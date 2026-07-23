@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     jarvis_log_level: str = "INFO"
 
     openai_api_key: str = ""
+    openai_model: str = "gpt-5-mini"
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
 

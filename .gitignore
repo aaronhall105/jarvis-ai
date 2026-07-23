@@ -7,3 +7,24 @@ logs/*
 data/*
 !logs/.gitkeep
 !data/.gitkeep
+
+# Secrets
+.env
+*.env
+secrets.yaml
+
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Backups
+*.backup
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Logs
+logs/

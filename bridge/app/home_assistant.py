@@ -25,6 +25,7 @@ class HomeAssistantClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self._message_id = 0
+        self._message_id_lock = asyncio.Lock()
 
     @property
     def websocket_url(self) -> str:
@@ -41,9 +42,10 @@ class HomeAssistantClient:
 
         return f"{scheme}://{parsed.netloc}/api/websocket"
 
-    def _next_id(self) -> int:
-        self._message_id += 1
-        return self._message_id
+    async def _next_id(self) -> int:
+        async with self._message_id_lock:
+            self._message_id += 1
+            return self._message_id
 
     async def _authenticate(self, websocket: Any) -> None:
         first_message = json.loads(await websocket.recv())
@@ -66,8 +68,57 @@ class HomeAssistantClient:
 
         if auth_response.get("type") != "auth_ok":
             raise HomeAssistantError(
-                auth_response.get("message", "Home Assistant authentication failed")
+                auth_response.get(
+                    "message",
+                    "Home Assistant authentication failed",
+                )
             )
+
+    async def send_command(
+        self,
+        command: dict[str, Any],
+    ) -> Any:
+        if not self.token:
+            raise HomeAssistantError(
+                "HOME_ASSISTANT_TOKEN is missing"
+            )
+
+        async with websockets.connect(
+            self.websocket_url,
+            open_timeout=10,
+            close_timeout=5,
+            ping_interval=20,
+            ping_timeout=20,
+        ) as websocket:
+            await self._authenticate(websocket)
+
+            message_id = await self._next_id()
+
+            payload = {
+                "id": message_id,
+                **command,
+            }
+
+            await websocket.send(json.dumps(payload))
+
+            while True:
+                response = json.loads(await websocket.recv())
+
+                if response.get("id") != message_id:
+                    continue
+
+                if not response.get("success"):
+                    error = response.get("error", {})
+
+                    raise HomeAssistantError(
+                        error.get(
+                            "message",
+                            f"Home Assistant command failed: "
+                            f"{command.get('type', 'unknown')}",
+                        )
+                    )
+
+                return response.get("result")
 
     async def test_connection(self) -> HomeAssistantStatus:
         if not self.token:
@@ -92,55 +143,60 @@ class HomeAssistantClient:
             )
 
         except Exception as exc:
-            logger.exception("Home Assistant connection test failed")
+            logger.exception(
+                "Home Assistant connection test failed"
+            )
+
             return HomeAssistantStatus(
                 connected=False,
                 message=str(exc),
             )
 
     async def get_states(self) -> list[dict[str, Any]]:
-        async with websockets.connect(
-            self.websocket_url,
-            open_timeout=10,
-            close_timeout=5,
-            ping_interval=20,
-            ping_timeout=20,
-        ) as websocket:
-            await self._authenticate(websocket)
+        result = await self.send_command(
+            {
+                "type": "get_states",
+            }
+        )
 
-            message_id = self._next_id()
-
-            await websocket.send(
-                json.dumps(
-                    {
-                        "id": message_id,
-                        "type": "get_states",
-                    }
-                )
+        if not isinstance(result, list):
+            raise HomeAssistantError(
+                "Home Assistant returned an invalid states response"
             )
 
-            while True:
-                response = json.loads(await websocket.recv())
+        return result
 
-                if response.get("id") != message_id:
-                    continue
+    async def call_service(
+        self,
+        domain: str,
+        service: str,
+        *,
+        entity_ids: list[str] | None = None,
+        service_data: dict[str, Any] | None = None,
+    ) -> Any:
+        command: dict[str, Any] = {
+            "type": "call_service",
+            "domain": domain,
+            "service": service,
+            "service_data": service_data or {},
+        }
 
-                if not response.get("success"):
-                    raise HomeAssistantError(
-                        response.get("error", {}).get(
-                            "message",
-                            "Failed to retrieve Home Assistant states",
-                        )
-                    )
+        if entity_ids:
+            command["target"] = {
+                "entity_id": entity_ids,
+            }
 
-                return response.get("result", [])
+        return await self.send_command(command)
 
 
 async def connection_test_with_timeout(
     client: HomeAssistantClient,
 ) -> HomeAssistantStatus:
     try:
-        return await asyncio.wait_for(client.test_connection(), timeout=15)
+        return await asyncio.wait_for(
+            client.test_connection(),
+            timeout=15,
+        )
     except TimeoutError:
         return HomeAssistantStatus(
             connected=False,
