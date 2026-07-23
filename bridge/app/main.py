@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.ai_engine import AIEngine, AIEngineError
 from app.config import get_settings
+from app.conversation_engine import ConversationEngine
 from app.intent_engine import IntentEngine, IntentError
 from app.home_assistant import (
     HomeAssistantClient,
@@ -36,6 +37,9 @@ tools = ToolEngine(home_assistant, registry)
 memory = MemoryEngine(
     database_path="/app/data/jarvis_memory.db",
 )
+conversations = ConversationEngine(
+    database_path="/app/data/jarvis_conversations.db",
+)
 intents = IntentEngine(registry, tools)
 ai = AIEngine(
     api_key=settings.openai_api_key,
@@ -43,6 +47,7 @@ ai = AIEngine(
     registry=registry,
     tools=tools,
     memory=memory,
+    conversations=conversations,
 )
 
 
@@ -52,6 +57,7 @@ class TextCommandRequest(BaseModel):
         max_length=500,
         examples=["Turn the living room lights off"],
     )
+    conversation_id: str | None = None
 
 
 @asynccontextmanager
@@ -79,7 +85,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title=settings.jarvis_name,
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -270,13 +276,83 @@ async def assistant_text(
 async def assistant_ai(
     request: TextCommandRequest,
 ) -> dict[str, object]:
+    conversation = await conversations.ensure_conversation(
+        conversation_id=request.conversation_id,
+        source="api",
+    )
+    conversation_id = conversation["conversation_id"]
+
     try:
-        return await ai.ask(request.text)
+        result = await ai.ask(
+            text=request.text,
+            conversation_id=conversation_id,
+        )
     except AIEngineError as exc:
         raise HTTPException(
             status_code=502,
             detail=str(exc),
         ) from exc
+
+    result["conversation_id"] = conversation_id
+    result["message_count"] = await conversations.message_count(
+        conversation_id
+    )
+    return result
+
+
+@app.get("/api/conversations")
+async def list_conversations(
+    limit: int = 50,
+) -> dict[str, object]:
+    items = await conversations.list_conversations(limit=limit)
+    return {
+        "count": len(items),
+        "conversations": items,
+    }
+
+
+@app.get("/api/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    limit: int = 100,
+) -> dict[str, object]:
+    conversation = await conversations.get_conversation(
+        conversation_id
+    )
+    if conversation is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    messages = await conversations.get_messages(
+        conversation_id=conversation_id,
+        limit=limit,
+    )
+    return {
+        "conversation": conversation,
+        "messages": messages,
+        "message_count": len(messages),
+    }
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+) -> dict[str, object]:
+    deleted = await conversations.delete_conversation(
+        conversation_id
+    )
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+
+    return {
+        "success": True,
+        "conversation_id": conversation_id,
+    }
 
 
 

@@ -4,6 +4,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.conversation_engine import ConversationEngine
 from app.memory_engine import MemoryEngine
 from app.registry import RegistryEngine
 from app.tool_engine import ToolEngine
@@ -24,6 +25,7 @@ class AIEngine:
         registry: RegistryEngine,
         tools: ToolEngine,
         memory: MemoryEngine,
+        conversations: ConversationEngine,
     ) -> None:
         if not api_key.strip():
             raise AIEngineError(
@@ -37,6 +39,7 @@ class AIEngine:
         self.registry = registry
         self.tools = tools
         self.memory = memory
+        self.conversations = conversations
 
     async def _area_options(
         self,
@@ -484,6 +487,7 @@ class AIEngine:
     async def ask(
         self,
         text: str,
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         if not text or not text.strip():
             raise AIEngineError(
@@ -496,6 +500,13 @@ class AIEngine:
         )
 
         input_messages: list[dict[str, str]] = []
+
+        if conversation_id:
+            history = await self.conversations.get_ai_history(
+                conversation_id=conversation_id,
+                limit=20,
+            )
+            input_messages.extend(history)
 
         if relevant_memory:
             input_messages.append(
@@ -567,6 +578,16 @@ class AIEngine:
                     "I could not determine an appropriate response."
                 )
 
+            if conversation_id:
+                await self.conversations.add_user_message(
+                    conversation_id=conversation_id,
+                    content=text,
+                )
+                await self.conversations.add_assistant_message(
+                    conversation_id=conversation_id,
+                    content=reply,
+                )
+
             return {
                 "success": True,
                 "response": reply,
@@ -614,6 +635,16 @@ class AIEngine:
             reply = (
                 f"Completed {successful_count} of "
                 f"{len(completed_calls)} requested actions."
+            )
+
+        if conversation_id:
+            await self.conversations.add_user_message(
+                conversation_id=conversation_id,
+                content=text,
+            )
+            await self.conversations.add_assistant_message(
+                conversation_id=conversation_id,
+                content=reply,
             )
 
         return {
