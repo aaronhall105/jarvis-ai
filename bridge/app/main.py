@@ -730,17 +730,27 @@ async def assistant_ai_stream(
 
         async def delayed_progress() -> None:
             nonlocal first_output_ms
-            # A short, natural acknowledgement masks long STT/model/tool pauses,
-            # but instant local replies are allowed to complete without filler.
-            await asyncio.sleep(0.55)
+            # Spoken progress is only useful for a real voice pipeline. Typed Assist
+            # remains clean, and quick deterministic replies complete without filler.
+            if not request.voice_mode:
+                return
+            profile = tone_engine.analyse(request.text)
+            if not tone_engine.should_emit_progress(request.text, profile):
+                return
+            await asyncio.sleep(
+                tone_engine.progress_delay_seconds(request.text, profile)
+            )
             if first_answer_event.is_set():
+                return
+            phrase = tone_engine.progress_phrase(request.text, profile).strip()
+            if not phrase:
                 return
             if first_output_ms is None:
                 first_output_ms = round((time.monotonic() - stream_started) * 1000)
-            profile = tone_engine.analyse(request.text)
             await queue.put({
                 "type": "progress",
-                "message": tone_engine.progress_phrase(request.text, profile),
+                "message": phrase,
+                "presentation": "spoken_thinking",
             })
 
         async def run_request() -> None:

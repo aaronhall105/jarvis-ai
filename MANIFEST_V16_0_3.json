@@ -1,0 +1,20 @@
+{
+  "name": "Jarvis Spoken Natural Progress",
+  "version": "16.0.3",
+  "core_application_version": "2.3.3",
+  "home_assistant_integration_version": "1.5.1",
+  "base": "v16.0.1 or v16.0.2",
+  "progress_phrase_count": 105,
+  "files": [
+    "bridge/app/main.py (guarded patch)",
+    "bridge/app/main_v16.py",
+    "bridge/app/task_engine.py",
+    "bridge/app/tone_engine.py",
+    "bridge/app/assets/jarvis-assist-spoken-progress-v1.5.1.tar.gz",
+    "bridge/tests/test_task_engine.py",
+    "bridge/tests/test_progress_experience.py",
+    "bridge/Dockerfile",
+    "updates/v16.0.3/patch_core_progress_v16_0_3.py",
+    "tools/install_temporal_v16_0_3.sh"
+  ]
+}
