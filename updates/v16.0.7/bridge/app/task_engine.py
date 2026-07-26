@@ -183,7 +183,7 @@ _APP_NAMES = {
 class TemporalActionEngine:
     """Restart-safe one-off Home Assistant action scheduler.
 
-    v16.0.3 supports a narrow allow-list: lights, switches, TV power
+    v16.0.7 supports a narrow allow-list: lights, switches, TV power
     and configured TV app shortcuts. Targets are resolved when the task is
     created, so a later registry change cannot silently redirect an action.
     """
@@ -428,7 +428,7 @@ class TemporalActionEngine:
             ).fetchall()
         counts = {str(row["status"]): int(row["count"]) for row in rows}
         return {
-            "version": "16.0.3",
+            "version": "16.0.7",
             "enabled": self.enabled,
             "notify_completion": self.notify_completion,
             "running": self._running,

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app import main_v15 as v15
+from app.capability_grounding import CapabilityGroundingEngine
 from app.task_engine import TemporalActionEngine
 
 core = v15.core
@@ -43,9 +44,10 @@ tasks = TemporalActionEngine(
     max_future_days=_env_int("JARVIS_TASKS_MAX_FUTURE_DAYS", 365),
     notify_completion=_env_bool("JARVIS_TASKS_NOTIFY_COMPLETION", True),
 )
+capabilities = CapabilityGroundingEngine(core.tools)
 
 app = v15.app
-app.version = "2.3.3"
+app.version = "2.3.7"
 
 _original_lifespan = app.router.lifespan_context
 
@@ -81,10 +83,84 @@ async def _execute_ai_request_v16(
     )
     command = await tasks.handle_command(request.text, actor)
     if not command.handled:
-        return await _original_execute_ai_request(
-            request,
-            on_text_delta=on_text_delta,
+        external_id, storage_id = core._conversation_scope(
+            request.conversation_id,
+            actor.user_key,
         )
+        history = await core.conversations.get_messages(
+            conversation_id=storage_id,
+            limit=12,
+        )
+        capability_command = await capabilities.handle(
+            text=request.text,
+            history=history,
+            actor=actor,
+        )
+        if not capability_command.handled:
+            return await _original_execute_ai_request(
+                request,
+                on_text_delta=on_text_delta,
+            )
+
+        conversation = await core.conversations.ensure_conversation(
+            conversation_id=storage_id,
+            source=f"home_assistant:{actor.user_key}",
+        )
+        storage_id = str(conversation["conversation_id"])
+        await core.conversations.add_user_message(
+            conversation_id=storage_id,
+            content=request.text,
+        )
+        await core.conversations.add_assistant_message(
+            conversation_id=storage_id,
+            content=capability_command.response,
+        )
+        if on_text_delta is not None and capability_command.response:
+            await on_text_delta(capability_command.response)
+
+        capability_result: dict[str, object] = {
+            "success": capability_command.success,
+            "response": capability_command.response,
+            "model": "capability-grounding-v16.0.7",
+            "intent": capability_command.intent,
+            "deterministic": True,
+            "tool_called": bool(capability_command.calls),
+            "tool_rounds": 1 if capability_command.calls else 0,
+            "calls": list(capability_command.calls),
+            "memory_used": False,
+            "continue_conversation": capability_command.continue_conversation,
+            "conversation_id": external_id,
+            "message_count": await core.conversations.message_count(storage_id),
+            "user": {
+                "key": actor.user_key,
+                "name": actor.display_name,
+                "is_admin": actor.is_admin,
+            },
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+            },
+            "timings": {
+                "jarvis_request_total_ms": round(
+                    (time.monotonic() - request_started) * 1000
+                )
+            },
+        }
+        if capability_command.details is not None:
+            capability_result["capability"] = capability_command.details
+        try:
+            await core.improvement.observe_interaction(
+                conversation_id=storage_id,
+                actor=actor,
+                raw_text=request.text,
+                result=capability_result,
+            )
+        except Exception:
+            core.logger.exception(
+                "Could not record capability-grounded command as improvement evidence"
+            )
+        return capability_result
 
     external_id, storage_id = core._conversation_scope(
         request.conversation_id,
@@ -109,7 +185,7 @@ async def _execute_ai_request_v16(
     result: dict[str, object] = {
         "success": command.success,
         "response": command.response,
-        "model": "temporal-action-engine-v16.0.3",
+        "model": "temporal-action-engine-v16.0.7",
         "intent": command.intent,
         "deterministic": True,
         "tool_called": bool(command.details),
@@ -165,12 +241,12 @@ class TaskCancelRequest(BaseModel):
 _ASSIST_UPDATE_PATH = (
     Path(__file__).resolve().parent
     / "assets"
-    / "jarvis-assist-spoken-progress-v1.5.1.tar.gz"
+    / "jarvis-assist-smart-audio-gate-v1.5.4.tar.gz"
 )
 
 
 @app.get(
-    "/api/updates/jarvis-assist-spoken-progress-v1.5.1.tar.gz",
+    "/api/updates/jarvis-assist-smart-audio-gate-v1.5.4.tar.gz",
     include_in_schema=False,
 )
 async def assist_spoken_progress_update() -> FileResponse:
@@ -179,7 +255,7 @@ async def assist_spoken_progress_update() -> FileResponse:
     return FileResponse(
         _ASSIST_UPDATE_PATH,
         media_type="application/gzip",
-        filename="jarvis-assist-spoken-progress-v1.5.1.tar.gz",
+        filename="jarvis-assist-smart-audio-gate-v1.5.4.tar.gz",
     )
 
 
