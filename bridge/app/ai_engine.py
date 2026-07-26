@@ -288,6 +288,17 @@ _STATE_NOUN_QUERY_PATTERN = re.compile(
     re.I,
 )
 
+_PERSONAL_MEMORY_QUERY_PATTERN = re.compile(
+    r"\b(?:health\s+conditions?|medical\s+conditions?|"
+    r"allerg(?:y|ies|ic)|intoleran(?:ce|ces|t)|"
+    r"medications?|medicines?|prescriptions?|"
+    r"dietary\s+(?:requirements?|needs?|restrictions?)|"
+    r"date\s+of\s+birth|birthday|"
+    r"favourites?|favorites?|preferences?)\b",
+    re.I,
+)
+
+
 _PERSON_LOCATION_PATTERN = re.compile(
     r"^\s*where(?:'s| is| are)\s+(?:aaron|amber|my phone|my watch)\b",
     re.I,
@@ -778,6 +789,19 @@ class RequestRouter:
                     "I’ll do it then."
                 ),
                 use_long_term_memory=False,
+            )
+
+
+        if _PERSONAL_MEMORY_QUERY_PATTERN.search(value):
+            return RoutingDecision(
+                intent=RequestIntent.GENERAL,
+                model_instruction=(
+                    "This asks about authorised saved personal context, not a live "
+                    "Home Assistant state. Use relevant long-term memory when available. "
+                    "Do not call Home Assistant entity-state tools, and do not claim "
+                    "Home Assistant has no record merely because no entity matches."
+                ),
+                use_long_term_memory=True,
             )
 
         state_question = bool(
