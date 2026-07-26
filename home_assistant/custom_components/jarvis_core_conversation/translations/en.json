@@ -1,0 +1,32 @@
+{
+  "title": "Jarvis Core Conversation",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Jarvis Core",
+        "description": "Connect Home Assistant Assist to your Jarvis Core server.",
+        "data": {
+          "url": "Jarvis Core URL",
+          "timeout": "Request timeout in seconds"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to Jarvis Core."
+    },
+    "abort": {
+      "already_configured": "This Jarvis Core server is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Follow-up listening",
+        "description": "Choose when Voice Preview Edition should reopen its microphone after Jarvis replies. Silence still ends the conversation.",
+        "data": {
+          "follow_up_mode": "Follow-up mode"
+        }
+      }
+    }
+  }
+}

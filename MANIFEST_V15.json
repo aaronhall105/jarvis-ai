@@ -1,0 +1,20 @@
+{
+  "name": "Jarvis Proactive Action Orchestrator",
+  "version": "15",
+  "core_application_version": "2.2.0",
+  "base_branch": "conversation-engine",
+  "files": [
+    "bridge/app/proactive_orchestrator.py",
+    "bridge/app/main_v15.py",
+    "bridge/tests/test_proactive_orchestrator.py",
+    "bridge/Dockerfile",
+    "bridge/Dockerfile.v15",
+    "tools/install_proactive_v15.sh",
+    "docs/PROACTIVE_ORCHESTRATOR.md",
+    "CHANGES_V15.md",
+    "INSTALL_V15.md",
+    "TESTED_V15.md"
+  ],
+  "legacy_proactive_delivery_disabled": true,
+  "source_code_auto_deployment": false
+}
