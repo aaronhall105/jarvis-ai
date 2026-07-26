@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "allow_auto_deploy_low_risk": false,
+  "max_context_files": 6,
+  "max_context_characters": 180000,
+  "allowed_context_paths": [
+    "bridge/app/*.py",
+    "bridge/tests/*.py",
+    "bridge/requirements.txt"
+  ],
+  "allowed_edit_paths": [
+    "bridge/app/*.py",
+    "bridge/tests/*.py",
+    "bridge/tests/**/*.py",
+    "bridge/tests/regressions/*.json",
+    "config/aliases*.json"
+  ],
+  "forbidden_paths": [
+    ".env",
+    ".env.*",
+    "data/**",
+    "logs/**",
+    ".git/**",
+    ".github/**",
+    "docker-compose.yml",
+    "bridge/Dockerfile",
+    "bridge/requirements.txt",
+    "tools/**",
+    "systemd/**",
+    "config/self_improvement_policy.json",
+    "config/*token*",
+    "config/*secret*",
+    "config/*credential*"
+  ],
+  "high_risk_paths": [
+    "bridge/app/admin_engine.py",
+    "bridge/app/home_assistant.py",
+    "bridge/app/self_improvement.py",
+    "bridge/app/config.py",
+    "bridge/app/main.py"
+  ],
+  "medium_risk_paths": [
+    "bridge/app/ai_engine.py",
+    "bridge/app/tool_engine.py",
+    "bridge/app/dialogue_manager.py",
+    "bridge/app/memory_engine.py",
+    "bridge/app/user_context.py",
+    "bridge/app/house_awareness.py"
+  ],
+  "forbidden_added_patterns": [
+    "shell\\s*=\\s*True",
+    "\\bos\\.system\\s*\\(",
+    "\\beval\\s*\\(",
+    "\\bexec\\s*\\(",
+    "\\bpickle\\.(?:loads?|load)\\s*\\(",
+    "/var/run/docker\\.sock",
+    "subprocess\\.(?:Popen|run|call|check_output)\\s*\\(",
+    "yaml\\.load\\s*\\(",
+    "requests\\.(?:get|post|put|delete)\\s*\\(",
+    "httpx\\.(?:get|post|put|delete)\\s*\\("
+  ],
+  "context_files_by_category": {
+    "device_resolution": [
+      "bridge/app/ai_engine.py",
+      "bridge/app/understanding_engine.py",
+      "bridge/app/dialogue_manager.py",
+      "bridge/app/tool_engine.py",
+      "bridge/tests/test_v10_ai_direct.py",
+      "bridge/tests/test_v10_understanding.py"
+    ],
+    "dialogue_context": [
+      "bridge/app/ai_engine.py",
+      "bridge/app/dialogue_manager.py",
+      "bridge/app/conversation_engine.py",
+      "bridge/tests/test_v10_ai_direct.py"
+    ],
+    "notification": [
+      "bridge/app/ai_engine.py",
+      "bridge/app/dialogue_manager.py",
+      "bridge/app/tool_engine.py",
+      "bridge/tests/test_v10_ai_direct.py"
+    ],
+    "performance": [
+      "bridge/app/main.py",
+      "bridge/app/ai_engine.py",
+      "bridge/app/understanding_engine.py"
+    ],
+    "admin_mode": [
+      "bridge/app/admin_engine.py",
+      "bridge/app/ai_engine.py",
+      "bridge/app/home_assistant.py"
+    ],
+    "tone": [
+      "bridge/app/tone_engine.py",
+      "bridge/app/ai_engine.py"
+    ],
+    "house_awareness": [
+      "bridge/app/house_awareness.py",
+      "bridge/app/ai_engine.py",
+      "bridge/app/home_assistant.py"
+    ],
+    "streaming": [
+      "bridge/app/main.py",
+      "bridge/app/ai_engine.py"
+    ],
+    "general": [
+      "bridge/app/ai_engine.py",
+      "bridge/app/main.py",
+      "bridge/app/understanding_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ]
+  }
+}

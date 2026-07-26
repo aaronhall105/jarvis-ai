@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="$ROOT/.venv-improver/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+  echo "Jarvis improvement environment is not installed. Run tools/install_self_improvement_v14.sh." >&2
+  exit 1
+fi
+exec "$PYTHON" "$ROOT/tools/self_improvement_worker.py" "${@:-status}"

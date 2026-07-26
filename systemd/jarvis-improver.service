@@ -1,0 +1,32 @@
+[Unit]
+Description=Jarvis supervised self-improvement worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__JARVIS_ROOT__
+ExecStart=__JARVIS_ROOT__/.venv-improver/bin/python __JARVIS_ROOT__/tools/self_improvement_worker.py daemon
+Restart=on-failure
+RestartSec=20
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=__JARVIS_ROOT__
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

@@ -1,27 +1,40 @@
+import asyncio
+import json
 import logging
+import secrets
+import time
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.admin_engine import AdminEngine
 from app.ai_engine import AIEngine, AIEngineError
 from app.config import get_settings
 from app.conversation_engine import ConversationEngine
+from app.dialogue_manager import DialogueManager
 from app.intent_engine import IntentEngine, IntentError
+from app.house_awareness import HouseAwarenessEngine
 from app.home_assistant import (
     HomeAssistantClient,
     connection_test_with_timeout,
 )
 from app.logging_config import configure_logging
 from app.memory_engine import MemoryEngine
+from app.self_improvement import SelfImprovementEngine
 from app.memory_models import (
     SaveMemoryRequest,
     SearchMemoryRequest,
 )
 from app.registry import RegistryEngine
 from app.tool_engine import ToolEngine
+from app.tone_engine import ToneEngine
+from app.user_context import UserContext
 
 settings = get_settings()
 configure_logging(settings.jarvis_log_level)
@@ -34,11 +47,41 @@ home_assistant = HomeAssistantClient(
 
 registry = RegistryEngine(home_assistant)
 tools = ToolEngine(home_assistant, registry)
+tone_engine = ToneEngine()
 memory = MemoryEngine(
     database_path="/app/data/jarvis_memory.db",
 )
 conversations = ConversationEngine(
     database_path="/app/data/jarvis_conversations.db",
+)
+dialogue = DialogueManager(
+    database_path="/app/data/jarvis_dialogue.db",
+)
+improvement = SelfImprovementEngine(
+    database_path="/app/data/jarvis_improvement.db",
+    enabled=settings.jarvis_self_improvement_enabled,
+    auto_prepare=settings.jarvis_self_improvement_auto_prepare,
+    repeat_threshold=settings.jarvis_self_improvement_repeat_threshold,
+    latency_failure_ms=settings.jarvis_self_improvement_latency_failure_ms,
+    core_version="2.1.0",
+)
+awareness = HouseAwarenessEngine(
+    client=home_assistant,
+    registry=registry,
+    tools=tools,
+    database_path="/app/data/jarvis_house_awareness.db",
+    enabled=settings.jarvis_awareness_enabled,
+    retention_days=settings.jarvis_awareness_retention_days,
+    proactive_enabled=settings.jarvis_proactive_enabled,
+    proactive_min_importance=settings.jarvis_proactive_min_importance,
+    proactive_target=settings.jarvis_proactive_target,
+    proactive_cooldown_seconds=settings.jarvis_proactive_cooldown_seconds,
+)
+admin = AdminEngine(
+    client=home_assistant,
+    database_path="/app/data/jarvis_admin.db",
+    enabled=settings.jarvis_admin_mode_enabled,
+    confirmation_ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
 )
 intents = IntentEngine(registry, tools)
 ai = AIEngine(
@@ -48,16 +91,43 @@ ai = AIEngine(
     tools=tools,
     memory=memory,
     conversations=conversations,
+    admin=admin,
+    dialogue=dialogue,
+    awareness=awareness,
 )
 
 
 class TextCommandRequest(BaseModel):
     text: str = Field(
         min_length=1,
-        max_length=500,
+        max_length=5000,
         examples=["Turn the living room lights off"],
     )
     conversation_id: str | None = None
+    user_id: str | None = None
+    user_name: str | None = None
+    user_is_admin: bool = False
+    device_id: str | None = None
+    voice_mode: bool = False
+
+
+class ImprovementActionRequest(BaseModel):
+    code: str | None = Field(default=None, min_length=6, max_length=12)
+
+
+def _conversation_scope(
+    conversation_id: str | None,
+    user_key: str,
+) -> tuple[str, str]:
+    """Return the external HA ID and isolated local storage ID."""
+
+    external_id = (conversation_id or "").strip() or str(uuid.uuid4())
+
+    # Accept an already-scoped ID from an older in-flight session.
+    if external_id.startswith("usr:"):
+        return external_id, external_id
+
+    return external_id, f"usr:{user_key}:{external_id}"
 
 
 @asynccontextmanager
@@ -73,6 +143,19 @@ async def lifespan(_: FastAPI):
             await registry.refresh()
         except Exception:
             logger.exception("Initial registry refresh failed")
+
+        admin_status = await admin.check_access()
+        if admin_status.get("admin_access"):
+            logger.info("Jarvis Admin Mode ready")
+        elif admin_status.get("enabled"):
+            logger.warning("Jarvis Admin Mode unavailable: %s", admin_status.get("message"))
+        else:
+            logger.info("Jarvis Admin Mode disabled")
+
+        try:
+            await awareness.start()
+        except Exception:
+            logger.exception("House Awareness failed to start")
     else:
         logger.error(
             "Home Assistant connection failed: %s",
@@ -80,12 +163,13 @@ async def lifespan(_: FastAPI):
         )
 
     yield
+    await awareness.stop()
     logger.info("%s stopping", settings.jarvis_name)
 
 
 app = FastAPI(
     title=settings.jarvis_name,
-    version="1.3.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -95,7 +179,7 @@ async def health() -> dict[str, str]:
     return {
         "status": "healthy",
         "service": settings.jarvis_name,
-        "version": "1.2.0",
+        "version": "2.1.0",
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -108,6 +192,227 @@ async def home_assistant_status() -> dict[str, object]:
         "connected": status.connected,
         "message": status.message,
         "url": settings.home_assistant_url,
+    }
+
+
+@app.get("/api/admin/status")
+async def admin_status() -> dict[str, object]:
+    status = await admin.check_access()
+    return {
+        **status,
+        "confirmation_ttl_seconds": admin.confirmation_ttl_seconds,
+    }
+
+
+@app.get("/api/admin/audit")
+async def admin_audit(limit: int = 50) -> dict[str, object]:
+    items = await admin.audit_log(limit=limit)
+    return {
+        "count": len(items),
+        "items": items,
+    }
+
+
+def _require_improvement_token(token: str | None) -> None:
+    expected = settings.jarvis_self_improvement_admin_token.strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "JARVIS_SELF_IMPROVEMENT_ADMIN_TOKEN is not configured. "
+                "Use authenticated Home Assistant voice commands or configure the token."
+            ),
+        )
+    supplied = (token or "").strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid improvement administration token.")
+
+
+@app.get("/api/improvement/status")
+async def improvement_status() -> dict[str, object]:
+    return await improvement.status()
+
+
+@app.get("/api/improvement/failures")
+async def improvement_failures(
+    limit: int = 20,
+    status: str | None = None,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    items = await improvement.list_failures(limit=limit, status=status)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/improvement/candidates")
+async def improvement_candidates(
+    limit: int = 20,
+    status: str | None = None,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    items = await improvement.list_candidates(limit=limit, status=status)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/improvement/audit")
+async def improvement_audit(
+    limit: int = 100,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    items = await improvement.audit_log(limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/improvement/candidates/{candidate_id}")
+async def improvement_candidate(
+    candidate_id: int,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    item = await improvement.get_candidate(candidate_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Improvement candidate not found.")
+    return item
+
+
+@app.post("/api/improvement/failures/{failure_id}/prepare")
+async def improvement_prepare(
+    failure_id: int,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    ok, candidate_id, state = await improvement.queue_failure(
+        failure_id,
+        actor="api",
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=state)
+    return {"success": True, "candidate_id": candidate_id, "status": state}
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/approve")
+async def improvement_approve(
+    candidate_id: int,
+    request: ImprovementActionRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    result = await improvement.approve_candidate(
+        candidate_id,
+        request.code or "",
+        actor="api",
+    )
+    return asdict(result)
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/deploy")
+async def improvement_deploy(
+    candidate_id: int,
+    request: ImprovementActionRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    result = await improvement.request_deploy(
+        candidate_id,
+        request.code or "",
+        actor="api",
+    )
+    return asdict(result)
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/reject")
+async def improvement_reject(
+    candidate_id: int,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    result = await improvement.reject_candidate(candidate_id, actor="api")
+    return asdict(result)
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/rollback")
+async def improvement_rollback(
+    candidate_id: int,
+    request: ImprovementActionRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    result = await improvement.request_rollback(
+        candidate_id,
+        request.code or "",
+        actor="api",
+    )
+    return asdict(result)
+
+
+@app.get("/api/awareness/status")
+async def awareness_status() -> dict[str, object]:
+    return await awareness.status()
+
+
+@app.get("/api/awareness/events")
+async def awareness_events(
+    minutes: int = 60,
+    limit: int = 50,
+    area_id: str | None = None,
+    min_importance: int = 0,
+) -> dict[str, object]:
+    events = await awareness.recent_events(
+        minutes=minutes,
+        limit=limit,
+        area_id=area_id,
+        min_importance=min_importance,
+    )
+    return {
+        "count": len(events),
+        "events": [event.as_dict() for event in events],
+    }
+
+
+@app.get("/api/awareness/summary")
+async def awareness_summary(
+    minutes: int = 60,
+    area_id: str | None = None,
+) -> dict[str, object]:
+    events = await awareness.recent_events(
+        minutes=minutes,
+        limit=80,
+        area_id=area_id,
+    )
+    return {
+        "count": len(events),
+        "summary": awareness.summarise_events(events),
+        "events": [event.as_dict() for event in events],
+    }
+
+
+@app.get("/api/awareness/proactive")
+async def awareness_proactive(limit: int = 20) -> dict[str, object]:
+    events = await awareness.proactive_candidates(limit=limit)
+    return {
+        "enabled": awareness.proactive_enabled,
+        "count": len(events),
+        "events": [event.as_dict() for event in events],
+    }
+
+
+@app.post("/api/awareness/proactive/{event_id}/delivered")
+async def awareness_mark_delivered(event_id: int) -> dict[str, object]:
+    updated = await awareness.mark_proactive_delivered(event_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Awareness event not found.")
+    return {"success": True, "event_id": event_id}
+
+
+@app.get("/api/awareness/active-devices")
+async def awareness_active_devices() -> dict[str, object]:
+    summary, calls = await awareness.active_devices_summary()
+    return {
+        "success": True,
+        "summary": summary,
+        "calls": calls,
     }
 
 
@@ -272,32 +577,247 @@ async def assistant_text(
 
 
 
+async def _execute_ai_request(
+    request: TextCommandRequest,
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+) -> dict[str, object]:
+    """Execute one user-scoped Jarvis request."""
+
+    request_started = time.monotonic()
+    actor = UserContext.from_request(
+        user_id=request.user_id,
+        user_name=request.user_name,
+        user_is_admin=request.user_is_admin,
+        device_id=request.device_id,
+        voice_mode=request.voice_mode,
+    )
+    external_conversation_id, storage_conversation_id = _conversation_scope(
+        request.conversation_id,
+        actor.user_key,
+    )
+
+    conversation = await conversations.ensure_conversation(
+        conversation_id=storage_conversation_id,
+        source=f"home_assistant:{actor.user_key}",
+    )
+    storage_conversation_id = str(conversation["conversation_id"])
+
+    improvement_command = await improvement.handle_command(
+        text=request.text,
+        actor=actor,
+        conversation_id=storage_conversation_id,
+    )
+
+    if improvement_command.handled:
+        await conversations.add_user_message(
+            conversation_id=storage_conversation_id,
+            content=request.text,
+        )
+        await conversations.add_assistant_message(
+            conversation_id=storage_conversation_id,
+            content=improvement_command.response,
+        )
+        result: dict[str, object] = {
+            "success": improvement_command.success,
+            "response": improvement_command.response,
+            "model": "self-improvement",
+            "intent": improvement_command.intent,
+            "deterministic": True,
+            "tool_called": False,
+            "tool_rounds": 0,
+            "calls": [],
+            "memory_used": False,
+            "conversation_id": storage_conversation_id,
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_tokens": 0,
+            },
+        }
+        if improvement_command.details is not None:
+            result["improvement"] = improvement_command.details
+    else:
+        await improvement.capture_feedback_before_request(
+            conversation_id=storage_conversation_id,
+            actor=actor,
+            raw_text=request.text,
+        )
+        result = await ai.ask(
+            text=request.text,
+            conversation_id=storage_conversation_id,
+            actor=actor,
+            on_text_delta=on_text_delta,
+        )
+
+    # Home Assistant should keep its own opaque conversation ID. Jarvis uses a
+    # user-scoped ID internally so Aaron and Amber can never share history.
+    result["conversation_id"] = external_conversation_id
+    result["message_count"] = await conversations.message_count(
+        storage_conversation_id
+    )
+    result["user"] = {
+        "key": actor.user_key,
+        "name": actor.display_name,
+        "is_admin": actor.is_admin,
+    }
+    timings = result.get("timings")
+    if not isinstance(timings, dict):
+        timings = {}
+    timings["jarvis_request_total_ms"] = round(
+        (time.monotonic() - request_started) * 1000
+    )
+    result["timings"] = timings
+
+    try:
+        await improvement.observe_interaction(
+            conversation_id=storage_conversation_id,
+            actor=actor,
+            raw_text=request.text,
+            result=result,
+        )
+    except Exception:
+        logger.exception("Could not record self-improvement interaction evidence")
+
+    return result
+
+
 @app.post("/api/assistant/ai")
 async def assistant_ai(
     request: TextCommandRequest,
 ) -> dict[str, object]:
-    conversation = await conversations.ensure_conversation(
-        conversation_id=request.conversation_id,
-        source="api",
-    )
-    conversation_id = conversation["conversation_id"]
-
     try:
-        result = await ai.ask(
-            text=request.text,
-            conversation_id=conversation_id,
-        )
+        return await _execute_ai_request(request)
     except AIEngineError as exc:
         raise HTTPException(
             status_code=502,
             detail=str(exc),
         ) from exc
 
-    result["conversation_id"] = conversation_id
-    result["message_count"] = await conversations.message_count(
-        conversation_id
+
+@app.post("/api/assistant/ai/stream")
+async def assistant_ai_stream(
+    request: TextCommandRequest,
+) -> StreamingResponse:
+    """Stream Jarvis text deltas as newline-delimited JSON."""
+
+    async def stream_events() -> AsyncIterator[str]:
+        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue(
+            maxsize=256
+        )
+
+        stream_started = time.monotonic()
+        first_answer_event = asyncio.Event()
+        first_output_ms: int | None = None
+
+        async def on_text_delta(delta: str) -> None:
+            nonlocal first_output_ms
+            if first_output_ms is None:
+                first_output_ms = round((time.monotonic() - stream_started) * 1000)
+            first_answer_event.set()
+            await queue.put({"type": "delta", "delta": delta})
+
+        async def delayed_progress() -> None:
+            nonlocal first_output_ms
+            # A short, natural acknowledgement masks long STT/model/tool pauses,
+            # but instant local replies are allowed to complete without filler.
+            await asyncio.sleep(0.55)
+            if first_answer_event.is_set():
+                return
+            if first_output_ms is None:
+                first_output_ms = round((time.monotonic() - stream_started) * 1000)
+            profile = tone_engine.analyse(request.text)
+            await queue.put({
+                "type": "progress",
+                "message": tone_engine.progress_phrase(request.text, profile),
+            })
+
+        async def run_request() -> None:
+            try:
+                result = await _execute_ai_request(
+                    request,
+                    on_text_delta=on_text_delta,
+                )
+                first_answer_event.set()
+                timings = result.get("timings")
+                if not isinstance(timings, dict):
+                    timings = {}
+                timings["stream_first_output_ms"] = first_output_ms
+                timings["stream_total_ms"] = round(
+                    (time.monotonic() - stream_started) * 1000
+                )
+                result["timings"] = timings
+                await queue.put({"type": "final", "result": result})
+            except AIEngineError as exc:
+                first_answer_event.set()
+                await queue.put({
+                    "type": "error",
+                    "message": str(exc),
+                })
+            except Exception:
+                first_answer_event.set()
+                logger.exception("Unexpected Jarvis streaming failure")
+                await queue.put({
+                    "type": "error",
+                    "message": "Jarvis encountered an unexpected streaming error.",
+                })
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(
+            run_request(),
+            name="jarvis_streaming_response",
+        )
+        progress_task = asyncio.create_task(
+            delayed_progress(),
+            name="jarvis_streaming_progress",
+        )
+
+        yield json.dumps(
+            {"type": "start", "version": "2.1.0"},
+            separators=(",", ":"),
+        ) + "\n"
+
+        try:
+            while True:
+                try:
+                    async with asyncio.timeout(5):
+                        event = await queue.get()
+                except TimeoutError:
+                    # Keep local proxies and Home Assistant's HTTP client from
+                    # treating a quiet model/tool phase as a dead connection.
+                    yield '{"type":"ping"}\n'
+                    continue
+
+                if event is None:
+                    break
+                yield json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ) + "\n"
+        finally:
+            if not progress_task.done():
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        stream_events(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
-    return result
 
 
 @app.get("/api/conversations")
@@ -343,6 +863,7 @@ async def delete_conversation(
     deleted = await conversations.delete_conversation(
         conversation_id
     )
+    await dialogue.delete(conversation_id)
     if not deleted:
         raise HTTPException(
             status_code=404,

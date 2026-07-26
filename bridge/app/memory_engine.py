@@ -41,30 +41,100 @@ class MemoryEngine:
 
     def _initialise_database(self) -> None:
         with self._connect() as connection:
-            connection.execute(
+            existing = connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    category TEXT NOT NULL,
-                    subject TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    search_text TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(category, subject)
-                )
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name = 'memories'
                 """
-            )
+            ).fetchone()
 
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS
-                idx_memories_search_text
-                ON memories(search_text)
-                """
-            )
+            if existing is None:
+                self._create_table(connection)
+                connection.commit()
+                return
+
+            columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(memories)"
+                ).fetchall()
+            }
+
+            if "owner_key" not in columns:
+                # Rebuild the table so the previous UNIQUE(category, subject)
+                # constraint becomes user-scoped. Existing memories belong to
+                # Aaron because Jarvis was single-user before this migration.
+                connection.execute(
+                    "ALTER TABLE memories RENAME TO memories_legacy"
+                )
+                self._create_table(connection)
+                connection.execute(
+                    """
+                    INSERT INTO memories (
+                        id,
+                        owner_key,
+                        category,
+                        subject,
+                        content,
+                        search_text,
+                        created_at,
+                        updated_at
+                    )
+                    SELECT
+                        id,
+                        'aaron',
+                        category,
+                        subject,
+                        content,
+                        search_text,
+                        created_at,
+                        updated_at
+                    FROM memories_legacy
+                    """
+                )
+                connection.execute("DROP TABLE memories_legacy")
+            else:
+                self._create_indexes(connection)
 
             connection.commit()
+
+    @staticmethod
+    def _create_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_key TEXT NOT NULL,
+                category TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                content TEXT NOT NULL,
+                search_text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(owner_key, category, subject)
+            )
+            """
+        )
+        MemoryEngine._create_indexes(connection)
+
+    @staticmethod
+    def _create_indexes(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_memories_owner_search
+            ON memories(owner_key, search_text)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_memories_owner_updated
+            ON memories(owner_key, updated_at DESC)
+            """
+        )
 
     @staticmethod
     def _clean_text(value: str) -> str:
@@ -79,12 +149,18 @@ class MemoryEngine:
         value = re.sub(r"\s+", " ", value)
         return value
 
+    @classmethod
+    def _owner(cls, owner_key: str | None) -> str:
+        value = cls._normalise(owner_key or "aaron")
+        return value.replace(" ", "_") or "aaron"
+
     @staticmethod
     def _row_to_dict(
         row: sqlite3.Row,
     ) -> dict[str, Any]:
         return {
             "id": row["id"],
+            "owner_key": row["owner_key"],
             "category": row["category"],
             "subject": row["subject"],
             "content": row["content"],
@@ -97,7 +173,9 @@ class MemoryEngine:
         category: str,
         subject: str,
         content: str,
+        owner_key: str = "aaron",
     ) -> dict[str, Any]:
+        owner_key = self._owner(owner_key)
         category = self._normalise(category)
         subject = self._clean_text(subject)
         content = self._clean_text(content)
@@ -128,6 +206,7 @@ class MemoryEngine:
                 connection.execute(
                     """
                     INSERT INTO memories (
+                        owner_key,
                         category,
                         subject,
                         content,
@@ -135,14 +214,15 @@ class MemoryEngine:
                         created_at,
                         updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(category, subject)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(owner_key, category, subject)
                     DO UPDATE SET
                         content = excluded.content,
                         search_text = excluded.search_text,
                         updated_at = excluded.updated_at
                     """,
                     (
+                        owner_key,
                         category,
                         subject,
                         content,
@@ -158,10 +238,12 @@ class MemoryEngine:
                     """
                     SELECT *
                     FROM memories
-                    WHERE category = ?
+                    WHERE owner_key = ?
+                      AND category = ?
                       AND subject = ?
                     """,
                     (
+                        owner_key,
                         category,
                         subject,
                     ),
@@ -177,7 +259,9 @@ class MemoryEngine:
     async def list_memories(
         self,
         limit: int = 100,
+        owner_key: str = "aaron",
     ) -> list[dict[str, Any]]:
+        owner_key = self._owner(owner_key)
         limit = max(1, min(limit, 500))
 
         async with self._lock:
@@ -186,10 +270,11 @@ class MemoryEngine:
                     """
                     SELECT *
                     FROM memories
+                    WHERE owner_key = ?
                     ORDER BY updated_at DESC
                     LIMIT ?
                     """,
-                    (limit,),
+                    (owner_key, limit),
                 ).fetchall()
 
         return [
@@ -201,7 +286,9 @@ class MemoryEngine:
         self,
         query: str,
         limit: int = 8,
+        owner_key: str = "aaron",
     ) -> list[dict[str, Any]]:
+        owner_key = self._owner(owner_key)
         query = self._normalise(query)
         limit = max(1, min(limit, 20))
 
@@ -251,9 +338,11 @@ class MemoryEngine:
                     """
                     SELECT *
                     FROM memories
+                    WHERE owner_key = ?
                     ORDER BY updated_at DESC
                     LIMIT 500
-                    """
+                    """,
+                    (owner_key,),
                 ).fetchall()
 
         ranked: list[
@@ -293,7 +382,9 @@ class MemoryEngine:
         self,
         category: str,
         subject: str,
+        owner_key: str = "aaron",
     ) -> bool:
+        owner_key = self._owner(owner_key)
         category = self._normalise(category)
         subject = self._clean_text(subject)
 
@@ -302,10 +393,12 @@ class MemoryEngine:
                 cursor = connection.execute(
                     """
                     DELETE FROM memories
-                    WHERE category = ?
+                    WHERE owner_key = ?
+                      AND category = ?
                       AND subject = ?
                     """,
                     (
+                        owner_key,
                         category,
                         subject,
                     ),
@@ -318,29 +411,35 @@ class MemoryEngine:
     async def delete_by_id(
         self,
         memory_id: int,
+        owner_key: str = "aaron",
     ) -> bool:
+        owner_key = self._owner(owner_key)
         async with self._lock:
             with self._connect() as connection:
                 cursor = connection.execute(
                     """
                     DELETE FROM memories
                     WHERE id = ?
+                      AND owner_key = ?
                     """,
-                    (memory_id,),
+                    (memory_id, owner_key),
                 )
 
                 connection.commit()
 
         return cursor.rowcount > 0
 
-    async def count(self) -> int:
+    async def count(self, owner_key: str = "aaron") -> int:
+        owner_key = self._owner(owner_key)
         async with self._lock:
             with self._connect() as connection:
                 row = connection.execute(
                     """
                     SELECT COUNT(*) AS total
                     FROM memories
-                    """
+                    WHERE owner_key = ?
+                    """,
+                    (owner_key,),
                 ).fetchone()
 
         return int(row["total"]) if row else 0
@@ -349,10 +448,12 @@ class MemoryEngine:
         self,
         query: str,
         limit: int = 6,
+        owner_key: str = "aaron",
     ) -> str:
         memories = await self.search(
             query=query,
             limit=limit,
+            owner_key=owner_key,
         )
 
         if not memories:
