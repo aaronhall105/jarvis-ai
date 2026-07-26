@@ -60,6 +60,71 @@ class MemoryEngine:
         re.I,
     )
 
+    # Retrieval concepts bridge natural questions and stored factual wording.
+    # For example, "Do I have any health conditions?" must retrieve a memory
+    # stored as "Amber is lactose intolerant" without weakening access control.
+    _QUERY_CONCEPT_PATTERNS = {
+        "health_profile": re.compile(
+            r"\b(?:health|medical|condition|diagnos(?:is|ed)|allerg(?:y|ies|ic)|"
+            r"intoleran(?:ce|t)|medication|medicine|prescription|disability|"
+            r"dietary requirements?|food restrictions?|what (?:can|cannot|can't) "
+            r"(?:i|aaron|amber) (?:eat|have))\b",
+            re.I,
+        ),
+        "dietary_profile": re.compile(
+            r"\b(?:diet|dietary|food|eat|allerg(?:y|ies|ic)|intoleran(?:ce|t)|"
+            r"vegetarian|vegan|gluten|lactose|dairy|coeliac|celiac)\b",
+            re.I,
+        ),
+        "birthday_profile": re.compile(
+            r"\b(?:birthday|date of birth|born|age|how old)\b",
+            re.I,
+        ),
+        "work_profile": re.compile(
+            r"\b(?:job|work|workplace|employer|occupation|works? at|works? as)\b",
+            re.I,
+        ),
+        "contact_profile": re.compile(
+            r"\b(?:phone number|mobile number|email address|contact details?)\b",
+            re.I,
+        ),
+        "preference_profile": re.compile(
+            r"\b(?:favourite|favorite|likes?|dislikes?|prefers?|preference)\b",
+            re.I,
+        ),
+    }
+
+    _MEMORY_CONCEPT_PATTERNS = {
+        "health_profile": re.compile(
+            r"\b(?:health|medical|condition|diagnos(?:is|ed)|allerg(?:y|ies|ic)|"
+            r"intoleran(?:ce|t)|medication|medicine|prescription|disability|"
+            r"mental health|pregnan(?:cy|t)|blood type|asthma|diabetes|epilepsy|"
+            r"coeliac|celiac|lactose|gluten|dairy)\b",
+            re.I,
+        ),
+        "dietary_profile": re.compile(
+            r"\b(?:diet|dietary|food|eat|allerg(?:y|ies|ic)|intoleran(?:ce|t)|"
+            r"vegetarian|vegan|gluten|lactose|dairy|coeliac|celiac)\b",
+            re.I,
+        ),
+        "birthday_profile": re.compile(
+            r"\b(?:birthday|date of birth|born|age|years? old)\b",
+            re.I,
+        ),
+        "work_profile": re.compile(
+            r"\b(?:job|work|workplace|employer|occupation|works? at|works? as)\b",
+            re.I,
+        ),
+        "contact_profile": re.compile(
+            r"\b(?:phone number|mobile number|email address|contact details?)\b",
+            re.I,
+        ),
+        "preference_profile": re.compile(
+            r"\b(?:favourite|favorite|likes?|dislikes?|prefers?|preference)\b",
+            re.I,
+        ),
+    }
+
     def __init__(
         self,
         database_path: str = "/app/data/jarvis_memory.db",
@@ -700,6 +765,26 @@ class MemoryEngine:
             for row in rows[:safe_limit]
         ]
 
+    @classmethod
+    def _query_concepts(cls, query: str) -> set[str]:
+        return {
+            name
+            for name, pattern in cls._QUERY_CONCEPT_PATTERNS.items()
+            if pattern.search(query)
+        }
+
+    @classmethod
+    def _memory_concepts(cls, row: sqlite3.Row) -> set[str]:
+        text = " ".join(
+            str(row[key] or "")
+            for key in ("category", "subject", "content")
+        )
+        return {
+            name
+            for name, pattern in cls._MEMORY_CONCEPT_PATTERNS.items()
+            if pattern.search(text)
+        }
+
     @staticmethod
     def _search_terms(query: str) -> list[str]:
         stop_words = {
@@ -726,6 +811,7 @@ class MemoryEngine:
         if not query:
             return []
         terms = self._search_terms(query)
+        query_concepts = self._query_concepts(query)
 
         async with self._lock:
             rows = await asyncio.to_thread(
@@ -738,15 +824,22 @@ class MemoryEngine:
         for row in rows:
             search_text = str(row["search_text"])
             term_score = sum(1 for term in terms if term in search_text)
-            if not term_score:
+            concept_matches = query_concepts & self._memory_concepts(row)
+            if not term_score and not concept_matches:
                 continue
-            score = term_score * 10
+
+            # Literal wording remains strongest. Concept matches provide the
+            # semantic bridge for broad profile questions such as health, diet,
+            # birthdays and work without introducing an external embedding store.
+            score = (term_score * 10) + (len(concept_matches) * 14)
             if str(row["subject_key"]) == requester:
-                score += 8
+                score += 12
             if str(row["owner_key"]) == requester:
                 score += 4
             if str(row["visibility"]) == "subject_and_owner":
                 score += 2
+            if str(row["sensitivity"]) == "sensitive" and "health_profile" in concept_matches:
+                score += 3
             ranked.append((score, str(row["updated_at"]), row))
 
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
