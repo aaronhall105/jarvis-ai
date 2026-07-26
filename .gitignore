@@ -34,3 +34,32 @@ data/
 backup/
 *.tar.gz
 *.before-*
+
+# Private configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Runtime databases and state
+data/
+.jarvis-improver/
+*.db
+*.db-shm
+*.db-wal
+
+# Backups and installation packages
+backup/
+*.tar.gz
+*.zip
+
+# Logs
+*.log
+logs/

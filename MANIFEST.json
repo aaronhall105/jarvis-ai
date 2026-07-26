@@ -1,0 +1,32 @@
+{
+  "name": "Jarvis Self-Improvement Engine",
+  "version": "14",
+  "jarvis_core_version": "2.1.0",
+  "created_at": "2026-07-26T06:28:12.866599+00:00",
+  "files": [
+    "bridge/app/self_improvement.py",
+    "bridge/app/config.py",
+    "bridge/app/main.py",
+    "bridge/tests/test_self_improvement.py",
+    "bridge/tests/test_improvement_worker_policy.py",
+    "config/self_improvement_policy.json",
+    "tools/self_improvement_worker.py",
+    "tools/install_self_improvement_v14.sh",
+    "tools/jarvis-improve",
+    "systemd/jarvis-improver.service",
+    "requirements-improver.txt",
+    "pyproject.toml",
+    ".github/workflows/jarvis-ci.yml",
+    ".github/workflows/codeql.yml",
+    ".github/CODEOWNERS",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "docs/SELF_IMPROVEMENT.md",
+    "INSTALL.md",
+    "CHANGES.md",
+    "ARCHITECTURE.md",
+    "TESTED.md",
+    "SECURITY.md"
+  ],
+  "deployment_policy": "human approval required",
+  "auto_deploy_source_code": false
+}
