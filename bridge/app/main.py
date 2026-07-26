@@ -228,6 +228,18 @@ def _require_improvement_token(token: str | None) -> None:
         raise HTTPException(status_code=403, detail="Invalid improvement administration token.")
 
 
+def _require_memory_token(token: str | None) -> None:
+    expected = settings.jarvis_memory_admin_token.strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="JARVIS_MEMORY_ADMIN_TOKEN is not configured.",
+        )
+    supplied = (token or "").strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Invalid memory administration token.")
+
+
 @app.get("/api/improvement/status")
 async def improvement_status() -> dict[str, object]:
     return await improvement.status()
@@ -881,72 +893,72 @@ async def delete_conversation(
 @app.get("/api/memory")
 async def list_memories(
     limit: int = 100,
+    requester_key: str = "aaron",
+    x_jarvis_memory_token: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
     memories = await memory.list_memories(
         limit=limit,
+        owner_key=requester_key,
     )
-    return {
-        "count": len(memories),
-        "memories": memories,
-    }
+    return {"count": len(memories), "memories": memories}
 
 
 @app.post("/api/memory")
 async def save_memory(
     request: SaveMemoryRequest,
+    x_jarvis_memory_token: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
     saved = await memory.save(
         category=request.category,
         subject=request.subject,
         content=request.content,
+        owner_key=request.owner_key,
+        subject_key=request.subject_key,
+        visibility=request.visibility,
+        sensitivity=request.sensitivity,
     )
-    return {
-        "success": True,
-        "memory": saved,
-    }
+    return {"success": True, "memory": saved}
 
 
 @app.post("/api/memory/search")
 async def search_memories(
     request: SearchMemoryRequest,
+    x_jarvis_memory_token: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
     memories = await memory.search(
         query=request.query,
         limit=request.limit,
+        owner_key=request.requester_key,
     )
-    return {
-        "count": len(memories),
-        "memories": memories,
-    }
+    return {"count": len(memories), "memories": memories}
 
 
 @app.delete("/api/memory/{memory_id}")
 async def delete_memory(
     memory_id: int,
+    requester_key: str = "aaron",
+    x_jarvis_memory_token: str | None = Header(default=None),
 ) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
     deleted = await memory.delete_by_id(
         memory_id,
+        owner_key=requester_key,
     )
-
     if not deleted:
-        raise HTTPException(
-            status_code=404,
-            detail="Memory not found.",
-        )
-
-    return {
-        "success": True,
-        "deleted_id": memory_id,
-    }
+        raise HTTPException(status_code=404, detail="Memory not found or not editable.")
+    return {"success": True, "deleted_id": memory_id}
 
 
 @app.get("/api/memory/status")
-async def memory_status() -> dict[str, object]:
-    return {
-        "status": "ready",
-        "count": await memory.count(),
-        "database": "jarvis_memory.db",
-    }
+async def memory_status(
+    requester_key: str = "aaron",
+    x_jarvis_memory_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
+    return await memory.status(owner_key=requester_key)
 
 
 @app.get("/chat", response_class=FileResponse)

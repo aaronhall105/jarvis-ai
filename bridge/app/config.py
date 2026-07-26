@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
 
+    # Protects direct memory REST endpoints. Internal AI memory access
+    # remains user-scoped and does not use this token.
+    jarvis_memory_admin_token: str = ""
+
     jarvis_admin_mode_enabled: bool = False
     jarvis_admin_confirmation_ttl_seconds: int = 900
 
