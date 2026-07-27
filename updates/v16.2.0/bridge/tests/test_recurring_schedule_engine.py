@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -83,18 +83,8 @@ class FakeActionEngine:
         self.calls: list[tuple] = []
         self.verified = True
 
-    async def _resolve_action(self, text: str, actor_key: str | None = None):
+    async def _resolve_action(self, text: str):
         value = text.casefold().strip()
-        if " and " in value:
-            parts = [part.strip() for part in value.split(" and ") if part.strip()]
-            plans = [await self._resolve_action(part, actor_key=actor_key) for part in parts]
-            if any(isinstance(plan, str) for plan in plans):
-                return "Unsupported compound action."
-            return ActionPlan(
-                action_type="sequence",
-                payload={"steps": [asdict(plan) for plan in plans], "stop_on_error": True},
-                summary=", then ".join(plan.summary for plan in plans),
-            )
         turn_on = " on" in f" {value}" or value.endswith("on")
         if "living room lights" in value:
             return ActionPlan(
@@ -129,16 +119,6 @@ class FakeActionEngine:
         return "I can currently schedule lights, switches, TV power and configured TV apps."
 
     async def _execute_action(self, action_type: str, payload: dict):
-        if action_type == "sequence":
-            results = []
-            for step in payload["steps"]:
-                results.append(await self._execute_action(step["action_type"], step["payload"]))
-            return {
-                "success": all(result.get("success") for result in results),
-                "verified": all(result.get("verified") for result in results),
-                "steps": results,
-                "response_message": "done",
-            }
         self.calls.append((action_type, dict(payload)))
         return {
             "success": True,
@@ -430,25 +410,6 @@ class RecurringScheduleEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any("failed" in item["message"].casefold() for item in self.tools.notifications)
         )
-
-    async def test_multi_step_recurring_schedule_executes_all_steps(self) -> None:
-        result = await self.engine.handle_command(
-            "Every day at 6 am turn the living room lights off and turn the TV off",
-            self.actor,
-        )
-        self.assertTrue(result.success)
-        schedule = result.details["schedule"]
-        self.assertEqual(schedule["action_type"], "sequence")
-        self.clock.advance(days=1)
-        await self.engine.process_once()
-        self.assertEqual(
-            self.actions.calls,
-            [
-                ("area_lights", {"area_id": "living_room", "turn_on": False}),
-                ("media_shortcut", {"shortcut": "tv_off"}),
-            ],
-        )
-
 
 
 if __name__ == "__main__":

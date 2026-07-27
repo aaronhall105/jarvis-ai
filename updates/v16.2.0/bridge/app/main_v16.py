@@ -15,7 +15,6 @@ from app.capability_grounding import CapabilityGroundingEngine
 from app.task_engine import TemporalActionEngine
 from app.recurring_schedule_engine import RecurringScheduleEngine
 from app.conditional_action_engine import ConditionalActionEngine
-from app.routine_engine import RoutineEngine
 
 core = v15.core
 
@@ -103,25 +102,8 @@ async def _handle_conditional_or_existing_command(text: str, actor: Any):
 
 tasks.handle_command = _handle_conditional_or_existing_command
 
-routines = RoutineEngine(
-    action_engine=tasks,
-    database_path="/app/data/jarvis_routines.db",
-    enabled=_env_bool("JARVIS_ROUTINES_ENABLED", True),
-    max_steps=_env_int("JARVIS_ROUTINES_MAX_STEPS", 8),
-)
-
-_original_conditional_or_existing_handle_command = tasks.handle_command
-
-async def _handle_routine_or_existing_command(text: str, actor: Any):
-    routine_command = await routines.handle_command(text, actor)
-    if routine_command.handled:
-        return routine_command
-    return await _original_conditional_or_existing_handle_command(text, actor)
-
-tasks.handle_command = _handle_routine_or_existing_command
-
 app = v15.app
-app.version = "2.6.0"
+app.version = "2.5.0"
 
 _original_lifespan = app.router.lifespan_context
 
@@ -264,13 +246,9 @@ async def _execute_ai_request_v16(
         "success": command.success,
         "response": command.response,
         "model": (
-            "routine-engine-v16.3.0"
-            if command.intent.startswith(("routine", "scene"))
-            else (
-                "conditional-action-engine-v16.2.0"
-                if command.intent.startswith("condition")
-                else "temporal-action-engine-v16.3.0"
-            )
+            "conditional-action-engine-v16.2.0"
+            if command.intent.startswith("condition")
+            else "temporal-action-engine-v16.2.0"
         ),
         "intent": command.intent,
         "deterministic": True,
@@ -297,9 +275,7 @@ async def _execute_ai_request_v16(
         },
     }
     if command.details is not None:
-        if command.intent.startswith(("routine", "scene")):
-            result["routine"] = command.details
-        elif command.intent.startswith("condition"):
+        if command.intent.startswith("condition"):
             result["condition"] = command.details
         elif command.intent.startswith("schedule"):
             result["schedule"] = command.details
@@ -613,112 +589,3 @@ async def condition_cancel(
     if not updated:
         raise HTTPException(status_code=404, detail="Conditional rule not found.")
     return {"success": True, "rule_id": rule_id}
-
-# Jarvis v16.3.0 multi-step routine API
-
-
-@app.get("/api/routines/status")
-async def routine_status() -> dict[str, Any]:
-    return await routines.status()
-
-
-@app.get("/api/routines")
-async def routine_list(
-    owner_key: str | None = None,
-    status: str | None = None,
-    limit: int = 50,
-) -> dict[str, Any]:
-    statuses = {status} if status else None
-    items = await routines.list_routines(
-        owner_key=owner_key,
-        statuses=statuses,
-        limit=limit,
-    )
-    return {"count": len(items), "routines": items}
-
-
-@app.get("/api/routines/{routine_id}")
-async def routine_get(routine_id: int) -> dict[str, Any]:
-    item = await routines.get_routine(routine_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Routine not found.")
-    return item
-
-
-@app.get("/api/routines/{routine_id}/runs")
-async def routine_runs(
-    routine_id: int,
-    owner_key: str | None = None,
-    limit: int = 50,
-) -> dict[str, Any]:
-    items = await routines.list_runs(
-        routine_id,
-        owner_key=owner_key,
-        limit=limit,
-    )
-    return {"count": len(items), "runs": items}
-
-
-@app.post("/api/routines/{routine_id}/run")
-async def routine_run(
-    routine_id: int,
-    request: TaskCancelRequest,
-    x_jarvis_admin_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    core._require_improvement_token(x_jarvis_admin_token)
-    if not request.owner_key:
-        raise HTTPException(status_code=400, detail="owner_key is required.")
-    outcome = await routines.run_routine(
-        routine_id,
-        owner_key=request.owner_key,
-        source=request.actor,
-    )
-    if outcome is None:
-        raise HTTPException(status_code=404, detail="Routine not found.")
-    return outcome
-
-
-@app.post("/api/routines/{routine_id}/disable")
-async def routine_disable(
-    routine_id: int,
-    request: TaskCancelRequest,
-    x_jarvis_admin_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    core._require_improvement_token(x_jarvis_admin_token)
-    if not request.owner_key:
-        raise HTTPException(status_code=400, detail="owner_key is required.")
-    updated = await routines.disable_routine(routine_id, owner_key=request.owner_key)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Active routine not found.")
-    return {"success": True, "routine_id": routine_id}
-
-
-@app.post("/api/routines/{routine_id}/enable")
-async def routine_enable(
-    routine_id: int,
-    request: TaskCancelRequest,
-    x_jarvis_admin_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    core._require_improvement_token(x_jarvis_admin_token)
-    if not request.owner_key:
-        raise HTTPException(status_code=400, detail="owner_key is required.")
-    updated = await routines.enable_routine(routine_id, owner_key=request.owner_key)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Disabled routine not found.")
-    return {"success": True, "routine_id": routine_id}
-
-
-@app.post("/api/routines/{routine_id}/delete")
-async def routine_delete(
-    routine_id: int,
-    request: TaskCancelRequest,
-    x_jarvis_admin_token: str | None = Header(default=None),
-) -> dict[str, Any]:
-    core._require_improvement_token(x_jarvis_admin_token)
-    if not request.owner_key:
-        raise HTTPException(status_code=400, detail="owner_key is required.")
-    updated = await routines.delete_routine(routine_id, owner_key=request.owner_key)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Routine not found.")
-    return {"success": True, "routine_id": routine_id}
-

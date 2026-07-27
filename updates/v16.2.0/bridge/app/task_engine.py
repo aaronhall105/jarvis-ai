@@ -43,26 +43,11 @@ class ToolProtocol(Protocol):
 
     async def run_media_shortcut(self, shortcut: str) -> dict[str, Any]: ...
 
-    async def runnable_routines(self, limit: int = 100) -> list[dict[str, Any]]: ...
-
-    async def run_home_routine(
-        self,
-        entity_id: str,
-        *,
-        name: str | None = None,
-    ) -> dict[str, Any]: ...
-
     async def send_mobile_notification(
         self,
         recipient: str,
         message: str,
         title: str = "Jarvis",
-    ) -> dict[str, Any]: ...
-
-    async def announce_message(
-        self,
-        target: str,
-        message: str,
     ) -> dict[str, Any]: ...
 
 
@@ -198,10 +183,10 @@ _APP_NAMES = {
 class TemporalActionEngine:
     """Restart-safe one-off Home Assistant action scheduler.
 
-    v16.3.0 adds exact multi-step action plans while recurring schedules,
-    conditional rules and saved routines reuse the same grounded resolver.
-    Targets are resolved when a plan is created, so later registry changes
-    cannot silently redirect an action.
+    v16.2.0 retains the verified one-off action allow-list while recurring
+    schedules and conditional rules reuse the same exact action resolver.
+    and configured TV app shortcuts. Targets are resolved when the task is
+    created, so a later registry change cannot silently redirect an action.
     """
 
     ACTIVE_STATUSES = {"pending", "executing"}
@@ -444,7 +429,7 @@ class TemporalActionEngine:
             ).fetchall()
         counts = {str(row["status"]): int(row["count"]) for row in rows}
         return {
-            "version": "16.3.0",
+            "version": "16.2.0",
             "enabled": self.enabled,
             "notify_completion": self.notify_completion,
             "running": self._running,
@@ -893,93 +878,11 @@ class TemporalActionEngine:
                 details={"recipient": recipient, "error": str(exc)},
             )
 
-    @staticmethod
-    def _result_succeeded(result: dict[str, Any]) -> bool:
-        if result.get("success") is not True:
-            return False
-        if result.get("verified") is False and result.get("command_accepted") is not True:
-            return False
-        return True
-
     async def _execute_action(
         self,
         action_type: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        if action_type == "sequence":
-            raw_steps = payload.get("steps")
-            if not isinstance(raw_steps, list) or not raw_steps:
-                raise ValueError("A multi-step action must contain at least one step.")
-            stop_on_error = bool(payload.get("stop_on_error", True))
-            results: list[dict[str, Any]] = []
-            completed = 0
-            failed_step: int | None = None
-            for index, raw_step in enumerate(raw_steps, start=1):
-                if not isinstance(raw_step, dict):
-                    raise ValueError(f"Invalid multi-step action at step {index}.")
-                step_type = str(raw_step.get("action_type") or "")
-                step_payload = raw_step.get("payload") or {}
-                if not isinstance(step_payload, dict):
-                    raise ValueError(f"Invalid payload at step {index}.")
-                summary = str(raw_step.get("summary") or f"step {index}")
-                try:
-                    result = await self._execute_action(step_type, dict(step_payload))
-                except Exception as exc:
-                    result = {
-                        "success": False,
-                        "verified": False,
-                        "error": str(exc),
-                        "response_message": str(exc),
-                    }
-                accepted = self._result_succeeded(result)
-                results.append(
-                    {
-                        "step": index,
-                        "summary": summary,
-                        "action_type": step_type,
-                        "success": accepted,
-                        "result": result,
-                    }
-                )
-                if accepted:
-                    completed += 1
-                else:
-                    failed_step = index
-                    if stop_on_error:
-                        break
-
-            success = failed_step is None and completed == len(raw_steps)
-            if success:
-                response_message = f"Completed all {completed} steps."
-            else:
-                response_message = (
-                    f"Completed {completed} of {len(raw_steps)} steps. "
-                    f"Step {failed_step} failed."
-                )
-            return {
-                "success": success,
-                # A sequence is considered confirmed when every step either
-                # verified its state or Home Assistant accepted a non-verifiable
-                # command such as an announcement, notification or app launch.
-                "verified": success,
-                "sequence": True,
-                "completed_steps": completed,
-                "total_steps": len(raw_steps),
-                "failed_step": failed_step,
-                "steps": results,
-                "response_message": response_message,
-            }
-
-        if action_type == "delay":
-            seconds = max(1, min(int(payload.get("seconds", 1)), 300))
-            await asyncio.sleep(seconds)
-            return {
-                "success": True,
-                "verified": True,
-                "delay_seconds": seconds,
-                "response_message": f"Waited {seconds} second{'s' if seconds != 1 else ''}.",
-            }
-
         if action_type == "area_lights":
             return await self.tools.control_area_lights(
                 str(payload["area_id"]),
@@ -992,22 +895,6 @@ class TemporalActionEngine:
             )
         if action_type == "media_shortcut":
             return await self.tools.run_media_shortcut(str(payload["shortcut"]))
-        if action_type == "home_routine":
-            return await self.tools.run_home_routine(
-                str(payload["entity_id"]),
-                name=str(payload.get("name") or "") or None,
-            )
-        if action_type == "notify_owner":
-            return await self.tools.send_mobile_notification(
-                recipient=str(payload["recipient"]),
-                message=str(payload["message"]),
-                title=str(payload.get("title") or "Jarvis"),
-            )
-        if action_type == "announcement":
-            return await self.tools.announce_message(
-                target=str(payload["target"]),
-                message=str(payload["message"]),
-            )
         raise ValueError(f"Unsupported scheduled action type: {action_type}")
 
     @staticmethod
@@ -1137,121 +1024,9 @@ class TemporalActionEngine:
             rendered = rendered.replace(":00 pm", " pm")
         return f"at {rendered}"
 
-    @staticmethod
-    def _split_action_steps(value: str) -> list[str]:
-        action_verb = (
-            r"(?:turn|switch|power|open|launch|start|watch|wait|pause|notify|"
-            r"message|send|announce|say|run|trigger|activate)"
-        )
-        pattern = re.compile(
-            rf"\s*(?:;|\band\s+then\b|\bthen\b|"
-            rf",\s*(?={action_verb}\b)|"
-            rf"\band\b(?=\s+{action_verb}\b))\s*",
-            re.I,
-        )
-        parts = [part.strip(" ,.;") for part in pattern.split(value) if part.strip(" ,.;")]
-        return parts or [value.strip()]
-
-    async def _resolve_action(
-        self,
-        text: str,
-        actor_key: str | None = None,
-    ) -> ActionPlan | str:
-        value = self._clean_action_text(text)
-        parts = self._split_action_steps(value)
-        if len(parts) > 1:
-            if len(parts) > 8:
-                return "A multi-step action can contain no more than eight steps."
-            plans: list[ActionPlan] = []
-            for index, part in enumerate(parts, start=1):
-                plan = await self._resolve_single_action(part, actor_key=actor_key)
-                if isinstance(plan, str):
-                    return f"I couldn’t understand step {index}: {plan}"
-                plans.append(plan)
-            summary = ", then ".join(plan.summary for plan in plans)
-            return ActionPlan(
-                action_type="sequence",
-                payload={
-                    "steps": [asdict(plan) for plan in plans],
-                    "stop_on_error": True,
-                },
-                summary=summary,
-            )
-        return await self._resolve_single_action(value, actor_key=actor_key)
-
-    async def _resolve_single_action(
-        self,
-        text: str,
-        *,
-        actor_key: str | None = None,
-    ) -> ActionPlan | str:
+    async def _resolve_action(self, text: str) -> ActionPlan | str:
         value = self._clean_action_text(text)
         normalised = self._normalise(value)
-
-        delay_match = re.fullmatch(
-            r"(?:wait|pause)(?:\s+for)?\s+(?P<amount>\d{1,3})\s*"
-            r"(?P<unit>seconds?|secs?|minutes?|mins?)",
-            normalised,
-            re.I,
-        )
-        if delay_match:
-            amount = int(delay_match.group("amount"))
-            unit = delay_match.group("unit").casefold()
-            seconds = amount * (60 if unit.startswith("min") else 1)
-            if seconds < 1 or seconds > 300:
-                return "Routine delays must be between 1 second and 5 minutes."
-            return ActionPlan(
-                action_type="delay",
-                payload={"seconds": seconds},
-                summary=f"wait {seconds} second{'s' if seconds != 1 else ''}",
-            )
-
-        notify_patterns = (
-            re.compile(
-                r"^(?:notify|message)\s+(?P<recipient>me|aaron|amber|both|both phones)"
-                r"(?:\s+(?:that|saying|with(?: the)? message)\s+(?P<message>.+))?$",
-                re.I,
-            ),
-            re.compile(
-                r"^send\s+(?:a\s+)?notification\s+to\s+"
-                r"(?P<recipient>me|aaron|amber|both|both phones)"
-                r"(?:\s+(?:that|saying|with(?: the)? message)\s+(?P<message>.+))?$",
-                re.I,
-            ),
-        )
-        for pattern in notify_patterns:
-            match = pattern.match(value)
-            if not match:
-                continue
-            recipient_text = match.group("recipient").casefold()
-            if recipient_text == "me":
-                if actor_key not in {"aaron", "amber"}:
-                    return "Please name Aaron or Amber as the notification recipient."
-                recipient = actor_key
-            else:
-                recipient = "both" if recipient_text == "both phones" else recipient_text
-            message = (match.group("message") or "Jarvis action completed.").strip()
-            if not message:
-                return "Please include the notification message."
-            return ActionPlan(
-                action_type="notify_owner",
-                payload={"recipient": recipient, "message": message, "title": "Jarvis"},
-                summary=f"notify {recipient}",
-            )
-
-        announcement_match = re.fullmatch(
-            r"(?:announce|say)(?:\s+that)?\s+(?P<message>.+?)\s+"
-            r"(?:in|to)\s+(?:the\s+)?(?P<target>living room)",
-            value,
-            re.I,
-        )
-        if announcement_match:
-            message = announcement_match.group("message").strip(" .")
-            return ActionPlan(
-                action_type="announcement",
-                payload={"target": "living_room", "message": message},
-                summary=f"announce ‘{message}’ in the living room",
-            )
 
         app_match = re.search(
             r"\b(?:open|launch|start|watch)\s+(netflix|youtube|bbc\s*i?player|prime\s*video)\b",
@@ -1267,59 +1042,11 @@ class TemporalActionEngine:
                 summary=f"open {display}",
             )
 
-        home_routine_match = re.fullmatch(
-            r"(?:run|start|trigger|activate)\s+(?:the\s+)?(?P<name>.+?)"
-            r"(?:\s+(?:routine|script|automation|scene))?",
-            value,
-            re.I,
-        )
-        if home_routine_match:
-            routine_query = re.sub(
-                r"\s+(?:routine|script|automation|scene)$",
-                "",
-                home_routine_match.group("name"),
-                flags=re.I,
-            ).strip()
-            query = self._normalise(routine_query)
-            try:
-                routines = await self.tools.runnable_routines(limit=200)
-            except (AttributeError, NotImplementedError):
-                routines = []
-            exact = [
-                item for item in routines
-                if query in {
-                    self._normalise(str(item.get("name") or "")),
-                    self._normalise(str(item.get("entity_id") or "")),
-                }
-            ]
-            matches = exact
-            if not matches:
-                matches = [
-                    item for item in routines
-                    if query and query in self._normalise(str(item.get("name") or ""))
-                ]
-            unique = {
-                str(item.get("entity_id")): item
-                for item in matches
-                if item.get("entity_id")
-            }
-            if len(unique) == 1:
-                item = next(iter(unique.values()))
-                name = str(item.get("name") or item["entity_id"])
-                return ActionPlan(
-                    action_type="home_routine",
-                    payload={"entity_id": str(item["entity_id"]), "name": name},
-                    summary=f"run {name}",
-                )
-            if len(unique) > 1:
-                names = sorted(str(item.get("name") or item.get("entity_id")) for item in unique.values())[:3]
-                return "I found more than one matching Home Assistant routine — " + ", ".join(names) + "."
-
         action, target = self._extract_on_off_target(normalised)
         if action is None or target is None:
             return (
-                "I can currently use lights, switches, TV power, configured TV apps, "
-                "Home Assistant routines, short delays, notifications and living-room announcements."
+                "I can currently schedule lights, switches, TV power and configured "
+                "TV apps."
             )
         turn_on = action == "on"
 
@@ -1723,7 +1450,7 @@ class TemporalActionEngine:
                 response="Scheduled actions are currently disabled.",
             )
 
-        plan = await self._resolve_action(action_text, actor_key=actor.user_key)
+        plan = await self._resolve_action(action_text)
         if isinstance(plan, str):
             return TaskCommandResult(
                 handled=True,

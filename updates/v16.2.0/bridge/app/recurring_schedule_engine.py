@@ -24,11 +24,7 @@ class ActorProtocol(Protocol):
 
 
 class ActionEngineProtocol(Protocol):
-    async def _resolve_action(
-        self,
-        text: str,
-        actor_key: str | None = None,
-    ) -> ActionPlan | str: ...
+    async def _resolve_action(self, text: str) -> ActionPlan | str: ...
 
     async def _execute_action(
         self,
@@ -863,34 +859,6 @@ class RecurringScheduleEngine:
                 return False, "The scheduled media shortcut is no longer configured."
             return True, None
 
-        if action_type == "home_routine":
-            entity_id = str(payload.get("entity_id") or "")
-            try:
-                routines = await self.tools.runnable_routines(limit=200)
-            except (AttributeError, NotImplementedError):
-                routines = []
-            if entity_id not in {str(item.get("entity_id")) for item in routines}:
-                return False, "The scheduled Home Assistant routine is no longer available."
-            return True, None
-
-        if action_type in {"delay", "notify_owner", "announcement"}:
-            return True, None
-
-        if action_type == "sequence":
-            steps = payload.get("steps")
-            if not isinstance(steps, list) or not steps:
-                return False, "The recurring multi-step action contains no steps."
-            for step in steps:
-                if not isinstance(step, dict):
-                    return False, "The recurring multi-step action is invalid."
-                available, error = await self._validate_action_available(
-                    str(step.get("action_type") or ""),
-                    dict(step.get("payload") or {}),
-                )
-                if not available:
-                    return False, error
-            return True, None
-
         return False, f"Unsupported recurring action type: {action_type}"
 
     async def create_schedule(
@@ -1645,10 +1613,7 @@ class RecurringScheduleEngine:
                 intent="schedule_create",
             )
 
-        plan = await self.action_engine._resolve_action(
-            parsed.action_text,
-            actor_key=actor.user_key,
-        )
+        plan = await self.action_engine._resolve_action(parsed.action_text)
         if isinstance(plan, str):
             return TaskCommandResult(
                 handled=True,

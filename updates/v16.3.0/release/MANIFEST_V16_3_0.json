@@ -1,0 +1,29 @@
+{
+  "name": "Jarvis Multi-Step Routines and Scenes",
+  "version": "16.3.0",
+  "core_application_version": "2.6.0",
+  "task_engine_version": "16.3.0",
+  "recurring_schedule_engine_version": "16.1.0",
+  "conditional_action_engine_version": "16.2.0",
+  "routine_engine_version": "16.3.0",
+  "home_assistant_integration_version": "1.5.4",
+  "home_assistant_config_entry_version": 2,
+  "base": "16.1.0 or 16.2.0",
+  "cumulative_conditional_actions": true,
+  "databases": [
+    "/app/data/jarvis_tasks.db",
+    "/app/data/jarvis_recurring_schedules.db",
+    "/app/data/jarvis_conditional_actions.db",
+    "/app/data/jarvis_routines.db"
+  ],
+  "files": [
+    "bridge/app/main_v16.py",
+    "bridge/app/task_engine.py",
+    "bridge/app/recurring_schedule_engine.py",
+    "bridge/app/conditional_action_engine.py",
+    "bridge/app/routine_engine.py",
+    "bridge/tests/test_routine_engine.py",
+    "tools/install_multi_step_routines_v16_3_0.sh",
+    "docs/MULTI_STEP_ROUTINES_V16_3_0.md"
+  ]
+}
