@@ -1,0 +1,20 @@
+{
+  "name": "Jarvis Recurring Schedules",
+  "version": "16.1.0",
+  "core_application_version": "2.4.0",
+  "task_engine_version": "16.1.0",
+  "recurring_schedule_engine_version": "16.1.0",
+  "home_assistant_integration_version": "1.5.4",
+  "home_assistant_config_entry_version": 2,
+  "base": "16.0.7",
+  "database": "/app/data/jarvis_recurring_schedules.db",
+  "files": [
+    "bridge/app/recurring_schedule_engine.py",
+    "bridge/tests/test_recurring_schedule_engine.py",
+    "tools/patch_recurring_schedules_v16_1_0.py",
+    "tools/install_recurring_schedules_v16_1_0.sh",
+    "docs/RECURRING_SCHEDULES_V16_1_0.md"
+  ],
+  "package_revision": 2,
+  "packaging_fix": "self-contained staged imports and dependency-free regression runner"
+}

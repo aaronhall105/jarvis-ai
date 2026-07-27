@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from app import main_v15 as v15
 from app.capability_grounding import CapabilityGroundingEngine
 from app.task_engine import TemporalActionEngine
+from app.recurring_schedule_engine import RecurringScheduleEngine
 
 core = v15.core
 
@@ -45,9 +46,35 @@ tasks = TemporalActionEngine(
     notify_completion=_env_bool("JARVIS_TASKS_NOTIFY_COMPLETION", True),
 )
 capabilities = CapabilityGroundingEngine(core.tools)
+schedules = RecurringScheduleEngine(
+    tools=core.tools,
+    action_engine=tasks,
+    database_path="/app/data/jarvis_recurring_schedules.db",
+    enabled=_env_bool("JARVIS_SCHEDULES_ENABLED", True),
+    timezone_name=_env_text("JARVIS_TIMEZONE", "Europe/London"),
+    poll_seconds=_env_int("JARVIS_SCHEDULES_POLL_SECONDS", 1),
+    misfire_grace_seconds=_env_int(
+        "JARVIS_SCHEDULES_MISFIRE_GRACE_SECONDS",
+        300,
+    ),
+    notify_completion=_env_bool(
+        "JARVIS_SCHEDULES_NOTIFY_COMPLETION",
+        True,
+    ),
+)
+
+_original_task_handle_command = tasks.handle_command
+
+async def _handle_temporal_or_recurring_command(text: str, actor: Any):
+    schedule_command = await schedules.handle_command(text, actor)
+    if schedule_command.handled:
+        return schedule_command
+    return await _original_task_handle_command(text, actor)
+
+tasks.handle_command = _handle_temporal_or_recurring_command
 
 app = v15.app
-app.version = "2.3.7"
+app.version = "2.4.0"
 
 _original_lifespan = app.router.lifespan_context
 
@@ -56,9 +83,11 @@ _original_lifespan = app.router.lifespan_context
 async def _v16_lifespan(application: Any):
     async with _original_lifespan(application):
         await tasks.start()
+        await schedules.start()
         try:
             yield
         finally:
+            await schedules.stop()
             await tasks.stop()
 
 
@@ -185,7 +214,7 @@ async def _execute_ai_request_v16(
     result: dict[str, object] = {
         "success": command.success,
         "response": command.response,
-        "model": "temporal-action-engine-v16.0.7",
+        "model": "temporal-action-engine-v16.1.0",
         "intent": command.intent,
         "deterministic": True,
         "tool_called": bool(command.details),
@@ -211,7 +240,9 @@ async def _execute_ai_request_v16(
         },
     }
     if command.details is not None:
-        result["task"] = command.details
+        result["schedule" if command.intent.startswith("schedule") else "task"] = (
+            command.details
+        )
 
     try:
         await core.improvement.observe_interaction(
@@ -311,3 +342,107 @@ async def task_cancel(
     if not updated:
         raise HTTPException(status_code=404, detail="Pending scheduled task not found.")
     return {"success": True, "task_id": task_id}
+
+
+# Jarvis v16.1.0 recurring schedule API
+
+@app.get("/api/schedules/status")
+async def schedule_status() -> dict[str, Any]:
+    return await schedules.status()
+
+
+@app.get("/api/schedules")
+async def schedule_list(
+    owner_key: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    statuses = {status} if status else None
+    items = await schedules.list_schedules(
+        owner_key=owner_key,
+        statuses=statuses,
+        limit=limit,
+    )
+    return {"count": len(items), "schedules": items}
+
+
+@app.get("/api/schedules/{schedule_id}")
+async def schedule_get(schedule_id: int) -> dict[str, Any]:
+    item = await schedules.get_schedule(schedule_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Recurring schedule not found.")
+    return item
+
+
+@app.get("/api/schedules/{schedule_id}/runs")
+async def schedule_runs(
+    schedule_id: int,
+    owner_key: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    items = await schedules.list_runs(
+        schedule_id,
+        owner_key=owner_key,
+        limit=limit,
+    )
+    return {"count": len(items), "runs": items}
+
+
+@app.post("/api/schedules/process")
+async def schedule_process(
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    core._require_improvement_token(x_jarvis_admin_token)
+    count = await schedules.process_once()
+    return {"success": True, "processed": count, "status": await schedules.status()}
+
+
+@app.post("/api/schedules/{schedule_id}/pause")
+async def schedule_pause(
+    schedule_id: int,
+    request: TaskCancelRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    core._require_improvement_token(x_jarvis_admin_token)
+    updated = await schedules.pause_schedule(
+        schedule_id,
+        owner_key=request.owner_key,
+        actor=request.actor,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Active recurring schedule not found.")
+    return {"success": True, "schedule_id": schedule_id}
+
+
+@app.post("/api/schedules/{schedule_id}/resume")
+async def schedule_resume(
+    schedule_id: int,
+    request: TaskCancelRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    core._require_improvement_token(x_jarvis_admin_token)
+    updated = await schedules.resume_schedule(
+        schedule_id,
+        owner_key=request.owner_key,
+        actor=request.actor,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Paused recurring schedule not found.")
+    return {"success": True, "schedule_id": schedule_id}
+
+
+@app.post("/api/schedules/{schedule_id}/cancel")
+async def schedule_cancel(
+    schedule_id: int,
+    request: TaskCancelRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    core._require_improvement_token(x_jarvis_admin_token)
+    updated = await schedules.cancel_schedule(
+        schedule_id,
+        owner_key=request.owner_key,
+        actor=request.actor,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Recurring schedule not found.")
+    return {"success": True, "schedule_id": schedule_id}
