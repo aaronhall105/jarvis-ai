@@ -131,7 +131,7 @@ async def _handle_routine_or_existing_command(text: str, actor: Any):
 tasks.handle_command = _handle_routine_or_existing_command
 
 app = v15.app
-app.version = "2.9.0"
+app.version = "3.1.0"
 
 _original_lifespan = app.router.lifespan_context
 
@@ -861,12 +861,13 @@ async def assist_mobile_voice_update() -> FileResponse:
         filename="jarvis-assist-mobile-voice-v1.6.3.tar.gz",
     )
 
-# Jarvis v17.2.0-r1 low-latency realtime phone voice
+# Jarvis v18.1.0 product voice and chat
 
 
 async def _realtime_jarvis_tool(
     command: str,
     metadata: dict[str, Any],
+    on_delta: Any,
 ) -> dict[str, Any]:
     request = core.TextCommandRequest(
         text=command,
@@ -875,9 +876,9 @@ async def _realtime_jarvis_tool(
         user_name=str(metadata.get("user_name") or "Aaron"),
         user_is_admin=bool(metadata.get("user_is_admin", True)),
         device_id=str(metadata.get("device_id") or "jarvis_android"),
-        voice_mode=True,
+        voice_mode=bool(metadata.get("speak", False)),
     )
-    return await core._execute_ai_request(request)
+    return await core._execute_ai_request(request, on_text_delta=on_delta)
 
 
 @app.get("/api/realtime/status")
