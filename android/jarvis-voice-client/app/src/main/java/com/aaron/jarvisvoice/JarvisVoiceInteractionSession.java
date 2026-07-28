@@ -5,7 +5,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Color;
-import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -223,8 +222,10 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         root.addView(card, cardParams);
 
         root.setOnApplyWindowInsetsListener((view, insets) -> {
-            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-            Insets ime = insets.getInsets(WindowInsets.Type.ime());
+            android.graphics.Insets bars =
+                insets.getInsets(WindowInsets.Type.systemBars());
+            android.graphics.Insets ime =
+                insets.getInsets(WindowInsets.Type.ime());
             int bottom = Math.max(bars.bottom, ime.bottom);
             root.setPadding(
                 dp(12) + bars.left,
