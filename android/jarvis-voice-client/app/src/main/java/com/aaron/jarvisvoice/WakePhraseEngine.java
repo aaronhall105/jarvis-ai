@@ -1,7 +1,9 @@
 package com.aaron.jarvisvoice;
 
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,7 +28,9 @@ public final class WakePhraseEngine implements RecognitionListener {
     private boolean running;
     private boolean listening;
     private boolean triggered;
+    private boolean onDevice;
     private String wakePhrase = "jarvis";
+    private int restartCount;
 
     public WakePhraseEngine(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -36,12 +40,19 @@ public final class WakePhraseEngine implements RecognitionListener {
     public void start(String configuredWakePhrase) {
         main.post(() -> {
             stopInternal();
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                listener.onWakeError("Microphone permission is required for the wake word");
+                return;
+            }
+
             wakePhrase = WakePhrasePolicy.normalise(configuredWakePhrase);
             if (wakePhrase.isEmpty()) wakePhrase = "jarvis";
             running = true;
             triggered = false;
+            restartCount = 0;
             createRecognizer();
-            listenSoon(100);
+            listenSoon(120L);
         });
     }
 
@@ -56,31 +67,64 @@ public final class WakePhraseEngine implements RecognitionListener {
     private void stopInternal() {
         running = false;
         listening = false;
+        triggered = false;
+        restartCount = 0;
         main.removeCallbacksAndMessages(null);
-        if (recognizer != null) {
-            try { recognizer.cancel(); } catch (Exception ignored) {}
-            try { recognizer.destroy(); } catch (Exception ignored) {}
-            recognizer = null;
+        releaseRecognizer();
+    }
+
+    private void releaseRecognizer() {
+        SpeechRecognizer current = recognizer;
+        recognizer = null;
+        if (current != null) {
+            try { current.cancel(); } catch (Exception ignored) {}
+            try { current.destroy(); } catch (Exception ignored) {}
         }
+    }
+
+    private void recreateRecognizer() {
+        listening = false;
+        releaseRecognizer();
+        createRecognizer();
     }
 
     private void createRecognizer() {
         if (recognizer != null || !running) return;
+
         try {
-            if (SpeechRecognizer.isOnDeviceRecognitionAvailable(context)) {
+            onDevice = SpeechRecognizer.isOnDeviceRecognitionAvailable(context);
+            if (onDevice) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(context);
-                listener.onWakeStatus("Wake word armed on-device — say “" + wakePhrase + "”");
             } else if (SpeechRecognizer.isRecognitionAvailable(context)) {
                 recognizer = SpeechRecognizer.createSpeechRecognizer(context);
-                listener.onWakeStatus("Wake word armed — say “" + wakePhrase + "”");
             } else {
-                listener.onWakeError("No Android speech recogniser is available for wake-word mode");
+                running = false;
+                listener.onWakeError("No Android speech recogniser is available");
                 return;
             }
             recognizer.setRecognitionListener(this);
-        } catch (Exception exception) {
-            recognizer = null;
-            listener.onWakeError("Wake recogniser unavailable: " + safeMessage(exception));
+            listener.onWakeStatus(
+                onDevice
+                    ? "Wake word ready on device — say \"" + wakePhrase + "\""
+                    : "Wake word ready — say \"" + wakePhrase + "\""
+            );
+        } catch (Exception firstFailure) {
+            releaseRecognizer();
+            if (onDevice && SpeechRecognizer.isRecognitionAvailable(context)) {
+                try {
+                    onDevice = false;
+                    recognizer = SpeechRecognizer.createSpeechRecognizer(context);
+                    recognizer.setRecognitionListener(this);
+                    listener.onWakeStatus("Wake word ready — say \"" + wakePhrase + "\"");
+                    return;
+                } catch (Exception ignored) {
+                    releaseRecognizer();
+                }
+            }
+            running = false;
+            listener.onWakeError(
+                "Wake recogniser unavailable: " + safeMessage(firstFailure)
+            );
         }
     }
 
@@ -91,26 +135,46 @@ public final class WakePhraseEngine implements RecognitionListener {
 
     private void beginListening() {
         if (!running || listening || triggered) return;
-        createRecognizer();
-        if (recognizer == null) {
-            listenSoon(2_000);
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            stopInternal();
+            listener.onWakeError("Microphone permission was removed");
             return;
         }
+
+        createRecognizer();
+        if (recognizer == null) {
+            listenSoon(2_000L);
+            return;
+        }
+
         Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
             .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.UK.toLanguageTag())
             .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L)
-            .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 600L);
+            .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, onDevice)
+            .putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS,
+                850L
+            )
+            .putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                500L
+            );
+
         try {
             listening = true;
             recognizer.startListening(intent);
         } catch (Exception exception) {
             listening = false;
-            listener.onWakeStatus("Wake recogniser restarting");
-            listenSoon(900);
+            restartCount++;
+            recreateRecognizer();
+            listener.onWakeStatus("Wake word restarting");
+            listenSoon(backoff(700L));
         }
     }
 
@@ -119,42 +183,79 @@ public final class WakePhraseEngine implements RecognitionListener {
             ? null
             : results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (values == null || values.isEmpty() || triggered) return;
+
         for (String value : values) {
-            WakePhrasePolicy.Decision decision = WakePhrasePolicy.evaluate(value, wakePhrase);
+            WakePhrasePolicy.Decision decision =
+                WakePhrasePolicy.evaluate(value, wakePhrase);
             if (!decision.triggered) continue;
+
             triggered = true;
             String transcript = value == null ? "" : value.trim();
             String command = decision.command;
-            stopInternal();
+            running = false;
+            listening = false;
+            main.removeCallbacksAndMessages(null);
+            releaseRecognizer();
             listener.onWakePhrase(transcript, command);
             return;
         }
     }
 
-    @Override public void onReadyForSpeech(Bundle params) {
-        listener.onWakeStatus("Sleeping lightly — say “" + wakePhrase + "”");
+    private long backoff(long base) {
+        int multiplier = Math.min(6, Math.max(1, restartCount));
+        return Math.min(6_000L, base * multiplier);
     }
+
+    @Override public void onReadyForSpeech(Bundle params) {
+        restartCount = 0;
+        listener.onWakeStatus("Listening for \"" + wakePhrase + "\"");
+    }
+
     @Override public void onBeginningOfSpeech() {}
     @Override public void onRmsChanged(float rmsdB) {}
     @Override public void onBufferReceived(byte[] buffer) {}
-    @Override public void onEndOfSpeech() { listening = false; }
+    @Override public void onEndOfSpeech() {
+        listening = false;
+    }
 
     @Override public void onError(int error) {
         listening = false;
         if (!running || triggered) return;
-        long delay = switch (error) {
-            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 1_200L;
-            case SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> 5_000L;
-            case SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> 2_500L;
-            default -> 350L;
+
+        if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+            stopInternal();
+            listener.onWakeError("Microphone permission is required for the wake word");
+            return;
+        }
+
+        boolean recreate =
+            error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY
+                || error == SpeechRecognizer.ERROR_CLIENT
+                || error == SpeechRecognizer.ERROR_SERVER_DISCONNECTED
+                || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED;
+
+        restartCount++;
+        if (recreate) recreateRecognizer();
+
+        long baseDelay = switch (error) {
+            case SpeechRecognizer.ERROR_NO_MATCH,
+                 SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 220L;
+            case SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 1_000L;
+            case SpeechRecognizer.ERROR_TOO_MANY_REQUESTS -> 4_000L;
+            case SpeechRecognizer.ERROR_SERVER_DISCONNECTED -> 2_000L;
+            default -> 500L;
         };
-        listenSoon(delay);
+        listenSoon(backoff(baseDelay));
     }
 
     @Override public void onResults(Bundle results) {
         listening = false;
         evaluate(results);
-        if (running && !triggered) listenSoon(180);
+        if (running && !triggered) {
+            restartCount = 0;
+            listenSoon(180L);
+        }
     }
 
     @Override public void onPartialResults(Bundle partialResults) {
@@ -165,6 +266,8 @@ public final class WakePhraseEngine implements RecognitionListener {
 
     private static String safeMessage(Exception exception) {
         String value = exception.getMessage();
-        return value == null || value.isBlank() ? exception.getClass().getSimpleName() : value;
+        return value == null || value.isBlank()
+            ? exception.getClass().getSimpleName()
+            : value;
     }
 }

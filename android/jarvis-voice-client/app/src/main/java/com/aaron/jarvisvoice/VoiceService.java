@@ -30,6 +30,7 @@ public final class VoiceService extends Service implements
     public static final String ACTION_START = "com.aaron.jarvisvoice.START";
     public static final String ACTION_STOP = "com.aaron.jarvisvoice.STOP";
     public static final String ACTION_START_VOICE = "com.aaron.jarvisvoice.START_VOICE";
+    public static final String ACTION_ARM_WAKE = "com.aaron.jarvisvoice.ARM_WAKE";
     public static final String ACTION_STOP_VOICE = "com.aaron.jarvisvoice.STOP_VOICE";
     public static final String ACTION_SEND_TEXT = "com.aaron.jarvisvoice.SEND_TEXT";
     public static final String ACTION_APPLY_SETTINGS = "com.aaron.jarvisvoice.APPLY_SETTINGS";
@@ -99,6 +100,11 @@ public final class VoiceService extends Service implements
         acquireWakeLock();
 
         switch (action) {
+            case ACTION_ARM_WAKE -> {
+                requestedVoiceActive = false;
+                ensureConnected();
+                if (ready) armWakeWord();
+            }
             case ACTION_START_VOICE -> {
                 requestedVoiceActive = microphoneForeground;
                 ensureConnected();
@@ -130,8 +136,14 @@ public final class VoiceService extends Service implements
             }
         }
 
-        return (store.backgroundConversations() ||
-                (store.assistantWakeAlways() && JarvisVoiceInteractionService.isActiveAssistant(this)))
+        return (
+            store.backgroundConversations()
+                || wakeWordUsesVoiceService()
+                || (
+                    store.assistantWakeAlways()
+                        && JarvisVoiceInteractionService.isActiveAssistant(this)
+                )
+        )
             ? START_STICKY
             : START_NOT_STICKY;
     }
@@ -143,18 +155,32 @@ public final class VoiceService extends Service implements
                 == PackageManager.PERMISSION_GRANTED;
     }
 
-    private boolean actionNeedsMicrophone(String action) {
-        if (ACTION_STOP_VOICE.equals(action)
-                || ACTION_ASSISTANT_DISMISS.equals(action)) {
-            return false;
-        }
+    private boolean wakeWordUsesVoiceService() {
+        return store.wakeEnabled()
+            && !(
+                store.assistantWakeAlways()
+                    && JarvisVoiceInteractionService.isActiveAssistant(this)
+            );
+    }
 
-        return voiceActive
+    private boolean actionNeedsMicrophone(String action) {
+        boolean wakeWordActive =
+            wakePhraseEngine != null && wakePhraseEngine.isRunning();
+
+        return wakeWordUsesVoiceService()
+            || wakeWordActive
+            || voiceActive
             || requestedVoiceActive
+            || ACTION_ARM_WAKE.equals(action)
             || ACTION_START_VOICE.equals(action)
-            || (ACTION_ASSISTANT_INVOKE.equals(action)
-                && store.assistantStartsVoice())
-            || (ACTION_START.equals(action) && store.startWithVoice());
+            || (
+                ACTION_ASSISTANT_INVOKE.equals(action)
+                    && store.assistantStartsVoice()
+            )
+            || (
+                ACTION_START.equals(action)
+                    && store.startWithVoice()
+            );
     }
 
     private boolean promoteForeground(String action) {
@@ -347,19 +373,39 @@ public final class VoiceService extends Service implements
     }
 
     private void armWakeWord() {
-        if (!ready || stopping || voiceActive) return;
+        if (!ready || stopping || voiceActive || !store.wakeEnabled()) return;
+
         standardSpeechEngine.stop();
         audio.stop();
         releaseAudioFocus();
-        if (store.assistantWakeAlways() && JarvisVoiceInteractionService.isActiveAssistant(this)) {
+
+        if (
+            store.assistantWakeAlways()
+                && JarvisVoiceInteractionService.isActiveAssistant(this)
+        ) {
             wakePhraseEngine.stop();
-            JarvisVoiceInteractionService.rearmWakeIfActive(this);
-            status("Always-on wake phrase armed — say “" + store.wakePhrase() + "”");
-        } else {
-            wakePhraseEngine.start(store.wakePhrase());
-            status("Wake word armed — say “" + store.wakePhrase() + "”");
+            JarvisVoiceInteractionService.refreshWakeIfActive(this);
+            status(
+                "Wake word ready — say \"" + store.wakePhrase() + "\""
+            );
+            broadcastState(false, true);
+            return;
         }
-        broadcastState(false, false);
+
+        if (!microphoneForegroundActive || !hasMicrophonePermission()) {
+            wakePhraseEngine.stop();
+            status(
+                "Wake word paused — open Jarvis and allow microphone access"
+            );
+            broadcastState(false, false);
+            return;
+        }
+
+        wakePhraseEngine.start(store.wakePhrase());
+        status(
+            "Wake word ready — say \"" + store.wakePhrase() + "\""
+        );
+        broadcastState(false, true);
     }
 
     private void stopCaptureAndPlayback() {

@@ -4,10 +4,13 @@
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">@color/jarvis_white</item>
         <item name="android:colorAccent">@color/jarvis_black</item>
-        <item name="android:navigationBarColor">@color/jarvis_white</item>
-        <item name="android:statusBarColor">@color/jarvis_white</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarDividerColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
 
     <style name="Theme.JarvisAssistantOverlay" parent="android:style/Theme.Material.Light.NoActionBar">
@@ -16,7 +19,12 @@
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:backgroundDimEnabled">true</item>
-        <item name="android:backgroundDimAmount">0.22</item>
+        <item name="android:backgroundDimAmount">0.18</item>
         <item name="android:colorAccent">@color/jarvis_black</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
 </resources>

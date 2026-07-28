@@ -8,17 +8,25 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.widget.Button;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -29,20 +37,24 @@ import java.util.List;
 
 public final class MainActivity extends Activity {
     private static final int BLACK = Color.rgb(20, 20, 20);
-    private static final int MID = Color.rgb(105, 105, 105);
-    private static final int LINE = Color.rgb(225, 225, 225);
-    private static final int SOFT = Color.rgb(245, 245, 245);
+    private static final int MID = Color.rgb(103, 103, 103);
+    private static final int LINE = Color.rgb(226, 226, 226);
+    private static final int SOFT = Color.rgb(246, 246, 246);
     private static final int WHITE = Color.WHITE;
+    private static final int REQUEST_VOICE_PERMISSIONS = 1800;
 
     private SecureStore store;
     private ChatHistoryStore history;
+    private LinearLayout root;
+    private LinearLayout topBar;
+    private LinearLayout composerShell;
     private ScrollView messageScroll;
     private LinearLayout messageList;
     private EditText composer;
     private TextView statusText;
-    private Button voiceButton;
-    private Button modeButton;
-    private TextView emptyState;
+    private ImageButton micButton;
+    private ImageButton sendButton;
+    private View emptyState;
     private TextView streamingText;
     private boolean voiceActive;
     private boolean listening;
@@ -55,8 +67,8 @@ public final class MainActivity extends Activity {
             String text = safe(intent.getStringExtra(VoiceService.EXTRA_TEXT));
             voiceActive = intent.getBooleanExtra(VoiceService.EXTRA_ACTIVE, voiceActive);
             listening = intent.getBooleanExtra(VoiceService.EXTRA_LISTENING, listening);
-            updateModeButton();
-            updateVoiceButton();
+            updateMicButton();
+
             switch (event) {
                 case "status" -> statusText.setText(text);
                 case "message" -> {
@@ -65,10 +77,12 @@ public final class MainActivity extends Activity {
                 }
                 case "assistant_delta" -> appendStreaming(text);
                 case "thinking" -> beginStreaming();
-                case "draft" -> statusText.setText(text.isBlank() ? "Listening" : "Listening: " + text);
-                case "state" -> { }
+                case "draft" -> statusText.setText(text.isBlank() ? "Listening" : text);
                 case "clear" -> renderHistory();
-                case "error" -> Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
+                case "error" -> {
+                    statusText.setText("Something went wrong");
+                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
+                }
                 default -> { }
             }
         }
@@ -80,13 +94,10 @@ public final class MainActivity extends Activity {
         history = new ChatHistoryStore(this);
         configureWindow();
         setContentView(buildContent());
+        applySystemInsets();
         renderHistory();
-        updateModeButton();
-        updateVoiceButton();
-        if (store.hasMobileToken() &&
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-            startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_START));
-        }
+        updateMicButton();
+        startJarvisIfConfigured();
     }
 
     @Override protected void onStart() {
@@ -98,7 +109,12 @@ public final class MainActivity extends Activity {
             registerReceiver(receiver, filter);
         }
         renderHistory();
-        updateModeButton();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        updateMicButton();
+        JarvisVoiceInteractionService.refreshWakeIfActive(this);
     }
 
     @Override protected void onStop() {
@@ -106,43 +122,37 @@ public final class MainActivity extends Activity {
         super.onStop();
     }
 
-    @Override protected void onResume() {
-        super.onResume();
-        updateModeButton();
-    }
-
     private void configureWindow() {
         Window window = getWindow();
-        window.setStatusBarColor(WHITE);
-        window.setNavigationBarColor(WHITE);
-        window.getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
-        );
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+
+        WindowInsetsController controller = window.getInsetsController();
+        if (controller != null) {
+            int appearance =
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(appearance, appearance);
+        }
     }
 
     private View buildContent() {
-        LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(WHITE);
 
-        root.addView(buildTopBar(), new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(58)
-        ));
-
-        statusText = text("Connecting", 12, MID);
-        statusText.setGravity(Gravity.CENTER_HORIZONTAL);
-        statusText.setPadding(dp(16), dp(5), dp(16), dp(7));
-        root.addView(statusText, matchWrap());
+        topBar = buildTopBar();
+        root.addView(topBar, matchWrap());
 
         FrameLayout conversation = new FrameLayout(this);
         messageScroll = new ScrollView(this);
         messageScroll.setFillViewport(true);
         messageScroll.setClipToPadding(false);
-        messageScroll.setPadding(dp(14), dp(8), dp(14), dp(12));
         messageList = new LinearLayout(this);
         messageList.setOrientation(LinearLayout.VERTICAL);
-        messageList.setPadding(0, 0, 0, dp(16));
+        messageList.setPadding(0, 0, 0, dp(18));
         messageScroll.addView(messageList, new ScrollView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -152,129 +162,247 @@ public final class MainActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
-        emptyState = text("How can I help?", 28, BLACK);
-        emptyState.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        emptyState.setGravity(Gravity.CENTER);
+        LinearLayout welcome = new LinearLayout(this);
+        welcome.setOrientation(LinearLayout.VERTICAL);
+        welcome.setGravity(Gravity.CENTER);
+        TextView welcomeTitle = text("What can I help with?", 27, BLACK);
+        welcomeTitle.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        welcomeTitle.setGravity(Gravity.CENTER);
+        welcome.addView(welcomeTitle, matchWrap());
+        TextView welcomeNote = text("Type a message or tap the microphone.", 14, MID);
+        welcomeNote.setGravity(Gravity.CENTER);
+        welcomeNote.setPadding(0, dp(8), 0, 0);
+        welcome.addView(welcomeNote, matchWrap());
+        emptyState = welcome;
+
         FrameLayout.LayoutParams emptyParams = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER
         );
-        emptyParams.setMargins(dp(24), 0, dp(24), dp(80));
+        emptyParams.setMargins(dp(24), 0, dp(24), dp(76));
         conversation.addView(emptyState, emptyParams);
 
-        LinearLayout.LayoutParams conversationParams = new LinearLayout.LayoutParams(
+        root.addView(conversation, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             0,
             1f
-        );
-        root.addView(conversation, conversationParams);
-        root.addView(buildComposer(), new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+
+        composerShell = buildComposer();
+        root.addView(composerShell, matchWrap());
         return root;
     }
 
-    private View buildTopBar() {
+    private LinearLayout buildTopBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(16), dp(4), dp(10), dp(4));
         bar.setBackgroundColor(WHITE);
 
+        LinearLayout titleBlock = new LinearLayout(this);
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
         TextView title = text("Jarvis", 22, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        bar.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        titleBlock.addView(title, matchWrap());
+        statusText = text("Connecting", 12, MID);
+        statusText.setMaxLines(1);
+        statusText.setPadding(0, dp(2), dp(8), 0);
+        titleBlock.addView(statusText, matchWrap());
+        bar.addView(titleBlock, new LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        ));
 
-        modeButton = smallButton("Live");
-        modeButton.setOnClickListener(view -> toggleMode());
-        bar.addView(modeButton, wrapWrap(0, dp(6)));
-
-        Button newChat = topTextButton("New");
+        ImageButton newChat = iconButton(R.drawable.ic_add, "New chat", SOFT, BLACK);
         newChat.setOnClickListener(view -> newChat());
-        bar.addView(newChat, wrapWrap(0, dp(2)));
+        bar.addView(newChat, iconParams(dp(40), dp(6)));
 
-        Button settings = topTextButton("Settings");
-        settings.setOnClickListener(view -> startActivity(new Intent(this, SettingsActivity.class)));
-        bar.addView(settings, wrapWrap());
+        ImageButton settings = iconButton(R.drawable.ic_settings, "Settings", SOFT, BLACK);
+        settings.setOnClickListener(view ->
+            startActivity(new Intent(this, SettingsActivity.class))
+        );
+        bar.addView(settings, iconParams(dp(40), 0));
         return bar;
     }
 
-    private View buildComposer() {
+    private LinearLayout buildComposer() {
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.VERTICAL);
-        wrapper.setPadding(dp(12), dp(6), dp(12), dp(12));
         wrapper.setBackgroundColor(WHITE);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.BOTTOM);
-        row.setPadding(dp(8), dp(7), dp(7), dp(7));
-        row.setBackground(rounded(SOFT, 24, 0, Color.TRANSPARENT));
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(6), dp(6), dp(6));
+        row.setBackground(rounded(SOFT, 25, 1, LINE));
 
         composer = new EditText(this);
         composer.setHint("Message Jarvis");
-        composer.setHintTextColor(Color.rgb(130, 130, 130));
+        composer.setHintTextColor(Color.rgb(132, 132, 132));
         composer.setTextColor(BLACK);
         composer.setTextSize(16);
+        composer.setSingleLine(true);
+        composer.setInputType(
+            InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+        );
+        composer.setImeOptions(EditorInfo.IME_ACTION_SEND);
         composer.setBackgroundColor(Color.TRANSPARENT);
-        composer.setPadding(dp(6), dp(4), dp(8), dp(4));
-        composer.setMinHeight(dp(42));
-        composer.setMaxLines(5);
-        composer.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        row.addView(composer, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        composer.setPadding(0, 0, dp(8), 0);
+        composer.setOnEditorActionListener((view, actionId, event) -> {
+            boolean keyboardSend = actionId == EditorInfo.IME_ACTION_SEND;
+            boolean hardwareEnter =
+                event != null
+                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
+                    && event.getAction() == KeyEvent.ACTION_DOWN;
+            if (keyboardSend || hardwareEnter) {
+                sendMessage();
+                return true;
+            }
+            return false;
+        });
+        composer.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
+                updateSendButton();
+            }
+            @Override public void afterTextChanged(Editable value) {}
+        });
+        row.addView(composer, new LinearLayout.LayoutParams(
+            0,
+            dp(44),
+            1f
+        ));
 
-        Button send = circleButton("↑", BLACK, WHITE);
-        send.setOnClickListener(view -> sendMessage());
-        row.addView(send, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        micButton = iconButton(R.drawable.ic_mic, "Start voice", WHITE, BLACK);
+        micButton.setOnClickListener(view -> toggleVoice());
+        row.addView(micButton, iconParams(dp(42), dp(6)));
+
+        sendButton = iconButton(R.drawable.ic_send, "Send message", BLACK, WHITE);
+        sendButton.setOnClickListener(view -> sendMessage());
+        row.addView(sendButton, iconParams(dp(42), 0));
+
         wrapper.addView(row, matchWrap());
-
-        voiceButton = button("Start voice");
-        voiceButton.setOnClickListener(view -> toggleVoice());
-        LinearLayout.LayoutParams voiceParams = matchWrap(dp(8), 0);
-        wrapper.addView(voiceButton, voiceParams);
+        updateSendButton();
         return wrapper;
     }
 
+    private void applySystemInsets() {
+        root.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars());
+            Insets ime = windowInsets.getInsets(WindowInsets.Type.ime());
+            int bottomInset = Math.max(bars.bottom, ime.bottom);
+
+            topBar.setPadding(
+                dp(16) + bars.left,
+                dp(9) + bars.top,
+                dp(12) + bars.right,
+                dp(9)
+            );
+            messageScroll.setPadding(
+                dp(14) + bars.left,
+                dp(8),
+                dp(14) + bars.right,
+                dp(14)
+            );
+            composerShell.setPadding(
+                dp(12) + bars.left,
+                dp(6),
+                dp(12) + bars.right,
+                dp(10) + bottomInset
+            );
+            return windowInsets;
+        });
+        root.requestApplyInsets();
+    }
+
+    private void startJarvisIfConfigured() {
+        if (!store.hasMobileToken() || store.coreUrl().isBlank()) return;
+
+        boolean microphoneGranted =
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+        boolean assistantHostsWake =
+            store.assistantWakeAlways()
+                && JarvisVoiceInteractionService.isActiveAssistant(this);
+        String action =
+            microphoneGranted
+                && store.wakeEnabled()
+                && !assistantHostsWake
+                    ? VoiceService.ACTION_ARM_WAKE
+                    : VoiceService.ACTION_START;
+
+        startForegroundService(
+            new Intent(this, VoiceService.class).setAction(action)
+        );
+        if (microphoneGranted) {
+            JarvisVoiceInteractionService.refreshWakeIfActive(this);
+        }
+    }
+
     private void sendMessage() {
-        String text = composer.getText().toString().trim();
-        if (text.isEmpty()) return;
+        String value = composer.getText().toString().trim();
+        if (value.isEmpty()) return;
         if (!credentialsReady()) return;
         composer.setText("");
-        Intent intent = new Intent(this, VoiceService.class)
-            .setAction(VoiceService.ACTION_SEND_TEXT)
-            .putExtra(VoiceService.EXTRA_TEXT, text);
-        startForegroundService(intent);
+        startForegroundService(
+            new Intent(this, VoiceService.class)
+                .setAction(VoiceService.ACTION_SEND_TEXT)
+                .putExtra(VoiceService.EXTRA_TEXT, value)
+        );
     }
 
     private void toggleVoice() {
         if (voiceActive) {
-            startService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_STOP_VOICE));
+            startService(
+                new Intent(this, VoiceService.class)
+                    .setAction(VoiceService.ACTION_STOP_VOICE)
+            );
             return;
         }
+
         if (!credentialsReady()) return;
         List<String> missing = new ArrayList<>();
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.RECORD_AUDIO);
         }
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
             missing.add(Manifest.permission.POST_NOTIFICATIONS);
         }
         if (!missing.isEmpty()) {
-            requestPermissions(missing.toArray(new String[0]), 1800);
+            requestPermissions(
+                missing.toArray(new String[0]),
+                REQUEST_VOICE_PERMISSIONS
+            );
             return;
         }
-        startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_START_VOICE));
+
+        startForegroundService(
+            new Intent(this, VoiceService.class)
+                .setAction(VoiceService.ACTION_START_VOICE)
+        );
     }
 
-    @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    @Override public void onRequestPermissionsResult(
+        int requestCode,
+        String[] permissions,
+        int[] grantResults
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode != 1800) return;
+        if (requestCode != REQUEST_VOICE_PERMISSIONS) return;
         for (int result : grantResults) {
             if (result != PackageManager.PERMISSION_GRANTED) {
-                Toast.makeText(this, "Microphone permission is required for voice", Toast.LENGTH_LONG).show();
+                Toast.makeText(
+                    this,
+                    "Microphone permission is required for voice",
+                    Toast.LENGTH_LONG
+                ).show();
                 return;
             }
         }
@@ -283,35 +411,36 @@ public final class MainActivity extends Activity {
 
     private boolean credentialsReady() {
         if (store.coreUrl().isBlank() || store.mobileToken().isBlank()) {
-            Toast.makeText(this, "Open Settings and add the Jarvis Core URL and mobile token", Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                this,
+                "Open Settings and add the Jarvis Core URL and mobile token",
+                Toast.LENGTH_LONG
+            ).show();
             startActivity(new Intent(this, SettingsActivity.class));
             return false;
         }
-        if (VoiceCatalog.isOriginal(store.voiceId()) &&
-            (store.homeAssistantUrl().isBlank() || store.homeAssistantToken().isBlank())) {
-            Toast.makeText(this, "The original Jarvis voice also needs Home Assistant details", Toast.LENGTH_LONG).show();
+        if (VoiceCatalog.isOriginal(store.voiceId())
+                && (store.homeAssistantUrl().isBlank()
+                    || store.homeAssistantToken().isBlank())) {
+            Toast.makeText(
+                this,
+                "The original Jarvis voice also needs Home Assistant details",
+                Toast.LENGTH_LONG
+            ).show();
             startActivity(new Intent(this, SettingsActivity.class));
             return false;
         }
         return true;
     }
 
-    private void toggleMode() {
-        String next = ConversationMode.toggle(store.conversationMode());
-        store.setConversationMode(next);
-        voiceActive = false;
-        listening = false;
-        updateModeButton();
-        updateVoiceButton();
-        startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_APPLY_SETTINGS));
-        Toast.makeText(this, ConversationMode.label(next) + " voice selected", Toast.LENGTH_SHORT).show();
-    }
-
     private void newChat() {
         history.clear();
         store.newConversationId();
         renderHistory();
-        startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_NEW_CHAT));
+        startForegroundService(
+            new Intent(this, VoiceService.class)
+                .setAction(VoiceService.ACTION_NEW_CHAT)
+        );
     }
 
     private void renderHistory() {
@@ -320,13 +449,16 @@ public final class MainActivity extends Activity {
         streamingText = null;
         List<ChatMessage> messages = history.list();
         emptyState.setVisibility(messages.isEmpty() ? View.VISIBLE : View.GONE);
-        for (ChatMessage message : messages) addMessageView(message, false);
+        for (ChatMessage message : messages) {
+            addMessageView(message, false);
+        }
         scrollToBottom();
     }
 
     private void addMessageView(ChatMessage message, boolean scroll) {
         if (message.text.isBlank()) return;
         emptyState.setVisibility(View.GONE);
+
         LinearLayout holder = new LinearLayout(this);
         holder.setOrientation(LinearLayout.VERTICAL);
         boolean user = ChatMessage.USER.equals(message.role);
@@ -341,14 +473,27 @@ public final class MainActivity extends Activity {
 
         TextView content = text(message.text, 16, BLACK);
         content.setTextIsSelectable(true);
-        content.setLineSpacing(0f, 1.12f);
-        content.setPadding(user ? dp(14) : 0, dp(10), user ? dp(14) : dp(8), dp(10));
-        if (user) content.setBackground(rounded(SOFT, 18, 0, Color.TRANSPARENT));
+        content.setLineSpacing(0f, 1.14f);
+        content.setPadding(
+            user ? dp(14) : 0,
+            dp(10),
+            user ? dp(14) : dp(8),
+            dp(10)
+        );
+        if (user) {
+            content.setBackground(rounded(SOFT, 18, 0, Color.TRANSPARENT));
+        }
+
         LinearLayout.LayoutParams contentParams = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         );
-        contentParams.width = user ? Math.min(getResources().getDisplayMetrics().widthPixels - dp(80), dp(520)) : ViewGroup.LayoutParams.WRAP_CONTENT;
+        if (user) {
+            contentParams.width = Math.min(
+                getResources().getDisplayMetrics().widthPixels - dp(80),
+                dp(520)
+            );
+        }
         holder.addView(content, contentParams);
 
         LinearLayout.LayoutParams holderParams = new LinearLayout.LayoutParams(
@@ -363,16 +508,20 @@ public final class MainActivity extends Activity {
     private void beginStreaming() {
         if (streamingText != null) return;
         emptyState.setVisibility(View.GONE);
+
         LinearLayout holder = new LinearLayout(this);
         holder.setOrientation(LinearLayout.VERTICAL);
         holder.setGravity(Gravity.START);
+
         TextView name = text("Jarvis", 12, MID);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         holder.addView(name, wrapWrap(0, dp(4)));
-        streamingText = text("Thinking…", 16, MID);
-        streamingText.setLineSpacing(0f, 1.12f);
+
+        streamingText = text("Thinking...", 16, MID);
+        streamingText.setLineSpacing(0f, 1.14f);
         streamingText.setPadding(0, dp(10), dp(8), dp(10));
         holder.addView(streamingText, wrapWrap());
+
         LinearLayout.LayoutParams params = matchWrap(dp(7), dp(11));
         messageList.addView(holder, params);
         scrollToBottom();
@@ -382,7 +531,7 @@ public final class MainActivity extends Activity {
         if (delta == null || delta.isEmpty()) return;
         if (streamingText == null) beginStreaming();
         String current = streamingText.getText().toString();
-        if ("Thinking…".equals(current)) current = "";
+        if ("Thinking...".equals(current)) current = "";
         streamingText.setText(current + delta);
         streamingText.setTextColor(BLACK);
         scrollToBottom();
@@ -391,7 +540,9 @@ public final class MainActivity extends Activity {
     private void finishStreaming() {
         if (streamingText == null) return;
         View parent = (View) streamingText.getParent();
-        if (parent != null && parent.getParent() == messageList) messageList.removeView(parent);
+        if (parent != null && parent.getParent() == messageList) {
+            messageList.removeView(parent);
+        }
         streamingText = null;
     }
 
@@ -399,69 +550,44 @@ public final class MainActivity extends Activity {
         messageScroll.post(() -> messageScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    private void updateVoiceButton() {
-        if (voiceButton == null) return;
+    private void updateMicButton() {
+        if (micButton == null) return;
         if (voiceActive) {
-            voiceButton.setText(listening ? "End voice · Listening" : "End voice");
-            voiceButton.setTextColor(WHITE);
-            voiceButton.setBackground(rounded(BLACK, 22, 0, Color.TRANSPARENT));
+            micButton.setBackground(rounded(BLACK, 21, 0, Color.TRANSPARENT));
+            micButton.setColorFilter(WHITE);
+            micButton.setContentDescription(
+                listening ? "Listening. Tap to stop voice." : "Stop voice"
+            );
+            micButton.setAlpha(1f);
         } else {
-            voiceButton.setText("Start " + ConversationMode.label(store.conversationMode()) + " voice");
-            voiceButton.setTextColor(BLACK);
-            voiceButton.setBackground(rounded(WHITE, 22, 1, LINE));
+            micButton.setBackground(rounded(WHITE, 21, 1, LINE));
+            micButton.setColorFilter(BLACK);
+            micButton.setContentDescription("Start voice");
+            micButton.setAlpha(1f);
         }
     }
 
-    private void updateModeButton() {
-        if (modeButton == null) return;
-        modeButton.setText(ConversationMode.label(store.conversationMode()));
+    private void updateSendButton() {
+        if (sendButton == null || composer == null) return;
+        boolean enabled = !composer.getText().toString().trim().isEmpty();
+        sendButton.setEnabled(enabled);
+        sendButton.setAlpha(enabled ? 1f : 0.35f);
     }
 
-    private Button topTextButton(String label) {
-        Button value = new Button(this);
-        value.setText(label);
-        value.setTextSize(13);
-        value.setTextColor(BLACK);
-        value.setAllCaps(false);
-        value.setMinWidth(0);
+    private ImageButton iconButton(
+        int icon,
+        String description,
+        int background,
+        int foreground
+    ) {
+        ImageButton value = new ImageButton(this);
+        value.setImageResource(icon);
+        value.setContentDescription(description);
+        value.setColorFilter(foreground);
+        value.setScaleType(ImageButton.ScaleType.CENTER);
+        value.setPadding(dp(10), dp(10), dp(10), dp(10));
         value.setMinimumWidth(0);
-        value.setMinHeight(0);
         value.setMinimumHeight(0);
-        value.setPadding(dp(8), dp(6), dp(8), dp(6));
-        value.setBackgroundColor(Color.TRANSPARENT);
-        return value;
-    }
-
-    private Button smallButton(String label) {
-        Button value = topTextButton(label);
-        value.setPadding(dp(12), dp(6), dp(12), dp(6));
-        value.setBackground(rounded(SOFT, 16, 0, Color.TRANSPARENT));
-        return value;
-    }
-
-    private Button button(String label) {
-        Button value = new Button(this);
-        value.setText(label);
-        value.setTextSize(15);
-        value.setTextColor(BLACK);
-        value.setAllCaps(false);
-        value.setPadding(dp(16), dp(11), dp(16), dp(11));
-        value.setBackground(rounded(WHITE, 22, 1, LINE));
-        return value;
-    }
-
-    private Button circleButton(String label, int background, int foreground) {
-        Button value = new Button(this);
-        value.setText(label);
-        value.setTextSize(22);
-        value.setTextColor(foreground);
-        value.setAllCaps(false);
-        value.setPadding(0, 0, 0, dp(2));
-        value.setMinWidth(0);
-        value.setMinimumWidth(0);
-        value.setMinHeight(0);
-        value.setMinimumHeight(0);
-        value.setGravity(Gravity.CENTER);
         value.setBackground(rounded(background, 21, 0, Color.TRANSPARENT));
         return value;
     }
@@ -475,12 +601,26 @@ public final class MainActivity extends Activity {
         return view;
     }
 
-    private GradientDrawable rounded(int fill, int radiusDp, int strokeDp, int strokeColour) {
+    private GradientDrawable rounded(
+        int fill,
+        int radiusDp,
+        int strokeDp,
+        int strokeColour
+    ) {
         GradientDrawable background = new GradientDrawable();
         background.setColor(fill);
         background.setCornerRadius(dp(radiusDp));
-        if (strokeDp > 0) background.setStroke(dp(strokeDp), strokeColour);
+        if (strokeDp > 0) {
+            background.setStroke(dp(strokeDp), strokeColour);
+        }
         return background;
+    }
+
+    private LinearLayout.LayoutParams iconParams(int size, int rightMargin) {
+        LinearLayout.LayoutParams params =
+            new LinearLayout.LayoutParams(size, size);
+        params.rightMargin = rightMargin;
+        return params;
     }
 
     private LinearLayout.LayoutParams matchWrap() {

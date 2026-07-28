@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.role.RoleManager;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -13,6 +14,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -63,11 +67,20 @@ public final class SettingsActivity extends Activity {
 
     private void configureWindow() {
         Window window = getWindow();
-        window.setStatusBarColor(WHITE);
-        window.setNavigationBarColor(WHITE);
-        window.getDecorView().setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        window.setSoftInputMode(
+            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         );
+
+        WindowInsetsController controller = window.getInsetsController();
+        if (controller != null) {
+            int appearance =
+                WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(appearance, appearance);
+        }
     }
 
     private View buildContent() {
@@ -183,6 +196,19 @@ public final class SettingsActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+        scroll.setClipToPadding(false);
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            Insets ime = insets.getInsets(WindowInsets.Type.ime());
+            page.setPadding(
+                dp(16) + bars.left,
+                dp(8) + bars.top,
+                dp(16) + bars.right,
+                dp(30) + Math.max(bars.bottom, ime.bottom)
+            );
+            return insets;
+        });
+        scroll.requestApplyInsets();
         return scroll;
     }
 
@@ -252,12 +278,64 @@ public final class SettingsActivity extends Activity {
             mobileToken.setText("");
             homeAssistantToken.setText("");
             loadSettings();
-            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_APPLY_SETTINGS));
-            }
+            applySavedRuntimeSettings();
             Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show();
         } catch (Exception exception) {
             Toast.makeText(this, "Could not save settings: " + safeMessage(exception), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void applySavedRuntimeSettings() {
+        JarvisVoiceInteractionService.refreshWakeIfActive(this);
+
+        boolean microphoneGranted =
+            checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        boolean assistantHostsWake =
+            store.assistantWakeAlways()
+                && JarvisVoiceInteractionService.isActiveAssistant(this);
+
+        if (store.wakeEnabled() && !microphoneGranted) {
+            requestPermissions(
+                new String[] { android.Manifest.permission.RECORD_AUDIO },
+                1811
+            );
+            return;
+        }
+
+        String action =
+            store.wakeEnabled() && !assistantHostsWake
+                ? VoiceService.ACTION_ARM_WAKE
+                : VoiceService.ACTION_APPLY_SETTINGS;
+        startForegroundService(
+            new Intent(this, VoiceService.class).setAction(action)
+        );
+    }
+
+    @Override public void onRequestPermissionsResult(
+        int requestCode,
+        String[] permissions,
+        int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        );
+        if (requestCode != 1811) return;
+
+        if (
+            grantResults.length > 0
+                && grantResults[0]
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            applySavedRuntimeSettings();
+        } else {
+            Toast.makeText(
+                this,
+                "Wake word needs microphone permission",
+                Toast.LENGTH_LONG
+            ).show();
         }
     }
 
@@ -296,17 +374,25 @@ public final class SettingsActivity extends Activity {
         }
     }
 
-    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+    @Override protected void onActivityResult(
+        int requestCode,
+        int resultCode,
+        Intent data
+    ) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == 1810) updateAssistantStatus();
+        if (requestCode == 1810) {
+            updateAssistantStatus();
+            JarvisVoiceInteractionService.refreshWakeIfActive(this);
+        }
     }
 
     private void clearChat() {
         new ChatHistoryStore(this).clear();
         store.newConversationId();
-        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            startForegroundService(new Intent(this, VoiceService.class).setAction(VoiceService.ACTION_NEW_CHAT));
-        }
+        startForegroundService(
+            new Intent(this, VoiceService.class)
+                .setAction(VoiceService.ACTION_NEW_CHAT)
+        );
         Toast.makeText(this, "New chat started", Toast.LENGTH_SHORT).show();
     }
 

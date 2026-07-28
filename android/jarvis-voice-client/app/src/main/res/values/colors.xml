@@ -4,7 +4,8 @@
     <color name="jarvis_black">#141414</color>
     <color name="jarvis_panel">#F6F6F6</color>
     <color name="jarvis_text">#141414</color>
-    <color name="jarvis_muted">#686868</color>
+    <color name="jarvis_muted">#676767</color>
     <color name="jarvis_accent">#141414</color>
     <color name="jarvis_danger">#B3261E</color>
+    <color name="jarvis_icon_background">#F2F2F2</color>
 </resources>
