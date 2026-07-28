@@ -62,6 +62,7 @@ public final class SettingsActivity extends Activity {
         store = new SecureStore(this);
         configureWindow();
         setContentView(buildContent());
+        applySystemBarAppearance();
         loadSettings();
     }
 
@@ -73,14 +74,26 @@ public final class SettingsActivity extends Activity {
         window.setSoftInputMode(
             WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
         );
+    }
 
-        WindowInsetsController controller = window.getInsetsController();
-        if (controller != null) {
+    private void applySystemBarAppearance() {
+        View decorView = getWindow().getDecorView();
+
+        decorView.post(() -> {
+            WindowInsetsController controller =
+                decorView.getWindowInsetsController();
+
+            if (controller == null) return;
+
             int appearance =
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                     | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-            controller.setSystemBarsAppearance(appearance, appearance);
-        }
+
+            controller.setSystemBarsAppearance(
+                appearance,
+                appearance
+            );
+        });
     }
 
     private View buildContent() {
