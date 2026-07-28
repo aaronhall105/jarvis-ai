@@ -10,7 +10,7 @@
         <item name="android:windowLightNavigationBar">true</item>
     </style>
 
-    <style name="Theme.JarvisAssistantOverlay" parent="android:style/Theme.Material.Light.NoActionBar.Translucent.Decor">
+    <style name="Theme.JarvisAssistantOverlay" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>
