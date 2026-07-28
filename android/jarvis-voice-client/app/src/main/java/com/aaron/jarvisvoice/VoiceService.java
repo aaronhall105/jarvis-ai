@@ -1,14 +1,18 @@
 package com.aaron.jarvisvoice;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -66,6 +70,7 @@ public final class VoiceService extends Service implements
     private boolean voiceActive;
     private boolean brainActive;
     private boolean playbackActive;
+    private boolean microphoneForegroundActive;
     private String pendingText = "";
     private boolean pendingTextSpeak;
 
@@ -89,15 +94,15 @@ public final class VoiceService extends Service implements
             return START_NOT_STICKY;
         }
 
-        startForeground(NOTIFICATION_ID, notification("Jarvis is starting"));
+        boolean microphoneForeground = promoteForeground(action);
         stopping = false;
         acquireWakeLock();
 
         switch (action) {
             case ACTION_START_VOICE -> {
-                requestedVoiceActive = true;
+                requestedVoiceActive = microphoneForeground;
                 ensureConnected();
-                if (ready) beginVoice();
+                if (ready && requestedVoiceActive) beginVoice();
             }
             case ACTION_STOP_VOICE -> stopVoice(false);
             case ACTION_SEND_TEXT -> {
@@ -107,16 +112,21 @@ public final class VoiceService extends Service implements
             case ACTION_APPLY_SETTINGS -> reconnectForSettings();
             case ACTION_NEW_CHAT -> newChat();
             case ACTION_ASSISTANT_INVOKE -> {
-                requestedVoiceActive = store.assistantStartsVoice();
+                requestedVoiceActive =
+                    store.assistantStartsVoice() && microphoneForeground;
                 ensureConnected();
                 if (ready && requestedVoiceActive) beginVoice();
                 String command = intent.getStringExtra(EXTRA_TEXT);
-                if (command != null && !command.isBlank()) queueOrSend(command, true);
+                if (command != null && !command.isBlank()) {
+                    queueOrSend(command, true);
+                }
             }
             case ACTION_ASSISTANT_DISMISS -> stopVoice(false);
             default -> {
                 ensureConnected();
-                if (store.startWithVoice()) requestedVoiceActive = true;
+                if (store.startWithVoice() && microphoneForeground) {
+                    requestedVoiceActive = true;
+                }
             }
         }
 
@@ -124,6 +134,81 @@ public final class VoiceService extends Service implements
                 (store.assistantWakeAlways() && JarvisVoiceInteractionService.isActiveAssistant(this)))
             ? START_STICKY
             : START_NOT_STICKY;
+    }
+
+
+    private boolean hasMicrophonePermission() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
+            || checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private boolean actionNeedsMicrophone(String action) {
+        if (ACTION_STOP_VOICE.equals(action)
+                || ACTION_ASSISTANT_DISMISS.equals(action)) {
+            return false;
+        }
+
+        return voiceActive
+            || requestedVoiceActive
+            || ACTION_START_VOICE.equals(action)
+            || (ACTION_ASSISTANT_INVOKE.equals(action)
+                && store.assistantStartsVoice())
+            || (ACTION_START.equals(action) && store.startWithVoice());
+    }
+
+    private boolean promoteForeground(String action) {
+        boolean wantsMicrophone = actionNeedsMicrophone(action);
+        boolean microphoneGranted = hasMicrophonePermission();
+
+        Notification activeNotification = notification(
+            wantsMicrophone
+                ? "Jarvis is starting voice"
+                : "Jarvis is connected"
+        );
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, activeNotification);
+            microphoneForegroundActive =
+                wantsMicrophone && microphoneGranted;
+            return microphoneForegroundActive;
+        }
+
+        int dataSyncType =
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+
+        if (wantsMicrophone && microphoneGranted) {
+            try {
+                startForeground(
+                    NOTIFICATION_ID,
+                    activeNotification,
+                    dataSyncType
+                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                );
+                microphoneForegroundActive = true;
+                return true;
+            } catch (SecurityException denied) {
+                requestedVoiceActive = false;
+                voiceActive = false;
+            }
+        }
+
+        startForeground(
+            NOTIFICATION_ID,
+            notification("Jarvis text chat is active"),
+            dataSyncType
+        );
+
+        microphoneForegroundActive = false;
+
+        if (wantsMicrophone) {
+            status(
+                "Open Jarvis and allow microphone access "
+                    + "before starting voice"
+            );
+        }
+
+        return false;
     }
 
     private void ensureConnected() {
@@ -211,6 +296,18 @@ public final class VoiceService extends Service implements
 
     private void beginVoice() {
         if (!ready || stopping) return;
+
+        if (!microphoneForegroundActive
+                || !hasMicrophonePermission()) {
+            requestedVoiceActive = false;
+            voiceActive = false;
+            status(
+                "Microphone permission is required. "
+                    + "Open Jarvis before starting voice."
+            );
+            broadcastState(false, false);
+            return;
+        }
         requestedVoiceActive = true;
         voiceActive = true;
         wakePhraseEngine.stop();
