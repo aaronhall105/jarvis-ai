@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,8 @@ from app.task_engine import TemporalActionEngine
 from app.recurring_schedule_engine import RecurringScheduleEngine
 from app.conditional_action_engine import ConditionalActionEngine
 from app.routine_engine import RoutineEngine
+from app.voice_session_engine import VoiceSessionEngine
+from app.realtime_voice import RealtimeVoiceProxy
 
 core = v15.core
 
@@ -110,6 +112,14 @@ routines = RoutineEngine(
     max_steps=_env_int("JARVIS_ROUTINES_MAX_STEPS", 8),
 )
 
+voice_sessions = VoiceSessionEngine(
+    database_path="/app/data/jarvis_voice_sessions.db",
+    idle_timeout_seconds=_env_int("JARVIS_VOICE_SESSION_IDLE_SECONDS", 45),
+    max_session_seconds=_env_int("JARVIS_VOICE_SESSION_MAX_SECONDS", 300),
+)
+
+realtime_voice = RealtimeVoiceProxy.from_environment()
+
 _original_conditional_or_existing_handle_command = tasks.handle_command
 
 async def _handle_routine_or_existing_command(text: str, actor: Any):
@@ -121,7 +131,7 @@ async def _handle_routine_or_existing_command(text: str, actor: Any):
 tasks.handle_command = _handle_routine_or_existing_command
 
 app = v15.app
-app.version = "2.6.0"
+app.version = "2.9.0"
 
 _original_lifespan = app.router.lifespan_context
 
@@ -159,6 +169,16 @@ async def _execute_ai_request_v16(
         device_id=request.device_id,
         voice_mode=request.voice_mode,
     )
+    if request.voice_mode and request.voice_session_id:
+        await voice_sessions.touch(
+            session_id=request.voice_session_id,
+            conversation_id=(request.conversation_id or request.voice_session_id),
+            user_key=actor.user_key,
+            satellite_id=request.satellite_id,
+            device_id=request.device_id,
+            endpoint_kind=request.voice_endpoint_kind,
+            turn_index=request.voice_session_turn,
+        )
     command = await tasks.handle_command(request.text, actor)
     if not command.handled:
         external_id, storage_id = core._conversation_scope(
@@ -721,4 +741,151 @@ async def routine_delete(
     if not updated:
         raise HTTPException(status_code=404, detail="Routine not found.")
     return {"success": True, "routine_id": routine_id}
+
+# Jarvis v17.0.0 native voice-session observability and Assist update
+
+_VOICE_SESSION_ASSIST_UPDATE_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "jarvis-assist-voice-session-v1.6.0.tar.gz"
+)
+
+
+class VoiceSessionCloseRequest(BaseModel):
+    reason: str = Field(default="closed", min_length=1, max_length=100)
+
+
+@app.get(
+    "/api/updates/jarvis-assist-voice-session-v1.6.0.tar.gz",
+    include_in_schema=False,
+)
+async def assist_voice_session_update() -> FileResponse:
+    if not _VOICE_SESSION_ASSIST_UPDATE_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Assist voice-session update not found.")
+    return FileResponse(
+        _VOICE_SESSION_ASSIST_UPDATE_PATH,
+        media_type="application/gzip",
+        filename="jarvis-assist-voice-session-v1.6.0.tar.gz",
+    )
+
+
+@app.get("/api/voice-sessions/status")
+async def voice_session_status() -> dict[str, Any]:
+    return await voice_sessions.status()
+
+
+@app.get("/api/voice-sessions")
+async def voice_session_list(
+    active_only: bool = False,
+    limit: int = 50,
+) -> dict[str, Any]:
+    items = await voice_sessions.list_sessions(
+        active_only=active_only,
+        limit=limit,
+    )
+    return {"count": len(items), "sessions": items}
+
+
+@app.post("/api/voice-sessions/{session_id}/close")
+async def voice_session_close(
+    session_id: str,
+    request: VoiceSessionCloseRequest,
+) -> dict[str, Any]:
+    closed = await voice_sessions.close(session_id, request.reason)
+    return {"success": True, "closed": closed, "session_id": session_id}
+
+# Jarvis v17.0.2 accepted-turn barge-in observability and Assist update
+
+_BARGE_IN_ASSIST_UPDATE_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "jarvis-assist-barge-in-v1.6.2.tar.gz"
+)
+
+
+class VoiceSessionInterruptRequest(BaseModel):
+    reason: str = Field(default="accepted_follow_up_during_playback", min_length=1, max_length=100)
+    media_player_entity_id: str | None = Field(default=None, max_length=255)
+
+
+@app.get(
+    "/api/updates/jarvis-assist-barge-in-v1.6.2.tar.gz",
+    include_in_schema=False,
+)
+async def assist_barge_in_update() -> FileResponse:
+    if not _BARGE_IN_ASSIST_UPDATE_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Assist barge-in update not found.")
+    return FileResponse(
+        _BARGE_IN_ASSIST_UPDATE_PATH,
+        media_type="application/gzip",
+        filename="jarvis-assist-barge-in-v1.6.2.tar.gz",
+    )
+
+
+@app.post("/api/voice-sessions/{session_id}/interrupt")
+async def voice_session_interrupt(
+    session_id: str,
+    request: VoiceSessionInterruptRequest,
+) -> dict[str, Any]:
+    record = await voice_sessions.record_interrupt(
+        session_id,
+        reason=request.reason,
+        media_player_entity_id=request.media_player_entity_id,
+    )
+    return {
+        "success": True,
+        "recorded": record is not None,
+        "session_id": session_id,
+        "session": record,
+    }
+
+# Jarvis v17.0.3 Companion App voice-session update
+
+_MOBILE_VOICE_ASSIST_UPDATE_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "jarvis-assist-mobile-voice-v1.6.3.tar.gz"
+)
+
+
+@app.get(
+    "/api/updates/jarvis-assist-mobile-voice-v1.6.3.tar.gz",
+    include_in_schema=False,
+)
+async def assist_mobile_voice_update() -> FileResponse:
+    if not _MOBILE_VOICE_ASSIST_UPDATE_PATH.is_file():
+        raise HTTPException(status_code=404, detail="Assist mobile voice update not found.")
+    return FileResponse(
+        _MOBILE_VOICE_ASSIST_UPDATE_PATH,
+        media_type="application/gzip",
+        filename="jarvis-assist-mobile-voice-v1.6.3.tar.gz",
+    )
+
+# Jarvis v17.2.0-r1 low-latency realtime phone voice
+
+
+async def _realtime_jarvis_tool(
+    command: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    request = core.TextCommandRequest(
+        text=command,
+        conversation_id=str(metadata.get("conversation_id") or "") or None,
+        user_id=str(metadata.get("user_id") or "aaron"),
+        user_name=str(metadata.get("user_name") or "Aaron"),
+        user_is_admin=bool(metadata.get("user_is_admin", True)),
+        device_id=str(metadata.get("device_id") or "jarvis_android"),
+        voice_mode=True,
+    )
+    return await core._execute_ai_request(request)
+
+
+@app.get("/api/realtime/status")
+async def realtime_voice_status() -> dict[str, Any]:
+    return realtime_voice.status()
+
+
+@app.websocket("/api/realtime/voice")
+async def realtime_voice_socket(websocket: WebSocket) -> None:
+    await realtime_voice.handle(websocket, _realtime_jarvis_tool)
 

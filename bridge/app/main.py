@@ -108,6 +108,10 @@ class TextCommandRequest(BaseModel):
     user_name: str | None = None
     user_is_admin: bool = False
     device_id: str | None = None
+    satellite_id: str | None = None
+    voice_session_id: str | None = None
+    voice_session_turn: int | None = None
+    voice_endpoint_kind: str | None = None
     voice_mode: bool = False
 
 
