@@ -12,6 +12,7 @@ public final class RealtimeProtocolTest {
         JSONObject auth = new JSONObject(RealtimeProtocol.auth(
             "mobile-token",
             "phone-1",
+            "aaron",
             "Aaron",
             "cedar",
             "realtime",
@@ -21,6 +22,8 @@ public final class RealtimeProtocolTest {
         ));
         assertEquals("auth", auth.getString("type"));
         assertEquals("mobile-token", auth.getString("token"));
+        assertEquals("aaron", auth.getString("user_id"));
+        assertEquals("Aaron", auth.getString("user_name"));
         assertEquals("live", auth.getString("conversation_mode"));
         assertEquals("high", auth.getString("vad_eagerness"));
         assertEquals("mobile-chat-123", auth.getString("conversation_id"));
