@@ -3,10 +3,12 @@ package com.aaron.jarvisvoice;
 import android.app.Activity;
 import android.app.role.RoleManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
@@ -20,6 +22,7 @@ import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -31,28 +34,38 @@ import java.util.List;
 
 public final class SettingsActivity extends Activity {
     private static final int BLACK = Color.rgb(20, 20, 20);
-    private static final int MID = Color.rgb(105, 105, 105);
+    private static final int MID = Color.rgb(102, 102, 102);
     private static final int LINE = Color.rgb(225, 225, 225);
-    private static final int SOFT = Color.rgb(246, 246, 246);
+    private static final int SOFT = Color.rgb(247, 247, 247);
     private static final int WHITE = Color.WHITE;
+    private static final int REQUEST_ASSISTANT_ROLE = 1810;
+    private static final int REQUEST_WAKE_PERMISSION = 1811;
 
     private SecureStore store;
-    private EditText coreUrl;
-    private EditText mobileToken;
-    private EditText userName;
+
+    private TextView assistantStatus;
+    private TextView wakeEngineStatus;
+
     private Spinner conversationMode;
     private Spinner voice;
     private Spinner responsiveness;
+    private Spinner wakeSensitivity;
+
     private Switch keepOpen;
     private Switch standardAutoListen;
     private Switch wakeEnabled;
-    private EditText wakePhrase;
+    private Switch dedicatedWake;
     private Switch backgroundConversations;
     private Switch startWithVoice;
     private Switch assistantWakeAlways;
     private Switch assistantOverlay;
     private Switch assistantStartVoice;
-    private TextView assistantStatus;
+
+    private EditText wakePhrase;
+    private EditText picovoiceAccessKey;
+    private EditText coreUrl;
+    private EditText mobileToken;
+    private EditText userName;
     private EditText homeAssistantUrl;
     private EditText homeAssistantToken;
     private EditText pipeline;
@@ -71,28 +84,18 @@ public final class SettingsActivity extends Activity {
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
         window.setNavigationBarDividerColor(Color.TRANSPARENT);
-        window.setSoftInputMode(
-            WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
-        );
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
     }
 
     private void applySystemBarAppearance() {
         View decorView = getWindow().getDecorView();
-
         decorView.post(() -> {
-            WindowInsetsController controller =
-                decorView.getWindowInsetsController();
-
+            WindowInsetsController controller = decorView.getWindowInsetsController();
             if (controller == null) return;
-
             int appearance =
                 WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                     | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
-
-            controller.setSystemBarsAppearance(
-                appearance,
-                appearance
-            );
+            controller.setSystemBarsAppearance(appearance, appearance);
         });
     }
 
@@ -102,114 +105,59 @@ public final class SettingsActivity extends Activity {
         page.setBackgroundColor(WHITE);
         page.setPadding(dp(16), dp(8), dp(16), dp(30));
 
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        Button back = textButton("Back");
-        back.setOnClickListener(view -> finish());
-        top.addView(back, wrapWrap());
-        TextView title = text("Settings", 22, BLACK);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        top.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        page.addView(top, matchWrap(0, dp(14)));
+        page.addView(buildHeader(), matchWrap(0, dp(20)));
 
-        page.addView(sectionTitle("Default Android assistant"), matchWrap(0, dp(8)));
-        LinearLayout assistantCard = card();
-        assistantStatus = note("Checking assistant status…");
-        assistantCard.addView(assistantStatus, matchWrap(0, dp(10)));
-        assistantWakeAlways = toggle("Keep the Jarvis wake phrase armed whenever Jarvis is the default assistant");
-        assistantOverlay = toggle("Show the compact Jarvis overlay instead of opening the full app");
-        assistantStartVoice = toggle("Start listening immediately when the overlay opens");
-        assistantCard.addView(assistantWakeAlways, matchWrap(0, dp(4)));
-        assistantCard.addView(assistantOverlay, matchWrap(0, dp(4)));
-        assistantCard.addView(assistantStartVoice, matchWrap(0, dp(10)));
-        Button makeDefault = primaryButton("Set Jarvis as default assistant");
-        makeDefault.setOnClickListener(view -> requestAssistantRole());
-        assistantCard.addView(makeDefault, matchWrap(0, dp(8)));
-        Button battery = secondaryButton("Open battery optimisation settings");
-        battery.setOnClickListener(view -> openBatterySettings());
-        assistantCard.addView(battery, matchWrap());
-        assistantCard.addView(note(
-            "The selected Android assistant service stays available for Side-button invocation and wake-phrase listening. Samsung may still require Jarvis to be set to Unrestricted battery use."
-        ), matchWrap(dp(10), 0));
-        page.addView(assistantCard, matchWrap(0, dp(18)));
-
-        page.addView(sectionTitle("Voice experience"), matchWrap(0, dp(8)));
-        LinearLayout voiceCard = card();
-        voiceCard.addView(label("Mode"), matchWrap(0, dp(6)));
-        conversationMode = spinner(List.of("Live", "Standard"));
-        voiceCard.addView(conversationMode, matchWrap(0, dp(12)));
-        voiceCard.addView(note(
-            "Live keeps the microphone session open for natural interruption. Standard listens one message at a time and can automatically listen again after Jarvis finishes."
-        ), matchWrap(0, dp(14)));
-
-        voiceCard.addView(label("Voice"), matchWrap(0, dp(6)));
-        voice = spinner(VoiceCatalog.labels());
-        voiceCard.addView(voice, matchWrap(0, dp(12)));
-
-        voiceCard.addView(label("Turn detection"), matchWrap(0, dp(6)));
-        responsiveness = spinner(List.of("Fast", "Balanced", "Patient"));
-        voiceCard.addView(responsiveness, matchWrap(0, dp(12)));
-
-        keepOpen = toggle("Keep the conversation open until I end it");
-        standardAutoListen = toggle("Standard mode automatically listens again");
-        startWithVoice = toggle("Start voice when the app opens");
-        backgroundConversations = toggle("Allow voice while the app is in the background");
-        voiceCard.addView(keepOpen, matchWrap(0, dp(4)));
-        voiceCard.addView(standardAutoListen, matchWrap(0, dp(4)));
-        voiceCard.addView(startWithVoice, matchWrap(0, dp(4)));
-        voiceCard.addView(backgroundConversations, matchWrap());
-        page.addView(voiceCard, matchWrap(0, dp(18)));
-
-        page.addView(sectionTitle("Wake word"), matchWrap(0, dp(8)));
-        LinearLayout wakeCard = card();
-        wakeEnabled = toggle("Enable the Jarvis wake phrase");
-        wakeCard.addView(wakeEnabled, matchWrap(0, dp(8)));
-        wakePhrase = field("Wake phrase", false);
-        wakeCard.addView(wakePhrase, matchWrap());
-        wakeCard.addView(note(
-            "When Jarvis is selected as the default assistant, Android keeps its VoiceInteractionService available and Jarvis continually rearms the on-device recogniser. A dedicated DSP wake-word model is not bundled, so reliability still depends on Samsung's recogniser and battery policy."
-        ), matchWrap(dp(10), 0));
-        page.addView(wakeCard, matchWrap(0, dp(18)));
-
-        page.addView(sectionTitle("Jarvis Core"), matchWrap(0, dp(8)));
-        LinearLayout coreCard = card();
-        coreUrl = field("Jarvis Core URL", false);
-        mobileToken = field("Mobile voice token", true);
-        userName = field("Your name", false);
-        coreCard.addView(coreUrl, matchWrap(0, dp(10)));
-        coreCard.addView(mobileToken, matchWrap(0, dp(10)));
-        coreCard.addView(userName, matchWrap());
-        page.addView(coreCard, matchWrap(0, dp(18)));
-
-        page.addView(sectionTitle("Original Jarvis voice"), matchWrap(0, dp(8)));
-        LinearLayout haCard = card();
-        haCard.addView(note(
-            "Only needed when Jarvis — Home Assistant original voice is selected."
+        page.addView(sectionHeader(
+            "Android assistant",
+            "Make Jarvis the system assistant and keep it available from the Side button."
         ), matchWrap(0, dp(10)));
-        homeAssistantUrl = field("Home Assistant URL", false);
-        homeAssistantToken = field("Home Assistant long-lived token", true);
-        pipeline = field("Assist pipeline ID — optional", false);
-        haCard.addView(homeAssistantUrl, matchWrap(0, dp(10)));
-        haCard.addView(homeAssistantToken, matchWrap(0, dp(10)));
-        haCard.addView(pipeline, matchWrap());
-        page.addView(haCard, matchWrap(0, dp(18)));
+        page.addView(buildAssistantCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Wake word",
+            "Use a dedicated on-device detector for faster and more reliable Jarvis activation."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildWakeCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Voice",
+            "Choose how Jarvis listens, responds and continues the conversation."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildVoiceCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Assistant behaviour",
+            "Control the overlay and background voice experience."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildBehaviourCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Jarvis Core",
+            "Private connection details used by the Android assistant."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildCoreCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Original Home Assistant voice",
+            "Only required when the Home Assistant Jarvis voice is selected."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildHomeAssistantCard(), matchWrap(0, dp(24)));
 
         Button save = primaryButton("Save settings");
         save.setOnClickListener(view -> saveSettings());
         page.addView(save, matchWrap(0, dp(10)));
 
-        Button clear = secondaryButton("Clear chat history and start a new chat");
+        Button clear = secondaryButton("Clear chat and start a new conversation");
         clear.setOnClickListener(view -> clearChat());
         page.addView(clear, matchWrap());
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
         scroll.addView(page, new ScrollView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        scroll.setClipToPadding(false);
         scroll.setOnApplyWindowInsetsListener((view, insets) -> {
             Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
             Insets ime = insets.getInsets(WindowInsets.Type.ime());
@@ -225,34 +173,235 @@ public final class SettingsActivity extends Activity {
         return scroll;
     }
 
+    private View buildHeader() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageButton back = iconButton(R.drawable.ic_back, "Back");
+        back.setOnClickListener(view -> finish());
+        row.addView(back, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        LinearLayout titleBlock = new LinearLayout(this);
+        titleBlock.setOrientation(LinearLayout.VERTICAL);
+        titleBlock.setPadding(dp(12), 0, 0, 0);
+        TextView title = text("Settings", 25, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        titleBlock.addView(title, matchWrap());
+        TextView subtitle = text("Jarvis Android assistant", 13, MID);
+        subtitle.setPadding(0, dp(2), 0, 0);
+        titleBlock.addView(subtitle, matchWrap());
+        row.addView(titleBlock, new LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        ));
+        return row;
+    }
+
+    private View buildAssistantCard() {
+        LinearLayout card = card();
+        assistantStatus = statusBadge("Checking default assistant…");
+        card.addView(assistantStatus, matchWrap(0, dp(14)));
+
+        Button defaults = primaryButton("Open default assistant settings");
+        defaults.setOnClickListener(view -> openDefaultAssistantSettings());
+        card.addView(defaults, matchWrap(0, dp(10)));
+
+        Button battery = secondaryButton("Open battery optimisation settings");
+        battery.setOnClickListener(view -> openBatterySettings());
+        card.addView(battery, matchWrap());
+
+        TextView note = note(
+            "In Android Settings, open Digital assistant app and select Jarvis. "
+                + "Set Jarvis battery use to Unrestricted for the best always-on result."
+        );
+        card.addView(note, matchWrap(dp(14), 0));
+        return card;
+    }
+
+    private View buildWakeCard() {
+        LinearLayout card = card();
+
+        wakeEnabled = new Switch(this);
+        dedicatedWake = new Switch(this);
+        assistantWakeAlways = new Switch(this);
+
+        card.addView(toggleRow(
+            "Wake word",
+            "Listen for Jarvis when voice mode is closed.",
+            wakeEnabled
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Dedicated detector",
+            "Porcupine runs on the phone and only listens for the Jarvis keyword.",
+            dedicatedWake
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Always on as default assistant",
+            "Keep the detector armed while Jarvis is Android's selected assistant.",
+            assistantWakeAlways
+        ), matchWrap(0, dp(14)));
+
+        wakeEngineStatus = statusBadge("Checking wake-word engine…");
+        card.addView(wakeEngineStatus, matchWrap(0, dp(14)));
+
+        wakePhrase = field("Wake phrase", false);
+        card.addView(fieldGroup("Wake phrase", wakePhrase), matchWrap(0, dp(14)));
+
+        picovoiceAccessKey = field("Picovoice AccessKey", true);
+        card.addView(fieldGroup(
+            "Dedicated wake-word AccessKey",
+            picovoiceAccessKey
+        ), matchWrap(0, dp(14)));
+
+        wakeSensitivity = spinner(List.of(
+            "Balanced",
+            "More sensitive",
+            "Fewer false wakes"
+        ));
+        card.addView(choiceGroup("Detection sensitivity", wakeSensitivity), matchWrap(0, dp(12)));
+
+        Button getKey = secondaryButton("Get a free Picovoice AccessKey");
+        getKey.setOnClickListener(view -> openPicovoiceConsole());
+        card.addView(getKey, matchWrap());
+
+        TextView note = note(
+            "The dedicated detector uses the built-in Jarvis keyword. "
+                + "Without an AccessKey, Jarvis automatically uses Android speech recognition as a fallback."
+        );
+        card.addView(note, matchWrap(dp(14), 0));
+
+        dedicatedWake.setOnCheckedChangeListener((button, checked) -> updateWakeControls());
+        return card;
+    }
+
+    private View buildVoiceCard() {
+        LinearLayout card = card();
+
+        conversationMode = spinner(List.of("Live", "Standard"));
+        card.addView(choiceGroup("Conversation mode", conversationMode), matchWrap(0, dp(14)));
+
+        voice = spinner(VoiceCatalog.labels());
+        card.addView(choiceGroup("Voice", voice), matchWrap(0, dp(14)));
+
+        responsiveness = spinner(List.of("Fast", "Balanced", "Patient"));
+        card.addView(choiceGroup("Turn detection", responsiveness), matchWrap(0, dp(14)));
+
+        keepOpen = new Switch(this);
+        standardAutoListen = new Switch(this);
+        card.addView(toggleRow(
+            "Continuous conversation",
+            "Keep listening until you end voice mode.",
+            keepOpen
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Standard mode follow-up",
+            "Listen again automatically after Jarvis finishes speaking.",
+            standardAutoListen
+        ), matchWrap());
+        return card;
+    }
+
+    private View buildBehaviourCard() {
+        LinearLayout card = card();
+
+        assistantOverlay = new Switch(this);
+        assistantStartVoice = new Switch(this);
+        startWithVoice = new Switch(this);
+        backgroundConversations = new Switch(this);
+
+        card.addView(toggleRow(
+            "Compact assistant overlay",
+            "Show Jarvis above the current app instead of opening full chat.",
+            assistantOverlay
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Listen when overlay opens",
+            "Start the microphone immediately after Side-button invocation.",
+            assistantStartVoice
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Start voice when Jarvis opens",
+            "Begin voice mode when the full app is opened.",
+            startWithVoice
+        ), matchWrap());
+        card.addView(divider(), matchWrap());
+        card.addView(toggleRow(
+            "Background conversations",
+            "Allow an active voice conversation to continue outside the app.",
+            backgroundConversations
+        ), matchWrap());
+        return card;
+    }
+
+    private View buildCoreCard() {
+        LinearLayout card = card();
+        coreUrl = field("http://192.168.1.40:8000", false);
+        mobileToken = field("Mobile voice token", true);
+        userName = field("Aaron", false);
+        card.addView(fieldGroup("Jarvis Core URL", coreUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Mobile voice token", mobileToken), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Your name", userName), matchWrap());
+        return card;
+    }
+
+    private View buildHomeAssistantCard() {
+        LinearLayout card = card();
+        homeAssistantUrl = field("Home Assistant URL", false);
+        homeAssistantToken = field("Home Assistant long-lived token", true);
+        pipeline = field("Assist pipeline ID — optional", false);
+        card.addView(fieldGroup("Home Assistant URL", homeAssistantUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Long-lived token", homeAssistantToken), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Assist pipeline ID", pipeline), matchWrap());
+        return card;
+    }
+
     private void loadSettings() {
         coreUrl.setText(store.coreUrl());
         userName.setText(store.userName());
-        conversationMode.setSelection(ConversationMode.STANDARD.equals(store.conversationMode()) ? 1 : 0);
+        conversationMode.setSelection(
+            ConversationMode.STANDARD.equals(store.conversationMode()) ? 1 : 0
+        );
         voice.setSelection(VoiceCatalog.indexOf(store.voiceId()));
         responsiveness.setSelection(switch (store.vadEagerness()) {
             case "medium" -> 1;
             case "low" -> 2;
             default -> 0;
         });
+        wakeSensitivity.setSelection(sensitivityPosition(store.wakeSensitivity()));
+
         keepOpen.setChecked(store.keepConversationOpen());
         standardAutoListen.setChecked(store.standardAutoListen());
         wakeEnabled.setChecked(store.wakeEnabled());
+        dedicatedWake.setChecked(store.dedicatedWakeEnabled());
         wakePhrase.setText(store.wakePhrase());
         backgroundConversations.setChecked(store.backgroundConversations());
         startWithVoice.setChecked(store.startWithVoice());
         assistantWakeAlways.setChecked(store.assistantWakeAlways());
         assistantOverlay.setChecked(store.assistantOverlayEnabled());
         assistantStartVoice.setChecked(store.assistantStartsVoice());
-        updateAssistantStatus();
+
         homeAssistantUrl.setText(store.homeAssistantUrl());
         pipeline.setText(store.homeAssistantPipeline());
+
         if (store.hasMobileToken()) {
-            mobileToken.setHint("Mobile voice token saved securely — leave blank to keep it");
+            mobileToken.setHint("Saved securely — leave blank to keep it");
         }
         if (store.hasHomeAssistantToken()) {
-            homeAssistantToken.setHint("Home Assistant token saved securely — leave blank to keep it");
+            homeAssistantToken.setHint("Saved securely — leave blank to keep it");
         }
+        if (store.hasPicovoiceAccessKey()) {
+            picovoiceAccessKey.setHint("Saved securely — leave blank to keep it");
+        }
+
+        updateAssistantStatus();
+        updateWakeControls();
     }
 
     private void saveSettings() {
@@ -266,6 +415,7 @@ public final class SettingsActivity extends Activity {
                 case 2 -> "low";
                 default -> "high";
             };
+
             store.saveProduct(
                 coreUrl.getText().toString(),
                 mobileToken.getText().toString(),
@@ -288,13 +438,118 @@ public final class SettingsActivity extends Activity {
                 assistantOverlay.isChecked(),
                 assistantStartVoice.isChecked()
             );
+            store.setWakeWordOptions(
+                dedicatedWake.isChecked(),
+                selectedSensitivity(),
+                picovoiceAccessKey.getText().toString()
+            );
+
             mobileToken.setText("");
             homeAssistantToken.setText("");
+            picovoiceAccessKey.setText("");
             loadSettings();
             applySavedRuntimeSettings();
-            Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show();
+
+            String message =
+                dedicatedWake.isChecked() && !store.hasPicovoiceAccessKey()
+                    ? "Settings saved — add a Picovoice AccessKey for dedicated wake word"
+                    : "Settings saved";
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
         } catch (Exception exception) {
-            Toast.makeText(this, "Could not save settings: " + safeMessage(exception), Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                this,
+                "Could not save settings: " + safeMessage(exception),
+                Toast.LENGTH_LONG
+            ).show();
+        }
+    }
+
+    private void updateWakeControls() {
+        if (dedicatedWake == null) return;
+        boolean dedicated = dedicatedWake.isChecked();
+        wakePhrase.setEnabled(!dedicated);
+        wakePhrase.setAlpha(dedicated ? 0.55f : 1f);
+        picovoiceAccessKey.setEnabled(dedicated);
+        picovoiceAccessKey.setAlpha(dedicated ? 1f : 0.55f);
+        wakeSensitivity.setEnabled(dedicated);
+        wakeSensitivity.setAlpha(dedicated ? 1f : 0.55f);
+        if (dedicated) wakePhrase.setText("jarvis");
+
+        boolean keyReady = store.hasPicovoiceAccessKey()
+            || !picovoiceAccessKey.getText().toString().trim().isEmpty();
+        if (dedicated && keyReady) {
+            setStatusBadge(wakeEngineStatus, "Dedicated Jarvis detector ready", true);
+        } else if (dedicated) {
+            setStatusBadge(wakeEngineStatus, "AccessKey required for dedicated detector", false);
+        } else {
+            setStatusBadge(wakeEngineStatus, "Android speech-recognition fallback selected", false);
+        }
+    }
+
+    private void updateAssistantStatus() {
+        boolean active = JarvisVoiceInteractionService.isActiveAssistant(this);
+        setStatusBadge(
+            assistantStatus,
+            active
+                ? "Jarvis is the default Android assistant"
+                : "Jarvis is not the default Android assistant",
+            active
+        );
+    }
+
+    private void openDefaultAssistantSettings() {
+        Intent defaults = new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS);
+        if (defaults.resolveActivity(getPackageManager()) != null) {
+            startActivity(defaults);
+            return;
+        }
+
+        try {
+            RoleManager roles = getSystemService(RoleManager.class);
+            if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
+                startActivityForResult(
+                    roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT),
+                    REQUEST_ASSISTANT_ROLE
+                );
+                return;
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            startActivity(new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS));
+        } catch (Exception exception) {
+            Toast.makeText(
+                this,
+                "Open Settings → Apps → Choose default apps → Digital assistant app",
+                Toast.LENGTH_LONG
+            ).show();
+        }
+    }
+
+    private void openBatterySettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+        } catch (Exception exception) {
+            Intent details = new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + getPackageName())
+            );
+            startActivity(details);
+        }
+    }
+
+    private void openPicovoiceConsole() {
+        try {
+            startActivity(new Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("https://console.picovoice.ai/")
+            ));
+        } catch (Exception exception) {
+            Toast.makeText(
+                this,
+                "Open console.picovoice.ai in your browser",
+                Toast.LENGTH_LONG
+            ).show();
         }
     }
 
@@ -303,7 +558,7 @@ public final class SettingsActivity extends Activity {
 
         boolean microphoneGranted =
             checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
-                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+                == PackageManager.PERMISSION_GRANTED;
         boolean assistantHostsWake =
             store.assistantWakeAlways()
                 && JarvisVoiceInteractionService.isActiveAssistant(this);
@@ -311,7 +566,7 @@ public final class SettingsActivity extends Activity {
         if (store.wakeEnabled() && !microphoneGranted) {
             requestPermissions(
                 new String[] { android.Manifest.permission.RECORD_AUDIO },
-                1811
+                REQUEST_WAKE_PERMISSION
             );
             return;
         }
@@ -330,18 +585,10 @@ public final class SettingsActivity extends Activity {
         String[] permissions,
         int[] grantResults
     ) {
-        super.onRequestPermissionsResult(
-            requestCode,
-            permissions,
-            grantResults
-        );
-        if (requestCode != 1811) return;
-
-        if (
-            grantResults.length > 0
-                && grantResults[0]
-                    == android.content.pm.PackageManager.PERMISSION_GRANTED
-        ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_WAKE_PERMISSION) return;
+        if (grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
             applySavedRuntimeSettings();
         } else {
             Toast.makeText(
@@ -357,43 +604,13 @@ public final class SettingsActivity extends Activity {
         if (assistantStatus != null) updateAssistantStatus();
     }
 
-    private void updateAssistantStatus() {
-        boolean active = JarvisVoiceInteractionService.isActiveAssistant(this);
-        assistantStatus.setText(active
-            ? "Jarvis is the current default assistant. Hold the Side button to open the overlay."
-            : "Jarvis is not currently the default assistant.");
-    }
-
-    private void requestAssistantRole() {
-        try {
-            RoleManager roles = getSystemService(RoleManager.class);
-            if (roles != null && roles.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
-                startActivityForResult(roles.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), 1810);
-                return;
-            }
-        } catch (Exception ignored) { }
-        try {
-            startActivity(new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS));
-        } catch (Exception exception) {
-            Toast.makeText(this, "Open Settings → Apps → Choose default apps → Digital assistant app", Toast.LENGTH_LONG).show();
-        }
-    }
-
-    private void openBatterySettings() {
-        try {
-            startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
-        } catch (Exception exception) {
-            startActivity(new Intent(Settings.ACTION_SETTINGS));
-        }
-    }
-
     @Override protected void onActivityResult(
         int requestCode,
         int resultCode,
         Intent data
     ) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == 1810) {
+        if (requestCode == REQUEST_ASSISTANT_ROLE) {
             updateAssistantStatus();
             JarvisVoiceInteractionService.refreshWakeIfActive(this);
         }
@@ -409,12 +626,76 @@ public final class SettingsActivity extends Activity {
         Toast.makeText(this, "New chat started", Toast.LENGTH_SHORT).show();
     }
 
+    private View sectionHeader(String titleValue, String noteValue) {
+        LinearLayout block = new LinearLayout(this);
+        block.setOrientation(LinearLayout.VERTICAL);
+        TextView title = text(titleValue, 17, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        block.addView(title, matchWrap());
+        TextView note = text(noteValue, 13, MID);
+        note.setLineSpacing(0f, 1.12f);
+        note.setPadding(0, dp(4), 0, 0);
+        block.addView(note, matchWrap());
+        return block;
+    }
+
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        card.setBackground(rounded(WHITE, 18, 1, LINE));
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackground(rounded(SOFT, 20, 1, LINE));
         return card;
+    }
+
+    private View toggleRow(String titleValue, String noteValue, Switch control) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(10), 0, dp(10));
+
+        LinearLayout copy = new LinearLayout(this);
+        copy.setOrientation(LinearLayout.VERTICAL);
+        TextView title = text(titleValue, 15, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        copy.addView(title, matchWrap());
+        TextView note = text(noteValue, 12, MID);
+        note.setLineSpacing(0f, 1.08f);
+        note.setPadding(0, dp(3), dp(12), 0);
+        copy.addView(note, matchWrap());
+        row.addView(copy, new LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        ));
+
+        control.setText("");
+        control.setShowText(false);
+        control.setMinWidth(0);
+        row.addView(control, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        return row;
+    }
+
+    private View fieldGroup(String labelValue, EditText value) {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        TextView label = text(labelValue, 13, MID);
+        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        group.addView(label, matchWrap(0, dp(7)));
+        group.addView(value, matchWrap());
+        return group;
+    }
+
+    private View choiceGroup(String labelValue, Spinner value) {
+        LinearLayout group = new LinearLayout(this);
+        group.setOrientation(LinearLayout.VERTICAL);
+        TextView label = text(labelValue, 13, MID);
+        label.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        group.addView(label, matchWrap(0, dp(7)));
+        group.addView(value, matchWrap());
+        return group;
     }
 
     private Spinner spinner(List<String> values) {
@@ -426,52 +707,53 @@ public final class SettingsActivity extends Activity {
         );
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinner.setAdapter(adapter);
-        spinner.setPadding(dp(10), dp(4), dp(10), dp(4));
-        spinner.setBackground(rounded(SOFT, 12, 0, Color.TRANSPARENT));
+        spinner.setPadding(dp(12), dp(6), dp(12), dp(6));
+        spinner.setMinimumHeight(dp(50));
+        spinner.setBackground(rounded(WHITE, 14, 1, LINE));
         return spinner;
     }
 
     private EditText field(String hint, boolean password) {
         EditText value = new EditText(this);
         value.setHint(hint);
-        value.setHintTextColor(Color.rgb(130, 130, 130));
+        value.setHintTextColor(Color.rgb(135, 135, 135));
         value.setTextColor(BLACK);
         value.setTextSize(15);
         value.setSingleLine(true);
-        value.setPadding(dp(12), dp(10), dp(12), dp(10));
-        value.setBackground(rounded(SOFT, 12, 0, Color.TRANSPARENT));
+        value.setMinHeight(dp(50));
+        value.setPadding(dp(13), dp(10), dp(13), dp(10));
+        value.setBackground(rounded(WHITE, 14, 1, LINE));
         if (password) {
-            value.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            value.setInputType(
+                InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_VARIATION_PASSWORD
+            );
         } else {
-            value.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            value.setInputType(
+                InputType.TYPE_CLASS_TEXT
+                    | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            );
         }
         return value;
     }
 
-    private Switch toggle(String label) {
-        Switch value = new Switch(this);
-        value.setText(label);
-        value.setTextColor(BLACK);
-        value.setTextSize(15);
-        value.setShowText(false);
-        value.setPadding(0, dp(3), 0, dp(3));
-        return value;
+    private TextView statusBadge(String value) {
+        TextView badge = text(value, 13, MID);
+        badge.setGravity(Gravity.CENTER_VERTICAL);
+        badge.setPadding(dp(12), dp(9), dp(12), dp(9));
+        badge.setBackground(rounded(WHITE, 14, 1, LINE));
+        return badge;
     }
 
-    private TextView sectionTitle(String value) {
-        TextView title = text(value, 13, MID);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        return title;
-    }
-
-    private TextView label(String value) {
-        TextView label = text(value, 14, BLACK);
-        label.setTypeface(Typeface.DEFAULT_BOLD);
-        return label;
+    private void setStatusBadge(TextView badge, String value, boolean active) {
+        if (badge == null) return;
+        badge.setText(value);
+        badge.setTextColor(active ? WHITE : MID);
+        badge.setBackground(rounded(active ? BLACK : WHITE, 14, 1, active ? BLACK : LINE));
     }
 
     private TextView note(String value) {
-        TextView note = text(value, 13, MID);
+        TextView note = text(value, 12, MID);
         note.setLineSpacing(0f, 1.12f);
         return note;
     }
@@ -482,7 +764,8 @@ public final class SettingsActivity extends Activity {
         value.setAllCaps(false);
         value.setTextSize(15);
         value.setTextColor(WHITE);
-        value.setBackground(rounded(BLACK, 22, 0, Color.TRANSPARENT));
+        value.setMinHeight(dp(52));
+        value.setBackground(rounded(BLACK, 18, 0, Color.TRANSPARENT));
         return value;
     }
 
@@ -492,21 +775,26 @@ public final class SettingsActivity extends Activity {
         value.setAllCaps(false);
         value.setTextSize(15);
         value.setTextColor(BLACK);
-        value.setBackground(rounded(WHITE, 22, 1, LINE));
+        value.setMinHeight(dp(52));
+        value.setBackground(rounded(WHITE, 18, 1, LINE));
         return value;
     }
 
-    private Button textButton(String label) {
-        Button value = new Button(this);
-        value.setText(label);
-        value.setAllCaps(false);
-        value.setTextSize(14);
-        value.setTextColor(BLACK);
-        value.setMinWidth(0);
-        value.setMinimumWidth(0);
-        value.setPadding(0, dp(8), dp(16), dp(8));
-        value.setBackgroundColor(Color.TRANSPARENT);
+    private ImageButton iconButton(int icon, String description) {
+        ImageButton value = new ImageButton(this);
+        value.setImageResource(icon);
+        value.setColorFilter(BLACK);
+        value.setContentDescription(description);
+        value.setPadding(dp(10), dp(10), dp(10), dp(10));
+        value.setBackground(rounded(SOFT, 21, 0, Color.TRANSPARENT));
         return value;
+    }
+
+    private View divider() {
+        View divider = new View(this);
+        divider.setBackgroundColor(LINE);
+        divider.setMinimumHeight(dp(1));
+        return divider;
     }
 
     private TextView text(String value, int size, int colour) {
@@ -518,12 +806,31 @@ public final class SettingsActivity extends Activity {
         return view;
     }
 
-    private GradientDrawable rounded(int fill, int radiusDp, int strokeDp, int strokeColour) {
+    private GradientDrawable rounded(
+        int fill,
+        int radiusDp,
+        int strokeDp,
+        int strokeColour
+    ) {
         GradientDrawable background = new GradientDrawable();
         background.setColor(fill);
         background.setCornerRadius(dp(radiusDp));
         if (strokeDp > 0) background.setStroke(dp(strokeDp), strokeColour);
         return background;
+    }
+
+    private float selectedSensitivity() {
+        return switch (wakeSensitivity.getSelectedItemPosition()) {
+            case 1 -> 0.78f;
+            case 2 -> 0.50f;
+            default -> 0.65f;
+        };
+    }
+
+    private int sensitivityPosition(float value) {
+        if (value >= 0.72f) return 1;
+        if (value <= 0.56f) return 2;
+        return 0;
     }
 
     private LinearLayout.LayoutParams matchWrap() {
@@ -540,19 +847,14 @@ public final class SettingsActivity extends Activity {
         return params;
     }
 
-    private LinearLayout.LayoutParams wrapWrap() {
-        return new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-    }
-
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
     private static String safeMessage(Exception exception) {
         String value = exception.getMessage();
-        return value == null || value.isBlank() ? exception.getClass().getSimpleName() : value;
+        return value == null || value.isBlank()
+            ? exception.getClass().getSimpleName()
+            : value;
     }
 }

@@ -23,6 +23,7 @@ public final class SecureStore {
     private static final String KEY_ALIAS = "jarvis_voice_token_v1710";
     private static final String MOBILE_TOKEN = "mobile_voice_token";
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
+    private static final String PICOVOICE_ACCESS_KEY = "picovoice_access_key_v1830";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -31,6 +32,7 @@ public final class SecureStore {
         this.context = context.getApplicationContext();
         this.preferences = this.context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         migrateAssistantDefaults();
+        migrateWakeEngineDefaults();
     }
 
     private void migrateAssistantDefaults() {
@@ -42,6 +44,15 @@ public final class SecureStore {
             .putBoolean("assistant_start_voice_v1810", true)
             .putBoolean("background_conversations_v1800", true)
             .putBoolean("assistant_migration_v1810", true)
+            .apply();
+    }
+
+    private void migrateWakeEngineDefaults() {
+        if (preferences.getBoolean("wake_engine_migration_v1830", false)) return;
+        preferences.edit()
+            .putBoolean("dedicated_wake_enabled_v1830", true)
+            .putFloat("wake_sensitivity_v1830", 0.65f)
+            .putBoolean("wake_engine_migration_v1830", true)
             .apply();
     }
 
@@ -85,7 +96,6 @@ public final class SecureStore {
         editor.apply();
     }
 
-    // Kept for source compatibility with v17.3.0 callers during an in-place update.
     public void saveUnified(
         String coreUrl,
         String mobileToken,
@@ -125,7 +135,9 @@ public final class SecureStore {
     }
 
     public String conversationMode() {
-        return ConversationMode.normalise(preferences.getString("conversation_mode_v1800", ConversationMode.LIVE));
+        return ConversationMode.normalise(
+            preferences.getString("conversation_mode_v1800", ConversationMode.LIVE)
+        );
     }
 
     public String voiceId() {
@@ -152,6 +164,36 @@ public final class SecureStore {
         return normaliseWakePhrase(preferences.getString("wake_phrase", "jarvis"));
     }
 
+    public boolean dedicatedWakeEnabled() {
+        return preferences.getBoolean("dedicated_wake_enabled_v1830", true);
+    }
+
+    public float wakeSensitivity() {
+        return clampSensitivity(preferences.getFloat("wake_sensitivity_v1830", 0.65f));
+    }
+
+    public void setWakeWordOptions(
+        boolean dedicated,
+        float sensitivity,
+        String accessKey
+    ) throws Exception {
+        SharedPreferences.Editor editor = preferences.edit()
+            .putBoolean("dedicated_wake_enabled_v1830", dedicated)
+            .putFloat("wake_sensitivity_v1830", clampSensitivity(sensitivity));
+        if (accessKey != null && !accessKey.isBlank() && !accessKey.startsWith("••")) {
+            editor.putString(PICOVOICE_ACCESS_KEY, encrypt(accessKey.trim()));
+        }
+        editor.apply();
+    }
+
+    public boolean hasPicovoiceAccessKey() {
+        return !preferences.getString(PICOVOICE_ACCESS_KEY, "").isBlank();
+    }
+
+    public String picovoiceAccessKey() {
+        return decryptPreference(PICOVOICE_ACCESS_KEY);
+    }
+
     public boolean backgroundConversations() {
         return preferences.getBoolean("background_conversations_v1800", true);
     }
@@ -159,7 +201,6 @@ public final class SecureStore {
     public boolean startWithVoice() {
         return preferences.getBoolean("start_with_voice_v1800", false);
     }
-
 
     public boolean assistantWakeAlways() {
         return preferences.getBoolean("assistant_wake_always_v1810", true);
@@ -224,16 +265,24 @@ public final class SecureStore {
     }
 
     public void setConversationMode(String value) {
-        preferences.edit().putString("conversation_mode_v1800", ConversationMode.normalise(value)).apply();
+        preferences.edit()
+            .putString("conversation_mode_v1800", ConversationMode.normalise(value))
+            .apply();
     }
 
     public String deviceId() {
-        String androidId = Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
+        String androidId = Settings.Secure.getString(
+            context.getContentResolver(),
+            Settings.Secure.ANDROID_ID
+        );
         if (androidId == null || androidId.isBlank()) androidId = "unknown";
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(androidId.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(androidId.getBytes(StandardCharsets.UTF_8));
             StringBuilder value = new StringBuilder("jarvis_android_");
-            for (int i = 0; i < 8; i++) value.append(String.format(Locale.ROOT, "%02x", digest[i]));
+            for (int i = 0; i < 8; i++) {
+                value.append(String.format(Locale.ROOT, "%02x", digest[i]));
+            }
             return value.toString();
         } catch (Exception ignored) {
             return "jarvis_android_" + Integer.toHexString(androidId.hashCode());
@@ -256,7 +305,10 @@ public final class SecureStore {
         if (store.containsAlias(KEY_ALIAS)) {
             return ((KeyStore.SecretKeyEntry) store.getEntry(KEY_ALIAS, null)).getSecretKey();
         }
-        KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        KeyGenerator generator = KeyGenerator.getInstance(
+            KeyProperties.KEY_ALGORITHM_AES,
+            "AndroidKeyStore"
+        );
         generator.init(new KeyGenParameterSpec.Builder(
             KEY_ALIAS,
             KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
@@ -270,16 +322,24 @@ public final class SecureStore {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key());
         byte[] encrypted = cipher.doFinal(value.getBytes(StandardCharsets.UTF_8));
-        return Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP) + ":" +
-            Base64.encodeToString(encrypted, Base64.NO_WRAP);
+        return Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP)
+            + ":"
+            + Base64.encodeToString(encrypted, Base64.NO_WRAP);
     }
 
     private String decrypt(String value) throws Exception {
         String[] parts = value.split(":", 2);
         if (parts.length != 2) throw new IllegalArgumentException("Invalid encrypted token");
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)));
-        return new String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), StandardCharsets.UTF_8);
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            key(),
+            new GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP))
+        );
+        return new String(
+            cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)),
+            StandardCharsets.UTF_8
+        );
     }
 
     private static String trimTrailingSlash(String value) {
@@ -304,5 +364,9 @@ public final class SecureStore {
             case "low", "medium", "high" -> result;
             default -> "high";
         };
+    }
+
+    private static float clampSensitivity(float value) {
+        return Math.max(0.1f, Math.min(1.0f, value));
     }
 }

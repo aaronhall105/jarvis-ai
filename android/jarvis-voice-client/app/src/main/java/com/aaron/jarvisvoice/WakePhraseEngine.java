@@ -14,6 +14,10 @@ import android.speech.SpeechRecognizer;
 import java.util.ArrayList;
 import java.util.Locale;
 
+import ai.picovoice.porcupine.Porcupine;
+import ai.picovoice.porcupine.PorcupineException;
+import ai.picovoice.porcupine.PorcupineManager;
+
 public final class WakePhraseEngine implements RecognitionListener {
     public interface Listener {
         void onWakePhrase(String transcript, String command);
@@ -24,11 +28,14 @@ public final class WakePhraseEngine implements RecognitionListener {
     private final Context context;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
+
     private SpeechRecognizer recognizer;
+    private PorcupineManager porcupineManager;
     private boolean running;
     private boolean listening;
     private boolean triggered;
     private boolean onDevice;
+    private boolean dedicated;
     private String wakePhrase = "jarvis";
     private int restartCount;
 
@@ -51,8 +58,27 @@ public final class WakePhraseEngine implements RecognitionListener {
             running = true;
             triggered = false;
             restartCount = 0;
-            createRecognizer();
-            listenSoon(120L);
+
+            SecureStore store = new SecureStore(context);
+            boolean dedicatedRequested =
+                store.dedicatedWakeEnabled()
+                    && store.hasPicovoiceAccessKey()
+                    && "jarvis".equals(wakePhrase);
+
+            if (dedicatedRequested) {
+                startDedicated(store.picovoiceAccessKey(), store.wakeSensitivity());
+            } else {
+                if (store.dedicatedWakeEnabled() && !store.hasPicovoiceAccessKey()) {
+                    listener.onWakeStatus(
+                        "Dedicated wake word needs a Picovoice AccessKey — using Android fallback"
+                    );
+                } else if (store.dedicatedWakeEnabled() && !"jarvis".equals(wakePhrase)) {
+                    listener.onWakeStatus(
+                        "Dedicated wake word supports Jarvis — using Android fallback"
+                    );
+                }
+                startSpeechFallback();
+            }
         });
     }
 
@@ -64,13 +90,79 @@ public final class WakePhraseEngine implements RecognitionListener {
         return running;
     }
 
+    private void startDedicated(String accessKey, float sensitivity) {
+        try {
+            dedicated = true;
+            porcupineManager = new PorcupineManager.Builder()
+                .setAccessKey(accessKey)
+                .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
+                .setSensitivity(sensitivity)
+                .setErrorCallback(error ->
+                    main.post(() -> handleDedicatedError(error))
+                )
+                .build(context, keywordIndex ->
+                    main.post(this::handleDedicatedDetection)
+                );
+            porcupineManager.start();
+            listening = true;
+            listener.onWakeStatus(
+                "Dedicated wake word active — say \"Jarvis\""
+            );
+        } catch (Exception exception) {
+            releaseDedicated();
+            dedicated = false;
+            listener.onWakeStatus(
+                "Dedicated wake word unavailable — using Android fallback"
+            );
+            startSpeechFallback();
+        }
+    }
+
+    private void handleDedicatedDetection() {
+        if (!running || triggered) return;
+        triggered = true;
+        running = false;
+        listening = false;
+        main.removeCallbacksAndMessages(null);
+        releaseDedicated();
+        releaseRecognizer();
+        listener.onWakePhrase("Jarvis", "");
+    }
+
+    private void handleDedicatedError(PorcupineException error) {
+        if (!running || triggered) return;
+        releaseDedicated();
+        dedicated = false;
+        listener.onWakeStatus(
+            "Dedicated wake word restarting with Android fallback"
+        );
+        startSpeechFallback();
+    }
+
+    private void startSpeechFallback() {
+        if (!running || triggered) return;
+        dedicated = false;
+        createRecognizer();
+        listenSoon(120L);
+    }
+
     private void stopInternal() {
         running = false;
         listening = false;
         triggered = false;
+        dedicated = false;
         restartCount = 0;
         main.removeCallbacksAndMessages(null);
+        releaseDedicated();
         releaseRecognizer();
+    }
+
+    private void releaseDedicated() {
+        PorcupineManager current = porcupineManager;
+        porcupineManager = null;
+        if (current == null) return;
+        try { current.stop(); } catch (Exception ignored) {}
+        try { current.delete(); } catch (Exception ignored) {}
     }
 
     private void releaseRecognizer() {
@@ -89,7 +181,7 @@ public final class WakePhraseEngine implements RecognitionListener {
     }
 
     private void createRecognizer() {
-        if (recognizer != null || !running) return;
+        if (recognizer != null || !running || dedicated) return;
 
         try {
             onDevice = SpeechRecognizer.isOnDeviceRecognitionAvailable(context);
@@ -105,8 +197,8 @@ public final class WakePhraseEngine implements RecognitionListener {
             recognizer.setRecognitionListener(this);
             listener.onWakeStatus(
                 onDevice
-                    ? "Wake word ready on device — say \"" + wakePhrase + "\""
-                    : "Wake word ready — say \"" + wakePhrase + "\""
+                    ? "Android wake fallback ready on device — say \"" + wakePhrase + "\""
+                    : "Android wake fallback ready — say \"" + wakePhrase + "\""
             );
         } catch (Exception firstFailure) {
             releaseRecognizer();
@@ -115,7 +207,9 @@ public final class WakePhraseEngine implements RecognitionListener {
                     onDevice = false;
                     recognizer = SpeechRecognizer.createSpeechRecognizer(context);
                     recognizer.setRecognitionListener(this);
-                    listener.onWakeStatus("Wake word ready — say \"" + wakePhrase + "\"");
+                    listener.onWakeStatus(
+                        "Android wake fallback ready — say \"" + wakePhrase + "\""
+                    );
                     return;
                 } catch (Exception ignored) {
                     releaseRecognizer();
@@ -129,12 +223,12 @@ public final class WakePhraseEngine implements RecognitionListener {
     }
 
     private void listenSoon(long delayMillis) {
-        if (!running || triggered) return;
+        if (!running || triggered || dedicated) return;
         main.postDelayed(this::beginListening, delayMillis);
     }
 
     private void beginListening() {
-        if (!running || listening || triggered) return;
+        if (!running || listening || triggered || dedicated) return;
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             stopInternal();
@@ -173,7 +267,7 @@ public final class WakePhraseEngine implements RecognitionListener {
             listening = false;
             restartCount++;
             recreateRecognizer();
-            listener.onWakeStatus("Wake word restarting");
+            listener.onWakeStatus("Android wake fallback restarting");
             listenSoon(backoff(700L));
         }
     }
@@ -214,13 +308,11 @@ public final class WakePhraseEngine implements RecognitionListener {
     @Override public void onBeginningOfSpeech() {}
     @Override public void onRmsChanged(float rmsdB) {}
     @Override public void onBufferReceived(byte[] buffer) {}
-    @Override public void onEndOfSpeech() {
-        listening = false;
-    }
+    @Override public void onEndOfSpeech() { listening = false; }
 
     @Override public void onError(int error) {
         listening = false;
-        if (!running || triggered) return;
+        if (!running || triggered || dedicated) return;
 
         if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
             stopInternal();
@@ -252,7 +344,7 @@ public final class WakePhraseEngine implements RecognitionListener {
     @Override public void onResults(Bundle results) {
         listening = false;
         evaluate(results);
-        if (running && !triggered) {
+        if (running && !triggered && !dedicated) {
             restartCount = 0;
             listenSoon(180L);
         }

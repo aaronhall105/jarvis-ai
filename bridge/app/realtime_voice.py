@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "18.2.1"
+VERSION = "18.3.0"
 CORE_APPLICATION_VERSION = "3.1.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"

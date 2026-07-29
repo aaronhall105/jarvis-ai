@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 18201
-        versionName = "18.2.1"
+        versionCode = 18300
+        versionName = "18.3.0"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
@@ -38,6 +38,7 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("ai.picovoice:porcupine-android:4.0.2")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
