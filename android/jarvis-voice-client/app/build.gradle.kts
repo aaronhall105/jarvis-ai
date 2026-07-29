@@ -10,10 +10,14 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 18300
-        versionName = "18.3.0"
+        versionCode = 18301
+        versionName = "18.3.1"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
+
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -38,7 +42,7 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("ai.picovoice:porcupine-android:4.0.2")
+    implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

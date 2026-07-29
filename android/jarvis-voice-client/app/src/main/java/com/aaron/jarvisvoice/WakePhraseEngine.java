@@ -14,10 +14,10 @@ import android.speech.SpeechRecognizer;
 import java.util.ArrayList;
 import java.util.Locale;
 
-import ai.picovoice.porcupine.Porcupine;
-import ai.picovoice.porcupine.PorcupineException;
-import ai.picovoice.porcupine.PorcupineManager;
-
+/**
+ * Dedicated local Jarvis wake word with Android speech recognition fallback.
+ * No cloud account, access key or network connection is required.
+ */
 public final class WakePhraseEngine implements RecognitionListener {
     public interface Listener {
         void onWakePhrase(String transcript, String command);
@@ -30,7 +30,7 @@ public final class WakePhraseEngine implements RecognitionListener {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private SpeechRecognizer recognizer;
-    private PorcupineManager porcupineManager;
+    private SherpaWakeWordEngine sherpaEngine;
     private boolean running;
     private boolean listening;
     private boolean triggered;
@@ -61,18 +61,12 @@ public final class WakePhraseEngine implements RecognitionListener {
 
             SecureStore store = new SecureStore(context);
             boolean dedicatedRequested =
-                store.dedicatedWakeEnabled()
-                    && store.hasPicovoiceAccessKey()
-                    && "jarvis".equals(wakePhrase);
+                store.dedicatedWakeEnabled() && "jarvis".equals(wakePhrase);
 
             if (dedicatedRequested) {
-                startDedicated(store.picovoiceAccessKey(), store.wakeSensitivity());
+                startDedicated(store.wakeSensitivity());
             } else {
-                if (store.dedicatedWakeEnabled() && !store.hasPicovoiceAccessKey()) {
-                    listener.onWakeStatus(
-                        "Dedicated wake word needs a Picovoice AccessKey — using Android fallback"
-                    );
-                } else if (store.dedicatedWakeEnabled() && !"jarvis".equals(wakePhrase)) {
+                if (store.dedicatedWakeEnabled() && !"jarvis".equals(wakePhrase)) {
                     listener.onWakeStatus(
                         "Dedicated wake word supports Jarvis — using Android fallback"
                     );
@@ -90,53 +84,42 @@ public final class WakePhraseEngine implements RecognitionListener {
         return running;
     }
 
-    private void startDedicated(String accessKey, float sensitivity) {
-        try {
-            dedicated = true;
-            porcupineManager = new PorcupineManager.Builder()
-                .setAccessKey(accessKey)
-                .setKeyword(Porcupine.BuiltInKeyword.JARVIS)
-                .setSensitivity(sensitivity)
-                .setErrorCallback(error ->
-                    main.post(() -> handleDedicatedError(error))
-                )
-                .build(context, keywordIndex ->
-                    main.post(this::handleDedicatedDetection)
-                );
-            porcupineManager.start();
-            listening = true;
-            listener.onWakeStatus(
-                "Dedicated wake word active — say \"Jarvis\""
-            );
-        } catch (Exception exception) {
-            releaseDedicated();
-            dedicated = false;
-            listener.onWakeStatus(
-                "Dedicated wake word unavailable — using Android fallback"
-            );
-            startSpeechFallback();
-        }
-    }
-
-    private void handleDedicatedDetection() {
+    private void startDedicated(float sensitivity) {
         if (!running || triggered) return;
-        triggered = true;
-        running = false;
-        listening = false;
-        main.removeCallbacksAndMessages(null);
-        releaseDedicated();
+        dedicated = true;
         releaseRecognizer();
-        listener.onWakePhrase("Jarvis", "");
-    }
+        sherpaEngine = new SherpaWakeWordEngine(
+            context,
+            new SherpaWakeWordEngine.Listener() {
+                @Override public void onDetected() {
+                    if (!running || triggered) return;
+                    triggered = true;
+                    running = false;
+                    listening = false;
+                    releaseDedicated();
+                    listener.onWakePhrase("Jarvis", "");
+                }
 
-    private void handleDedicatedError(PorcupineException error) {
-        if (!running || triggered) return;
-        releaseDedicated();
-        dedicated = false;
-        listener.onWakeStatus(
-            "Dedicated wake word restarting with Android fallback"
+                @Override public void onStatus(String message) {
+                    if (running && dedicated && !triggered) {
+                        listening = true;
+                        listener.onWakeStatus(message);
+                    }
+                }
+
+                @Override public void onError(String message) {
+                    if (!running || triggered) return;
+                    releaseDedicated();
+                    dedicated = false;
+                    listening = false;
+                    listener.onWakeStatus(
+                        "Dedicated wake word unavailable — using Android fallback"
+                    );
+                    startSpeechFallback();
+                }
+            }
         );
-        startSpeechFallback();
+        sherpaEngine.start(sensitivity);
     }
 
     private void startSpeechFallback() {
@@ -158,11 +141,9 @@ public final class WakePhraseEngine implements RecognitionListener {
     }
 
     private void releaseDedicated() {
-        PorcupineManager current = porcupineManager;
-        porcupineManager = null;
-        if (current == null) return;
-        try { current.stop(); } catch (Exception ignored) {}
-        try { current.delete(); } catch (Exception ignored) {}
+        SherpaWakeWordEngine current = sherpaEngine;
+        sherpaEngine = null;
+        if (current != null) current.stop();
     }
 
     private void releaseRecognizer() {

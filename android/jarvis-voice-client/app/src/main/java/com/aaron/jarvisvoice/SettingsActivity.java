@@ -62,7 +62,6 @@ public final class SettingsActivity extends Activity {
     private Switch assistantStartVoice;
 
     private EditText wakePhrase;
-    private EditText picovoiceAccessKey;
     private EditText coreUrl;
     private EditText mobileToken;
     private EditText userName;
@@ -235,7 +234,7 @@ public final class SettingsActivity extends Activity {
         card.addView(divider(), matchWrap());
         card.addView(toggleRow(
             "Dedicated detector",
-            "Porcupine runs on the phone and only listens for the Jarvis keyword.",
+            "Sherpa-ONNX runs fully on the phone and listens only for the Jarvis keyword.",
             dedicatedWake
         ), matchWrap());
         card.addView(divider(), matchWrap());
@@ -251,12 +250,6 @@ public final class SettingsActivity extends Activity {
         wakePhrase = field("Wake phrase", false);
         card.addView(fieldGroup("Wake phrase", wakePhrase), matchWrap(0, dp(14)));
 
-        picovoiceAccessKey = field("Picovoice AccessKey", true);
-        card.addView(fieldGroup(
-            "Dedicated wake-word AccessKey",
-            picovoiceAccessKey
-        ), matchWrap(0, dp(14)));
-
         wakeSensitivity = spinner(List.of(
             "Balanced",
             "More sensitive",
@@ -264,13 +257,10 @@ public final class SettingsActivity extends Activity {
         ));
         card.addView(choiceGroup("Detection sensitivity", wakeSensitivity), matchWrap(0, dp(12)));
 
-        Button getKey = secondaryButton("Get a free Picovoice AccessKey");
-        getKey.setOnClickListener(view -> openPicovoiceConsole());
-        card.addView(getKey, matchWrap());
-
         TextView note = note(
-            "The dedicated detector uses the built-in Jarvis keyword. "
-                + "Without an AccessKey, Jarvis automatically uses Android speech recognition as a fallback."
+            "The dedicated detector runs fully offline and needs no account "
+                + "or credential. Android speech recognition remains available "
+                + "as an automatic fallback."
         );
         card.addView(note, matchWrap(dp(14), 0));
 
@@ -396,9 +386,7 @@ public final class SettingsActivity extends Activity {
         if (store.hasHomeAssistantToken()) {
             homeAssistantToken.setHint("Saved securely — leave blank to keep it");
         }
-        if (store.hasPicovoiceAccessKey()) {
-            picovoiceAccessKey.setHint("Saved securely — leave blank to keep it");
-        }
+
 
         updateAssistantStatus();
         updateWakeControls();
@@ -440,21 +428,19 @@ public final class SettingsActivity extends Activity {
             );
             store.setWakeWordOptions(
                 dedicatedWake.isChecked(),
-                selectedSensitivity(),
-                picovoiceAccessKey.getText().toString()
+                selectedSensitivity()
             );
 
             mobileToken.setText("");
             homeAssistantToken.setText("");
-            picovoiceAccessKey.setText("");
             loadSettings();
             applySavedRuntimeSettings();
 
-            String message =
-                dedicatedWake.isChecked() && !store.hasPicovoiceAccessKey()
-                    ? "Settings saved — add a Picovoice AccessKey for dedicated wake word"
-                    : "Settings saved";
-            Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+            Toast.makeText(
+                this,
+                "Settings saved",
+                Toast.LENGTH_LONG
+            ).show();
         } catch (Exception exception) {
             Toast.makeText(
                 this,
@@ -466,23 +452,28 @@ public final class SettingsActivity extends Activity {
 
     private void updateWakeControls() {
         if (dedicatedWake == null) return;
+
         boolean dedicated = dedicatedWake.isChecked();
+
         wakePhrase.setEnabled(!dedicated);
         wakePhrase.setAlpha(dedicated ? 0.55f : 1f);
-        picovoiceAccessKey.setEnabled(dedicated);
-        picovoiceAccessKey.setAlpha(dedicated ? 1f : 0.55f);
+
         wakeSensitivity.setEnabled(dedicated);
         wakeSensitivity.setAlpha(dedicated ? 1f : 0.55f);
-        if (dedicated) wakePhrase.setText("jarvis");
 
-        boolean keyReady = store.hasPicovoiceAccessKey()
-            || !picovoiceAccessKey.getText().toString().trim().isEmpty();
-        if (dedicated && keyReady) {
-            setStatusBadge(wakeEngineStatus, "Dedicated Jarvis detector ready", true);
-        } else if (dedicated) {
-            setStatusBadge(wakeEngineStatus, "AccessKey required for dedicated detector", false);
+        if (dedicated) {
+            wakePhrase.setText("jarvis");
+            setStatusBadge(
+                wakeEngineStatus,
+                "Dedicated offline Jarvis detector ready",
+                true
+            );
         } else {
-            setStatusBadge(wakeEngineStatus, "Android speech-recognition fallback selected", false);
+            setStatusBadge(
+                wakeEngineStatus,
+                "Android speech-recognition fallback selected",
+                false
+            );
         }
     }
 
@@ -535,21 +526,6 @@ public final class SettingsActivity extends Activity {
                 Uri.parse("package:" + getPackageName())
             );
             startActivity(details);
-        }
-    }
-
-    private void openPicovoiceConsole() {
-        try {
-            startActivity(new Intent(
-                Intent.ACTION_VIEW,
-                Uri.parse("https://console.picovoice.ai/")
-            ));
-        } catch (Exception exception) {
-            Toast.makeText(
-                this,
-                "Open console.picovoice.ai in your browser",
-                Toast.LENGTH_LONG
-            ).show();
         }
     }
 

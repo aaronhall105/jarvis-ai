@@ -23,7 +23,6 @@ public final class SecureStore {
     private static final String KEY_ALIAS = "jarvis_voice_token_v1710";
     private static final String MOBILE_TOKEN = "mobile_voice_token";
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
-    private static final String PICOVOICE_ACCESS_KEY = "picovoice_access_key_v1830";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -174,24 +173,15 @@ public final class SecureStore {
 
     public void setWakeWordOptions(
         boolean dedicated,
-        float sensitivity,
-        String accessKey
-    ) throws Exception {
-        SharedPreferences.Editor editor = preferences.edit()
+        float sensitivity
+    ) {
+        preferences.edit()
             .putBoolean("dedicated_wake_enabled_v1830", dedicated)
-            .putFloat("wake_sensitivity_v1830", clampSensitivity(sensitivity));
-        if (accessKey != null && !accessKey.isBlank() && !accessKey.startsWith("••")) {
-            editor.putString(PICOVOICE_ACCESS_KEY, encrypt(accessKey.trim()));
-        }
-        editor.apply();
-    }
-
-    public boolean hasPicovoiceAccessKey() {
-        return !preferences.getString(PICOVOICE_ACCESS_KEY, "").isBlank();
-    }
-
-    public String picovoiceAccessKey() {
-        return decryptPreference(PICOVOICE_ACCESS_KEY);
+            .putFloat(
+                "wake_sensitivity_v1830",
+                clampSensitivity(sensitivity)
+            )
+            .apply();
     }
 
     public boolean backgroundConversations() {
