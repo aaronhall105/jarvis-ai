@@ -83,41 +83,50 @@ final class SherpaWakeWordEngine {
             status("Loading dedicated offline wake word");
 
             File modelDir = installModelAssets();
-            FeatureConfig featureConfig = FeatureConfig.builder()
-                .setSampleRate(SAMPLE_RATE)
-                .setFeatureDim(80)
-                .setDither(0.0f)
-                .build();
+
+            FeatureConfig featureConfig = new FeatureConfig();
+            featureConfig.setSampleRate(SAMPLE_RATE);
+            featureConfig.setFeatureDim(80);
+            featureConfig.setDither(0.0f);
 
             OnlineTransducerModelConfig transducer =
-                OnlineTransducerModelConfig.builder()
-                    .setEncoder(new File(modelDir, "encoder.onnx").getAbsolutePath())
-                    .setDecoder(new File(modelDir, "decoder.onnx").getAbsolutePath())
-                    .setJoiner(new File(modelDir, "joiner.onnx").getAbsolutePath())
-                    .build();
+                new OnlineTransducerModelConfig();
+            transducer.setEncoder(
+                new File(modelDir, "encoder.onnx").getAbsolutePath()
+            );
+            transducer.setDecoder(
+                new File(modelDir, "decoder.onnx").getAbsolutePath()
+            );
+            transducer.setJoiner(
+                new File(modelDir, "joiner.onnx").getAbsolutePath()
+            );
 
-            OnlineModelConfig modelConfig = OnlineModelConfig.builder()
-                .setTransducer(transducer)
-                .setTokens(new File(modelDir, "tokens.txt").getAbsolutePath())
-                .setNumThreads(2)
-                .setDebug(false)
-                .setProvider("cpu")
-                .setModelType("")
-                .setModelingUnit("cjkchar")
-                .build();
+            OnlineModelConfig modelConfig = new OnlineModelConfig();
+            modelConfig.setTransducer(transducer);
+            modelConfig.setTokens(
+                new File(modelDir, "tokens.txt").getAbsolutePath()
+            );
+            modelConfig.setNumThreads(2);
+            modelConfig.setDebug(false);
+            modelConfig.setProvider("cpu");
+            modelConfig.setModelType("zipformer2");
+            modelConfig.setModelingUnit("cjkchar");
 
-            KeywordSpotterConfig config = KeywordSpotterConfig.builder()
-                .setFeatureConfig(featureConfig)
-                .setOnlineModelConfig(modelConfig)
-                .setMaxActivePaths(4)
-                .setKeywordsFile(new File(modelDir, "keywords.txt").getAbsolutePath())
-                .setKeywordsScore(1.0f)
-                .setKeywordsThreshold(thresholdFor(sensitivity))
-                .setNumTrailingBlanks(1)
-                .build();
+            KeywordSpotterConfig config = new KeywordSpotterConfig();
+            config.setFeatConfig(featureConfig);
+            config.setModelConfig(modelConfig);
+            config.setMaxActivePaths(4);
+            config.setKeywordsFile(
+                new File(modelDir, "keywords.txt").getAbsolutePath()
+            );
+            config.setKeywordsScore(1.0f);
+            config.setKeywordsThreshold(thresholdFor(sensitivity));
+            config.setNumTrailingBlanks(1);
 
-            spotter = new KeywordSpotter(config);
-            stream = spotter.createStream();
+            // The model files are copied from APK assets to real files.
+            // A null AssetManager selects Sherpa's file-based loader.
+            spotter = new KeywordSpotter(null, config);
+            stream = spotter.createStream("");
 
             int minimum = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
