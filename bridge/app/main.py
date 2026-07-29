@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,7 @@ from app.memory_models import (
     SearchMemoryRequest,
 )
 from app.registry import RegistryEngine
+from app.realtime_voice import RealtimeVoiceProxy
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext
@@ -95,6 +96,9 @@ ai = AIEngine(
     dialogue=dialogue,
     awareness=awareness,
 )
+
+
+realtime_voice = RealtimeVoiceProxy.from_environment()
 
 
 class TextCommandRequest(BaseModel):
@@ -695,6 +699,75 @@ async def _execute_ai_request(
         logger.exception("Could not record self-improvement interaction evidence")
 
     return result
+
+
+
+async def _realtime_brain_handler(
+    text: str,
+    metadata: dict[str, object],
+    on_text_delta: Callable[[str], Awaitable[None]],
+) -> dict[str, object]:
+    """Send one mobile voice turn through the normal Jarvis brain."""
+
+    conversation_id = str(
+        metadata.get("conversation_id") or ""
+    ).strip() or None
+
+    user_id = str(
+        metadata.get("user_id") or ""
+    ).strip() or None
+
+    user_name = str(
+        metadata.get("user_name") or ""
+    ).strip() or None
+
+    device_id = str(
+        metadata.get("device_id") or ""
+    ).strip() or None
+
+    session_id = str(
+        metadata.get("session_id") or ""
+    ).strip() or None
+
+    request = TextCommandRequest(
+        text=text,
+        conversation_id=conversation_id,
+        user_id=user_id,
+        user_name=user_name,
+        user_is_admin=bool(
+            metadata.get("user_is_admin", False)
+        ),
+        device_id=device_id,
+        voice_session_id=session_id,
+        voice_endpoint_kind="android_realtime",
+        voice_mode=True,
+    )
+
+    return await _execute_ai_request(
+        request,
+        on_text_delta=on_text_delta,
+    )
+
+
+@app.get("/api/realtime/voice/status")
+async def realtime_voice_status() -> dict[str, object]:
+    """Report Android realtime voice availability."""
+
+    return realtime_voice.status()
+
+
+@app.websocket("/api/realtime/voice")
+async def realtime_voice_websocket(
+    websocket: WebSocket,
+) -> None:
+    """Handle Android realtime voice connections."""
+
+    await realtime_voice.handle(
+        websocket,
+        _realtime_brain_handler,
+    )
+
+
 
 
 @app.post("/api/assistant/ai")
