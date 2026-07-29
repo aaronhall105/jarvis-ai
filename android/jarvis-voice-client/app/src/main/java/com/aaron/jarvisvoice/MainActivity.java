@@ -43,6 +43,7 @@ public final class MainActivity extends Activity {
     private static final int SOFT = Color.rgb(246, 246, 246);
     private static final int WHITE = Color.WHITE;
     private static final int REQUEST_VOICE_PERMISSIONS = 1800;
+    private static volatile boolean foreground;
 
     private SecureStore store;
     private ChatHistoryStore history;
@@ -89,6 +90,10 @@ public final class MainActivity extends Activity {
         }
     };
 
+    public static boolean isForeground() {
+        return foreground;
+    }
+
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         store = new SecureStore(this);
@@ -115,8 +120,14 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        foreground = true;
         updateMicButton();
         JarvisVoiceInteractionService.refreshWakeIfActive(this);
+    }
+
+    @Override protected void onPause() {
+        foreground = false;
+        super.onPause();
     }
 
     @Override protected void onStop() {

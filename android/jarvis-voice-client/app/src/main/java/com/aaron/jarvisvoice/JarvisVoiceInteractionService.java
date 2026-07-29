@@ -141,6 +141,7 @@ public final class JarvisVoiceInteractionService extends VoiceInteractionService
     }
 
     private boolean showOverlay(String command, String source) {
+        if (MainActivity.isForeground()) return false;
         if (!systemReady || !store.assistantOverlayEnabled()) return false;
         stopWakePhrase();
         Bundle args = new Bundle();
@@ -178,6 +179,7 @@ public final class JarvisVoiceInteractionService extends VoiceInteractionService
         String command,
         String source
     ) {
+        if (MainActivity.isForeground()) return false;
         JarvisVoiceInteractionService service = active.get();
         if (service == null || !isActiveAssistant(context)) return false;
         if (!service.systemReady || !service.store.assistantOverlayEnabled()) {
