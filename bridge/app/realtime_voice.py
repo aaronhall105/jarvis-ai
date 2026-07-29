@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "18.1.0"
+VERSION = "18.2.1"
 CORE_APPLICATION_VERSION = "3.1.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
@@ -212,7 +212,6 @@ def speak_response_event(text: str, voice: str) -> dict[str, Any]:
                 "output": {
                     "format": {"type": "audio/pcm", "rate": OUTPUT_RATE},
                     "voice": normalise_voice(voice),
-                    "speed": 1.0,
                 }
             },
             "metadata": {"source": "jarvis_core", "release": VERSION},

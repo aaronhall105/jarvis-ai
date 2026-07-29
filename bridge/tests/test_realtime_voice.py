@@ -34,7 +34,7 @@ class FakeUpstream:
 
 class ConfigurationTests(unittest.TestCase):
     def test_release_and_modes(self) -> None:
-        self.assertEqual(module.VERSION, "18.1.0")
+        self.assertEqual(module.VERSION, "18.2.1")
         self.assertEqual(module.CORE_APPLICATION_VERSION, "3.1.0")
         self.assertEqual(module.normalise_conversation_mode("standard"), "standard")
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
@@ -84,6 +84,18 @@ class ConfigurationTests(unittest.TestCase):
     def test_conversation_id_is_sanitised(self) -> None:
         value = module.normalise_conversation_id(" mobile-chat-1 / unsafe ", "fallback")
         self.assertEqual(value, "mobile-chat-1unsafe")
+
+
+    def test_response_create_omits_unsupported_speed_parameter(self) -> None:
+        event = module.speak_response_event(
+            "Bedroom Floodlight is now on.",
+            "marin",
+        )
+        output = event["response"]["audio"]["output"]
+
+        self.assertEqual(event["type"], "response.create")
+        self.assertEqual(output["voice"], "marin")
+        self.assertNotIn("speed", output)
 
 
 class BrainTurnTests(unittest.IsolatedAsyncioTestCase):
