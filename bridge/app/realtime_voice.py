@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "18.3.0"
+VERSION = "18.3.2"
 CORE_APPLICATION_VERSION = "3.1.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
@@ -302,6 +302,24 @@ class RealtimeVoiceProxy:
             value = auth_payload.get(key)
             if isinstance(value, str) and value.strip():
                 metadata[key] = value.strip()[:200]
+
+        supplied_user_id = auth_payload.get("user_id")
+        if isinstance(supplied_user_id, str):
+            candidate = re.sub(
+                r"[^a-z0-9_-]+",
+                "_",
+                supplied_user_id.strip().lower(),
+            ).strip("_")[:80]
+            if candidate:
+                metadata["user_id"] = candidate
+                metadata["user_is_admin"] = bool(
+                    self.config.user_is_admin
+                    and candidate == self.config.user_id
+                )
+
+        metadata["response_style"] = "brief"
+        metadata["reasoning_effort"] = "low"
+        metadata["mobile_fast_response"] = True
 
         metadata["conversation_id"] = normalise_conversation_id(
             auth_payload.get("conversation_id"),

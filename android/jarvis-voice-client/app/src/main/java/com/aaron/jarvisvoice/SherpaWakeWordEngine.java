@@ -123,8 +123,6 @@ final class SherpaWakeWordEngine {
             config.setKeywordsThreshold(thresholdFor(sensitivity));
             config.setNumTrailingBlanks(1);
 
-            // The model files are copied from APK assets to real files.
-            // A null AssetManager selects Sherpa's file-based loader.
             spotter = new KeywordSpotter(null, config);
             stream = spotter.createStream("");
 

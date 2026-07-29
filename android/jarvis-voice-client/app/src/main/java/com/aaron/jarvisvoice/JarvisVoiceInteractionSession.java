@@ -20,6 +20,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -85,6 +86,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
                     transcript.setText(text);
                     transcript.setTextColor(BLACK);
                 }
+                case "conversation.ended" -> finish();
                 default -> { }
             }
         }
@@ -113,7 +115,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
     @Override public View onCreateContentView() {
         FrameLayout root = new FrameLayout(context);
         root.setBackgroundColor(Color.TRANSPARENT);
-        root.setOnClickListener(view -> finish());
+        root.setOnClickListener(view -> stopVoiceAndFinish());
 
         LinearLayout card = new LinearLayout(context);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -125,6 +127,14 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         LinearLayout header = new LinearLayout(context);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView logo = new ImageView(context);
+        logo.setImageResource(R.drawable.jarvis_logo_ui);
+        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        LinearLayout.LayoutParams logoParams =
+            new LinearLayout.LayoutParams(dp(34), dp(34));
+        logoParams.rightMargin = dp(10);
+        header.addView(logo, logoParams);
 
         TextView title = text("Jarvis", 19, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -142,7 +152,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         header.addView(open, wrapWrap(0, dp(4)));
 
         Button close = textButton("Close");
-        close.setOnClickListener(view -> finish());
+        close.setOnClickListener(view -> stopVoiceAndFinish());
         header.addView(close, wrapWrap());
         card.addView(header, matchWrap());
 
@@ -287,6 +297,16 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         context.startForegroundService(
             new Intent(context, VoiceService.class).setAction(action)
         );
+    }
+
+    private void stopVoiceAndFinish() {
+        try {
+            context.startForegroundService(
+                new Intent(context, VoiceService.class)
+                    .setAction(VoiceService.ACTION_STOP_VOICE)
+            );
+        } catch (Exception ignored) {}
+        finish();
     }
 
     private void openFullChat() {

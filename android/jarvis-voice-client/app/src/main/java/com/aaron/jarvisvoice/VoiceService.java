@@ -72,6 +72,7 @@ public final class VoiceService extends Service implements
     private boolean brainActive;
     private boolean playbackActive;
     private boolean microphoneForegroundActive;
+    private boolean endConversationAfterReply;
     private String pendingText = "";
     private boolean pendingTextSpeak;
 
@@ -254,6 +255,7 @@ public final class VoiceService extends Service implements
             store.coreUrl(),
             store.mobileToken(),
             store.deviceId(),
+            store.userId(),
             store.userName(),
             VoiceCatalog.serverVoice(selected.id),
             VoiceCatalog.serverMode(selected.id),
@@ -302,6 +304,9 @@ public final class VoiceService extends Service implements
         String text = rawText == null ? "" : rawText.trim();
         if (text.isEmpty()) return;
         addMessage(ChatMessage.USER, text);
+        if (isConversationEndPhrase(text)) {
+            endConversationAfterReply = true;
+        }
         pendingText = text;
         pendingTextSpeak = speak;
         ensureConnected();
@@ -528,7 +533,13 @@ public final class VoiceService extends Service implements
         brainActive = false;
         if (text != null && !text.isBlank()) addMessage(ChatMessage.ASSISTANT, text);
         status(success ? "Jarvis answered" : "Jarvis Core returned an error");
-        if (!store.keepConversationOpen() && voiceActive && !playbackActive && !VoiceCatalog.isOriginal(store.voiceId())) {
+        if (endConversationAfterReply) {
+            main.postDelayed(() -> {
+                if (endConversationAfterReply && !brainActive && !playbackActive) {
+                    finishConversation();
+                }
+            }, 1_400L);
+        } else if (!store.keepConversationOpen() && voiceActive && !playbackActive && !VoiceCatalog.isOriginal(store.voiceId())) {
             main.postDelayed(() -> stopVoice(false), 250L);
         }
     }
@@ -545,6 +556,10 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onTurnDone() {
+        if (endConversationAfterReply && !playbackActive) {
+            finishConversation();
+            return;
+        }
         if (!voiceActive) return;
         if (!store.keepConversationOpen() && !playbackActive) {
             stopVoice(false);
@@ -603,6 +618,10 @@ public final class VoiceService extends Service implements
     }
 
     private void afterPlayback() {
+        if (endConversationAfterReply) {
+            finishConversation();
+            return;
+        }
         if (!voiceActive) return;
         if (!store.keepConversationOpen()) {
             stopVoice(false);
@@ -670,6 +689,32 @@ public final class VoiceService extends Service implements
     @Override public void onStandardError(String message) {
         status(message);
         broadcastState(voiceActive, false);
+    }
+
+    private void finishConversation() {
+        endConversationAfterReply = false;
+        stopVoice(false);
+        broadcastEvent("conversation.ended", "", "", false, false);
+    }
+
+    private static boolean isConversationEndPhrase(String raw) {
+        String value = raw == null
+            ? ""
+            : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        value = value.replaceAll("[.!?]+$", "").trim();
+        return value.equals("that is all")
+            || value.equals("that's all")
+            || value.equals("thats all")
+            || value.equals("thanks")
+            || value.equals("thank you")
+            || value.equals("cheers")
+            || value.equals("goodbye")
+            || value.equals("good bye")
+            || value.equals("bye")
+            || value.equals("see you")
+            || value.equals("see you later")
+            || value.equals("stop listening")
+            || value.equals("stop");
     }
 
     private void addMessage(String role, String text) {

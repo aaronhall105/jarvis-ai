@@ -133,6 +133,15 @@ public final class SecureStore {
         return preferences.getString("realtime_user_name", "Aaron");
     }
 
+    public String userId() {
+        String value = userName()
+            .trim()
+            .toLowerCase(Locale.ROOT)
+            .replaceAll("[^a-z0-9]+", "_")
+            .replaceAll("^_+|_+$", "");
+        return value.isBlank() ? "user" : value;
+    }
+
     public String conversationMode() {
         return ConversationMode.normalise(
             preferences.getString("conversation_mode_v1800", ConversationMode.LIVE)

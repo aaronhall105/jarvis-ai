@@ -51,6 +51,7 @@ public final class RealtimeProtocol {
     public static String auth(
         String token,
         String deviceId,
+        String userId,
         String userName,
         String voice,
         String voiceMode,
@@ -62,7 +63,7 @@ public final class RealtimeProtocol {
             .put("type", "auth")
             .put("token", token)
             .put("device_id", deviceId)
-            .put("user_id", "aaron")
+            .put("user_id", userId)
             .put("user_name", userName)
             .put("voice", voice)
             .put("voice_mode", voiceMode)

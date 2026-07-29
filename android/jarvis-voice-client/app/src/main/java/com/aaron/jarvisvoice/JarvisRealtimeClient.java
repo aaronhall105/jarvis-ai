@@ -35,6 +35,7 @@ public final class JarvisRealtimeClient {
     private final String coreUrl;
     private final String token;
     private final String deviceId;
+    private final String userId;
     private final String userName;
     private final String voice;
     private final String voiceMode;
@@ -60,6 +61,7 @@ public final class JarvisRealtimeClient {
         String coreUrl,
         String token,
         String deviceId,
+        String userId,
         String userName,
         String voice,
         String voiceMode,
@@ -71,6 +73,7 @@ public final class JarvisRealtimeClient {
         this.coreUrl = coreUrl;
         this.token = token;
         this.deviceId = deviceId;
+        this.userId = userId;
         this.userName = userName;
         this.voice = voice;
         this.voiceMode = voiceMode;
@@ -144,6 +147,7 @@ public final class JarvisRealtimeClient {
                     webSocket.send(RealtimeProtocol.auth(
                         token,
                         deviceId,
+                        userId,
                         userName,
                         voice,
                         voiceMode,

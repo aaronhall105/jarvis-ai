@@ -34,7 +34,7 @@ class FakeUpstream:
 
 class ConfigurationTests(unittest.TestCase):
     def test_release_and_modes(self) -> None:
-        self.assertEqual(module.VERSION, "18.3.0")
+        self.assertEqual(module.VERSION, "18.3.2")
         self.assertEqual(module.CORE_APPLICATION_VERSION, "3.1.0")
         self.assertEqual(module.normalise_conversation_mode("standard"), "standard")
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
