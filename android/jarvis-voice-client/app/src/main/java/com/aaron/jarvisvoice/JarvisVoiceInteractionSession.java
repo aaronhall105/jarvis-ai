@@ -8,6 +8,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.service.voice.VoiceInteractionSession;
 import android.text.InputType;
 import android.view.Gravity;
@@ -40,6 +42,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
     private ImageButton sendButton;
     private boolean voiceActive;
     private boolean listening;
+    private boolean handoffToFullChat;
     private final StringBuilder streamed = new StringBuilder();
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -131,8 +134,9 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         ImageView logo = new ImageView(context);
         logo.setImageResource(R.drawable.jarvis_logo_ui);
         logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        logo.setAdjustViewBounds(true);
         LinearLayout.LayoutParams logoParams =
-            new LinearLayout.LayoutParams(dp(34), dp(34));
+            new LinearLayout.LayoutParams(dp(28), dp(28));
         logoParams.rightMargin = dp(10);
         header.addView(logo, logoParams);
 
@@ -264,18 +268,31 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
 
     @Override public void onHide() {
         setKeepAwake(false);
-        try {
-            context.startService(
-                new Intent(context, VoiceService.class)
-                    .setAction(VoiceService.ACTION_ASSISTANT_DISMISS)
+        if (!handoffToFullChat) {
+            try {
+                context.startService(
+                    new Intent(context, VoiceService.class)
+                        .setAction(
+                            VoiceService.ACTION_ASSISTANT_DISMISS
+                        )
+                );
+            } catch (Exception ignored) {}
+            JarvisVoiceInteractionService.rearmWakeIfActive(
+                context
             );
-        } catch (Exception ignored) {}
-        JarvisVoiceInteractionService.rearmWakeIfActive(context);
+        }
         super.onHide();
     }
 
     @Override public void onDestroy() {
-        try { context.unregisterReceiver(receiver); } catch (Exception ignored) {}
+        try {
+            context.unregisterReceiver(receiver);
+        } catch (Exception ignored) {}
+        if (!handoffToFullChat) {
+            JarvisVoiceInteractionService.rearmWakeIfActive(
+                context
+            );
+        }
         super.onDestroy();
     }
 
@@ -310,13 +327,23 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
     }
 
     private void openFullChat() {
-        Intent open = new Intent(context, MainActivity.class)
-            .addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK
-                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
-            );
-        context.startActivity(open);
+        handoffToFullChat = true;
         finish();
+
+        new Handler(Looper.getMainLooper()).postDelayed(
+            () -> {
+                Intent open = new Intent(
+                    context,
+                    MainActivity.class
+                ).addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK
+                        | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        | Intent.FLAG_ACTIVITY_SINGLE_TOP
+                );
+                context.startActivity(open);
+            },
+            120L
+        );
     }
 
     private void updateMicButton() {

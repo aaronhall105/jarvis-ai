@@ -43,7 +43,6 @@ public final class MainActivity extends Activity {
     private static final int SOFT = Color.rgb(246, 246, 246);
     private static final int WHITE = Color.WHITE;
     private static final int REQUEST_VOICE_PERMISSIONS = 1800;
-    private static volatile boolean foreground;
 
     private SecureStore store;
     private ChatHistoryStore history;
@@ -90,8 +89,8 @@ public final class MainActivity extends Activity {
         }
     };
 
-    public static boolean isForeground() {
-        return foreground;
+    public static boolean isVisible() {
+        return AppVisibility.isVisible();
     }
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -109,6 +108,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onStart() {
         super.onStart();
+        AppVisibility.activityStarted();
         IntentFilter filter = new IntentFilter(VoiceService.ACTION_EVENT);
         if (android.os.Build.VERSION.SDK_INT >= 33) {
             registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -120,17 +120,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
-        foreground = true;
         updateMicButton();
-        JarvisVoiceInteractionService.refreshWakeIfActive(this);
-    }
-
-    @Override protected void onPause() {
-        foreground = false;
-        super.onPause();
+        JarvisVoiceInteractionService.ensureWakeIfActive(this);
     }
 
     @Override protected void onStop() {
+        AppVisibility.activityStopped();
         try { unregisterReceiver(receiver); } catch (Exception ignored) {}
         super.onStop();
     }
@@ -230,8 +225,9 @@ public final class MainActivity extends Activity {
         ImageView logo = new ImageView(this);
         logo.setImageResource(R.drawable.jarvis_logo_ui);
         logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        logo.setAdjustViewBounds(true);
         LinearLayout.LayoutParams logoParams =
-            new LinearLayout.LayoutParams(dp(38), dp(38));
+            new LinearLayout.LayoutParams(dp(32), dp(32));
         logoParams.rightMargin = dp(10);
         bar.addView(logo, logoParams);
 
@@ -374,7 +370,7 @@ public final class MainActivity extends Activity {
             new Intent(this, VoiceService.class).setAction(action)
         );
         if (microphoneGranted) {
-            JarvisVoiceInteractionService.refreshWakeIfActive(this);
+            JarvisVoiceInteractionService.ensureWakeIfActive(this);
         }
     }
 

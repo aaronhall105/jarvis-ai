@@ -32,6 +32,7 @@ public final class SecureStore {
         this.preferences = this.context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         migrateAssistantDefaults();
         migrateWakeEngineDefaults();
+        migrateWakeStabilityDefaults();
     }
 
     private void migrateAssistantDefaults() {
@@ -52,6 +53,33 @@ public final class SecureStore {
             .putBoolean("dedicated_wake_enabled_v1830", true)
             .putFloat("wake_sensitivity_v1830", 0.65f)
             .putBoolean("wake_engine_migration_v1830", true)
+            .apply();
+    }
+
+    private void migrateWakeStabilityDefaults() {
+        if (
+            preferences.getBoolean(
+                "wake_stability_migration_v1840",
+                false
+            )
+        ) {
+            return;
+        }
+
+        float existing = preferences.getFloat(
+            "wake_sensitivity_v1830",
+            0.65f
+        );
+
+        preferences.edit()
+            .putFloat(
+                "wake_sensitivity_v1830",
+                Math.max(existing, 0.78f)
+            )
+            .putBoolean(
+                "wake_stability_migration_v1840",
+                true
+            )
             .apply();
     }
 
@@ -177,7 +205,7 @@ public final class SecureStore {
     }
 
     public float wakeSensitivity() {
-        return clampSensitivity(preferences.getFloat("wake_sensitivity_v1830", 0.65f));
+        return clampSensitivity(preferences.getFloat("wake_sensitivity_v1830", 0.78f));
     }
 
     public void setWakeWordOptions(

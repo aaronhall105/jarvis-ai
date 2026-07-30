@@ -78,6 +78,16 @@ public final class SettingsActivity extends Activity {
         loadSettings();
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        AppVisibility.activityStarted();
+    }
+
+    @Override protected void onStop() {
+        AppVisibility.activityStopped();
+        super.onStop();
+    }
+
     private void configureWindow() {
         Window window = getWindow();
         window.setStatusBarColor(Color.TRANSPARENT);

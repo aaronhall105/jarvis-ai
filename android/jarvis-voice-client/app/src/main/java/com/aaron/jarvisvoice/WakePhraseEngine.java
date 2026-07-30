@@ -38,6 +38,8 @@ public final class WakePhraseEngine implements RecognitionListener {
     private boolean dedicated;
     private String wakePhrase = "jarvis";
     private int restartCount;
+    private int dedicatedRetryCount;
+    private float dedicatedSensitivity = 0.78f;
 
     public WakePhraseEngine(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -58,6 +60,7 @@ public final class WakePhraseEngine implements RecognitionListener {
             running = true;
             triggered = false;
             restartCount = 0;
+            dedicatedRetryCount = 0;
 
             SecureStore store = new SecureStore(context);
             boolean dedicatedRequested =
@@ -86,6 +89,7 @@ public final class WakePhraseEngine implements RecognitionListener {
 
     private void startDedicated(float sensitivity) {
         if (!running || triggered) return;
+        dedicatedSensitivity = sensitivity;
         dedicated = true;
         releaseRecognizer();
         sherpaEngine = new SherpaWakeWordEngine(
@@ -109,11 +113,38 @@ public final class WakePhraseEngine implements RecognitionListener {
 
                 @Override public void onError(String message) {
                     if (!running || triggered) return;
+
                     releaseDedicated();
                     dedicated = false;
                     listening = false;
+                    dedicatedRetryCount++;
+
+                    if (dedicatedRetryCount <= 3) {
+                        long delay = Math.min(
+                            4_000L,
+                            700L
+                                * (1L << (dedicatedRetryCount - 1))
+                        );
+                        listener.onWakeStatus(
+                            "Dedicated wake word restarting"
+                        );
+                        main.postDelayed(
+                            () -> {
+                                if (running && !triggered) {
+                                    startDedicated(
+                                        dedicatedSensitivity
+                                    );
+                                }
+                            },
+                            delay
+                        );
+                        return;
+                    }
+
+                    dedicatedRetryCount = 0;
                     listener.onWakeStatus(
-                        "Dedicated wake word unavailable — using Android fallback"
+                        "Dedicated wake word unavailable — "
+                            + "using Android fallback"
                     );
                     startSpeechFallback();
                 }
@@ -135,6 +166,7 @@ public final class WakePhraseEngine implements RecognitionListener {
         triggered = false;
         dedicated = false;
         restartCount = 0;
+        dedicatedRetryCount = 0;
         main.removeCallbacksAndMessages(null);
         releaseDedicated();
         releaseRecognizer();

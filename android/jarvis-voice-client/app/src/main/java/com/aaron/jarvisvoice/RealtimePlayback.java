@@ -62,8 +62,30 @@ public final class RealtimePlayback {
 
     public void markDone() {
         if (closed.get()) return;
+        int acceptedGeneration = generation.get();
         try {
-            writer.execute(() -> setPlaying(false));
+            writer.execute(() -> {
+                if (
+                    closed.get()
+                        || generation.get() != acceptedGeneration
+                ) {
+                    return;
+                }
+
+                try {
+                    Thread.sleep(180L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+
+                if (
+                    !closed.get()
+                        && generation.get() == acceptedGeneration
+                ) {
+                    setPlaying(false);
+                }
+            });
         } catch (RejectedExecutionException ignored) {}
     }
 

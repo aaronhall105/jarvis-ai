@@ -1,4 +1,4 @@
-name: Build Jarvis Assistant v18.3.3
+name: Build Jarvis Assistant v18.4.0
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
       - conversation-engine
     paths:
       - android/jarvis-voice-client/**
-      - .github/workflows/android-jarvis-assistant-v18.3.3.yml
+      - .github/workflows/android-jarvis-assistant-v18.4.0.yml
 
 permissions:
   contents: read
@@ -92,7 +92,7 @@ jobs:
           cp "$(choose_model decoder)" "$ASSETS/decoder.onnx"
           cp "$(choose_model joiner)" "$ASSETS/joiner.onnx"
           cp "$MODEL_DIR/tokens.txt" "$ASSETS/tokens.txt"
-          PRONUNCIATION="$(
+          JARVIS_PRONUNCIATION="$(
             awk '
               toupper($1) == "JARVIS" {
                 $1 = ""
@@ -102,15 +102,33 @@ jobs:
               }
             ' "$MODEL_DIR/en.phone"
           )"
+          HEY_PRONUNCIATION="$(
+            awk '
+              toupper($1) == "HEY" {
+                $1 = ""
+                sub(/^ /, "")
+                print
+                exit
+              }
+            ' "$MODEL_DIR/en.phone"
+          )"
 
-          if [ -z "$PRONUNCIATION" ]; then
+          if [ -z "$JARVIS_PRONUNCIATION" ]; then
             echo "JARVIS was not found in the model lexicon."
             exit 1
           fi
+          if [ -z "$HEY_PRONUNCIATION" ]; then
+            echo "HEY was not found in the model lexicon."
+            exit 1
+          fi
 
-          printf '%s :1.5 @JARVIS\n' \
-            "$PRONUNCIATION" \
-            > "$ASSETS/keywords.txt"
+          {
+            printf '%s :2.2 @JARVIS\n' \
+              "$JARVIS_PRONUNCIATION"
+            printf '%s %s :2.5 @HEY_JARVIS\n' \
+              "$HEY_PRONUNCIATION" \
+              "$JARVIS_PRONUNCIATION"
+          } > "$ASSETS/keywords.txt"
 
           test -s "$ASSETS/encoder.onnx"
           test -s "$ASSETS/decoder.onnx"
@@ -154,11 +172,11 @@ jobs:
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v18.3.3-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v18.4.0-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v18.3.3-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v18.3.3-debug.apk
+          name: jarvis-assistant-v18.4.0-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v18.4.0-debug.apk
           if-no-files-found: error
           retention-days: 30

@@ -25,7 +25,8 @@ public final class VoiceService extends Service implements
     PlaybackController.Listener,
     HomeAssistantTtsClient.Listener,
     WakePhraseEngine.Listener,
-    StandardSpeechEngine.Listener {
+    StandardSpeechEngine.Listener,
+    ReliableSpeechFallback.Listener {
 
     public static final String ACTION_START = "com.aaron.jarvisvoice.START";
     public static final String ACTION_STOP = "com.aaron.jarvisvoice.STOP";
@@ -61,6 +62,7 @@ public final class VoiceService extends Service implements
     private HomeAssistantTtsClient homeAssistantTts;
     private WakePhraseEngine wakePhraseEngine;
     private StandardSpeechEngine standardSpeechEngine;
+    private ReliableSpeechFallback speechFallback;
     private PowerManager.WakeLock wakeLock;
     private AudioManager audioManager;
     private AudioFocusRequest audioFocusRequest;
@@ -73,6 +75,10 @@ public final class VoiceService extends Service implements
     private boolean playbackActive;
     private boolean microphoneForegroundActive;
     private boolean endConversationAfterReply;
+    private boolean turnShouldSpeak;
+    private boolean turnReceivedRealtimeAudio;
+    private boolean fallbackPending;
+    private boolean fallbackSpeaking;
     private String pendingText = "";
     private boolean pendingTextSpeak;
 
@@ -85,6 +91,7 @@ public final class VoiceService extends Service implements
         originalPlayback = new PlaybackController(this, this);
         wakePhraseEngine = new WakePhraseEngine(this, this);
         standardSpeechEngine = new StandardSpeechEngine(this, this);
+        speechFallback = new ReliableSpeechFallback(this, this);
         audioManager = getSystemService(AudioManager.class);
         createNotificationChannel();
     }
@@ -303,6 +310,7 @@ public final class VoiceService extends Service implements
     private void queueOrSend(String rawText, boolean speak) {
         String text = rawText == null ? "" : rawText.trim();
         if (text.isEmpty()) return;
+        prepareSpokenTurn(speak);
         addMessage(ChatMessage.USER, text);
         if (isConversationEndPhrase(text)) {
             endConversationAfterReply = true;
@@ -313,10 +321,19 @@ public final class VoiceService extends Service implements
         flushPendingText();
     }
 
+    private void prepareSpokenTurn(boolean speak) {
+        turnShouldSpeak = speak;
+        turnReceivedRealtimeAudio = false;
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        if (speechFallback != null) speechFallback.cancel();
+    }
+
     private void flushPendingText() {
         if (!ready || client == null || pendingText.isBlank()) return;
         String text = pendingText;
         boolean speak = pendingTextSpeak;
+        prepareSpokenTurn(speak);
         if (client.sendText(text, speak)) {
             pendingText = "";
             pendingTextSpeak = false;
@@ -332,6 +349,7 @@ public final class VoiceService extends Service implements
                 || !hasMicrophonePermission()) {
             requestedVoiceActive = false;
             voiceActive = false;
+            VoiceSessionState.setActive(false);
             status(
                 "Microphone permission is required. "
                     + "Open Jarvis before starting voice."
@@ -341,6 +359,7 @@ public final class VoiceService extends Service implements
         }
         requestedVoiceActive = true;
         voiceActive = true;
+        VoiceSessionState.setActive(true);
         wakePhraseEngine.stop();
         acquireAudioFocus();
         if (ConversationMode.STANDARD.equals(store.conversationMode())) {
@@ -366,6 +385,9 @@ public final class VoiceService extends Service implements
         voiceActive = false;
         brainActive = false;
         stopCaptureAndPlayback();
+        turnShouldSpeak = false;
+        turnReceivedRealtimeAudio = false;
+        VoiceSessionState.setActive(false);
         releaseAudioFocus();
         broadcastState(false, false);
         if (stopService) {
@@ -389,7 +411,7 @@ public final class VoiceService extends Service implements
                 && JarvisVoiceInteractionService.isActiveAssistant(this)
         ) {
             wakePhraseEngine.stop();
-            JarvisVoiceInteractionService.refreshWakeIfActive(this);
+            JarvisVoiceInteractionService.ensureWakeIfActive(this);
             status(
                 "Wake word ready — say \"" + store.wakePhrase() + "\""
             );
@@ -417,6 +439,9 @@ public final class VoiceService extends Service implements
         wakePhraseEngine.stop();
         standardSpeechEngine.stop();
         audio.stop();
+        if (speechFallback != null) speechFallback.cancel();
+        fallbackPending = false;
+        fallbackSpeaking = false;
         realtimePlayback.interrupt();
         originalPlayback.stop();
         playbackActive = false;
@@ -440,6 +465,9 @@ public final class VoiceService extends Service implements
         ready = false;
         requestedVoiceActive = false;
         voiceActive = false;
+        turnShouldSpeak = false;
+        turnReceivedRealtimeAudio = false;
+        VoiceSessionState.setActive(false);
         main.removeCallbacksAndMessages(null);
         closeClientAndAudio();
         releaseAudioFocus();
@@ -487,6 +515,7 @@ public final class VoiceService extends Service implements
 
     @Override public void onUserTranscript(String text) {
         if (text == null || text.isBlank()) return;
+        prepareSpokenTurn(true);
         brainActive = true;
         addMessage(ChatMessage.USER, text);
         status("Thinking");
@@ -499,13 +528,24 @@ public final class VoiceService extends Service implements
     @Override public void onAssistantTranscriptDone(String text) {}
 
     @Override public void onAudio(byte[] pcm16) {
-        if (!voiceActive) return;
+        if (!voiceActive || pcm16 == null || pcm16.length == 0) {
+            return;
+        }
+
+        if (fallbackSpeaking) {
+            return;
+        }
+
+        turnReceivedRealtimeAudio = true;
+        fallbackPending = false;
+        if (speechFallback != null) speechFallback.cancel();
         playbackActive = true;
         realtimePlayback.enqueue(pcm16);
     }
 
     @Override public void onSpeechStarted() {
         if (!voiceActive) return;
+        prepareSpokenTurn(true);
         brainActive = true;
         realtimePlayback.interrupt();
         originalPlayback.stop();
@@ -520,7 +560,18 @@ public final class VoiceService extends Service implements
 
     @Override public void onBrainStarted(String command) {
         brainActive = true;
-        broadcastEvent("thinking", "", "", voiceActive, false);
+        if (voiceActive) turnShouldSpeak = true;
+        turnReceivedRealtimeAudio = false;
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        if (speechFallback != null) speechFallback.cancel();
+        broadcastEvent(
+            "thinking",
+            "",
+            "",
+            voiceActive,
+            false
+        );
         status("Thinking");
     }
 
@@ -529,18 +580,73 @@ public final class VoiceService extends Service implements
         broadcastEvent("assistant_delta", ChatMessage.ASSISTANT, text, voiceActive, false);
     }
 
-    @Override public void onBrainResponse(String text, boolean success, String conversationId) {
+    @Override public void onBrainResponse(
+        String text,
+        boolean success,
+        String conversationId
+    ) {
         brainActive = false;
-        if (text != null && !text.isBlank()) addMessage(ChatMessage.ASSISTANT, text);
-        status(success ? "Jarvis answered" : "Jarvis Core returned an error");
+        String response = text == null ? "" : text.trim();
+
+        if (!response.isEmpty()) {
+            addMessage(ChatMessage.ASSISTANT, response);
+        }
+
+        status(
+            success
+                ? "Jarvis answered"
+                : "Jarvis Core returned an error"
+        );
+
+        boolean useFallback =
+            SpeechFallbackPolicy.shouldUseFallback(
+                turnShouldSpeak,
+                turnReceivedRealtimeAudio,
+                success,
+                response,
+                VoiceCatalog.isOriginal(store.voiceId())
+            );
+
+        if (useFallback && speechFallback != null) {
+            fallbackPending = true;
+            speechFallback.schedule(response, 900L);
+        }
+
         if (endConversationAfterReply) {
-            main.postDelayed(() -> {
-                if (endConversationAfterReply && !brainActive && !playbackActive) {
-                    finishConversation();
-                }
-            }, 1_400L);
-        } else if (!store.keepConversationOpen() && voiceActive && !playbackActive && !VoiceCatalog.isOriginal(store.voiceId())) {
-            main.postDelayed(() -> stopVoice(false), 250L);
+            main.postDelayed(
+                () -> {
+                    if (
+                        endConversationAfterReply
+                            && !brainActive
+                            && !playbackActive
+                            && !fallbackPending
+                            && !fallbackSpeaking
+                    ) {
+                        finishConversation();
+                    }
+                },
+                1_600L
+            );
+        } else if (
+            !store.keepConversationOpen()
+                && voiceActive
+                && !playbackActive
+                && !fallbackPending
+                && !fallbackSpeaking
+                && !VoiceCatalog.isOriginal(store.voiceId())
+        ) {
+            main.postDelayed(
+                () -> {
+                    if (
+                        !playbackActive
+                            && !fallbackPending
+                            && !fallbackSpeaking
+                    ) {
+                        stopVoice(false);
+                    }
+                },
+                350L
+            );
         }
     }
 
@@ -556,6 +662,7 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onTurnDone() {
+        if (fallbackPending || fallbackSpeaking) return;
         if (endConversationAfterReply && !playbackActive) {
             finishConversation();
             return;
@@ -591,6 +698,7 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onPlaybackState(boolean playing) {
+        if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
             status("Jarvis is speaking — you can interrupt");
@@ -618,6 +726,11 @@ public final class VoiceService extends Service implements
     }
 
     private void afterPlayback() {
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        turnShouldSpeak = false;
+        turnReceivedRealtimeAudio = false;
+
         if (endConversationAfterReply) {
             finishConversation();
             return;
@@ -631,6 +744,41 @@ public final class VoiceService extends Service implements
             status("Live voice — listening continuously");
             broadcastState(true, true);
         }
+    }
+
+    @Override public void onFallbackStarted() {
+        if (stopping || !voiceActive) {
+            if (speechFallback != null) speechFallback.cancel();
+            fallbackPending = false;
+            fallbackSpeaking = false;
+            return;
+        }
+
+        fallbackPending = false;
+        fallbackSpeaking = true;
+        playbackActive = true;
+        realtimePlayback.interrupt();
+        status("Jarvis is speaking");
+        broadcastState(true, false);
+    }
+
+    @Override public void onFallbackDone() {
+        if (!fallbackSpeaking && !playbackActive) return;
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        playbackActive = false;
+        afterPlayback();
+    }
+
+    @Override public void onFallbackError(String message) {
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        playbackActive = false;
+        status(
+            "Speech fallback unavailable: "
+                + safe(message, "Android speech failed")
+        );
+        if (voiceActive) afterPlayback();
     }
 
     @Override public void onHomeAssistantTtsConnected() {
@@ -834,7 +982,12 @@ public final class VoiceService extends Service implements
 
     @Override public void onDestroy() {
         stopping = true;
+        VoiceSessionState.setActive(false);
         closeClientAndAudio();
+        if (speechFallback != null) {
+            speechFallback.shutdown();
+            speechFallback = null;
+        }
         releaseAudioFocus();
         releaseWakeLock();
         super.onDestroy();

@@ -115,11 +115,11 @@ final class SherpaWakeWordEngine {
             KeywordSpotterConfig config = new KeywordSpotterConfig();
             config.setFeatConfig(featureConfig);
             config.setModelConfig(modelConfig);
-            config.setMaxActivePaths(4);
+            config.setMaxActivePaths(8);
             config.setKeywordsFile(
                 new File(modelDir, "keywords.txt").getAbsolutePath()
             );
-            config.setKeywordsScore(1.0f);
+            config.setKeywordsScore(1.8f);
             config.setKeywordsThreshold(thresholdFor(sensitivity));
             config.setNumTrailingBlanks(1);
 
@@ -249,7 +249,10 @@ final class SherpaWakeWordEngine {
 
     private static float thresholdFor(float sensitivity) {
         float clamped = Math.max(0.1f, Math.min(1.0f, sensitivity));
-        return Math.max(0.16f, Math.min(0.32f, 0.36f - (0.18f * clamped)));
+        return Math.max(
+            0.11f,
+            Math.min(0.24f, 0.27f - (0.17f * clamped))
+        );
     }
 
     private static String safeMessage(Throwable failure) {
