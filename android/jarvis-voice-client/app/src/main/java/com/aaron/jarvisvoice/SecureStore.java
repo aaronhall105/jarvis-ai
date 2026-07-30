@@ -354,6 +354,14 @@ public final class SecureStore {
         return created;
     }
 
+    public void setConversationId(String value) {
+        String candidate = value == null ? "" : value.trim();
+        if (candidate.isEmpty() || candidate.length() > 200) return;
+        preferences.edit()
+            .putString("conversation_id_v1800", candidate)
+            .apply();
+    }
+
     public void setConversationMode(String value) {
         preferences.edit()
             .putString("conversation_mode_v1800", ConversationMode.normalise(value))

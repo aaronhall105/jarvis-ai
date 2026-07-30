@@ -634,6 +634,85 @@ public final class VoiceService extends Service implements
         if (message != null && !message.isBlank()) status(message);
     }
 
+    @Override public void onCoreEvent(
+        RealtimeProtocol.Event event
+    ) {
+        if (event == null) return;
+
+        if (
+            event.conversationId != null
+                && !event.conversationId.isBlank()
+        ) {
+            store.setConversationId(event.conversationId);
+        }
+
+        switch (event.type) {
+            case "session.context" -> {
+                String name = event.userName == null
+                    || event.userName.isBlank()
+                        ? store.userName()
+                        : event.userName;
+                String message = event.messageCount > 0
+                    ? "Context restored for " + name
+                        + " · " + event.messageCount + " messages"
+                    : "Context ready for " + name;
+                status(message);
+                broadcastEvent(
+                    "context",
+                    "",
+                    message,
+                    voiceActive,
+                    false
+                );
+            }
+            case "tool.started" -> {
+                String label = toolLabel(event.tool);
+                status("Running " + label);
+                broadcastEvent(
+                    "tool",
+                    "",
+                    "Running " + label,
+                    voiceActive,
+                    false
+                );
+            }
+            case "tool.completed" -> {
+                String label = toolLabel(event.tool);
+                String message =
+                    event.message != null
+                        && !event.message.isBlank()
+                            ? event.message
+                            : event.success
+                                ? label + " completed"
+                                : label + " failed";
+                status(message);
+                broadcastEvent(
+                    "tool",
+                    "",
+                    message,
+                    voiceActive,
+                    false
+                );
+            }
+            case "memory.context" -> {
+                if (event.memoryUsed) {
+                    broadcastEvent(
+                        "memory",
+                        "",
+                        "Personal context used",
+                        voiceActive,
+                        false
+                    );
+                }
+            }
+            case "turn.summary" -> {
+                // Summary is recorded in diagnostics. The spoken answer
+                // remains the primary user-facing result.
+            }
+            default -> { }
+        }
+    }
+
     @Override public void onUserTranscript(String text) {
         if (text == null || text.isBlank()) return;
         if (ConversationEndPolicy.shouldEnd(text)) {
@@ -1219,6 +1298,14 @@ public final class VoiceService extends Service implements
 
     @Override public IBinder onBind(Intent intent) {
         return null;
+    }
+
+    private static String toolLabel(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        if (value.isEmpty()) return "Home Assistant action";
+        value = value.replace('_', ' ');
+        return Character.toUpperCase(value.charAt(0))
+            + value.substring(1);
     }
 
     private static String shorten(String value, int max) {

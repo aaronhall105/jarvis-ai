@@ -31,6 +31,7 @@ public final class JarvisRealtimeClient {
         void onBrainResponse(String text, boolean success, String conversationId);
         void onOriginalTts(String text);
         void onTurnDone();
+        void onCoreEvent(RealtimeProtocol.Event event);
         void onError(String message);
     }
 
@@ -338,6 +339,33 @@ public final class JarvisRealtimeClient {
             case "brain.response" -> post(() -> listener.onBrainResponse(event.text, event.success, event.conversationId));
             case "original.tts" -> post(() -> listener.onOriginalTts(event.text));
             case "turn.done" -> post(listener::onTurnDone);
+            case "session.context",
+                 "tool.started",
+                 "tool.completed",
+                 "memory.context",
+                 "turn.summary" -> {
+                if ("session.context".equals(event.type)) {
+                    diagnostics.recordCoreContext(
+                        event.userName,
+                        event.conversationId,
+                        event.messageCount
+                    );
+                } else if (
+                    "tool.started".equals(event.type)
+                        || "tool.completed".equals(event.type)
+                ) {
+                    diagnostics.recordToolEvent(
+                        event.tool,
+                        event.success
+                    );
+                } else if ("memory.context".equals(event.type)) {
+                    diagnostics.recordMemoryContext(
+                        event.memoryUsed,
+                        event.messageCount
+                    );
+                }
+                post(() -> listener.onCoreEvent(event));
+            }
             case "error" -> post(() -> listener.onError(
                 event.message.isBlank()
                     ? "Jarvis voice error"

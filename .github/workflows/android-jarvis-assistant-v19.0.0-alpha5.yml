@@ -1,4 +1,4 @@
-name: Build Jarvis Assistant v19.0.0-alpha3
+name: Build Jarvis Assistant v19.0.0-alpha5
 
 on:
   workflow_dispatch:
@@ -7,7 +7,9 @@ on:
       - conversation-engine
     paths:
       - android/jarvis-voice-client/**
-      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha3.yml
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha5.yml
+      - bridge/app/realtime_voice.py
+      - bridge/tests/test_realtime_voice_alpha5.py
 
 permissions:
   contents: read
@@ -166,17 +168,23 @@ jobs:
           ! grep -RniE 'picovoice|porcupine|AccessKey' \
             app/src/main app/build.gradle.kts
 
+      - name: Test Jarvis Core alpha5 context protocol
+        working-directory: .
+        run: |
+          python3 -m py_compile bridge/app/realtime_voice.py
+          PYTHONPATH=bridge python3 bridge/tests/test_realtime_voice_alpha5.py
+
       - name: Unit tests and debug APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
 
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha3-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha5-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v19.0.0-alpha3-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha3-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha5-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha5-debug.apk
           if-no-files-found: error
           retention-days: 30

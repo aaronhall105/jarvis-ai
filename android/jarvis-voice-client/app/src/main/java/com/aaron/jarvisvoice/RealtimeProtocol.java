@@ -14,9 +14,15 @@ public final class RealtimeProtocol {
         public final String conversationMode;
         public final String conversationId;
         public final String transport;
+        public final String phase;
+        public final String tool;
+        public final String userName;
         public final int sampleRate;
+        public final int messageCount;
         public final boolean success;
         public final boolean unifiedBrain;
+        public final boolean memoryUsed;
+        public final boolean toolCalled;
 
         private Event(
             String type,
@@ -29,9 +35,15 @@ public final class RealtimeProtocol {
             String conversationMode,
             String conversationId,
             String transport,
+            String phase,
+            String tool,
+            String userName,
             int sampleRate,
+            int messageCount,
             boolean success,
-            boolean unifiedBrain
+            boolean unifiedBrain,
+            boolean memoryUsed,
+            boolean toolCalled
         ) {
             this.type = type;
             this.message = message;
@@ -43,9 +55,15 @@ public final class RealtimeProtocol {
             this.conversationMode = conversationMode;
             this.conversationId = conversationId;
             this.transport = transport;
+            this.phase = phase;
+            this.tool = tool;
+            this.userName = userName;
             this.sampleRate = sampleRate;
+            this.messageCount = messageCount;
             this.success = success;
             this.unifiedBrain = unifiedBrain;
+            this.memoryUsed = memoryUsed;
+            this.toolCalled = toolCalled;
         }
     }
 
@@ -70,10 +88,14 @@ public final class RealtimeProtocol {
             .put("user_name", userName)
             .put("voice", voice)
             .put("voice_mode", voiceMode)
-            .put("conversation_mode", ConversationMode.normalise(conversationMode))
+            .put(
+                "conversation_mode",
+                ConversationMode.normalise(conversationMode)
+            )
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
             .put("transport", "websocket_pcm")
+            .put("client_release", "19.0.0-alpha5")
             .toString();
     }
 
@@ -117,9 +139,15 @@ public final class RealtimeProtocol {
             root.optString("conversation_mode", ""),
             root.optString("conversation_id", ""),
             root.optString("transport", "websocket_pcm"),
+            root.optString("phase", ""),
+            root.optString("tool", ""),
+            root.optString("user_name", ""),
             root.optInt("sample_rate", 24_000),
+            root.optInt("message_count", 0),
             root.optBoolean("success", true),
-            root.optBoolean("unified_brain", false)
+            root.optBoolean("unified_brain", false),
+            root.optBoolean("memory_used", false),
+            root.optBoolean("tool_called", false)
         );
     }
 }

@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "18.3.2"
-CORE_APPLICATION_VERSION = "3.1.0"
+VERSION = "19.0.0-alpha5"
+CORE_APPLICATION_VERSION = "3.2.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000
@@ -220,6 +220,70 @@ def speak_response_event(text: str, voice: str) -> dict[str, Any]:
     }
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, default)
+
+
+def _clean_event_message(value: Any, limit: int = 240) -> str:
+    cleaned = " ".join(str(value or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(1, limit - 1)].rstrip() + "…"
+
+
+def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
+    # Return privacy-safe tool results for the trusted mobile client.
+    if not isinstance(value, list):
+        return []
+
+    events: list[dict[str, Any]] = []
+    for raw_call in value[:20]:
+        if not isinstance(raw_call, dict):
+            continue
+
+        name = re.sub(
+            r"[^a-zA-Z0-9_.-]+",
+            "_",
+            str(raw_call.get("tool") or "").strip(),
+        )[:100].strip("_")
+        if not name:
+            continue
+
+        raw_result = raw_call.get("result")
+        result = raw_result if isinstance(raw_result, dict) else {}
+
+        if "success" in result:
+            success = bool(result.get("success"))
+        elif "verified" in result:
+            success = bool(result.get("verified"))
+        elif "error" in result:
+            success = False
+        else:
+            success = True
+
+        message = _clean_event_message(
+            result.get("response_message")
+            or result.get("message")
+            or result.get("error")
+            or (
+                f"{name.replace('_', ' ')} completed"
+                if success
+                else f"{name.replace('_', ' ')} failed"
+            )
+        )
+
+        events.append({
+            "tool": name,
+            "success": success,
+            "message": message,
+        })
+
+    return events
+
+
 class RealtimeVoiceProxy:
     def __init__(self, config: RealtimeVoiceConfig | None = None) -> None:
         self.config = config or RealtimeVoiceConfig.from_environment()
@@ -231,6 +295,9 @@ class RealtimeVoiceProxy:
         self.total_brain_turns = 0
         self.total_streamed_text_chunks = 0
         self.total_discarded_stale_turns = 0
+        self.total_tool_calls = 0
+        self.total_memory_turns = 0
+        self.total_context_syncs = 0
         self.last_error: str | None = None
 
     @classmethod
@@ -265,6 +332,10 @@ class RealtimeVoiceProxy:
             "total_brain_turns": self.total_brain_turns,
             "total_streamed_text_chunks": self.total_streamed_text_chunks,
             "total_discarded_stale_turns": self.total_discarded_stale_turns,
+            "total_tool_calls": self.total_tool_calls,
+            "total_memory_turns": self.total_memory_turns,
+            "total_context_syncs": self.total_context_syncs,
+            "mobile_context_protocol": "alpha5",
             "uptime_seconds": max(0, round(time.time() - self.started_at)),
             "last_error": self.last_error,
         }
@@ -357,6 +428,7 @@ class RealtimeVoiceProxy:
                 "conversation_mode": conversation_mode,
                 "conversation_id": metadata["conversation_id"],
                 "sample_rate": INPUT_RATE,
+                "transport": "websocket_pcm",
                 "unified_brain": True,
             },
         )
@@ -525,9 +597,20 @@ class RealtimeVoiceProxy:
                         "voice_mode": voice_mode,
                         "conversation_mode": conversation_mode,
                         "conversation_id": metadata.get("conversation_id"),
+                        "transport": "websocket_pcm",
                         "unified_brain": True,
                     },
                 )
+                await self._send_json(
+                    client,
+                    {
+                        "type": "session.context",
+                        "conversation_id": metadata.get("conversation_id"),
+                        "user_name": metadata.get("user_name"),
+                        "message_count": 0,
+                    },
+                )
+                self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
                 state["generation"] = int(state.get("generation", 0)) + 1
                 state["suppress_audio"] = True
@@ -667,12 +750,33 @@ class RealtimeVoiceProxy:
             conversation_id = str(raw_result.get("conversation_id") or "").strip()
             if conversation_id:
                 metadata["conversation_id"] = conversation_id
+            tool_events = sanitise_tool_events(
+                raw_result.get("calls")
+            )
+            memory_used = bool(raw_result.get("memory_used", False))
+            message_count = _safe_int(
+                raw_result.get("message_count"),
+                0,
+            )
+            user_payload = raw_result.get("user")
+            user_name = (
+                str(user_payload.get("name") or "").strip()
+                if isinstance(user_payload, dict)
+                else str(metadata.get("user_name") or "").strip()
+            )
             result = {
                 "success": bool(raw_result.get("success", True)),
                 "response": response,
                 "intent": raw_result.get("intent"),
                 "conversation_id": metadata.get("conversation_id"),
                 "model": raw_result.get("model"),
+                "tool_events": tool_events,
+                "tool_called": bool(
+                    raw_result.get("tool_called", bool(tool_events))
+                ),
+                "memory_used": memory_used,
+                "message_count": message_count,
+                "user_name": user_name,
             }
         except asyncio.CancelledError:
             raise
@@ -684,12 +788,77 @@ class RealtimeVoiceProxy:
                 "intent": None,
                 "conversation_id": metadata.get("conversation_id"),
                 "model": None,
+                "tool_events": [],
+                "tool_called": False,
+                "memory_used": False,
+                "message_count": 0,
+                "user_name": str(
+                    metadata.get("user_name") or ""
+                ).strip(),
             }
 
         if generation != int(state.get("generation", 0)):
             self.total_discarded_stale_turns += 1
             await self._send_json(client, {"type": "brain.discarded", "command": command})
             return
+
+        for tool_event in result.get("tool_events", []):
+            await self._send_json(
+                client,
+                {
+                    "type": "tool.completed",
+                    "tool": tool_event["tool"],
+                    "success": tool_event["success"],
+                    "message": tool_event["message"],
+                    "conversation_id": result["conversation_id"],
+                },
+            )
+            self.total_tool_calls += 1
+
+        await self._send_json(
+            client,
+            {
+                "type": "memory.context",
+                "memory_used": bool(result.get("memory_used")),
+                "message_count": _safe_int(
+                    result.get("message_count"),
+                    0,
+                ),
+                "conversation_id": result["conversation_id"],
+            },
+        )
+        if bool(result.get("memory_used")):
+            self.total_memory_turns += 1
+
+        await self._send_json(
+            client,
+            {
+                "type": "session.context",
+                "conversation_id": result["conversation_id"],
+                "user_name": result.get("user_name"),
+                "message_count": _safe_int(
+                    result.get("message_count"),
+                    0,
+                ),
+            },
+        )
+        self.total_context_syncs += 1
+
+        await self._send_json(
+            client,
+            {
+                "type": "turn.summary",
+                "success": result["success"],
+                "tool_called": bool(result.get("tool_called")),
+                "memory_used": bool(result.get("memory_used")),
+                "message_count": _safe_int(
+                    result.get("message_count"),
+                    0,
+                ),
+                "conversation_id": result["conversation_id"],
+                "user_name": result.get("user_name"),
+            },
+        )
 
         await self._send_json(
             client,
