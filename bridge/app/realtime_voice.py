@@ -10,12 +10,14 @@ import secrets
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "19.0.0-alpha5"
-CORE_APPLICATION_VERSION = "3.2.0"
+VERSION = "19.0.0-alpha5.1"
+CORE_APPLICATION_VERSION = "3.2.1"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000
@@ -100,6 +102,32 @@ def normalise_conversation_id(value: Any, fallback: str) -> str:
     return safe or fallback
 
 
+def normalise_timezone(value: Any, fallback: str = "Europe/London") -> str:
+    candidate = str(value or "").strip() or fallback
+    try:
+        ZoneInfo(candidate)
+        return candidate
+    except ZoneInfoNotFoundError:
+        try:
+            ZoneInfo(fallback)
+            return fallback
+        except ZoneInfoNotFoundError:
+            return "UTC"
+
+
+def trusted_local_context(timezone_name: Any) -> dict[str, Any]:
+    timezone_value = normalise_timezone(timezone_name)
+    local = datetime.now(ZoneInfo(timezone_value))
+    offset = local.utcoffset()
+    return {
+        "timezone": timezone_value,
+        "local_datetime": local.isoformat(timespec="seconds"),
+        "local_date": local.date().isoformat(),
+        "local_time": local.strftime("%H:%M:%S"),
+        "utc_offset_seconds": int(offset.total_seconds()) if offset else 0,
+    }
+
+
 @dataclass(frozen=True)
 class RealtimeVoiceConfig:
     enabled: bool
@@ -111,6 +139,7 @@ class RealtimeVoiceConfig:
     user_name: str
     user_is_admin: bool
     transcription_prompt: str
+    timezone: str = "Europe/London"
 
     @classmethod
     def from_environment(cls) -> "RealtimeVoiceConfig":
@@ -130,6 +159,9 @@ class RealtimeVoiceConfig:
                     "Home Assistant, bedroom floodlight, living room, hallway, front door, "
                     "Reolink, Frigate, Tamworth and Durham. Preserve names exactly."
                 ),
+            ),
+            timezone=normalise_timezone(
+                _env_text("JARVIS_TIMEZONE", "Europe/London")
             ),
         )
 
@@ -335,7 +367,8 @@ class RealtimeVoiceProxy:
             "total_tool_calls": self.total_tool_calls,
             "total_memory_turns": self.total_memory_turns,
             "total_context_syncs": self.total_context_syncs,
-            "mobile_context_protocol": "alpha5",
+            "mobile_context_protocol": "alpha5.1",
+            "timezone": self.config.timezone,
             "uptime_seconds": max(0, round(time.time() - self.started_at)),
             "last_error": self.last_error,
         }
@@ -392,6 +425,11 @@ class RealtimeVoiceProxy:
         metadata["response_style"] = "brief"
         metadata["reasoning_effort"] = "low"
         metadata["mobile_fast_response"] = True
+        metadata["client_timezone"] = normalise_timezone(
+            auth_payload.get("timezone"),
+            self.config.timezone,
+        )
+        metadata.update(trusted_local_context(self.config.timezone))
 
         metadata["conversation_id"] = normalise_conversation_id(
             auth_payload.get("conversation_id"),
@@ -738,6 +776,9 @@ class RealtimeVoiceProxy:
 
         try:
             turn_metadata = dict(metadata)
+            turn_metadata.update(
+                trusted_local_context(self.config.timezone)
+            )
             turn_metadata["speak"] = bool(speak)
             raw_result = await brain_handler(command, turn_metadata, on_delta)
             if hasattr(raw_result, "model_dump"):

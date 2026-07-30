@@ -38,8 +38,10 @@ public final class JarvisRealtimeClient {
     private static final long AUTH_TIMEOUT_MS = 12_000L;
     private static final long READY_TIMEOUT_MS = 20_000L;
     private static final long PING_INTERVAL_MS = 10_000L;
+    private static final long LAN_RECHECK_MS = 30_000L;
 
-    private final String coreUrl;
+    private final String lanCoreUrl;
+    private final CoreEndpointSelector endpoints;
     private final String token;
     private final String deviceId;
     private final String userId;
@@ -64,6 +66,7 @@ public final class JarvisRealtimeClient {
     private boolean authenticated;
     private boolean ready;
     private boolean opening;
+    private boolean probing;
     private boolean shouldReconnect;
     private int reconnectAttempt;
     private int generation;
@@ -71,6 +74,8 @@ public final class JarvisRealtimeClient {
     private long pingStartedAtMs;
     private long turnStartedAtMs;
     private boolean firstAudioMeasured;
+    private String activeCoreUrl;
+    private String activeEndpointName = "LAN";
 
     public JarvisRealtimeClient(
         Context context,
@@ -86,7 +91,8 @@ public final class JarvisRealtimeClient {
         String conversationId,
         Listener listener
     ) {
-        this.coreUrl = coreUrl;
+        this.lanCoreUrl = coreUrl;
+        this.activeCoreUrl = coreUrl;
         this.token = token;
         this.deviceId = deviceId;
         this.userId = userId;
@@ -98,6 +104,7 @@ public final class JarvisRealtimeClient {
         this.conversationId = conversationId;
         this.listener = listener;
         diagnostics = new VoiceDiagnosticsStore(context);
+        endpoints = new CoreEndpointSelector(context, coreUrl);
         network = new NetworkQualityMonitor(
             context,
             new NetworkQualityMonitor.Listener() {
@@ -116,10 +123,12 @@ public final class JarvisRealtimeClient {
         shouldReconnect = true;
         reconnectAttempt = 0;
         if (!network.isAvailable()) {
-            diagnostics.recordNetwork("Offline — waiting for network");
+            diagnostics.recordNetworkStatus(false, "Waiting for network");
+            diagnostics.recordCoreReachability("Unavailable", "No network");
             post(() -> listener.onStatus("Offline — waiting for network"));
             return;
         }
+        diagnostics.recordNetworkStatus(true, "Online");
         open();
     }
 
@@ -128,7 +137,9 @@ public final class JarvisRealtimeClient {
         authenticated = false;
         ready = false;
         opening = false;
+        probing = false;
         generation++;
+        endpoints.cancel();
         cancelTimers();
         WebSocket current = socket;
         socket = null;
@@ -171,26 +182,84 @@ public final class JarvisRealtimeClient {
     }
 
     private void open() {
-        if (!shouldReconnect || opening || authenticated) return;
+        if (!shouldReconnect || opening || authenticated || probing) return;
         if (!network.isAvailable()) {
-            diagnostics.recordNetwork("Offline — reconnect paused");
+            diagnostics.recordNetworkStatus(false, "Reconnect paused");
+            diagnostics.recordCoreReachability("Unavailable", "No network");
             return;
         }
 
+        final int probeGeneration = ++generation;
+        probing = true;
+        opening = true;
+        ready = false;
+        diagnostics.recordNetworkStatus(true, "Online");
+        diagnostics.recordCoreReachability(
+            "Checking",
+            "Probing LAN and Tailscale"
+        );
+        post(() -> listener.onStatus("Finding Jarvis Core"));
+
+        endpoints.select(new CoreEndpointSelector.Listener() {
+            @Override public void onSelected(String url, String name) {
+                if (
+                    probeGeneration != generation
+                        || !shouldReconnect
+                        || !network.isAvailable()
+                ) {
+                    return;
+                }
+                probing = false;
+                opening = false;
+                activeCoreUrl = url;
+                activeEndpointName = name;
+                diagnostics.recordEndpoint(name, url);
+                diagnostics.recordCoreReachability(
+                    "Reachable",
+                    name + " health check passed"
+                );
+                openSocket(url, name);
+            }
+
+            @Override public void onUnavailable(String reason) {
+                if (probeGeneration != generation || !shouldReconnect) return;
+                probing = false;
+                opening = false;
+                ready = false;
+                diagnostics.recordCoreReachability("Unreachable", reason);
+                post(() -> listener.onDisconnected("Jarvis Core unreachable"));
+                scheduleReconnect("Jarvis Core unreachable: " + reason);
+            }
+        });
+    }
+
+    private void openSocket(String selectedCoreUrl, String endpointName) {
+        if (!shouldReconnect || !network.isAvailable()) return;
         final int currentGeneration = ++generation;
         final String websocketUrl;
         try {
-            websocketUrl = CoreUrl.websocket(coreUrl);
+            websocketUrl = CoreUrl.websocket(selectedCoreUrl);
         } catch (Exception exception) {
+            diagnostics.recordCoreReachability(
+                "Unreachable",
+                safeMessage(exception)
+            );
             post(() -> listener.onError(safeMessage(exception)));
+            scheduleReconnect(safeMessage(exception));
             return;
         }
 
         opening = true;
+        probing = false;
         ready = false;
+        activeCoreUrl = selectedCoreUrl;
+        activeEndpointName = endpointName;
         openStartedAtMs = SystemClock.elapsedRealtime();
-        diagnostics.recordNetwork("Online — connecting");
-        post(() -> listener.onStatus("Connecting to Jarvis Core"));
+        diagnostics.recordNetworkStatus(true, "Online");
+        diagnostics.recordEndpoint(endpointName, selectedCoreUrl);
+        post(() -> listener.onStatus(
+            "Connecting to Jarvis Core via " + endpointName
+        ));
 
         Request request = new Request.Builder().url(websocketUrl).build();
         socket = http.newWebSocket(request, new WebSocketListener() {
@@ -199,6 +268,10 @@ public final class JarvisRealtimeClient {
                 opening = false;
                 diagnostics.recordConnectionLatency(
                     SystemClock.elapsedRealtime() - openStartedAtMs
+                );
+                diagnostics.recordCoreReachability(
+                    "Reachable",
+                    endpointName + " WebSocket connected"
                 );
                 try {
                     webSocket.send(RealtimeProtocol.auth(
@@ -214,7 +287,10 @@ public final class JarvisRealtimeClient {
                     ));
                     scheduleAuthTimeout(currentGeneration);
                 } catch (Exception exception) {
-                    failCurrent(currentGeneration, "Could not authenticate: " + safeMessage(exception));
+                    failCurrent(
+                        currentGeneration,
+                        "Could not authenticate: " + safeMessage(exception)
+                    );
                 }
             }
 
@@ -235,7 +311,11 @@ public final class JarvisRealtimeClient {
                 post(() -> listener.onAudio(audio));
             }
 
-            @Override public void onClosed(WebSocket webSocket, int code, String reason) {
+            @Override public void onClosed(
+                WebSocket webSocket,
+                int code,
+                String reason
+            ) {
                 if (currentGeneration != generation) return;
                 opening = false;
                 authenticated = false;
@@ -244,11 +324,16 @@ public final class JarvisRealtimeClient {
                 String value = reason == null || reason.isBlank()
                     ? "Connection closed"
                     : reason;
+                diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
             }
 
-            @Override public void onFailure(WebSocket webSocket, Throwable throwable, Response response) {
+            @Override public void onFailure(
+                WebSocket webSocket,
+                Throwable throwable,
+                Response response
+            ) {
                 if (currentGeneration != generation) return;
                 opening = false;
                 authenticated = false;
@@ -258,6 +343,7 @@ public final class JarvisRealtimeClient {
                     ? "Connection failed"
                     : throwable.getMessage();
                 String value = reason == null ? "Connection failed" : reason;
+                diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
             }
@@ -296,10 +382,17 @@ public final class JarvisRealtimeClient {
                 ready = true;
                 reconnectAttempt = 0;
                 main.removeCallbacks(readyTimeout);
-                diagnostics.recordNetwork(
-                    "Online · " + event.transport + " · ready"
+                diagnostics.recordNetworkStatus(true, "Online");
+                diagnostics.recordCoreReachability(
+                    "Reachable",
+                    event.transport + " · ready"
+                );
+                diagnostics.recordEndpoint(
+                    activeEndpointName,
+                    activeCoreUrl
                 );
                 schedulePing();
+                scheduleLanRecheck();
                 post(() -> listener.onReady(
                     event.model,
                     event.voice,
@@ -430,7 +523,8 @@ public final class JarvisRealtimeClient {
     private void scheduleReconnect(String reason) {
         if (!shouldReconnect) return;
         if (!network.isAvailable()) {
-            diagnostics.recordNetwork("Offline — reconnect paused");
+            diagnostics.recordNetworkStatus(false, "Reconnect paused");
+            diagnostics.recordCoreReachability("Unavailable", "No network");
             post(() -> listener.onStatus("Offline — waiting for network"));
             return;
         }
@@ -439,7 +533,8 @@ public final class JarvisRealtimeClient {
         int seed = (int) (System.nanoTime() ^ generation ^ attempt);
         long delay = ReconnectPolicy.delayMillis(attempt, seed);
         diagnostics.recordReconnect(attempt + 1, delay, reason);
-        diagnostics.recordNetwork("Online — reconnecting");
+        diagnostics.recordNetworkStatus(true, "Reconnecting");
+        diagnostics.recordCoreReachability("Checking", "Retry scheduled");
         main.postDelayed(() -> {
             if (shouldReconnect && !authenticated && network.isAvailable()) {
                 open();
@@ -448,7 +543,8 @@ public final class JarvisRealtimeClient {
     }
 
     private void networkAvailable() {
-        diagnostics.recordNetwork("Online — network restored");
+        diagnostics.recordNetworkStatus(true, "Network restored");
+        diagnostics.recordCoreReachability("Checking", "Selecting endpoint");
         post(() -> listener.onStatus("Network restored — reconnecting Jarvis"));
         if (shouldReconnect && !authenticated && !opening) {
             reconnectAttempt = 0;
@@ -457,7 +553,10 @@ public final class JarvisRealtimeClient {
     }
 
     private void networkLost() {
-        diagnostics.recordNetwork("Offline — network lost");
+        diagnostics.recordNetworkStatus(false, "Network lost");
+        diagnostics.recordCoreReachability("Unavailable", "No network");
+        endpoints.cancel();
+        probing = false;
         authenticated = false;
         ready = false;
         opening = false;
@@ -469,10 +568,53 @@ public final class JarvisRealtimeClient {
         post(() -> listener.onDisconnected("Network unavailable"));
     }
 
+    private final Runnable lanRecheckTask = () -> {
+        if (!ready || endpoints.isLan(activeCoreUrl)) return;
+        endpoints.probeLan(new CoreEndpointSelector.Listener() {
+            @Override public void onSelected(String url, String name) {
+                if (!ready || endpoints.isLan(activeCoreUrl)) return;
+                returnToLan(url, name);
+            }
+
+            @Override public void onUnavailable(String reason) {
+                if (ready && !endpoints.isLan(activeCoreUrl)) {
+                    scheduleLanRecheck();
+                }
+            }
+        });
+    };
+
+    private void scheduleLanRecheck() {
+        main.removeCallbacks(lanRecheckTask);
+        if (ready && !endpoints.isLan(activeCoreUrl)) {
+            main.postDelayed(lanRecheckTask, LAN_RECHECK_MS);
+        }
+    }
+
+    private void returnToLan(String url, String name) {
+        if (!shouldReconnect || !ready || endpoints.isLan(activeCoreUrl)) return;
+        diagnostics.recordRecovery("Returned from Tailscale to LAN");
+        diagnostics.recordEndpoint(name, url);
+        diagnostics.recordCoreReachability("Reachable", "LAN restored");
+        post(() -> listener.onStatus("Home network restored — switching to LAN"));
+
+        WebSocket current = socket;
+        socket = null;
+        authenticated = false;
+        ready = false;
+        opening = false;
+        probing = false;
+        generation++;
+        cancelTimers();
+        if (current != null) current.cancel();
+        openSocket(url, name);
+    }
+
     private void cancelTimers() {
         main.removeCallbacks(authTimeout);
         main.removeCallbacks(readyTimeout);
         main.removeCallbacks(pingTask);
+        main.removeCallbacks(lanRecheckTask);
     }
 
     private void post(Runnable runnable) {

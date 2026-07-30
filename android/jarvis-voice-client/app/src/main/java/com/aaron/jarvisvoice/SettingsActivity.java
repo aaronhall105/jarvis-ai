@@ -335,7 +335,21 @@ public final class SettingsActivity extends Activity {
         refresh.setOnClickListener(view ->
             updateVoiceFoundationStatus()
         );
-        card.addView(refresh, matchWrap());
+        card.addView(refresh, matchWrap(0, dp(10)));
+
+        Button resetDiagnostics = secondaryButton(
+            "Reset diagnostics counters"
+        );
+        resetDiagnostics.setOnClickListener(view -> {
+            new VoiceDiagnosticsStore(this).resetCounters();
+            updateVoiceFoundationStatus();
+            Toast.makeText(
+                this,
+                "Diagnostics counters reset",
+                Toast.LENGTH_SHORT
+            ).show();
+        });
+        card.addView(resetDiagnostics, matchWrap());
 
         return card;
     }

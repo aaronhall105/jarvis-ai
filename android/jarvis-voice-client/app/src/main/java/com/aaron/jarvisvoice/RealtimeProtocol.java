@@ -2,7 +2,12 @@ package com.aaron.jarvisvoice;
 
 import org.json.JSONObject;
 
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+
 public final class RealtimeProtocol {
+    private static final String LOCAL_TIMEZONE = "Europe/London";
+
     public static final class Event {
         public final String type;
         public final String message;
@@ -80,7 +85,7 @@ public final class RealtimeProtocol {
         String vadEagerness,
         String conversationId
     ) throws Exception {
-        return new JSONObject()
+        return withLocalTime(new JSONObject()
             .put("type", "auth")
             .put("token", token)
             .put("device_id", deviceId)
@@ -95,15 +100,15 @@ public final class RealtimeProtocol {
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
             .put("transport", "websocket_pcm")
-            .put("client_release", "19.0.0-alpha5")
+            .put("client_release", "19.0.0-alpha5.1"))
             .toString();
     }
 
     public static String ping(long clientTimeMs) {
         try {
-            return new JSONObject()
+            return withLocalTime(new JSONObject()
                 .put("type", "ping")
-                .put("client_time_ms", clientTimeMs)
+                .put("client_time_ms", clientTimeMs))
                 .toString();
         } catch (Exception ignored) {
             return "{\"type\":\"ping\"}";
@@ -111,19 +116,37 @@ public final class RealtimeProtocol {
     }
 
     public static String cancel() {
-        return "{\"type\":\"cancel\"}";
+        try {
+            return withLocalTime(new JSONObject().put("type", "cancel"))
+                .toString();
+        } catch (Exception ignored) {
+            return "{\"type\":\"cancel\"}";
+        }
     }
 
     public static String stop() {
-        return "{\"type\":\"stop\"}";
+        try {
+            return withLocalTime(new JSONObject().put("type", "stop"))
+                .toString();
+        } catch (Exception ignored) {
+            return "{\"type\":\"stop\"}";
+        }
     }
 
     public static String text(String value, boolean speak) throws Exception {
-        return new JSONObject()
+        return withLocalTime(new JSONObject()
             .put("type", "text")
             .put("text", value)
-            .put("speak", speak)
+            .put("speak", speak))
             .toString();
+    }
+
+    private static JSONObject withLocalTime(JSONObject payload) throws Exception {
+        OffsetDateTime local = OffsetDateTime.now(ZoneId.of(LOCAL_TIMEZONE));
+        return payload
+            .put("timezone", LOCAL_TIMEZONE)
+            .put("local_datetime", local.toString())
+            .put("utc_offset_seconds", local.getOffset().getTotalSeconds());
     }
 
     public static Event parse(String raw) throws Exception {

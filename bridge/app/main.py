@@ -600,6 +600,7 @@ async def assistant_text(
 async def _execute_ai_request(
     request: TextCommandRequest,
     on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+    trusted_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Execute one user-scoped Jarvis request."""
 
@@ -667,6 +668,7 @@ async def _execute_ai_request(
             conversation_id=storage_conversation_id,
             actor=actor,
             on_text_delta=on_text_delta,
+            trusted_context=trusted_context,
         )
 
     # Home Assistant should keep its own opaque conversation ID. Jarvis uses a
@@ -743,9 +745,18 @@ async def _realtime_brain_handler(
         voice_mode=True,
     )
 
+    trusted_context = {
+        "timezone": metadata.get("timezone"),
+        "local_datetime": metadata.get("local_datetime"),
+        "local_date": metadata.get("local_date"),
+        "local_time": metadata.get("local_time"),
+        "utc_offset_seconds": metadata.get("utc_offset_seconds"),
+    }
+
     return await _execute_ai_request(
         request,
         on_text_delta=on_text_delta,
+        trusted_context=trusted_context,
     )
 
 

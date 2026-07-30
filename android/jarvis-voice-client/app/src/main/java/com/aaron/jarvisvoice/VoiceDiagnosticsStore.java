@@ -3,6 +3,7 @@ package com.aaron.jarvisvoice;
 import android.content.Context;
 import android.content.SharedPreferences;
 
+import java.net.URI;
 import java.text.DateFormat;
 import java.util.Date;
 
@@ -36,6 +37,29 @@ public final class VoiceDiagnosticsStore {
         preferences.edit()
             .putString("network", safe(summary))
             .putLong("network_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
+    public void recordNetworkStatus(boolean online, String detail) {
+        preferences.edit()
+            .putBoolean("network_online", online)
+            .putString("network_detail", safe(detail))
+            .putLong("network_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
+    public void recordCoreReachability(String status, String detail) {
+        preferences.edit()
+            .putString("core_reachability", safe(status))
+            .putString("core_reachability_detail", safe(detail))
+            .putLong("core_reachability_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
+    public void recordEndpoint(String name, String url) {
+        preferences.edit()
+            .putString("active_endpoint", safe(name))
+            .putString("active_endpoint_url", endpointDisplay(url))
             .apply();
     }
 
@@ -127,6 +151,18 @@ public final class VoiceDiagnosticsStore {
             .apply();
     }
 
+    public void resetCounters() {
+        preferences.edit()
+            .putInt("recovery_count", 0)
+            .putInt("invalid_transition_count", 0)
+            .putInt("last_reconnect_attempt", 0)
+            .putLong("last_reconnect_delay_ms", 0L)
+            .remove("last_reconnect_reason")
+            .remove("last_recovery")
+            .remove("last_invalid_transition")
+            .apply();
+    }
+
     public String summary() {
         String state = preferences.getString("state", "Not started");
         String owner = preferences.getString("owner", "NONE");
@@ -134,62 +170,49 @@ public final class VoiceDiagnosticsStore {
             "audio_processing",
             "Audio processing not measured yet"
         );
-        String network = preferences.getString(
-            "network",
+        boolean networkOnline = preferences.getBoolean(
+            "network_online",
+            false
+        );
+        String networkDetail = preferences.getString(
+            "network_detail",
+            preferences.getString("network", "Not measured")
+        );
+        String coreReachability = preferences.getString(
+            "core_reachability",
             "Not measured"
         );
-        long connect = preferences.getLong(
-            "connect_latency_ms",
-            -1L
+        String coreDetail = preferences.getString(
+            "core_reachability_detail",
+            "Not measured"
         );
-        long roundTrip = preferences.getLong(
-            "round_trip_ms",
-            -1L
+        String endpoint = preferences.getString(
+            "active_endpoint",
+            "Not selected"
         );
-        long firstAudio = preferences.getLong(
-            "first_audio_ms",
-            -1L
+        String endpointUrl = preferences.getString(
+            "active_endpoint_url",
+            "Not selected"
         );
-        int reconnectAttempt = preferences.getInt(
-            "last_reconnect_attempt",
-            0
-        );
-        long reconnectDelay = preferences.getLong(
-            "last_reconnect_delay_ms",
-            0L
-        );
-        int recoveries = preferences.getInt(
-            "recovery_count",
-            0
-        );
-        int invalid = preferences.getInt(
-            "invalid_transition_count",
-            0
-        );
-        String coreUser = preferences.getString(
-            "core_user",
-            "Not synchronised"
-        );
+        long connect = preferences.getLong("connect_latency_ms", -1L);
+        long roundTrip = preferences.getLong("round_trip_ms", -1L);
+        long firstAudio = preferences.getLong("first_audio_ms", -1L);
+        int reconnectAttempt = preferences.getInt("last_reconnect_attempt", 0);
+        long reconnectDelay = preferences.getLong("last_reconnect_delay_ms", 0L);
+        int recoveries = preferences.getInt("recovery_count", 0);
+        int invalid = preferences.getInt("invalid_transition_count", 0);
+        String coreUser = preferences.getString("core_user", "Not synchronised");
         String conversationId = preferences.getString(
             "conversation_id",
             "Not synchronised"
         );
-        int messageCount = preferences.getInt(
-            "message_count",
-            0
-        );
-        String lastTool = preferences.getString(
-            "last_tool",
-            "None"
-        );
+        int messageCount = preferences.getInt("message_count", 0);
+        String lastTool = preferences.getString("last_tool", "None");
         boolean lastToolSuccess = preferences.getBoolean(
             "last_tool_success",
             false
         );
-        boolean memoryUsed = preferences.getBoolean(
-            "memory_used",
-            false
-        );
+        boolean memoryUsed = preferences.getBoolean("memory_used", false);
         long updated = preferences.getLong("updated_at", 0L);
 
         String time = updated <= 0L
@@ -202,16 +225,18 @@ public final class VoiceDiagnosticsStore {
         return "State: " + state
             + "\nMicrophone: " + owner
             + "\nAudio: " + audio
-            + "\nNetwork: " + network
+            + "\nNetwork online: " + (networkOnline ? "yes" : "no")
+            + " · " + networkDetail
+            + "\nCore: " + coreReachability + " · " + coreDetail
+            + "\nActive endpoint: " + endpoint
+            + "\nCore address: " + endpointUrl
             + "\nConnect: " + latency(connect)
             + " · RTT: " + latency(roundTrip)
             + " · first audio: " + latency(firstAudio)
             + "\nCore context: " + coreUser
             + " · " + messageCount + " messages"
             + "\nConversation: " + conversationId
-            + "\nMemory used last turn: " + (
-                memoryUsed ? "yes" : "no"
-            )
+            + "\nMemory used last turn: " + (memoryUsed ? "yes" : "no")
             + "\nLast tool: " + lastTool
             + (
                 "None".equals(lastTool)
@@ -223,6 +248,20 @@ public final class VoiceDiagnosticsStore {
             + "\nRecoveries: " + recoveries
             + " · ordering warnings: " + invalid
             + "\nUpdated: " + time;
+    }
+
+    private static String endpointDisplay(String value) {
+        String candidate = value == null ? "" : value.trim();
+        try {
+            URI uri = URI.create(candidate);
+            String host = uri.getHost();
+            int port = uri.getPort();
+            if (host != null && !host.isBlank()) {
+                return port > 0 ? host + ":" + port : host;
+            }
+        } catch (Exception ignored) {
+        }
+        return shorten(candidate, 100);
     }
 
     private static String latency(long value) {

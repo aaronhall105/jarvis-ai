@@ -3950,6 +3950,7 @@ class AIEngine:
         conversation_id: str | None = None,
         actor: UserContext | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        trusted_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         actor = actor or UserContext.from_request(
             user_id=None,
@@ -3958,6 +3959,7 @@ class AIEngine:
             device_id=None,
             voice_mode=False,
         )
+        trusted_context = dict(trusted_context or {})
         raw_user_text = _normalise_space(text)
         if not raw_user_text:
             raise AIEngineError("The request cannot be empty.")
@@ -4889,6 +4891,24 @@ class AIEngine:
                 owner_key=actor.user_key,
             )
 
+        trusted_time = ""
+        local_datetime = str(
+            trusted_context.get("local_datetime") or ""
+        ).strip()
+        timezone_name = str(
+            trusted_context.get("timezone") or ""
+        ).strip()
+        if local_datetime and timezone_name:
+            trusted_time = (
+                "\nTrusted local temporal context for this request:\n"
+                f"- timezone: {timezone_name}\n"
+                f"- local_datetime: {local_datetime}\n"
+                f"- local_date: {trusted_context.get('local_date') or ''}\n"
+                f"- local_time: {trusted_context.get('local_time') or ''}\n"
+                "Use this context for words such as today, tomorrow, yesterday, "
+                "morning, evening and the current time."
+            )
+
         input_items: list[Any] = [
             {
                 "role": "developer",
@@ -4904,6 +4924,7 @@ class AIEngine:
                     "Resolve first-person references such as 'my phone', "
                     "'notify me' and 'my battery' to this user. Address the "
                     "user naturally by name only when useful."
+                    f"{trusted_time}"
                 ),
             }
         ]
