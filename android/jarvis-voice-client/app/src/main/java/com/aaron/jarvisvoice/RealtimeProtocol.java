@@ -13,6 +13,7 @@ public final class RealtimeProtocol {
         public final String voiceMode;
         public final String conversationMode;
         public final String conversationId;
+        public final String transport;
         public final int sampleRate;
         public final boolean success;
         public final boolean unifiedBrain;
@@ -27,6 +28,7 @@ public final class RealtimeProtocol {
             String voiceMode,
             String conversationMode,
             String conversationId,
+            String transport,
             int sampleRate,
             boolean success,
             boolean unifiedBrain
@@ -40,6 +42,7 @@ public final class RealtimeProtocol {
             this.voiceMode = voiceMode;
             this.conversationMode = conversationMode;
             this.conversationId = conversationId;
+            this.transport = transport;
             this.sampleRate = sampleRate;
             this.success = success;
             this.unifiedBrain = unifiedBrain;
@@ -70,12 +73,16 @@ public final class RealtimeProtocol {
             .put("conversation_mode", ConversationMode.normalise(conversationMode))
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
+            .put("transport", "websocket_pcm")
             .toString();
     }
 
-    public static String ping() {
+    public static String ping(long clientTimeMs) {
         try {
-            return new JSONObject().put("type", "ping").toString();
+            return new JSONObject()
+                .put("type", "ping")
+                .put("client_time_ms", clientTimeMs)
+                .toString();
         } catch (Exception ignored) {
             return "{\"type\":\"ping\"}";
         }
@@ -109,6 +116,7 @@ public final class RealtimeProtocol {
             root.optString("voice_mode", ""),
             root.optString("conversation_mode", ""),
             root.optString("conversation_id", ""),
+            root.optString("transport", "websocket_pcm"),
             root.optInt("sample_rate", 24_000),
             root.optBoolean("success", true),
             root.optBoolean("unified_brain", false)

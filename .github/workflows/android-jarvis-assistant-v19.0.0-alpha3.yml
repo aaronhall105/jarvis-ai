@@ -1,4 +1,4 @@
-name: Build Jarvis Assistant v18.4.3
+name: Build Jarvis Assistant v19.0.0-alpha3
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
       - conversation-engine
     paths:
       - android/jarvis-voice-client/**
-      - .github/workflows/android-jarvis-assistant-v18.4.3.yml
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha3.yml
 
 permissions:
   contents: read
@@ -172,11 +172,11 @@ jobs:
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v18.4.3-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha3-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v18.4.3-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v18.4.3-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha3-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha3-debug.apk
           if-no-files-found: error
           retention-days: 30

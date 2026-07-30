@@ -66,6 +66,7 @@ public final class VoiceService extends Service implements
     private ReliableSpeechFallback speechFallback;
     private PowerManager.WakeLock wakeLock;
     private AudioManager audioManager;
+    private VoiceFoundationStateMachine voiceFoundation;
     private AudioFocusRequest audioFocusRequest;
 
     private boolean stopping;
@@ -90,6 +91,8 @@ public final class VoiceService extends Service implements
     @Override public void onCreate() {
         super.onCreate();
         store = new SecureStore(this);
+        voiceFoundation =
+            new VoiceFoundationStateMachine(this);
         history = new ChatHistoryStore(this);
         audio = new RealtimeAudioEngine(this);
         realtimePlayback = new RealtimePlayback(this);
@@ -257,10 +260,12 @@ public final class VoiceService extends Service implements
 
     private void connect() {
         ready = false;
+        voiceFoundation.opening("connecting to Jarvis Core");
         closeClientAndAudio();
         prepareOriginalVoice();
         VoiceCatalog.Entry selected = VoiceCatalog.fromId(store.voiceId());
         client = new JarvisRealtimeClient(
+            this,
             store.coreUrl(),
             store.mobileToken(),
             store.deviceId(),
@@ -362,6 +367,15 @@ public final class VoiceService extends Service implements
         requestedVoiceActive = true;
         voiceActive = true;
         VoiceSessionState.setActive(true);
+        if (ConversationMode.STANDARD.equals(store.conversationMode())) {
+            voiceFoundation.listeningStandard(
+                "voice session started"
+            );
+        } else {
+            voiceFoundation.listeningLive(
+                "voice session started"
+            );
+        }
         wakePhraseEngine.stop();
         acquireAudioFocus();
         if (ConversationMode.STANDARD.equals(store.conversationMode())) {
@@ -455,6 +469,7 @@ public final class VoiceService extends Service implements
     }
 
     private void interruptCurrentTurnForBargeIn() {
+        voiceFoundation.interrupting("user barge-in");
         if (!hasInterruptibleTurn()) return;
 
         JarvisRealtimeClient current = client;
@@ -514,6 +529,7 @@ public final class VoiceService extends Service implements
 
     private void armWakeWord() {
         if (!ready || stopping || voiceActive || !store.wakeEnabled()) return;
+        voiceFoundation.offlineWake("dedicated wake armed");
 
         standardSpeechEngine.stop();
         audio.stop();
@@ -605,6 +621,9 @@ public final class VoiceService extends Service implements
 
     @Override public void onDisconnected(String reason) {
         ready = false;
+        voiceFoundation.recovering(
+            "connection lost: " + safe(reason, "unknown")
+        );
         audio.stop();
         standardSpeechEngine.stop();
         status("Reconnecting: " + safe(reason, "connection lost"));
@@ -668,6 +687,12 @@ public final class VoiceService extends Service implements
 
     @Override public void onBrainStarted(String command) {
         brainActive = true;
+        voiceFoundation.processing(
+            ConversationMode.STANDARD.equals(
+                store.conversationMode()
+            ),
+            "Jarvis Core processing"
+        );
         if (voiceActive) turnShouldSpeak = true;
         turnReceivedRealtimeAudio = false;
         fallbackPending = false;
@@ -810,6 +835,9 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onAudioError(String message) {
+        voiceFoundation.recovering(
+            safe(message, "live audio error")
+        );
         status(message);
     }
 
@@ -829,6 +857,12 @@ public final class VoiceService extends Service implements
 
     @Override public void onPlaybackStarted() {
         playbackActive = true;
+        voiceFoundation.speaking(
+            ConversationMode.STANDARD.equals(
+                store.conversationMode()
+            ),
+            "assistant playback started"
+        );
         markAssistantAudioStarted();
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(voiceActive, false);
@@ -950,6 +984,9 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onStandardReady() {
+        voiceFoundation.listeningStandard(
+            "standard recogniser ready"
+        );
         status("Listening");
         broadcastState(true, true);
     }
@@ -1033,6 +1070,9 @@ public final class VoiceService extends Service implements
 
 
     private void finishConversation() {
+        voiceFoundation.closing(
+            "conversation closing phrase"
+        );
         endConversationAfterReply = false;
         store.resetToDedicatedWake();
         stopVoice(false);

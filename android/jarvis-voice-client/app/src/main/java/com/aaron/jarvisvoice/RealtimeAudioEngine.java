@@ -1,15 +1,13 @@
 package com.aaron.jarvisvoice;
 
+import android.content.Context;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
-import android.media.audiofx.AcousticEchoCanceler;
-import android.media.audiofx.AutomaticGainControl;
-import android.media.audiofx.NoiseSuppressor;
 import android.os.Process;
 
-import java.util.Arrays;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 
 public final class RealtimeAudioEngine {
     public interface Listener {
@@ -18,179 +16,224 @@ public final class RealtimeAudioEngine {
         void onAudioError(String message);
     }
 
-    public static final int SAMPLE_RATE = 24_000;
-    public static final int FRAME_MILLIS = 20;
-    public static final int FRAME_BYTES = AudioFrameSizer.bytesFor(SAMPLE_RATE, FRAME_MILLIS);
+    private static final int SAMPLE_RATE = 24_000;
+    private static final int FRAME_SAMPLES = 480;
 
+    private final Context context;
     private final Listener listener;
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private AudioRecord recorder;
-    private AcousticEchoCanceler echoCanceler;
-    private NoiseSuppressor noiseSuppressor;
-    private AutomaticGainControl gainControl;
-    private Thread captureThread;
+
+    private volatile boolean running;
+    private volatile AudioRecord recorder;
+    private Thread worker;
 
     public RealtimeAudioEngine(Listener listener) {
+        if (!(listener instanceof Context)) {
+            throw new IllegalArgumentException(
+                "RealtimeAudioEngine listener must be an Android Context"
+            );
+        }
+        this.context =
+            ((Context) listener).getApplicationContext();
+        this.listener = listener;
+    }
+
+    public RealtimeAudioEngine(
+        Context context,
+        Listener listener
+    ) {
+        this.context = context.getApplicationContext();
         this.listener = listener;
     }
 
     public synchronized void start() {
-        if (running.get()) return;
+        if (running) return;
+        running = true;
+        worker = new Thread(
+            this::captureLoop,
+            "jarvis-live-audio"
+        );
+        worker.start();
+    }
+
+    public synchronized void stop() {
+        running = false;
+
+        AudioRecord current = recorder;
+        recorder = null;
+        if (current != null) {
+            try {
+                current.stop();
+            } catch (Throwable ignored) {}
+        }
+
+        Thread currentWorker = worker;
+        worker = null;
+        if (currentWorker != null) {
+            currentWorker.interrupt();
+        }
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    private void captureLoop() {
+        AudioRecord localRecorder = null;
+        AudioInputEffects localEffects = null;
+
         try {
+            Process.setThreadPriority(
+                Process.THREAD_PRIORITY_AUDIO
+            );
+
             int minimum = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             );
-            int bufferBytes = Math.max(minimum, FRAME_BYTES * 12);
-            AudioFormat format = new AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
-                .build();
-            recorder = new AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-                .setAudioFormat(format)
+
+            if (minimum <= 0) {
+                throw new IllegalStateException(
+                    "Android returned an invalid live microphone buffer"
+                );
+            }
+
+            int bufferBytes = Math.max(
+                minimum * 2,
+                FRAME_SAMPLES * 2 * 8
+            );
+
+            localRecorder = new AudioRecord.Builder()
+                .setAudioSource(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION
+                )
+                .setAudioFormat(
+                    new AudioFormat.Builder()
+                        .setEncoding(
+                            AudioFormat.ENCODING_PCM_16BIT
+                        )
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(
+                            AudioFormat.CHANNEL_IN_MONO
+                        )
+                        .build()
+                )
                 .setBufferSizeInBytes(bufferBytes)
                 .build();
-            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
-                throw new IllegalStateException("Microphone could not be initialised at 24 kHz");
+
+            if (
+                localRecorder.getState()
+                    != AudioRecord.STATE_INITIALIZED
+            ) {
+                throw new IllegalStateException(
+                    "Live microphone could not initialise"
+                );
             }
-            attachEffects(recorder.getAudioSessionId());
-            recorder.startRecording();
-            running.set(true);
-            captureThread = new Thread(this::captureLoop, "jarvis-realtime-capture");
-            captureThread.start();
-        } catch (Exception exception) {
-            releaseRecorder();
-            listener.onAudioError("Microphone error: " + safeMessage(exception));
-        }
-    }
 
-    public synchronized void stop() {
-        running.set(false);
-        AudioRecord current = recorder;
-        if (current != null) {
-            try {
-                current.stop();
-            } catch (Exception ignored) {}
-        }
-        Thread thread = captureThread;
-        captureThread = null;
-        if (thread != null && thread != Thread.currentThread()) {
-            try {
-                thread.join(500);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-        }
-        releaseRecorder();
-    }
+            localEffects =
+                AudioInputEffects.attach(localRecorder);
 
-    public boolean isRunning() {
-        return running.get();
-    }
+            new VoiceDiagnosticsStore(context)
+                .recordAudioProcessing(
+                    localEffects.summary()
+                );
 
-    private void captureLoop() {
-        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
-        byte[] frame = new byte[FRAME_BYTES];
-        int offset = 0;
-        long lastLevelAt = 0L;
-        try {
-            while (running.get()) {
-                AudioRecord current = recorder;
-                if (current == null) return;
-                int read = current.read(
+            recorder = localRecorder;
+            localRecorder.startRecording();
+
+            short[] frame = new short[FRAME_SAMPLES];
+
+            while (
+                running
+                    && !Thread.currentThread().isInterrupted()
+            ) {
+                int count = localRecorder.read(
                     frame,
-                    offset,
-                    frame.length - offset,
+                    0,
+                    frame.length,
                     AudioRecord.READ_BLOCKING
                 );
-                if (read < 0) {
-                    throw new IllegalStateException("AudioRecord read failed: " + read);
+
+                if (count <= 0) {
+                    if (!running) break;
+                    continue;
                 }
-                if (read == 0) continue;
-                offset += read;
-                if (offset < frame.length) continue;
 
-                byte[] delivered = Arrays.copyOf(frame, frame.length);
-                listener.onAudioFrame(delivered);
-                long now = System.currentTimeMillis();
-                if (now - lastLevelAt >= 100L) {
-                    listener.onInputLevel(rms(delivered));
-                    lastLevelAt = now;
-                }
-                offset = 0;
+                byte[] pcm = shortsToLittleEndian(
+                    frame,
+                    count
+                );
+                listener.onInputLevel(level(frame, count));
+                listener.onAudioFrame(pcm);
             }
-        } catch (Exception exception) {
-            if (running.getAndSet(false)) {
-                listener.onAudioError("Microphone stopped: " + safeMessage(exception));
+        } catch (SecurityException denied) {
+            if (running) {
+                listener.onAudioError(
+                    "Microphone permission is required"
+                );
             }
-        }
-    }
-
-    private void attachEffects(int sessionId) {
-        try {
-            if (AcousticEchoCanceler.isAvailable()) {
-                echoCanceler = AcousticEchoCanceler.create(sessionId);
-                if (echoCanceler != null) echoCanceler.setEnabled(true);
+        } catch (Throwable failure) {
+            if (running) {
+                listener.onAudioError(
+                    "Live microphone failed: "
+                        + safeMessage(failure)
+                );
             }
-        } catch (Exception ignored) {}
-        try {
-            if (NoiseSuppressor.isAvailable()) {
-                noiseSuppressor = NoiseSuppressor.create(sessionId);
-                if (noiseSuppressor != null) noiseSuppressor.setEnabled(true);
-            }
-        } catch (Exception ignored) {}
-        try {
-            if (AutomaticGainControl.isAvailable()) {
-                gainControl = AutomaticGainControl.create(sessionId);
-                if (gainControl != null) gainControl.setEnabled(true);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private synchronized void releaseRecorder() {
-        releaseEffects();
-        if (recorder != null) {
-            try {
-                recorder.release();
-            } catch (Exception ignored) {}
+        } finally {
+            running = false;
             recorder = null;
+
+            if (localRecorder != null) {
+                try {
+                    localRecorder.stop();
+                } catch (Throwable ignored) {}
+            }
+            if (localEffects != null) {
+                localEffects.release();
+            }
+            if (localRecorder != null) {
+                try {
+                    localRecorder.release();
+                } catch (Throwable ignored) {}
+            }
         }
     }
 
-    private void releaseEffects() {
-        if (echoCanceler != null) {
-            try { echoCanceler.release(); } catch (Exception ignored) {}
-            echoCanceler = null;
+    private static byte[] shortsToLittleEndian(
+        short[] samples,
+        int count
+    ) {
+        ByteBuffer buffer = ByteBuffer
+            .allocate(count * 2)
+            .order(ByteOrder.LITTLE_ENDIAN);
+
+        for (int index = 0; index < count; index++) {
+            buffer.putShort(samples[index]);
         }
-        if (noiseSuppressor != null) {
-            try { noiseSuppressor.release(); } catch (Exception ignored) {}
-            noiseSuppressor = null;
-        }
-        if (gainControl != null) {
-            try { gainControl.release(); } catch (Exception ignored) {}
-            gainControl = null;
-        }
+
+        return buffer.array();
     }
 
-    static float rms(byte[] pcm16) {
-        if (pcm16 == null || pcm16.length < 2) return 0f;
-        double sum = 0d;
-        int samples = pcm16.length / 2;
-        for (int i = 0; i + 1 < pcm16.length; i += 2) {
-            int low = pcm16[i] & 0xff;
-            int high = pcm16[i + 1];
-            short sample = (short) ((high << 8) | low);
-            double normalised = sample / 32768.0;
-            sum += normalised * normalised;
+    private static float level(short[] samples, int count) {
+        if (count <= 0) return 0f;
+
+        double squares = 0.0;
+        for (int index = 0; index < count; index++) {
+            double sample = samples[index] / 32768.0;
+            squares += sample * sample;
         }
-        return (float) Math.sqrt(sum / Math.max(1, samples));
+
+        double rms = Math.sqrt(squares / count);
+        return (float) Math.max(
+            0.0,
+            Math.min(1.0, rms * 5.0)
+        );
     }
 
-    private static String safeMessage(Exception exception) {
-        String value = exception.getMessage();
-        return value == null || value.isBlank() ? exception.getClass().getSimpleName() : value;
+    private static String safeMessage(Throwable failure) {
+        String message = failure.getMessage();
+        return message == null || message.isBlank()
+            ? failure.getClass().getSimpleName()
+            : message;
     }
 }

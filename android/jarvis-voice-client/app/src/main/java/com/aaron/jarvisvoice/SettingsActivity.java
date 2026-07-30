@@ -45,6 +45,7 @@ public final class SettingsActivity extends Activity {
 
     private TextView assistantStatus;
     private TextView wakeEngineStatus;
+    private TextView voiceFoundationStatus;
 
     private Spinner conversationMode;
     private Spinner voice;
@@ -133,6 +134,15 @@ public final class SettingsActivity extends Activity {
             "Choose how Jarvis listens, responds and continues the conversation."
         ), matchWrap(0, dp(10)));
         page.addView(buildVoiceCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Voice foundation",
+            "Live state, microphone ownership and native audio processing."
+        ), matchWrap(0, dp(10)));
+        page.addView(
+            buildVoiceFoundationCard(),
+            matchWrap(0, dp(24))
+        );
 
         page.addView(sectionHeader(
             "Assistant behaviour",
@@ -306,6 +316,37 @@ public final class SettingsActivity extends Activity {
         return card;
     }
 
+
+    private View buildVoiceFoundationCard() {
+        LinearLayout card = card();
+
+        voiceFoundationStatus = note(
+            new VoiceDiagnosticsStore(this).summary()
+        );
+        voiceFoundationStatus.setTextIsSelectable(true);
+        card.addView(
+            voiceFoundationStatus,
+            matchWrap(0, dp(12))
+        );
+
+        Button refresh = secondaryButton(
+            "Refresh voice diagnostics"
+        );
+        refresh.setOnClickListener(view ->
+            updateVoiceFoundationStatus()
+        );
+        card.addView(refresh, matchWrap());
+
+        return card;
+    }
+
+    private void updateVoiceFoundationStatus() {
+        if (voiceFoundationStatus == null) return;
+        voiceFoundationStatus.setText(
+            new VoiceDiagnosticsStore(this).summary()
+        );
+    }
+
     private View buildBehaviourCard() {
         LinearLayout card = card();
 
@@ -399,6 +440,7 @@ public final class SettingsActivity extends Activity {
 
 
         updateAssistantStatus();
+        updateVoiceFoundationStatus();
         updateWakeControls();
     }
 

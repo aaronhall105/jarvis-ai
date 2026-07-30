@@ -1,7 +1,9 @@
 package com.aaron.jarvisvoice;
 
+import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.util.concurrent.TimeUnit;
 
@@ -32,6 +34,10 @@ public final class JarvisRealtimeClient {
         void onError(String message);
     }
 
+    private static final long AUTH_TIMEOUT_MS = 12_000L;
+    private static final long READY_TIMEOUT_MS = 20_000L;
+    private static final long PING_INTERVAL_MS = 10_000L;
+
     private final String coreUrl;
     private final String token;
     private final String deviceId;
@@ -44,6 +50,8 @@ public final class JarvisRealtimeClient {
     private final String conversationId;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final VoiceDiagnosticsStore diagnostics;
+    private final NetworkQualityMonitor network;
     private final OkHttpClient http = new OkHttpClient.Builder()
         .pingInterval(12, TimeUnit.SECONDS)
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -53,11 +61,18 @@ public final class JarvisRealtimeClient {
 
     private WebSocket socket;
     private boolean authenticated;
+    private boolean ready;
+    private boolean opening;
     private boolean shouldReconnect;
     private int reconnectAttempt;
     private int generation;
+    private long openStartedAtMs;
+    private long pingStartedAtMs;
+    private long turnStartedAtMs;
+    private boolean firstAudioMeasured;
 
     public JarvisRealtimeClient(
+        Context context,
         String coreUrl,
         String token,
         String deviceId,
@@ -81,43 +96,68 @@ public final class JarvisRealtimeClient {
         this.vadEagerness = vadEagerness;
         this.conversationId = conversationId;
         this.listener = listener;
+        diagnostics = new VoiceDiagnosticsStore(context);
+        network = new NetworkQualityMonitor(
+            context,
+            new NetworkQualityMonitor.Listener() {
+                @Override public void onNetworkAvailable() {
+                    main.post(JarvisRealtimeClient.this::networkAvailable);
+                }
+
+                @Override public void onNetworkLost() {
+                    main.post(JarvisRealtimeClient.this::networkLost);
+                }
+            }
+        );
     }
 
     public void connect() {
         shouldReconnect = true;
         reconnectAttempt = 0;
+        if (!network.isAvailable()) {
+            diagnostics.recordNetwork("Offline — waiting for network");
+            post(() -> listener.onStatus("Offline — waiting for network"));
+            return;
+        }
         open();
     }
 
     public void close() {
         shouldReconnect = false;
         authenticated = false;
+        ready = false;
+        opening = false;
         generation++;
-        main.removeCallbacksAndMessages(null);
+        cancelTimers();
         WebSocket current = socket;
         socket = null;
         if (current != null) {
             current.send(RealtimeProtocol.stop());
             current.close(1000, "Jarvis voice stopped");
         }
+        network.close();
     }
 
     public boolean sendAudio(byte[] pcm16) {
         WebSocket current = socket;
-        if (!authenticated || current == null || pcm16 == null || pcm16.length == 0) return false;
+        if (!ready || current == null || pcm16 == null || pcm16.length == 0) return false;
         if (current.queueSize() > 384_000L) return false;
         return current.send(ByteString.of(pcm16, 0, pcm16.length));
     }
 
     public void cancelResponse() {
         WebSocket current = socket;
-        if (authenticated && current != null) current.send(RealtimeProtocol.cancel());
+        if (authenticated && current != null) {
+            current.send(RealtimeProtocol.cancel());
+        }
     }
 
     public boolean sendText(String text, boolean speak) {
         WebSocket current = socket;
-        if (!authenticated || current == null || text == null || text.isBlank()) return false;
+        if (!ready || current == null || text == null || text.isBlank()) return false;
         try {
+            turnStartedAtMs = SystemClock.elapsedRealtime();
+            firstAudioMeasured = false;
             return current.send(RealtimeProtocol.text(text.trim(), speak));
         } catch (Exception exception) {
             post(() -> listener.onError("Could not send text: " + safeMessage(exception)));
@@ -130,6 +170,12 @@ public final class JarvisRealtimeClient {
     }
 
     private void open() {
+        if (!shouldReconnect || opening || authenticated) return;
+        if (!network.isAvailable()) {
+            diagnostics.recordNetwork("Offline — reconnect paused");
+            return;
+        }
+
         final int currentGeneration = ++generation;
         final String websocketUrl;
         try {
@@ -138,11 +184,21 @@ public final class JarvisRealtimeClient {
             post(() -> listener.onError(safeMessage(exception)));
             return;
         }
+
+        opening = true;
+        ready = false;
+        openStartedAtMs = SystemClock.elapsedRealtime();
+        diagnostics.recordNetwork("Online — connecting");
         post(() -> listener.onStatus("Connecting to Jarvis Core"));
+
         Request request = new Request.Builder().url(websocketUrl).build();
         socket = http.newWebSocket(request, new WebSocketListener() {
             @Override public void onOpen(WebSocket webSocket, Response response) {
                 if (currentGeneration != generation) return;
+                opening = false;
+                diagnostics.recordConnectionLatency(
+                    SystemClock.elapsedRealtime() - openStartedAtMs
+                );
                 try {
                     webSocket.send(RealtimeProtocol.auth(
                         token,
@@ -155,40 +211,59 @@ public final class JarvisRealtimeClient {
                         vadEagerness,
                         conversationId
                     ));
+                    scheduleAuthTimeout(currentGeneration);
                 } catch (Exception exception) {
-                    post(() -> listener.onError("Could not authenticate: " + safeMessage(exception)));
+                    failCurrent(currentGeneration, "Could not authenticate: " + safeMessage(exception));
                 }
             }
 
             @Override public void onMessage(WebSocket webSocket, String text) {
                 if (currentGeneration != generation) return;
-                handleText(text);
+                handleText(text, currentGeneration);
             }
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
                 if (currentGeneration != generation) return;
+                if (!firstAudioMeasured && turnStartedAtMs > 0L) {
+                    firstAudioMeasured = true;
+                    diagnostics.recordFirstAudioLatency(
+                        SystemClock.elapsedRealtime() - turnStartedAtMs
+                    );
+                }
                 byte[] audio = bytes.toByteArray();
                 post(() -> listener.onAudio(audio));
             }
 
             @Override public void onClosed(WebSocket webSocket, int code, String reason) {
                 if (currentGeneration != generation) return;
+                opening = false;
                 authenticated = false;
-                post(() -> listener.onDisconnected(reason == null || reason.isBlank() ? "Connection closed" : reason));
-                scheduleReconnect();
+                ready = false;
+                cancelTimers();
+                String value = reason == null || reason.isBlank()
+                    ? "Connection closed"
+                    : reason;
+                post(() -> listener.onDisconnected(value));
+                scheduleReconnect(value);
             }
 
             @Override public void onFailure(WebSocket webSocket, Throwable throwable, Response response) {
                 if (currentGeneration != generation) return;
+                opening = false;
                 authenticated = false;
-                String reason = throwable == null ? "Connection failed" : throwable.getMessage();
-                post(() -> listener.onDisconnected(reason == null ? "Connection failed" : reason));
-                scheduleReconnect();
+                ready = false;
+                cancelTimers();
+                String reason = throwable == null
+                    ? "Connection failed"
+                    : throwable.getMessage();
+                String value = reason == null ? "Connection failed" : reason;
+                post(() -> listener.onDisconnected(value));
+                scheduleReconnect(value);
             }
         });
     }
 
-    private void handleText(String raw) {
+    private void handleText(String raw, int currentGeneration) {
         final RealtimeProtocol.Event event;
         try {
             event = RealtimeProtocol.parse(raw);
@@ -196,49 +271,180 @@ public final class JarvisRealtimeClient {
             post(() -> listener.onError("Invalid Jarvis Core message: " + safeMessage(exception)));
             return;
         }
+
         switch (event.type) {
             case "auth.ok" -> {
                 authenticated = true;
                 reconnectAttempt = 0;
+                main.removeCallbacks(authTimeout);
+                scheduleReadyTimeout(currentGeneration);
                 post(listener::onConnected);
             }
             case "auth.error" -> {
                 authenticated = false;
+                ready = false;
                 shouldReconnect = false;
-                post(() -> listener.onError(event.message.isBlank() ? "Mobile voice token rejected" : event.message));
+                cancelTimers();
+                post(() -> listener.onError(
+                    event.message.isBlank()
+                        ? "Mobile voice token rejected"
+                        : event.message
+                ));
             }
-            case "ready" -> post(() -> listener.onReady(
-                event.model,
-                event.voice,
-                event.voiceMode,
-                event.conversationMode,
-                event.unifiedBrain
-            ));
+            case "ready" -> {
+                ready = true;
+                reconnectAttempt = 0;
+                main.removeCallbacks(readyTimeout);
+                diagnostics.recordNetwork(
+                    "Online · " + event.transport + " · ready"
+                );
+                schedulePing();
+                post(() -> listener.onReady(
+                    event.model,
+                    event.voice,
+                    event.voiceMode,
+                    event.conversationMode,
+                    event.unifiedBrain
+                ));
+            }
+            case "pong" -> {
+                if (pingStartedAtMs > 0L) {
+                    diagnostics.recordRoundTrip(
+                        SystemClock.elapsedRealtime() - pingStartedAtMs
+                    );
+                }
+                schedulePing();
+            }
             case "status" -> post(() -> listener.onStatus(event.message));
             case "speech.started" -> post(listener::onSpeechStarted);
-            case "user.transcript" -> post(() -> listener.onUserTranscript(event.text));
+            case "user.transcript" -> {
+                turnStartedAtMs = SystemClock.elapsedRealtime();
+                firstAudioMeasured = false;
+                post(() -> listener.onUserTranscript(event.text));
+            }
             case "assistant.transcript.delta" -> post(() -> listener.onAssistantTranscriptDelta(event.text));
             case "assistant.transcript.done" -> post(() -> listener.onAssistantTranscriptDone(event.text));
             case "audio.done" -> post(listener::onAudioDone);
-            case "brain.started" -> post(() -> listener.onBrainStarted(
-                event.command.isBlank() ? event.text : event.command
-            ));
+            case "brain.started" -> {
+                if (turnStartedAtMs <= 0L) {
+                    turnStartedAtMs = SystemClock.elapsedRealtime();
+                }
+                firstAudioMeasured = false;
+                post(() -> listener.onBrainStarted(
+                    event.command.isBlank() ? event.text : event.command
+                ));
+            }
             case "brain.delta" -> post(() -> listener.onBrainDelta(event.text));
             case "brain.response" -> post(() -> listener.onBrainResponse(event.text, event.success, event.conversationId));
             case "original.tts" -> post(() -> listener.onOriginalTts(event.text));
             case "turn.done" -> post(listener::onTurnDone);
-            case "error" -> post(() -> listener.onError(event.message.isBlank() ? "Jarvis voice error" : event.message));
+            case "error" -> post(() -> listener.onError(
+                event.message.isBlank()
+                    ? "Jarvis voice error"
+                    : event.message
+            ));
             default -> { }
         }
     }
 
-    private void scheduleReconnect() {
-        if (!shouldReconnect) return;
-        int attempt = Math.min(6, reconnectAttempt++);
-        long delay = Math.min(8_000L, 500L * (1L << attempt));
+    private final Runnable authTimeout = () -> {
+        if (!authenticated && shouldReconnect) {
+            failCurrent(generation, "Jarvis Core authentication timed out");
+        }
+    };
+
+    private final Runnable readyTimeout = () -> {
+        if (!ready && shouldReconnect) {
+            failCurrent(generation, "Jarvis voice session did not become ready");
+        }
+    };
+
+    private final Runnable pingTask = () -> {
+        WebSocket current = socket;
+        if (!ready || current == null) return;
+        pingStartedAtMs = SystemClock.elapsedRealtime();
+        current.send(RealtimeProtocol.ping(System.currentTimeMillis()));
+    };
+
+    private void scheduleAuthTimeout(int currentGeneration) {
+        main.removeCallbacks(authTimeout);
         main.postDelayed(() -> {
-            if (shouldReconnect && !authenticated) open();
+            if (currentGeneration == generation) authTimeout.run();
+        }, AUTH_TIMEOUT_MS);
+    }
+
+    private void scheduleReadyTimeout(int currentGeneration) {
+        main.removeCallbacks(readyTimeout);
+        main.postDelayed(() -> {
+            if (currentGeneration == generation) readyTimeout.run();
+        }, READY_TIMEOUT_MS);
+    }
+
+    private void schedulePing() {
+        main.removeCallbacks(pingTask);
+        if (ready) main.postDelayed(pingTask, PING_INTERVAL_MS);
+    }
+
+    private void failCurrent(int currentGeneration, String reason) {
+        if (currentGeneration != generation) return;
+        WebSocket current = socket;
+        socket = null;
+        opening = false;
+        authenticated = false;
+        ready = false;
+        generation++;
+        cancelTimers();
+        if (current != null) current.cancel();
+        post(() -> listener.onDisconnected(reason));
+        scheduleReconnect(reason);
+    }
+
+    private void scheduleReconnect(String reason) {
+        if (!shouldReconnect) return;
+        if (!network.isAvailable()) {
+            diagnostics.recordNetwork("Offline — reconnect paused");
+            post(() -> listener.onStatus("Offline — waiting for network"));
+            return;
+        }
+
+        int attempt = Math.min(7, reconnectAttempt++);
+        int seed = (int) (System.nanoTime() ^ generation ^ attempt);
+        long delay = ReconnectPolicy.delayMillis(attempt, seed);
+        diagnostics.recordReconnect(attempt + 1, delay, reason);
+        diagnostics.recordNetwork("Online — reconnecting");
+        main.postDelayed(() -> {
+            if (shouldReconnect && !authenticated && network.isAvailable()) {
+                open();
+            }
         }, delay);
+    }
+
+    private void networkAvailable() {
+        diagnostics.recordNetwork("Online — network restored");
+        post(() -> listener.onStatus("Network restored — reconnecting Jarvis"));
+        if (shouldReconnect && !authenticated && !opening) {
+            reconnectAttempt = 0;
+            open();
+        }
+    }
+
+    private void networkLost() {
+        diagnostics.recordNetwork("Offline — network lost");
+        authenticated = false;
+        ready = false;
+        opening = false;
+        cancelTimers();
+        WebSocket current = socket;
+        socket = null;
+        generation++;
+        if (current != null) current.cancel();
+        post(() -> listener.onDisconnected("Network unavailable"));
+    }
+
+    private void cancelTimers() {
+        main.removeCallbacks(authTimeout);
+        main.removeCallbacks(readyTimeout);
+        main.removeCallbacks(pingTask);
     }
 
     private void post(Runnable runnable) {
@@ -247,6 +453,8 @@ public final class JarvisRealtimeClient {
 
     private static String safeMessage(Exception exception) {
         String value = exception.getMessage();
-        return value == null || value.isBlank() ? exception.getClass().getSimpleName() : value;
+        return value == null || value.isBlank()
+            ? exception.getClass().getSimpleName()
+            : value;
     }
 }
