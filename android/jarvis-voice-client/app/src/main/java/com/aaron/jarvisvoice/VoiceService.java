@@ -81,6 +81,7 @@ public final class VoiceService extends Service implements
     private boolean fallbackSpeaking;
     private String pendingText = "";
     private boolean pendingTextSpeak;
+    private String lastAssistantResponse = "";
 
     @Override public void onCreate() {
         super.onCreate();
@@ -166,6 +167,7 @@ public final class VoiceService extends Service implements
     private boolean wakeWordUsesVoiceService() {
         return store.wakeEnabled();
     }
+
 
     private boolean actionNeedsMicrophone(String action) {
         boolean wakeWordActive =
@@ -370,11 +372,100 @@ public final class VoiceService extends Service implements
     }
 
     private void startStandardListening() {
-        if (!voiceActive || brainActive || playbackActive || stopping) return;
+        if (!voiceActive || stopping || endConversationAfterReply) return;
         if (standardSpeechEngine.isRunning()) return;
+
         standardSpeechEngine.start();
-        status("Standard voice — listening for one message");
+        status(
+            brainActive || playbackActive
+                ? "Listening — interrupt anytime"
+                : "Listening"
+        );
         broadcastState(true, true);
+    }
+
+
+
+    private boolean hasInterruptibleTurn() {
+        return brainActive
+            || playbackActive
+            || fallbackPending
+            || fallbackSpeaking;
+    }
+
+    private boolean isLikelyPlaybackEcho(String candidate) {
+        String heard = candidate == null
+            ? ""
+            : candidate.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9' ]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        String spoken = lastAssistantResponse == null
+            ? ""
+            : lastAssistantResponse
+                .toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9' ]+", " ")
+                .replaceAll("\\s+", " ")
+                .trim();
+
+        if (heard.isEmpty() || spoken.isEmpty()) return false;
+        if (heard.equals(spoken)) return true;
+
+        String[] heardWords = heard.split(" ");
+        String[] spokenWords = spoken.split(" ");
+        if (heardWords.length < 2) return false;
+
+        int common = 0;
+        int maximum = Math.min(heardWords.length, spokenWords.length);
+        while (
+            common < maximum
+                && heardWords[common].equals(spokenWords[common])
+        ) {
+            common++;
+        }
+
+        return common >= 3
+            || (
+                common >= 2
+                    && common / (double) heardWords.length >= 0.75
+            );
+    }
+
+    private void interruptCurrentTurnForBargeIn() {
+        if (!hasInterruptibleTurn()) return;
+
+        JarvisRealtimeClient current = client;
+        if (current != null) current.cancelResponse();
+
+        realtimePlayback.interrupt();
+        originalPlayback.stop();
+        if (homeAssistantTts != null) homeAssistantTts.cancelActiveRun();
+        if (speechFallback != null) speechFallback.cancel();
+
+        brainActive = false;
+        playbackActive = false;
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        turnShouldSpeak = false;
+        turnReceivedRealtimeAudio = false;
+
+        status("Interrupted — listening");
+        broadcastState(true, true);
+    }
+
+    private void keepStandardBargeInArmed() {
+        if (
+            !voiceActive
+                || stopping
+                || endConversationAfterReply
+                || !ConversationMode.STANDARD.equals(store.conversationMode())
+                || standardSpeechEngine.isRunning()
+        ) {
+            return;
+        }
+
+        startStandardListening();
     }
 
     private void stopVoice(boolean stopService) {
@@ -532,6 +623,8 @@ public final class VoiceService extends Service implements
 
     @Override public void onSpeechStarted() {
         if (!voiceActive) return;
+
+        interruptCurrentTurnForBargeIn();
         prepareSpokenTurn(true);
         brainActive = true;
         realtimePlayback.interrupt();
@@ -540,6 +633,7 @@ public final class VoiceService extends Service implements
         if (homeAssistantTts != null) homeAssistantTts.cancelActiveRun();
         status("Listening");
     }
+
 
     @Override public void onAudioDone() {
         realtimePlayback.markDone();
@@ -560,6 +654,13 @@ public final class VoiceService extends Service implements
             false
         );
         status("Thinking");
+        if (
+            voiceActive
+                && ConversationMode.STANDARD.equals(store.conversationMode())
+                && !endConversationAfterReply
+        ) {
+            main.postDelayed(this::keepStandardBargeInArmed, 180L);
+        }
     }
 
     @Override public void onBrainDelta(String text) {
@@ -574,6 +675,7 @@ public final class VoiceService extends Service implements
     ) {
         brainActive = false;
         String response = text == null ? "" : text.trim();
+        lastAssistantResponse = response;
 
         if (!response.isEmpty()) {
             addMessage(ChatMessage.ASSISTANT, response);
@@ -688,8 +790,9 @@ public final class VoiceService extends Service implements
         if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
-            status("Jarvis is speaking — you can interrupt");
+            status("Jarvis is speaking — interrupt anytime");
             broadcastState(voiceActive, false);
+            main.postDelayed(this::keepStandardBargeInArmed, 260L);
             return;
         }
         afterPlayback();
@@ -697,8 +800,9 @@ public final class VoiceService extends Service implements
 
     @Override public void onPlaybackStarted() {
         playbackActive = true;
-        status("Jarvis is speaking — you can interrupt");
+        status("Jarvis is speaking — interrupt anytime");
         broadcastState(voiceActive, false);
+        main.postDelayed(this::keepStandardBargeInArmed, 260L);
     }
 
     @Override public void onPlaybackCompleted() {
@@ -745,8 +849,12 @@ public final class VoiceService extends Service implements
         fallbackSpeaking = true;
         playbackActive = true;
         realtimePlayback.interrupt();
-        status("Jarvis is speaking");
+        status("Jarvis is speaking — interrupt anytime");
         broadcastState(true, false);
+        main.postDelayed(
+            this::keepStandardBargeInArmed,
+            260L
+        );
     }
 
     @Override public void onFallbackDone() {
@@ -812,34 +920,73 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onStandardPartial(String text) {
+        if (text == null || text.isBlank()) return;
+
+        if (hasInterruptibleTurn() && !isLikelyPlaybackEcho(text)) {
+            interruptCurrentTurnForBargeIn();
+        }
+
         broadcastEvent("draft", ChatMessage.USER, text, true, true);
     }
 
+
     @Override public void onStandardFinal(String text) {
         if (!voiceActive) return;
-        queueOrSend(text, true);
+
+        String command = text == null ? "" : text.trim();
+        if (command.isEmpty()) {
+            main.postDelayed(this::keepStandardBargeInArmed, 400L);
+            return;
+        }
+
+        if (playbackActive && isLikelyPlaybackEcho(command)) {
+            main.postDelayed(this::keepStandardBargeInArmed, 350L);
+            return;
+        }
+
+        interruptCurrentTurnForBargeIn();
+        queueOrSend(command, true);
         broadcastState(true, false);
+
+        if (!endConversationAfterReply) {
+            main.postDelayed(this::keepStandardBargeInArmed, 250L);
+        }
     }
+
 
     @Override public void onStandardError(String message) {
         status(message);
         broadcastState(voiceActive, false);
+
         if (
             voiceActive
-                && !brainActive
-                && !playbackActive
-                && store.keepConversationOpen()
                 && !endConversationAfterReply
+                && !stopping
+                && (
+                    hasInterruptibleTurn()
+                        || store.keepConversationOpen()
+                )
         ) {
-            main.postDelayed(this::startStandardListening, 650L);
+            main.postDelayed(this::keepStandardBargeInArmed, 600L);
         }
     }
 
+
     private void finishConversation() {
         endConversationAfterReply = false;
+        store.resetToDedicatedWake();
         stopVoice(false);
         broadcastEvent("conversation.ended", "", "", false, false);
+        main.postDelayed(
+            () -> {
+                if (ready && !voiceActive && store.wakeEnabled()) {
+                    armWakeWord();
+                }
+            },
+            300L
+        );
     }
+
 
 
     private void addMessage(String role, String text) {
@@ -947,7 +1094,7 @@ public final class VoiceService extends Service implements
         if (manager == null) return;
         wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "jarvisvoice:chat");
         wakeLock.setReferenceCounted(false);
-        wakeLock.acquire(12 * 60 * 60 * 1000L);
+        wakeLock.acquire();
     }
 
     private void releaseWakeLock() {

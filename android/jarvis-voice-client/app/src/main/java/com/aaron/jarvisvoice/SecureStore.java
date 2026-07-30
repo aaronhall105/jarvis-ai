@@ -33,6 +33,7 @@ public final class SecureStore {
         migrateAssistantDefaults();
         migrateWakeEngineDefaults();
         migrateWakeStabilityDefaults();
+        migrateProductionVoiceDefaults();
         migrateReliableVoiceDefaults();
     }
 
@@ -109,6 +110,39 @@ public final class SecureStore {
                 Math.max(sensitivity, 0.86f)
             )
             .putBoolean("voice_reliability_migration_v1841", true)
+            .apply();
+    }
+
+    private void migrateProductionVoiceDefaults() {
+        if (preferences.getBoolean("production_voice_migration_v1842", false)) {
+            return;
+        }
+
+        float sensitivity = preferences.getFloat("wake_sensitivity_v1830", 0.78f);
+
+        preferences.edit()
+            .putString("conversation_mode_v1800", ConversationMode.STANDARD)
+            .putBoolean("standard_auto_listen_v1800", true)
+            .putBoolean("keep_conversation_open_v1800", true)
+            .putBoolean("wake_enabled", true)
+            .putString("wake_phrase", "jarvis")
+            .putBoolean("dedicated_wake_enabled_v1830", true)
+            .putBoolean("assistant_wake_always_v1810", true)
+            .putBoolean("background_conversations_v1800", true)
+            .putFloat("wake_sensitivity_v1830", Math.max(sensitivity, 0.90f))
+            .putBoolean("production_voice_migration_v1842", true)
+            .apply();
+    }
+
+    public void resetToDedicatedWake() {
+        float sensitivity = preferences.getFloat("wake_sensitivity_v1830", 0.90f);
+
+        preferences.edit()
+            .putBoolean("wake_enabled", true)
+            .putString("wake_phrase", "jarvis")
+            .putBoolean("dedicated_wake_enabled_v1830", true)
+            .putBoolean("assistant_wake_always_v1810", true)
+            .putFloat("wake_sensitivity_v1830", Math.max(sensitivity, 0.90f))
             .apply();
     }
 

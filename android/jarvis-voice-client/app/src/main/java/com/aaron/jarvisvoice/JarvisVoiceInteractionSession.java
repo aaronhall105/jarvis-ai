@@ -43,6 +43,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
     private boolean voiceActive;
     private boolean listening;
     private boolean handoffToFullChat;
+    private boolean conversationClosed;
     private final StringBuilder streamed = new StringBuilder();
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -89,7 +90,10 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
                     transcript.setText(text);
                     transcript.setTextColor(BLACK);
                 }
-                case "conversation.ended" -> finish();
+                case "conversation.ended" -> {
+                    conversationClosed = true;
+                    finish();
+                }
                 default -> { }
             }
         }
@@ -268,7 +272,7 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
 
     @Override public void onHide() {
         setKeepAwake(false);
-        if (!handoffToFullChat) {
+        if (!handoffToFullChat && !conversationClosed) {
             try {
                 context.startService(
                     new Intent(context, VoiceService.class)

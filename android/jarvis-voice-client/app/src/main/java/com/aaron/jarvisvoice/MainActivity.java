@@ -80,6 +80,8 @@ public final class MainActivity extends Activity {
                 case "thinking" -> beginStreaming();
                 case "draft" -> statusText.setText(text.isBlank() ? "Listening" : text);
                 case "clear" -> renderHistory();
+                case "conversation.ended" ->
+                    statusText.setText("Dedicated wake word ready");
                 case "error" -> {
                     statusText.setText("Something went wrong");
                     Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
