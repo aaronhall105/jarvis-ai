@@ -33,6 +33,7 @@ public final class SecureStore {
         migrateAssistantDefaults();
         migrateWakeEngineDefaults();
         migrateWakeStabilityDefaults();
+        migrateReliableVoiceDefaults();
     }
 
     private void migrateAssistantDefaults() {
@@ -80,6 +81,34 @@ public final class SecureStore {
                 "wake_stability_migration_v1840",
                 true
             )
+            .apply();
+    }
+
+    private void migrateReliableVoiceDefaults() {
+        if (preferences.getBoolean("voice_reliability_migration_v1841", false)) {
+            return;
+        }
+
+        float sensitivity = preferences.getFloat(
+            "wake_sensitivity_v1830",
+            0.78f
+        );
+
+        preferences.edit()
+            .putString(
+                "conversation_mode_v1800",
+                ConversationMode.STANDARD
+            )
+            .putBoolean("standard_auto_listen_v1800", true)
+            .putBoolean("keep_conversation_open_v1800", true)
+            .putBoolean("wake_enabled", true)
+            .putBoolean("dedicated_wake_enabled_v1830", true)
+            .putBoolean("assistant_wake_always_v1810", true)
+            .putFloat(
+                "wake_sensitivity_v1830",
+                Math.max(sensitivity, 0.86f)
+            )
+            .putBoolean("voice_reliability_migration_v1841", true)
             .apply();
     }
 
@@ -172,7 +201,7 @@ public final class SecureStore {
 
     public String conversationMode() {
         return ConversationMode.normalise(
-            preferences.getString("conversation_mode_v1800", ConversationMode.LIVE)
+            preferences.getString("conversation_mode_v1800", ConversationMode.STANDARD)
         );
     }
 

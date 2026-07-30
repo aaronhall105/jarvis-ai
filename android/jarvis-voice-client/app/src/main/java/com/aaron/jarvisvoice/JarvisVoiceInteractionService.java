@@ -82,6 +82,26 @@ public final class JarvisVoiceInteractionService
         } catch (Exception ignored) {}
     }
 
+    private void requestWakeService() {
+        store = new SecureStore(this);
+        if (!systemReady) return;
+
+        String action = store.wakeEnabled()
+            ? VoiceService.ACTION_ARM_WAKE
+            : VoiceService.ACTION_STOP_VOICE;
+
+        try {
+            startForegroundService(
+                new Intent(this, VoiceService.class).setAction(action)
+            );
+        } catch (Exception exception) {
+            broadcastWakeError(
+                "Background wake could not start: "
+                    + safeMessage(exception)
+            );
+        }
+    }
+
     private boolean wakeConfigurationReady() {
         return systemReady
             && store.assistantWakeAlways()
@@ -94,59 +114,12 @@ public final class JarvisVoiceInteractionService
     }
 
     private void refreshWakePhrase() {
-        stopWakePhrase();
-        store = new SecureStore(this);
-        retryAttempt = 0;
-        armWakePhrase();
+        stopWakeEngineOnly();
+        requestWakeService();
     }
 
     private void ensureWakePhrase() {
-        store = new SecureStore(this);
-
-        if (!systemReady) return;
-
-        if (VoiceSessionState.isActive()) {
-            stopWakeEngineOnly();
-            scheduleHealthCheck();
-            return;
-        }
-
-        if (!store.assistantWakeAlways() || !store.wakeEnabled()) {
-            stopWakePhrase();
-            broadcastWakeStatus("Wake word is off", false);
-            return;
-        }
-
-        if (
-            checkSelfPermission(Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED
-        ) {
-            stopWakePhrase();
-            broadcastWakeError(
-                "Open Jarvis and allow microphone access"
-            );
-            return;
-        }
-
-        if (!store.hasMobileToken() || store.coreUrl().isBlank()) {
-            stopWakePhrase();
-            broadcastWakeError(
-                "Open Jarvis Settings and connect Jarvis Core"
-            );
-            return;
-        }
-
-        String desired = store.wakePhrase();
-        if (
-            wakePhraseEngine.isRunning()
-                && desired.equals(armedPhrase)
-        ) {
-            scheduleHealthCheck();
-            return;
-        }
-
-        stopWakeEngineOnly();
-        armWakePhrase();
+        requestWakeService();
     }
 
     private void armWakePhrase() {
@@ -379,6 +352,14 @@ public final class JarvisVoiceInteractionService
             service::ensureWakePhrase,
             650L
         );
+    }
+
+
+    private static String safeMessage(Exception exception) {
+        String value = exception.getMessage();
+        return value == null || value.isBlank()
+            ? exception.getClass().getSimpleName()
+            : value;
     }
 
     public static boolean isActiveAssistant(Context context) {

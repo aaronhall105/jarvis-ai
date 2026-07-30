@@ -164,11 +164,7 @@ public final class VoiceService extends Service implements
     }
 
     private boolean wakeWordUsesVoiceService() {
-        return store.wakeEnabled()
-            && !(
-                store.assistantWakeAlways()
-                    && JarvisVoiceInteractionService.isActiveAssistant(this)
-            );
+        return store.wakeEnabled();
     }
 
     private boolean actionNeedsMicrophone(String action) {
@@ -312,7 +308,7 @@ public final class VoiceService extends Service implements
         if (text.isEmpty()) return;
         prepareSpokenTurn(speak);
         addMessage(ChatMessage.USER, text);
-        if (isConversationEndPhrase(text)) {
+        if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
         }
         pendingText = text;
@@ -375,6 +371,7 @@ public final class VoiceService extends Service implements
 
     private void startStandardListening() {
         if (!voiceActive || brainActive || playbackActive || stopping) return;
+        if (standardSpeechEngine.isRunning()) return;
         standardSpeechEngine.start();
         status("Standard voice — listening for one message");
         broadcastState(true, true);
@@ -405,19 +402,6 @@ public final class VoiceService extends Service implements
         standardSpeechEngine.stop();
         audio.stop();
         releaseAudioFocus();
-
-        if (
-            store.assistantWakeAlways()
-                && JarvisVoiceInteractionService.isActiveAssistant(this)
-        ) {
-            wakePhraseEngine.stop();
-            JarvisVoiceInteractionService.ensureWakeIfActive(this);
-            status(
-                "Wake word ready — say \"" + store.wakePhrase() + "\""
-            );
-            broadcastState(false, true);
-            return;
-        }
 
         if (!microphoneForegroundActive || !hasMicrophonePermission()) {
             wakePhraseEngine.stop();
@@ -515,6 +499,9 @@ public final class VoiceService extends Service implements
 
     @Override public void onUserTranscript(String text) {
         if (text == null || text.isBlank()) return;
+        if (ConversationEndPolicy.shouldEnd(text)) {
+            endConversationAfterReply = true;
+        }
         prepareSpokenTurn(true);
         brainActive = true;
         addMessage(ChatMessage.USER, text);
@@ -837,6 +824,15 @@ public final class VoiceService extends Service implements
     @Override public void onStandardError(String message) {
         status(message);
         broadcastState(voiceActive, false);
+        if (
+            voiceActive
+                && !brainActive
+                && !playbackActive
+                && store.keepConversationOpen()
+                && !endConversationAfterReply
+        ) {
+            main.postDelayed(this::startStandardListening, 650L);
+        }
     }
 
     private void finishConversation() {
@@ -845,25 +841,6 @@ public final class VoiceService extends Service implements
         broadcastEvent("conversation.ended", "", "", false, false);
     }
 
-    private static boolean isConversationEndPhrase(String raw) {
-        String value = raw == null
-            ? ""
-            : raw.trim().toLowerCase(java.util.Locale.ROOT);
-        value = value.replaceAll("[.!?]+$", "").trim();
-        return value.equals("that is all")
-            || value.equals("that's all")
-            || value.equals("thats all")
-            || value.equals("thanks")
-            || value.equals("thank you")
-            || value.equals("cheers")
-            || value.equals("goodbye")
-            || value.equals("good bye")
-            || value.equals("bye")
-            || value.equals("see you")
-            || value.equals("see you later")
-            || value.equals("stop listening")
-            || value.equals("stop");
-    }
 
     private void addMessage(String role, String text) {
         history.add(role, text);

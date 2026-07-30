@@ -281,7 +281,7 @@ public final class SettingsActivity extends Activity {
     private View buildVoiceCard() {
         LinearLayout card = card();
 
-        conversationMode = spinner(List.of("Live", "Standard"));
+        conversationMode = spinner(List.of("Standard — recommended", "Live — experimental"));
         card.addView(choiceGroup("Conversation mode", conversationMode), matchWrap(0, dp(14)));
 
         voice = spinner(VoiceCatalog.labels());
@@ -366,7 +366,7 @@ public final class SettingsActivity extends Activity {
         coreUrl.setText(store.coreUrl());
         userName.setText(store.userName());
         conversationMode.setSelection(
-            ConversationMode.STANDARD.equals(store.conversationMode()) ? 1 : 0
+            ConversationMode.STANDARD.equals(store.conversationMode()) ? 0 : 1
         );
         voice.setSelection(VoiceCatalog.indexOf(store.voiceId()));
         responsiveness.setSelection(switch (store.vadEagerness()) {
@@ -405,7 +405,7 @@ public final class SettingsActivity extends Activity {
     private void saveSettings() {
         try {
             VoiceCatalog.Entry selectedVoice = VoiceCatalog.at(voice.getSelectedItemPosition());
-            String selectedMode = conversationMode.getSelectedItemPosition() == 1
+            String selectedMode = conversationMode.getSelectedItemPosition() == 0
                 ? ConversationMode.STANDARD
                 : ConversationMode.LIVE;
             String eagerness = switch (responsiveness.getSelectedItemPosition()) {
