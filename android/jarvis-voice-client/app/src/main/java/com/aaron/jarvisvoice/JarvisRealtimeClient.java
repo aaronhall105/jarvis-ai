@@ -105,6 +105,21 @@ public final class JarvisRealtimeClient {
         this.listener = listener;
         diagnostics = new VoiceDiagnosticsStore(context);
         endpoints = new CoreEndpointSelector(context, coreUrl);
+        lanRecheckTask = () -> {
+            if (!ready || endpoints.isLan(activeCoreUrl)) return;
+            endpoints.probeLan(new CoreEndpointSelector.Listener() {
+                @Override public void onSelected(String url, String name) {
+                    if (!ready || endpoints.isLan(activeCoreUrl)) return;
+                    returnToLan(url, name);
+                }
+
+                @Override public void onUnavailable(String reason) {
+                    if (ready && !endpoints.isLan(activeCoreUrl)) {
+                        scheduleLanRecheck();
+                    }
+                }
+            });
+        };
         network = new NetworkQualityMonitor(
             context,
             new NetworkQualityMonitor.Listener() {
@@ -568,21 +583,7 @@ public final class JarvisRealtimeClient {
         post(() -> listener.onDisconnected("Network unavailable"));
     }
 
-    private final Runnable lanRecheckTask = () -> {
-        if (!ready || endpoints.isLan(activeCoreUrl)) return;
-        endpoints.probeLan(new CoreEndpointSelector.Listener() {
-            @Override public void onSelected(String url, String name) {
-                if (!ready || endpoints.isLan(activeCoreUrl)) return;
-                returnToLan(url, name);
-            }
-
-            @Override public void onUnavailable(String reason) {
-                if (ready && !endpoints.isLan(activeCoreUrl)) {
-                    scheduleLanRecheck();
-                }
-            }
-        });
-    };
+    private final Runnable lanRecheckTask;
 
     private void scheduleLanRecheck() {
         main.removeCallbacks(lanRecheckTask);
