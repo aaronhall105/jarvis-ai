@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 
 public final class VoiceService extends Service implements
     JarvisRealtimeClient.Listener,
@@ -82,6 +83,9 @@ public final class VoiceService extends Service implements
     private String pendingText = "";
     private boolean pendingTextSpeak;
     private String lastAssistantResponse = "";
+    private long echoSuppressionUntilMs;
+    private String pendingBargeInPartial = "";
+    private long pendingBargeInPartialAtMs;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -393,43 +397,61 @@ public final class VoiceService extends Service implements
             || fallbackSpeaking;
     }
 
+    private boolean isEchoSuppressionWindowActive() {
+        return playbackActive
+            || fallbackSpeaking
+            || SystemClock.elapsedRealtime()
+                < echoSuppressionUntilMs;
+    }
+
     private boolean isLikelyPlaybackEcho(String candidate) {
-        String heard = candidate == null
-            ? ""
-            : candidate.toLowerCase(java.util.Locale.ROOT)
-                .replaceAll("[^a-z0-9' ]+", " ")
-                .replaceAll("\\s+", " ")
-                .trim();
+        return PlaybackEchoPolicy.isLikelyEcho(
+            candidate,
+            lastAssistantResponse,
+            isEchoSuppressionWindowActive()
+        );
+    }
 
-        String spoken = lastAssistantResponse == null
-            ? ""
-            : lastAssistantResponse
-                .toLowerCase(java.util.Locale.ROOT)
-                .replaceAll("[^a-z0-9' ]+", " ")
-                .replaceAll("\\s+", " ")
-                .trim();
+    private void markAssistantAudioStarted() {
+        echoSuppressionUntilMs = Long.MAX_VALUE;
+        clearPendingBargeInPartial();
+    }
 
-        if (heard.isEmpty() || spoken.isEmpty()) return false;
-        if (heard.equals(spoken)) return true;
+    private void markAssistantAudioEnded() {
+        echoSuppressionUntilMs =
+            SystemClock.elapsedRealtime() + 2_200L;
+        clearPendingBargeInPartial();
+    }
 
-        String[] heardWords = heard.split(" ");
-        String[] spokenWords = spoken.split(" ");
-        if (heardWords.length < 2) return false;
+    private void clearPendingBargeInPartial() {
+        pendingBargeInPartial = "";
+        pendingBargeInPartialAtMs = 0L;
+    }
 
-        int common = 0;
-        int maximum = Math.min(heardWords.length, spokenWords.length);
-        while (
-            common < maximum
-                && heardWords[common].equals(spokenWords[common])
-        ) {
-            common++;
+    private boolean partialBargeInIsConfirmed(
+        String candidate
+    ) {
+        String normalised =
+            PlaybackEchoPolicy.normalise(candidate);
+        if (normalised.isEmpty()) return false;
+
+        int wordCount = normalised.split(" ").length;
+        if (wordCount >= 4) {
+            clearPendingBargeInPartial();
+            return true;
         }
 
-        return common >= 3
-            || (
-                common >= 2
-                    && common / (double) heardWords.length >= 0.75
-            );
+        long now = SystemClock.elapsedRealtime();
+        boolean repeated =
+            normalised.equals(pendingBargeInPartial)
+                && now - pendingBargeInPartialAtMs
+                    <= 1_300L;
+
+        pendingBargeInPartial = normalised;
+        pendingBargeInPartialAtMs = now;
+
+        if (repeated) clearPendingBargeInPartial();
+        return repeated;
     }
 
     private void interruptCurrentTurnForBargeIn() {
@@ -450,6 +472,9 @@ public final class VoiceService extends Service implements
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
 
+        echoSuppressionUntilMs =
+            SystemClock.elapsedRealtime() + 700L;
+        clearPendingBargeInPartial();
         status("Interrupted — listening");
         broadcastState(true, true);
     }
@@ -511,6 +536,8 @@ public final class VoiceService extends Service implements
     }
 
     private void stopCaptureAndPlayback() {
+        echoSuppressionUntilMs = 0L;
+        clearPendingBargeInPartial();
         wakePhraseEngine.stop();
         standardSpeechEngine.stop();
         audio.stop();
@@ -790,16 +817,19 @@ public final class VoiceService extends Service implements
         if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
+            markAssistantAudioStarted();
             status("Jarvis is speaking — interrupt anytime");
             broadcastState(voiceActive, false);
             main.postDelayed(this::keepStandardBargeInArmed, 260L);
             return;
         }
+        markAssistantAudioEnded();
         afterPlayback();
     }
 
     @Override public void onPlaybackStarted() {
         playbackActive = true;
+        markAssistantAudioStarted();
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(voiceActive, false);
         main.postDelayed(this::keepStandardBargeInArmed, 260L);
@@ -807,11 +837,13 @@ public final class VoiceService extends Service implements
 
     @Override public void onPlaybackCompleted() {
         playbackActive = false;
+        markAssistantAudioEnded();
         afterPlayback();
     }
 
     @Override public void onPlaybackError(String message) {
         playbackActive = false;
+        markAssistantAudioEnded();
         status("Audio error: " + safe(message, "playback failed"));
         afterPlayback();
     }
@@ -848,6 +880,7 @@ public final class VoiceService extends Service implements
         fallbackPending = false;
         fallbackSpeaking = true;
         playbackActive = true;
+        markAssistantAudioStarted();
         realtimePlayback.interrupt();
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(true, false);
@@ -862,6 +895,7 @@ public final class VoiceService extends Service implements
         fallbackPending = false;
         fallbackSpeaking = false;
         playbackActive = false;
+        markAssistantAudioEnded();
         afterPlayback();
     }
 
@@ -869,6 +903,7 @@ public final class VoiceService extends Service implements
         fallbackPending = false;
         fallbackSpeaking = false;
         playbackActive = false;
+        markAssistantAudioEnded();
         status(
             "Speech fallback unavailable: "
                 + safe(message, "Android speech failed")
@@ -922,11 +957,31 @@ public final class VoiceService extends Service implements
     @Override public void onStandardPartial(String text) {
         if (text == null || text.isBlank()) return;
 
-        if (hasInterruptibleTurn() && !isLikelyPlaybackEcho(text)) {
-            interruptCurrentTurnForBargeIn();
+        if (isLikelyPlaybackEcho(text)) {
+            return;
         }
 
-        broadcastEvent("draft", ChatMessage.USER, text, true, true);
+        if (hasInterruptibleTurn()) {
+            boolean outputActive =
+                playbackActive || fallbackSpeaking;
+
+            if (
+                !outputActive
+                    || partialBargeInIsConfirmed(text)
+            ) {
+                interruptCurrentTurnForBargeIn();
+            } else {
+                return;
+            }
+        }
+
+        broadcastEvent(
+            "draft",
+            ChatMessage.USER,
+            text,
+            true,
+            true
+        );
     }
 
 
@@ -939,11 +994,16 @@ public final class VoiceService extends Service implements
             return;
         }
 
-        if (playbackActive && isLikelyPlaybackEcho(command)) {
-            main.postDelayed(this::keepStandardBargeInArmed, 350L);
+        if (isLikelyPlaybackEcho(command)) {
+            clearPendingBargeInPartial();
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                350L
+            );
             return;
         }
 
+        clearPendingBargeInPartial();
         interruptCurrentTurnForBargeIn();
         queueOrSend(command, true);
         broadcastState(true, false);
