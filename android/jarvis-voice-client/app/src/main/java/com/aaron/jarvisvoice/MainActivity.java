@@ -3,6 +3,8 @@ package com.aaron.jarvisvoice;
 import android.Manifest;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -15,6 +17,7 @@ import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
+import android.text.method.LinkMovementMethod;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -29,6 +32,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -59,6 +63,7 @@ public final class MainActivity extends Activity {
     private TextView streamingText;
     private boolean voiceActive;
     private boolean listening;
+    private boolean generating;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -74,17 +79,58 @@ public final class MainActivity extends Activity {
                 case "status" -> statusText.setText(text);
                 case "message" -> {
                     finishStreaming();
-                    addMessageView(new ChatMessage(role, text, System.currentTimeMillis()), true);
+                    if (ChatMessage.ASSISTANT.equals(role)) {
+                        generating = false;
+                    }
+                    addMessageView(
+                        new ChatMessage(
+                            role,
+                            text,
+                            System.currentTimeMillis()
+                        ),
+                        true
+                    );
+                    updateSendButton();
                 }
-                case "assistant_delta" -> appendStreaming(text);
-                case "thinking" -> beginStreaming();
-                case "draft" -> statusText.setText(text.isBlank() ? "Listening" : text);
-                case "clear" -> renderHistory();
+                case "assistant_delta" -> {
+                    generating = true;
+                    appendStreaming(text);
+                    updateSendButton();
+                }
+                case "thinking" -> {
+                    generating = true;
+                    beginStreaming();
+                    updateSendButton();
+                }
+                case "draft" -> statusText.setText(
+                    text.isBlank() ? "Listening" : text
+                );
+                case "clear", "chat.switched" -> {
+                    generating = false;
+                    finishStreaming();
+                    renderHistory();
+                    updateSendButton();
+                }
+                case "generation.cancelled" -> {
+                    generating = false;
+                    finishStreaming();
+                    statusText.setText("Stopped");
+                    updateSendButton();
+                }
                 case "conversation.ended" ->
-                    statusText.setText("Dedicated wake word ready");
+                    statusText.setText(
+                        "Dedicated wake word ready"
+                    );
                 case "error" -> {
+                    generating = false;
+                    finishStreaming();
+                    updateSendButton();
                     statusText.setText("Something went wrong");
-                    Toast.makeText(MainActivity.this, text, Toast.LENGTH_LONG).show();
+                    Toast.makeText(
+                        MainActivity.this,
+                        text,
+                        Toast.LENGTH_LONG
+                    ).show();
                 }
                 default -> { }
             }
@@ -248,7 +294,24 @@ public final class MainActivity extends Activity {
             1f
         ));
 
-        ImageButton newChat = iconButton(R.drawable.ic_add, "New chat", SOFT, BLACK);
+        ImageButton historyButton = iconButton(
+            R.drawable.ic_history,
+            "Chat history",
+            SOFT,
+            BLACK
+        );
+        historyButton.setOnClickListener(view -> openHistory());
+        bar.addView(
+            historyButton,
+            iconParams(dp(40), dp(6))
+        );
+
+        ImageButton newChat = iconButton(
+            R.drawable.ic_add,
+            "New chat",
+            SOFT,
+            BLACK
+        );
         newChat.setOnClickListener(view -> newChat());
         bar.addView(newChat, iconParams(dp(40), dp(6)));
 
@@ -276,27 +339,37 @@ public final class MainActivity extends Activity {
         composer.setHintTextColor(Color.rgb(132, 132, 132));
         composer.setTextColor(BLACK);
         composer.setTextSize(16);
-        composer.setSingleLine(true);
+        composer.setSingleLine(false);
+        composer.setMinLines(1);
+        composer.setMaxLines(6);
+        composer.setGravity(Gravity.CENTER_VERTICAL);
         composer.setInputType(
             InputType.TYPE_CLASS_TEXT
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
         );
-        composer.setImeOptions(EditorInfo.IME_ACTION_SEND);
+        composer.setImeOptions(
+            EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        );
         composer.setBackgroundColor(Color.TRANSPARENT);
         composer.setPadding(0, 0, dp(8), 0);
-        composer.setOnEditorActionListener((view, actionId, event) -> {
-            boolean keyboardSend = actionId == EditorInfo.IME_ACTION_SEND;
-            boolean hardwareEnter =
-                event != null
-                    && event.getKeyCode() == KeyEvent.KEYCODE_ENTER
-                    && event.getAction() == KeyEvent.ACTION_DOWN;
-            if (keyboardSend || hardwareEnter) {
-                sendMessage();
-                return true;
+        composer.setOnEditorActionListener(
+            (view, actionId, event) -> {
+                boolean controlEnter =
+                    event != null
+                        && event.isCtrlPressed()
+                        && event.getKeyCode()
+                            == KeyEvent.KEYCODE_ENTER
+                        && event.getAction()
+                            == KeyEvent.ACTION_DOWN;
+                if (controlEnter) {
+                    sendMessage();
+                    return true;
+                }
+                return false;
             }
-            return false;
-        });
+        );
         composer.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
@@ -304,9 +377,10 @@ public final class MainActivity extends Activity {
             }
             @Override public void afterTextChanged(Editable value) {}
         });
+        composer.setMinHeight(dp(44));
         row.addView(composer, new LinearLayout.LayoutParams(
             0,
-            dp(44),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
             1f
         ));
 
@@ -314,8 +388,15 @@ public final class MainActivity extends Activity {
         micButton.setOnClickListener(view -> toggleVoice());
         row.addView(micButton, iconParams(dp(42), dp(6)));
 
-        sendButton = iconButton(R.drawable.ic_send, "Send message", BLACK, WHITE);
-        sendButton.setOnClickListener(view -> sendMessage());
+        sendButton = iconButton(
+            R.drawable.ic_send,
+            "Send message",
+            BLACK,
+            WHITE
+        );
+        sendButton.setOnClickListener(
+            view -> handleSendOrStop()
+        );
         row.addView(sendButton, iconParams(dp(42), 0));
 
         wrapper.addView(row, matchWrap());
@@ -466,10 +547,15 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    private void openHistory() {
+        startActivity(
+            new Intent(this, ChatHistoryActivity.class)
+        );
+    }
+
     private void newChat() {
-        history.clear();
-        store.newConversationId();
-        renderHistory();
+        generating = false;
+        finishStreaming();
         startForegroundService(
             new Intent(this, VoiceService.class)
                 .setAction(VoiceService.ACTION_NEW_CHAT)
@@ -504,9 +590,19 @@ public final class MainActivity extends Activity {
             holder.addView(name, wrapWrap(0, dp(4)));
         }
 
-        TextView content = text(message.text, 16, BLACK);
+        TextView content = text("", 16, BLACK);
+        content.setText(
+            ChatTextFormatter.format(message.text)
+        );
         content.setTextIsSelectable(true);
+        content.setMovementMethod(
+            LinkMovementMethod.getInstance()
+        );
         content.setLineSpacing(0f, 1.14f);
+        content.setOnLongClickListener(view -> {
+            showMessageActions(view, message);
+            return true;
+        });
         content.setPadding(
             user ? dp(14) : 0,
             dp(10),
@@ -528,6 +624,15 @@ public final class MainActivity extends Activity {
             );
         }
         holder.addView(content, contentParams);
+
+        if (assistant) {
+            TextView copy = text("Copy", 12, MID);
+            copy.setPadding(0, dp(4), dp(8), dp(2));
+            copy.setOnClickListener(
+                view -> copyText(message.text)
+            );
+            holder.addView(copy, wrapWrap());
+        }
 
         LinearLayout.LayoutParams holderParams = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -579,6 +684,113 @@ public final class MainActivity extends Activity {
         streamingText = null;
     }
 
+    private void handleSendOrStop() {
+        if (generating) {
+            cancelGeneration();
+        } else {
+            sendMessage();
+        }
+    }
+
+    private void cancelGeneration() {
+        startService(
+            new Intent(this, VoiceService.class)
+                .setAction(
+                    VoiceService.ACTION_CANCEL_RESPONSE
+                )
+        );
+    }
+
+    private void showMessageActions(
+        View anchor,
+        ChatMessage message
+    ) {
+        PopupMenu popup = new PopupMenu(this, anchor);
+        popup.getMenu().add(0, 1, 0, "Copy");
+
+        if (ChatMessage.USER.equals(message.role)) {
+            popup.getMenu().add(
+                0,
+                2,
+                1,
+                "Edit and resend"
+            );
+        } else if (
+            ChatMessage.ASSISTANT.equals(message.role)
+        ) {
+            popup.getMenu().add(
+                0,
+                3,
+                1,
+                "Retry answer"
+            );
+        }
+
+        popup.getMenu().add(0, 4, 2, "Delete");
+        popup.setOnMenuItemClickListener(item -> {
+            return switch (item.getItemId()) {
+                case 1 -> {
+                    copyText(message.text);
+                    yield true;
+                }
+                case 2 -> {
+                    editMessage(message.text);
+                    yield true;
+                }
+                case 3 -> {
+                    retryMessage(message);
+                    yield true;
+                }
+                case 4 -> {
+                    history.deleteMessage(message.id);
+                    renderHistory();
+                    yield true;
+                }
+                default -> false;
+            };
+        });
+        popup.show();
+    }
+
+    private void copyText(String value) {
+        ClipboardManager clipboard =
+            (ClipboardManager) getSystemService(
+                Context.CLIPBOARD_SERVICE
+            );
+        if (clipboard == null) return;
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("Jarvis message", value)
+        );
+        Toast.makeText(
+            this,
+            "Copied",
+            Toast.LENGTH_SHORT
+        ).show();
+    }
+
+    private void editMessage(String value) {
+        composer.setText(value);
+        composer.setSelection(composer.length());
+        composer.requestFocus();
+    }
+
+    private void retryMessage(ChatMessage message) {
+        String userMessage = history.previousUserMessage(
+            message.id
+        );
+        if (userMessage.isBlank()) {
+            Toast.makeText(
+                this,
+                "No earlier user message to retry",
+                Toast.LENGTH_SHORT
+            ).show();
+            return;
+        }
+        composer.setText(userMessage);
+        composer.setSelection(composer.length());
+        sendMessage();
+    }
+
     private void scrollToBottom() {
         messageScroll.post(() -> messageScroll.fullScroll(View.FOCUS_DOWN));
     }
@@ -602,7 +814,20 @@ public final class MainActivity extends Activity {
 
     private void updateSendButton() {
         if (sendButton == null || composer == null) return;
-        boolean enabled = !composer.getText().toString().trim().isEmpty();
+        if (generating) {
+            sendButton.setImageResource(R.drawable.ic_stop);
+            sendButton.setContentDescription(
+                "Stop generating"
+            );
+            sendButton.setEnabled(true);
+            sendButton.setAlpha(1f);
+            return;
+        }
+
+        sendButton.setImageResource(R.drawable.ic_send);
+        sendButton.setContentDescription("Send message");
+        boolean enabled =
+            !composer.getText().toString().trim().isEmpty();
         sendButton.setEnabled(enabled);
         sendButton.setAlpha(enabled ? 1f : 0.35f);
     }

@@ -690,13 +690,15 @@ public final class SettingsActivity extends Activity {
     }
 
     private void clearChat() {
-        new ChatHistoryStore(this).clear();
-        store.newConversationId();
         startForegroundService(
             new Intent(this, VoiceService.class)
                 .setAction(VoiceService.ACTION_NEW_CHAT)
         );
-        Toast.makeText(this, "New chat started", Toast.LENGTH_SHORT).show();
+        Toast.makeText(
+            this,
+            "New chat started",
+            Toast.LENGTH_SHORT
+        ).show();
     }
 
     private View sectionHeader(String titleValue, String noteValue) {

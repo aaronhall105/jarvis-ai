@@ -40,6 +40,11 @@
             android:exported="true"
             android:screenOrientation="portrait" />
 
+        <activity
+            android:name=".ChatHistoryActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
         <service
             android:name=".VoiceService"
             android:exported="false"

@@ -39,6 +39,8 @@ public final class VoiceService extends Service implements
     public static final String ACTION_SEND_TEXT = "com.aaron.jarvisvoice.SEND_TEXT";
     public static final String ACTION_APPLY_SETTINGS = "com.aaron.jarvisvoice.APPLY_SETTINGS";
     public static final String ACTION_NEW_CHAT = "com.aaron.jarvisvoice.NEW_CHAT";
+    public static final String ACTION_SWITCH_CHAT = "com.aaron.jarvisvoice.SWITCH_CHAT";
+    public static final String ACTION_CANCEL_RESPONSE = "com.aaron.jarvisvoice.CANCEL_RESPONSE";
     public static final String ACTION_ASSISTANT_INVOKE = "com.aaron.jarvisvoice.ASSISTANT_INVOKE";
     public static final String ACTION_ASSISTANT_DISMISS = "com.aaron.jarvisvoice.ASSISTANT_DISMISS";
     public static final String ACTION_STATUS = "com.aaron.jarvisvoice.STATUS";
@@ -51,6 +53,8 @@ public final class VoiceService extends Service implements
     public static final String EXTRA_ACTIVE = "active";
     public static final String EXTRA_LISTENING = "listening";
     public static final String EXTRA_MODE = "mode";
+    public static final String EXTRA_CONVERSATION_ID =
+        "conversation_id";
 
     private static final int NOTIFICATION_ID = 1800;
     private static final String CHANNEL_ID = "jarvis_chat_voice";
@@ -138,6 +142,13 @@ public final class VoiceService extends Service implements
             }
             case ACTION_APPLY_SETTINGS -> reconnectForSettings();
             case ACTION_NEW_CHAT -> newChat();
+            case ACTION_SWITCH_CHAT -> switchChat(
+                intent.getStringExtra(
+                    EXTRA_CONVERSATION_ID
+                )
+            );
+            case ACTION_CANCEL_RESPONSE ->
+                cancelCurrentResponse();
             case ACTION_ASSISTANT_INVOKE -> {
                 requestedVoiceActive =
                     store.assistantStartsVoice() && microphoneForeground;
@@ -264,6 +275,7 @@ public final class VoiceService extends Service implements
     }
 
     private void connect() {
+        history.ensureActiveConversation();
         ready = false;
         voiceFoundation.opening("connecting to Jarvis Core");
         closeClientAndAudio();
@@ -311,12 +323,68 @@ public final class VoiceService extends Service implements
     }
 
     private void newChat() {
-        history.clear();
-        store.newConversationId();
-        broadcastEvent("clear", "", "", false, false);
+        String id = history.createConversation();
+        switchChat(id);
+    }
+
+    private void switchChat(String id) {
+        if (!history.switchConversation(id)) {
+            status("Unable to open that conversation");
+            return;
+        }
         requestedVoiceActive = false;
+        voiceActive = false;
+        VoiceSessionState.setActive(false);
         stopCaptureAndPlayback();
+        broadcastEvent(
+            "chat.switched",
+            "",
+            history.activeTitle(),
+            false,
+            false
+        );
         connect();
+    }
+
+    private void cancelCurrentResponse() {
+        JarvisRealtimeClient current = client;
+        if (current != null) current.cancelResponse();
+        pendingText = "";
+        pendingTextSpeak = false;
+        brainActive = false;
+        fallbackPending = false;
+        fallbackSpeaking = false;
+        turnShouldSpeak = false;
+        turnReceivedRealtimeAudio = false;
+        realtimePlayback.interrupt();
+        originalPlayback.stop();
+        if (homeAssistantTts != null) {
+            homeAssistantTts.cancelActiveRun();
+        }
+        if (speechFallback != null) {
+            speechFallback.cancel();
+        }
+        playbackActive = false;
+        broadcastEvent(
+            "generation.cancelled",
+            "",
+            "",
+            voiceActive,
+            false
+        );
+        status("Stopped");
+        if (
+            voiceActive
+                && ConversationMode.STANDARD.equals(
+                    store.conversationMode()
+                )
+                && store.standardAutoListen()
+        ) {
+            main.postDelayed(
+                this::startStandardListening,
+                200L
+            );
+        }
     }
 
     private void queueOrSend(String rawText, boolean speak) {
@@ -648,6 +716,9 @@ public final class VoiceService extends Service implements
             event.conversationId != null
                 && !event.conversationId.isBlank()
         ) {
+            history.rekeyActiveConversation(
+                event.conversationId
+            );
             store.setConversationId(event.conversationId);
         }
 
