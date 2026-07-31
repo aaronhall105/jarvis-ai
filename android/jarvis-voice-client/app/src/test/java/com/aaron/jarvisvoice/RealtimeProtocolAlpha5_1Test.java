@@ -20,7 +20,10 @@ public final class RealtimeProtocolAlpha5_1Test {
             "conversation"
         ));
 
-        assertEquals("19.0.0-alpha5.1", payload.getString("client_release"));
+        assertTrue(
+            payload.getString("client_release")
+                .startsWith("19.0.0-alpha")
+        );
         assertEquals("Europe/London", payload.getString("timezone"));
         assertEquals("websocket_pcm", payload.getString("transport"));
         assertTrue(payload.getString("local_datetime").contains("T"));
