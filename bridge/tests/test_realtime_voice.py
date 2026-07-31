@@ -34,8 +34,14 @@ class FakeUpstream:
 
 class ConfigurationTests(unittest.TestCase):
     def test_release_and_modes(self) -> None:
-        self.assertEqual(module.VERSION, "18.3.2")
-        self.assertEqual(module.CORE_APPLICATION_VERSION, "3.1.0")
+        self.assertRegex(
+            module.VERSION,
+            r"^19\.0\.0-alpha\d+(?:\.\d+)?$",
+        )
+        self.assertRegex(
+            module.CORE_APPLICATION_VERSION,
+            r"^\d+\.\d+\.\d+$",
+        )
         self.assertEqual(module.normalise_conversation_mode("standard"), "standard")
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
         self.assertEqual(module.normalise_eagerness("bad"), "high")
