@@ -89,10 +89,21 @@ public final class ProactiveClient implements AutoCloseable {
         int minutes,
         ResultCallback callback
     ) {
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("action", action);
+            payload.put("minutes", minutes);
+        } catch (Exception exception) {
+            main.post(() ->
+                callback.onError(message(exception))
+            );
+            return;
+        }
+
         execute(
             "POST",
             "/api/proactive/events/" + event.id + "/action",
-            new JSONObject().put("action", action).put("minutes", minutes),
+            payload,
             callback
         );
     }
