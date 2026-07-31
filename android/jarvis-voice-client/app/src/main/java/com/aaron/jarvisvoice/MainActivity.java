@@ -294,6 +294,22 @@ public final class MainActivity extends Activity {
             1f
         ));
 
+        ImageButton proactiveButton = iconButton(
+            R.drawable.ic_notifications,
+            "House activity",
+            SOFT,
+            BLACK
+        );
+        proactiveButton.setOnClickListener(view ->
+            startActivity(
+                new Intent(this, ProactiveActivity.class)
+            )
+        );
+        bar.addView(
+            proactiveButton,
+            iconParams(dp(40), dp(6))
+        );
+
         ImageButton historyButton = iconButton(
             R.drawable.ic_history,
             "Chat history",

@@ -1161,4 +1161,6 @@ async def dashboard() -> str:
     </html>
     """
 
-
+# Jarvis v19 alpha8 proactive router
+from app.proactive_intelligence import router as proactive_router
+app.include_router(proactive_router)

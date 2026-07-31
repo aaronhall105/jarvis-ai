@@ -45,6 +45,20 @@
             android:exported="false"
             android:screenOrientation="portrait" />
 
+        <activity
+            android:name=".ProactiveActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="jarvis"
+                    android:host="proactive" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".VoiceService"
             android:exported="false"

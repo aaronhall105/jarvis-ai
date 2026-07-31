@@ -1,4 +1,4 @@
-name: Build Jarvis Assistant v19.0.0-alpha7
+name: Build Jarvis Assistant v19.0.0-alpha8
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ on:
       - bridge/app/main.py
       - bridge/app/ai_engine.py
       - bridge/tests/test_realtime_voice_alpha5*.py
-      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha7.yml
-      - CHANGES_V19_0_0_ALPHA7.md
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha8.yml
+      - CHANGES_V19_0_0_ALPHA8.md
 
 permissions:
   contents: read
@@ -28,16 +28,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify alpha7 release source
+      - name: Verify alpha8 combined Core and Android source
         working-directory: .
         run: |
           set -euo pipefail
           git diff --check
-          grep -q 'versionCode = 190070' \
+          grep -q 'versionCode = 190080' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'versionName = "19.0.0-alpha7"' \
+          grep -q 'versionName = "19.0.0-alpha8"' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'client_release", "19.0.0-alpha7"' \
+          grep -q 'client_release", "19.0.0-alpha8"' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
           grep -q '100.127.215.111:8000' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/CoreEndpointSelector.java
@@ -52,6 +52,10 @@ jobs:
             android/jarvis-voice-client/app/src/main/AndroidManifest.xml
           grep -q 'ACTION_CANCEL_RESPONSE' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
+          grep -q 'ProactiveActivity' \
+            android/jarvis-voice-client/app/src/main/AndroidManifest.xml
+          grep -q 'jarvis_proactive.db' bridge/app/proactive_intelligence.py
+          grep -q 'notify.mobile_app_aaron_s_phone' bridge/app/proactive_intelligence.py
 
       - uses: actions/setup-java@v4
         with:
@@ -196,15 +200,25 @@ jobs:
           ! grep -RniE 'picovoice|porcupine|AccessKey' \
             app/src/main app/build.gradle.kts
 
-      - name: Test Jarvis Core alpha7 conversation archive protocol
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Jarvis Core test dependencies
+        working-directory: .
+        run: python3 -m pip install -r bridge/requirements.txt
+
+      - name: Test Jarvis Core alpha8 proactive intelligence
         working-directory: .
         run: |
           python3 -m py_compile \
             bridge/app/realtime_voice.py \
             bridge/app/main.py \
-            bridge/app/ai_engine.py
+            bridge/app/ai_engine.py \
+            bridge/app/proactive_intelligence.py
           PYTHONPATH=bridge python3 bridge/tests/test_realtime_voice_alpha5.py
           PYTHONPATH=bridge python3 bridge/tests/test_realtime_voice_alpha5_1.py
+          PYTHONPATH=bridge python3 bridge/tests/test_proactive_intelligence_alpha8.py
 
       - name: Unit tests and debug APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
@@ -212,11 +226,11 @@ jobs:
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha7-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha8-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v19.0.0-alpha7-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha7-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha8-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha8-debug.apk
           if-no-files-found: error
           retention-days: 30
