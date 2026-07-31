@@ -94,6 +94,7 @@ public final class VoiceService extends Service implements
     private long echoSuppressionUntilMs;
     private String pendingBargeInPartial = "";
     private long pendingBargeInPartialAtMs;
+    private long confirmedBargeInUntilMs;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -485,6 +486,26 @@ public final class VoiceService extends Service implements
             || fallbackSpeaking;
     }
 
+    private boolean usesPrivateAudioRoute() {
+        return alpha6AudioRouteMonitor != null
+            && alpha6AudioRouteMonitor.usesPrivateListeningRoute();
+    }
+
+    private long bargeInArmDelayMs() {
+        return usesPrivateAudioRoute() ? 180L : 850L;
+    }
+
+    private long followUpListenDelayMs() {
+        return usesPrivateAudioRoute() ? 180L : 500L;
+    }
+
+    private boolean explicitSpeakerBargeIn(String candidate) {
+        String normalised = PlaybackEchoPolicy.normalise(candidate);
+        return normalised.matches(
+            "^(?:jarvis\\s+)?(?:stop|wait|cancel|quiet|no|hold on|hang on)(?:\\s+.*)?$"
+        );
+    }
+
     private boolean isEchoSuppressionWindowActive() {
         return playbackActive
             || fallbackSpeaking
@@ -502,12 +523,13 @@ public final class VoiceService extends Service implements
 
     private void markAssistantAudioStarted() {
         echoSuppressionUntilMs = Long.MAX_VALUE;
+        confirmedBargeInUntilMs = 0L;
         clearPendingBargeInPartial();
     }
 
     private void markAssistantAudioEnded() {
         echoSuppressionUntilMs =
-            SystemClock.elapsedRealtime() + 2_200L;
+            SystemClock.elapsedRealtime() + (usesPrivateAudioRoute() ? 650L : 3_200L);
         clearPendingBargeInPartial();
     }
 
@@ -523,22 +545,31 @@ public final class VoiceService extends Service implements
             PlaybackEchoPolicy.normalise(candidate);
         if (normalised.isEmpty()) return false;
 
+        long now = SystemClock.elapsedRealtime();
         int wordCount = normalised.split(" ").length;
-        if (wordCount >= 4) {
+        if (usesPrivateAudioRoute() && wordCount >= 2) {
+            confirmedBargeInUntilMs = now + 2_000L;
             clearPendingBargeInPartial();
             return true;
         }
-
-        long now = SystemClock.elapsedRealtime();
+        if (explicitSpeakerBargeIn(normalised)) {
+            confirmedBargeInUntilMs = now + 2_000L;
+            clearPendingBargeInPartial();
+            return true;
+        }
         boolean repeated =
-            normalised.equals(pendingBargeInPartial)
+            wordCount >= 4
+                && normalised.equals(pendingBargeInPartial)
                 && now - pendingBargeInPartialAtMs
                     <= 1_300L;
 
         pendingBargeInPartial = normalised;
         pendingBargeInPartialAtMs = now;
 
-        if (repeated) clearPendingBargeInPartial();
+        if (repeated) {
+            confirmedBargeInUntilMs = now + 2_000L;
+            clearPendingBargeInPartial();
+        }
         return repeated;
     }
 
@@ -825,7 +856,9 @@ public final class VoiceService extends Service implements
 
     @Override public void onSpeechStarted() {
         if (!voiceActive) return;
-
+        if ((playbackActive || fallbackSpeaking) && !usesPrivateAudioRoute()) {
+            return;
+        }
         interruptCurrentTurnForBargeIn();
         prepareSpokenTurn(true);
         brainActive = true;
@@ -969,7 +1002,7 @@ public final class VoiceService extends Service implements
             stopVoice(false);
         } else if (ConversationMode.STANDARD.equals(store.conversationMode()) &&
                    store.standardAutoListen() && !playbackActive && !brainActive) {
-            main.postDelayed(this::startStandardListening, 250L);
+            main.postDelayed(this::startStandardListening, followUpListenDelayMs());
         }
     }
 
@@ -1004,7 +1037,7 @@ public final class VoiceService extends Service implements
             markAssistantAudioStarted();
             status("Jarvis is speaking — interrupt anytime");
             broadcastState(voiceActive, false);
-            main.postDelayed(this::keepStandardBargeInArmed, 260L);
+            main.postDelayed(this::keepStandardBargeInArmed, bargeInArmDelayMs());
             return;
         }
         markAssistantAudioEnded();
@@ -1022,7 +1055,7 @@ public final class VoiceService extends Service implements
         markAssistantAudioStarted();
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(voiceActive, false);
-        main.postDelayed(this::keepStandardBargeInArmed, 260L);
+        main.postDelayed(this::keepStandardBargeInArmed, bargeInArmDelayMs());
     }
 
     @Override public void onPlaybackCompleted() {
@@ -1052,7 +1085,7 @@ public final class VoiceService extends Service implements
         if (!store.keepConversationOpen()) {
             stopVoice(false);
         } else if (ConversationMode.STANDARD.equals(store.conversationMode()) && store.standardAutoListen()) {
-            main.postDelayed(this::startStandardListening, 250L);
+            main.postDelayed(this::startStandardListening, followUpListenDelayMs());
         } else {
             status("Live voice — listening continuously");
             broadcastState(true, true);
@@ -1184,6 +1217,14 @@ public final class VoiceService extends Service implements
         String command = text == null ? "" : text.trim();
         if (command.isEmpty()) {
             main.postDelayed(this::keepStandardBargeInArmed, 400L);
+            return;
+        }
+
+        boolean outputActive = playbackActive || fallbackSpeaking;
+        boolean confirmed = SystemClock.elapsedRealtime() < confirmedBargeInUntilMs;
+        if (outputActive && !usesPrivateAudioRoute() && !confirmed && !explicitSpeakerBargeIn(command)) {
+            clearPendingBargeInPartial();
+            main.postDelayed(this::keepStandardBargeInArmed, 450L);
             return;
         }
 

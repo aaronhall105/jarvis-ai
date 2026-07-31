@@ -15,7 +15,8 @@ class ToolEngine:
         "switch",
     }
 
-    STATE_VERIFY_DELAYS = (0.25, 0.5, 0.9)
+    STATE_VERIFY_DELAYS = (0.12, 0.20, 0.35)
+    STATE_RETRY_VERIFY_DELAYS = (0.18, 0.30, 0.50, 0.75, 1.00)
     AVAILABLE_ON_STATES = {"on", "playing", "paused", "idle", "buffering"}
     STOPPED_MEDIA_STATES = {"idle", "off", "standby", "stopped"}
 
@@ -338,20 +339,41 @@ class ToolEngine:
         )
 
         final_lookup: dict[str, dict[str, Any]] = {}
-        for delay in self.STATE_VERIFY_DELAYS:
-            await asyncio.sleep(delay)
-            refreshed = await self.readable_entity_states(refresh=True)
-            final_lookup = {
-                str(entity["entity_id"]): entity
-                for entity in refreshed
-                if entity.get("entity_id") in pending_ids
-            }
-            if all(
-                str(final_lookup.get(entity_id, {}).get("state") or "").lower()
-                == target_state
+        retried = False
+        for attempt, delays in enumerate((
+            self.STATE_VERIFY_DELAYS,
+            self.STATE_RETRY_VERIFY_DELAYS,
+        )):
+            for delay in delays:
+                await asyncio.sleep(delay)
+                refreshed = await self.readable_entity_states(refresh=True)
+                final_lookup = {
+                    str(entity["entity_id"]): entity
+                    for entity in refreshed
+                    if entity.get("entity_id") in pending_ids
+                }
+                if all(
+                    str(final_lookup.get(entity_id, {}).get("state") or "").lower()
+                    == target_state
+                    for entity_id in pending_ids
+                ):
+                    break
+
+            remaining_ids = [
+                entity_id
                 for entity_id in pending_ids
-            ):
+                if str(final_lookup.get(entity_id, {}).get("state") or "").lower()
+                != target_state
+            ]
+            if not remaining_ids:
                 break
+            if attempt == 0:
+                await self.client.call_service(
+                    domain="light",
+                    service=service,
+                    entity_ids=remaining_ids,
+                )
+                retried = True
 
         verified_ids = [
             entity_id
@@ -392,12 +414,14 @@ class ToolEngine:
             for entity_id in pending_ids
         ]
         return {
-            "success": True,
+            "success": not failed_ids,
             "area_id": area_id,
             "area_name": area_name,
             "domain": "light",
             "target_state": target_state,
             "changed": bool(verified_ids),
+            "command_sent": True,
+            "retried": retried,
             "verified": not failed_ids,
             "complete": not failed_ids and not unavailable,
             "already_in_target_state": False,
@@ -573,25 +597,39 @@ class ToolEngine:
         current_state = previous_state
         final_entity: dict[str, Any] = current_entity
         verified = False
-        for delay in self.STATE_VERIFY_DELAYS:
-            await asyncio.sleep(delay)
-            refreshed = await self.get_entity_state(entity_id)
-            final_entity = refreshed.get("entity") or {}
-            current_state = str(final_entity.get("state") or "unknown").lower()
-            if current_state == target_state:
-                verified = True
+        retried = False
+        for attempt, delays in enumerate((
+            self.STATE_VERIFY_DELAYS,
+            self.STATE_RETRY_VERIFY_DELAYS,
+        )):
+            for delay in delays:
+                await asyncio.sleep(delay)
+                refreshed = await self.get_entity_state(entity_id)
+                final_entity = refreshed.get("entity") or {}
+                current_state = str(final_entity.get("state") or "unknown").lower()
+                if current_state == target_state:
+                    verified = True
+                    break
+            if verified:
                 break
+            if attempt == 0:
+                await self.client.call_service(
+                    domain=domain,
+                    service=service,
+                    entity_ids=[entity_id],
+                )
+                retried = True
 
         if verified:
             response_message = f"{name} is now {target_state}."
         else:
             response_message = (
-                f"I sent the command to turn {name} {target_state}, but Home Assistant "
-                f"still reports it as {current_state}."
+                f"{name} still has not reported {target_state}. "
+                "I sent the safe command twice, but the device is not confirming the change."
             )
 
         return {
-            "success": True,
+            "success": verified,
             "entity_id": entity_id,
             "name": name,
             "area_id": entity.get("area_id"),
@@ -599,6 +637,8 @@ class ToolEngine:
             "domain": domain,
             "target_state": target_state,
             "changed": verified,
+            "command_sent": True,
+            "retried": retried,
             "verified": verified,
             "already_in_target_state": False,
             "previous_state": previous_state,

@@ -47,7 +47,11 @@ class ToneProfile:
         }
         return guidance.get(
             self.label,
-            "Use a calm, natural and direct conversational tone.",
+            (
+                "Use a warm, familiar and naturally varied British conversational tone. "
+                "Be candid and helpful, with occasional understated wit when the subject "
+                "is low stakes. Avoid stock assistant phrases."
+            ),
         )
 
 

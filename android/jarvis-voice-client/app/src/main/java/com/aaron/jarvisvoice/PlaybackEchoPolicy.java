@@ -45,7 +45,7 @@ public final class PlaybackEchoPolicy {
 
         if (heardWords.size() == 1) {
             String word = heardWords.get(0);
-            return word.length() >= 4 && spokenWords.contains(word);
+            return word.length() >= 3 && spokenWords.contains(word);
         }
 
         int contiguous = longestContiguousMatch(

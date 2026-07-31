@@ -46,6 +46,22 @@ public final class AudioRouteMonitor implements AutoCloseable {
         record("Audio route active");
     }
 
+    public boolean usesPrivateListeningRoute() {
+        if (audio == null) return false;
+        AudioDeviceInfo selected = audio.getCommunicationDevice();
+        if (selected == null) return false;
+        return switch (selected.getType()) {
+            case AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                 AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                 AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                 AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                 AudioDeviceInfo.TYPE_USB_DEVICE,
+                 AudioDeviceInfo.TYPE_USB_HEADSET,
+                 AudioDeviceInfo.TYPE_BLE_HEADSET -> true;
+            default -> false;
+        };
+    }
+
     @Override public void close() {
         if (!started || audio == null) return;
         started = false;

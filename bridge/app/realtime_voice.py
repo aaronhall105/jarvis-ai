@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "19.0.0-alpha5.1"
-CORE_APPLICATION_VERSION = "3.2.1"
+VERSION = "19.0.0-alpha10"
+CORE_APPLICATION_VERSION = "3.3.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000
@@ -140,6 +140,7 @@ class RealtimeVoiceConfig:
     user_is_admin: bool
     transcription_prompt: str
     timezone: str = "Europe/London"
+    quiet_controls: bool = True
 
     @classmethod
     def from_environment(cls) -> "RealtimeVoiceConfig":
@@ -162,6 +163,10 @@ class RealtimeVoiceConfig:
             ),
             timezone=normalise_timezone(
                 _env_text("JARVIS_TIMEZONE", "Europe/London")
+            ),
+            quiet_controls=_env_bool(
+                "JARVIS_MOBILE_QUIET_CONTROLS",
+                True,
             ),
         )
 
@@ -287,10 +292,10 @@ def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
         raw_result = raw_call.get("result")
         result = raw_result if isinstance(raw_result, dict) else {}
 
-        if "success" in result:
-            success = bool(result.get("success"))
-        elif "verified" in result:
+        if "verified" in result:
             success = bool(result.get("verified"))
+        elif "success" in result:
+            success = bool(result.get("success"))
         elif "error" in result:
             success = False
         else:
@@ -314,6 +319,40 @@ def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
         })
 
     return events
+
+
+QUIET_CONTROL_TOOLS = {
+    "control_device",
+    "control_area_lights",
+    "control_area_switches",
+    "run_media_shortcut",
+    "control_media_player",
+    "set_media_volume",
+}
+
+
+def control_voice_policy(command: str, tool_events: list[dict[str, Any]], *, enabled: bool) -> tuple[bool, str]:
+    if not enabled or len(tool_events) != 1:
+        return False, ""
+    event = tool_events[0]
+    if str(event.get("tool") or "") not in QUIET_CONTROL_TOOLS:
+        return False, ""
+    if not bool(event.get("success")):
+        return False, ""
+    message = _clean_event_message(event.get("message"), 240)
+    lowered = message.casefold()
+    if any(term in lowered for term in ("failed", "could not", "unavailable", "not responding", "not confirming", "still reports", "has not reported")):
+        return False, ""
+    if "already" in lowered:
+        return True, "Already done."
+    normalised = " ".join(str(command or "").casefold().split())
+    if re.search(r"\b(?:turn|switch|power)\b.*\boff\b", normalised):
+        choices = ("Done.", "Done.", "That's off.", "Done, sir.", "Consider it handled.", "Done.", "Certainly.", "Done.")
+    elif "light" in normalised and re.search(r"\b(?:turn|switch|power)\b.*\bon\b", normalised):
+        choices = ("Done.", "Done.", "It's on.", "Done, sir.", "Let there be light.", "Done.", "Certainly.", "Done.")
+    else:
+        choices = ("Done.", "Done.", "Certainly.", "Done, sir.", "Consider it handled.", "Done.", "All sorted.", "Done.")
+    return True, choices[sum(normalised.encode("utf-8")) % len(choices)]
 
 
 class RealtimeVoiceProxy:
@@ -422,8 +461,8 @@ class RealtimeVoiceProxy:
                     and candidate == self.config.user_id
                 )
 
-        metadata["response_style"] = "brief"
-        metadata["reasoning_effort"] = "low"
+        metadata["response_style"] = "natural"
+        metadata["reasoning_effort"] = "medium"
         metadata["mobile_fast_response"] = True
         metadata["client_timezone"] = normalise_timezone(
             auth_payload.get("timezone"),
@@ -794,6 +833,13 @@ class RealtimeVoiceProxy:
             tool_events = sanitise_tool_events(
                 raw_result.get("calls")
             )
+            quiet_control, compact_response = control_voice_policy(
+                command,
+                tool_events,
+                enabled=self.config.quiet_controls,
+            )
+            if quiet_control:
+                response = compact_response
             memory_used = bool(raw_result.get("memory_used", False))
             message_count = _safe_int(
                 raw_result.get("message_count"),
@@ -815,6 +861,7 @@ class RealtimeVoiceProxy:
                 "tool_called": bool(
                     raw_result.get("tool_called", bool(tool_events))
                 ),
+                "quiet_control": quiet_control,
                 "memory_used": memory_used,
                 "message_count": message_count,
                 "user_name": user_name,
@@ -831,6 +878,7 @@ class RealtimeVoiceProxy:
                 "model": None,
                 "tool_events": [],
                 "tool_called": False,
+                "quiet_control": False,
                 "memory_used": False,
                 "message_count": 0,
                 "user_name": str(
@@ -911,10 +959,11 @@ class RealtimeVoiceProxy:
                 "conversation_id": result["conversation_id"],
                 "model": result["model"],
                 "voice_mode": voice_mode,
+                "quiet_control": bool(result.get("quiet_control")),
             },
         )
 
-        if not speak:
+        if not speak or bool(result.get("quiet_control")):
             await self._send_json(client, {"type": "turn.done", "status": "completed", "usage": None})
             return
 
