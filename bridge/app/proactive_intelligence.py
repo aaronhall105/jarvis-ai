@@ -9,8 +9,6 @@ import logging
 import os
 import sqlite3
 import time
-import urllib.error
-import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
@@ -457,9 +456,27 @@ class ProactiveEngine:
             return self.default_settings(user)
         categories = self.default_settings(user)["categories"]
         try:
-            categories.update(json.loads(row["categories_json"]))
-        except Exception:
-            pass
+            stored_categories = json.loads(row["categories_json"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Ignoring invalid proactive categories for %s: %s",
+                user,
+                exc,
+            )
+        else:
+            if isinstance(stored_categories, dict):
+                categories.update(
+                    {
+                        key: bool(value)
+                        for key, value in stored_categories.items()
+                        if key in CATEGORIES
+                    }
+                )
+            else:
+                logger.warning(
+                    "Ignoring non-object proactive categories for %s",
+                    user,
+                )
         return {
             "user_id": user,
             "enabled": bool(row["enabled"]),
@@ -746,23 +763,37 @@ class ProactiveEngine:
         method: str,
         payload: dict[str, Any] | None,
     ) -> Any:
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode() if payload is not None else None,
-            method=method,
-            headers={
-                "Authorization": "Bearer " + self.ha_token,
-                "Content-Type": "application/json",
-            },
-        )
         try:
-            with urllib.request.urlopen(request, timeout=12) as response:
-                raw = response.read().decode()
-                return json.loads(raw) if raw else {}
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
+            response = httpx.request(
+                method=method,
+                url=url,
+                json=payload,
+                headers={
+                    "Authorization": "Bearer " + self.ha_token,
+                    "Content-Type": "application/json",
+                },
+                timeout=12.0,
+                follow_redirects=False,
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text
             raise RuntimeError(
-                f"Home Assistant HTTP {exc.code}: {detail[:250]}"
+                "Home Assistant HTTP "
+                f"{exc.response.status_code}: {detail[:250]}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"Home Assistant request failed: {exc}"
+            ) from exc
+
+        if not response.content:
+            return {}
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "Home Assistant returned invalid JSON"
             ) from exc
 
     async def fetch_states(self) -> list[dict[str, Any]]:
@@ -814,18 +845,36 @@ class ProactiveEngine:
         self.states = current
 
     def update(self, event_id: str, **fields: Any) -> None:
-        allowed = {
-            "status", "updated_at", "notified_at", "spoken_at", "snoozed_until"
+        statements = {
+            "status": (
+                "UPDATE proactive_events SET status = ? WHERE id = ?"
+            ),
+            "updated_at": (
+                "UPDATE proactive_events SET updated_at = ? WHERE id = ?"
+            ),
+            "notified_at": (
+                "UPDATE proactive_events SET notified_at = ? WHERE id = ?"
+            ),
+            "spoken_at": (
+                "UPDATE proactive_events SET spoken_at = ? WHERE id = ?"
+            ),
+            "snoozed_until": (
+                "UPDATE proactive_events SET snoozed_until = ? WHERE id = ?"
+            ),
         }
-        safe = {key: value for key, value in fields.items() if key in allowed}
+        safe = {
+            key: value
+            for key, value in fields.items()
+            if key in statements
+        }
         if not safe:
             return
-        assignments = ", ".join(f"{key} = ?" for key in safe)
         with self.connection() as connection:
-            connection.execute(
-                f"UPDATE proactive_events SET {assignments} WHERE id = ?",
-                list(safe.values()) + [event_id],
-            )
+            for key, value in safe.items():
+                connection.execute(
+                    statements[key],
+                    (value, event_id),
+                )
 
     @staticmethod
     def row(row: sqlite3.Row) -> dict[str, Any]:

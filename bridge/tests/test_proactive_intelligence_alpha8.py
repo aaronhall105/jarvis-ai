@@ -10,6 +10,7 @@ from app.proactive_intelligence import (
     Candidate,
     ProactiveEngine,
     Rules,
+    SettingsModel,
 )
 
 
@@ -100,6 +101,50 @@ class Alpha8ProactiveTest(unittest.TestCase):
                 )
 
         asyncio.run(run())
+
+
+    def test_invalid_saved_categories_fall_back_safely(self):
+        self.engine.save_settings(
+            SettingsModel(
+                user_id="aaron",
+                categories={"security": False},
+            )
+        )
+        with self.engine.connection() as connection:
+            connection.execute(
+                "UPDATE proactive_settings "
+                "SET categories_json = ? WHERE user_id = ?",
+                ("{invalid-json", "aaron"),
+            )
+
+        settings = self.engine.settings("aaron")
+
+        self.assertTrue(settings["categories"]["security"])
+        self.assertTrue(settings["categories"]["cameras"])
+
+    def test_event_update_ignores_unknown_columns(self):
+        candidate = Candidate(
+            "system",
+            "update_test",
+            "sensor.update_test",
+            "Update test",
+            "Update message",
+            "Update reason",
+            85,
+        )
+
+        async def run():
+            event = await self.engine.record(candidate)
+            self.engine.update(
+                event["id"],
+                status="dismissed",
+                attacker_controlled_column="blocked",
+            )
+            updated = self.engine.get_event(event["id"])
+            self.assertEqual("dismissed", updated["status"])
+
+        asyncio.run(run())
+
 
 
 if __name__ == "__main__":

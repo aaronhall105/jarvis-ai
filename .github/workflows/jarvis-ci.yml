@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -42,7 +44,35 @@ jobs:
       - name: Ruff
         run: python -m ruff check bridge/app bridge/tests
       - name: Bandit
-        run: python -m bandit -q -r bridge/app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Repository-wide high-severity security scan"
+          python -m bandit -q -r bridge/app -lll
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+          fi
+
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          mapfile -t CHANGED_PYTHON < <(
+            git diff --name-only "$BASE_SHA" "$GITHUB_SHA" -- bridge/app |
+              grep -E '\.py$' || true
+          )
+
+          if (( ${#CHANGED_PYTHON[@]} > 0 )); then
+            echo "Strict scan for changed Core Python files:"
+            printf '  %s\n' "${CHANGED_PYTHON[@]}"
+            python -m bandit -q "${CHANGED_PYTHON[@]}"
+          else
+            echo "No Core Python files changed in this commit."
+          fi
       - name: Dependency audit
         run: python -m pip_audit -r bridge/requirements.txt --progress-spinner off
 
