@@ -1,5 +1,6 @@
 package com.aaron.jarvisvoice;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.LinkedHashMap;
@@ -33,7 +34,10 @@ public final class ProactiveSettings {
         this.speakEnabled = speakEnabled;
         this.categories = new LinkedHashMap<>();
         for (String category : CATEGORIES) {
-            this.categories.put(category, categories.getOrDefault(category, true));
+            this.categories.put(
+                category,
+                categories.getOrDefault(category, true)
+            );
         }
     }
 
@@ -60,18 +64,30 @@ public final class ProactiveSettings {
     }
 
     public JSONObject toJson() {
-        JSONObject categoriesJson = new JSONObject();
-        for (Map.Entry<String, Boolean> entry : categories.entrySet()) {
-            categoriesJson.put(entry.getKey(), entry.getValue());
+        try {
+            JSONObject categoriesJson = new JSONObject();
+            for (Map.Entry<String, Boolean> entry : categories.entrySet()) {
+                categoriesJson.put(
+                    entry.getKey(),
+                    entry.getValue()
+                );
+            }
+
+            JSONObject payload = new JSONObject();
+            payload.put("user_id", userId);
+            payload.put("enabled", enabled);
+            payload.put("min_importance", minImportance);
+            payload.put("notify_enabled", notifyEnabled);
+            payload.put("speak_enabled", speakEnabled);
+            payload.put("quiet_start_hour", 22);
+            payload.put("quiet_end_hour", 7);
+            payload.put("categories", categoriesJson);
+            return payload;
+        } catch (JSONException exception) {
+            throw new IllegalStateException(
+                "Unable to create proactive settings JSON",
+                exception
+            );
         }
-        return new JSONObject()
-            .put("user_id", userId)
-            .put("enabled", enabled)
-            .put("min_importance", minImportance)
-            .put("notify_enabled", notifyEnabled)
-            .put("speak_enabled", speakEnabled)
-            .put("quiet_start_hour", 22)
-            .put("quiet_end_hour", 7)
-            .put("categories", categoriesJson);
     }
 }
