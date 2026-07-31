@@ -29,6 +29,8 @@ public final class VoiceService extends Service implements
     StandardSpeechEngine.Listener,
     ReliableSpeechFallback.Listener {
 
+    private AudioRouteMonitor alpha6AudioRouteMonitor;
+
     public static final String ACTION_START = "com.aaron.jarvisvoice.START";
     public static final String ACTION_STOP = "com.aaron.jarvisvoice.STOP";
     public static final String ACTION_START_VOICE = "com.aaron.jarvisvoice.START_VOICE";
@@ -90,6 +92,9 @@ public final class VoiceService extends Service implements
 
     @Override public void onCreate() {
         super.onCreate();
+        new VoiceDiagnosticsStore(this).recordLifecycle("Service started", true);
+        alpha6AudioRouteMonitor = new AudioRouteMonitor(this);
+        alpha6AudioRouteMonitor.start();
         store = new SecureStore(this);
         voiceFoundation =
             new VoiceFoundationStateMachine(this);
@@ -1284,6 +1289,14 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onDestroy() {
+        if (alpha6AudioRouteMonitor != null) {
+            alpha6AudioRouteMonitor.close();
+            alpha6AudioRouteMonitor = null;
+        }
+        new VoiceDiagnosticsStore(this).recordLifecycle(
+            "Service stopped",
+            true
+        );
         stopping = true;
         VoiceSessionState.setActive(false);
         closeClientAndAudio();
@@ -1317,4 +1330,13 @@ public final class VoiceService extends Service implements
     private static String safe(String value, String fallback) {
         return value == null || value.isBlank() ? fallback : value;
     }
+
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        new VoiceDiagnosticsStore(this).recordLifecycle(
+            "Task removed — session recoverable",
+            true
+        );
+        super.onTaskRemoved(rootIntent);
+    }
+
 }

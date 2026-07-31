@@ -337,6 +337,14 @@ public final class SettingsActivity extends Activity {
         );
         card.addView(refresh, matchWrap(0, dp(10)));
 
+        Button systemTest = primaryButton(
+            "Run Jarvis system test"
+        );
+        systemTest.setOnClickListener(view ->
+            runJarvisSystemTest()
+        );
+        card.addView(systemTest, matchWrap(0, dp(10)));
+
         Button resetDiagnostics = secondaryButton(
             "Reset diagnostics counters"
         );
@@ -359,6 +367,29 @@ public final class SettingsActivity extends Activity {
         voiceFoundationStatus.setText(
             new VoiceDiagnosticsStore(this).summary()
         );
+    }
+
+    private void runJarvisSystemTest() {
+        if (voiceFoundationStatus == null) return;
+        voiceFoundationStatus.setText(
+            "Running Jarvis alpha6 system test…"
+        );
+        String configured = coreUrl == null
+            ? ""
+            : coreUrl.getText().toString();
+        new JarvisSystemTest(this).run(configured, result -> {
+            voiceFoundationStatus.setText(
+                result.report + "\n\n"
+                    + new VoiceDiagnosticsStore(this).summary()
+            );
+            Toast.makeText(
+                this,
+                result.passed
+                    ? "Jarvis system test passed"
+                    : "Jarvis system test needs attention",
+                Toast.LENGTH_LONG
+            ).show();
+        });
     }
 
     private View buildBehaviourCard() {

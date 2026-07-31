@@ -33,6 +33,25 @@ public final class VoiceDiagnosticsStore {
             .apply();
     }
 
+    public void recordAudioRoute(String summary) {
+        preferences.edit()
+            .putString("audio_route", safe(summary))
+            .putLong("audio_route_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
+    public void recordLifecycle(String state, boolean recoverable) {
+        int starts = preferences.getInt("service_start_count", 0);
+        SharedPreferences.Editor editor = preferences.edit()
+            .putString("lifecycle_state", safe(state))
+            .putBoolean("lifecycle_recoverable", recoverable)
+            .putLong("lifecycle_updated_at", System.currentTimeMillis());
+        if (safe(state).toLowerCase().contains("started")) {
+            editor.putInt("service_start_count", starts + 1);
+        }
+        editor.apply();
+    }
+
     public void recordNetwork(String summary) {
         preferences.edit()
             .putString("network", safe(summary))
@@ -81,6 +100,31 @@ public final class VoiceDiagnosticsStore {
             .apply();
     }
 
+    public void recordTurnPerformance(
+        TurnPerformanceTracker.Snapshot snapshot
+    ) {
+        preferences.edit()
+            .putLong("turn_brain_ms", snapshot.brainStartMs)
+            .putLong("turn_first_token_ms", snapshot.firstTokenMs)
+            .putLong("turn_first_audio_ms", snapshot.firstAudioMs)
+            .putLong("turn_total_ms", snapshot.totalMs)
+            .putInt("turn_samples", snapshot.sampleCount)
+            .putLong("turn_median_ms", snapshot.medianTotalMs)
+            .putLong("turn_worst_ms", snapshot.worstTotalMs)
+            .putInt("dropped_frames_turn", snapshot.droppedThisTurn)
+            .putInt("dropped_frames_total", snapshot.droppedTotal)
+            .putLong("turn_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
+    public void recordSystemTest(boolean passed, String report) {
+        preferences.edit()
+            .putBoolean("system_test_passed", passed)
+            .putString("system_test_report", safe(report))
+            .putLong("system_test_updated_at", System.currentTimeMillis())
+            .apply();
+    }
+
     public void recordReconnect(int attempt, long delay, String reason) {
         preferences.edit()
             .putInt("last_reconnect_attempt", Math.max(0, attempt))
@@ -102,6 +146,22 @@ public final class VoiceDiagnosticsStore {
         String to,
         String reason
     ) {
+        if (ExpectedTransitionPolicy.isExpected(from, to, reason)) {
+            int expected = preferences.getInt(
+                "expected_transition_count",
+                0
+            );
+            preferences.edit()
+                .putInt("expected_transition_count", expected + 1)
+                .putString(
+                    "last_expected_transition",
+                    safe(from) + " -> " + safe(to)
+                        + " · " + safe(reason)
+                )
+                .apply();
+            return;
+        }
+
         int count = preferences.getInt(
             "invalid_transition_count",
             0
@@ -151,14 +211,47 @@ public final class VoiceDiagnosticsStore {
             .apply();
     }
 
+    public boolean hasConversationContext() {
+        String value = preferences.getString(
+            "conversation_id",
+            ""
+        );
+        return value != null
+            && !value.isBlank()
+            && !"Not synchronised".equals(value)
+            && !"unknown".equals(value);
+    }
+
+    public String conversationContextSummary() {
+        return preferences.getString(
+            "conversation_id",
+            "Not synchronised"
+        );
+    }
+
+    public String activeEndpointSummary() {
+        return preferences.getString(
+            "active_endpoint",
+            "Not selected"
+        ) + " · " + preferences.getString(
+            "active_endpoint_url",
+            "Not selected"
+        );
+    }
+
     public void resetCounters() {
         preferences.edit()
             .putInt("recovery_count", 0)
+            .putInt("expected_transition_count", 0)
             .putInt("invalid_transition_count", 0)
             .putInt("last_reconnect_attempt", 0)
             .putLong("last_reconnect_delay_ms", 0L)
+            .putInt("dropped_frames_turn", 0)
+            .putInt("dropped_frames_total", 0)
+            .putInt("turn_samples", 0)
             .remove("last_reconnect_reason")
             .remove("last_recovery")
+            .remove("last_expected_transition")
             .remove("last_invalid_transition")
             .apply();
     }
@@ -169,6 +262,10 @@ public final class VoiceDiagnosticsStore {
         String audio = preferences.getString(
             "audio_processing",
             "Audio processing not measured yet"
+        );
+        String audioRoute = preferences.getString(
+            "audio_route",
+            "Audio route not measured yet"
         );
         boolean networkOnline = preferences.getBoolean(
             "network_online",
@@ -197,22 +294,66 @@ public final class VoiceDiagnosticsStore {
         long connect = preferences.getLong("connect_latency_ms", -1L);
         long roundTrip = preferences.getLong("round_trip_ms", -1L);
         long firstAudio = preferences.getLong("first_audio_ms", -1L);
-        int reconnectAttempt = preferences.getInt("last_reconnect_attempt", 0);
-        long reconnectDelay = preferences.getLong("last_reconnect_delay_ms", 0L);
+        long turnBrain = preferences.getLong("turn_brain_ms", -1L);
+        long firstToken = preferences.getLong("turn_first_token_ms", -1L);
+        long turnFirstAudio = preferences.getLong(
+            "turn_first_audio_ms",
+            -1L
+        );
+        long turnTotal = preferences.getLong("turn_total_ms", -1L);
+        int turnSamples = preferences.getInt("turn_samples", 0);
+        long turnMedian = preferences.getLong("turn_median_ms", -1L);
+        long turnWorst = preferences.getLong("turn_worst_ms", -1L);
+        int droppedTurn = preferences.getInt("dropped_frames_turn", 0);
+        int droppedTotal = preferences.getInt("dropped_frames_total", 0);
+        int reconnectAttempt = preferences.getInt(
+            "last_reconnect_attempt",
+            0
+        );
+        long reconnectDelay = preferences.getLong(
+            "last_reconnect_delay_ms",
+            0L
+        );
         int recoveries = preferences.getInt("recovery_count", 0);
-        int invalid = preferences.getInt("invalid_transition_count", 0);
-        String coreUser = preferences.getString("core_user", "Not synchronised");
-        String conversationId = preferences.getString(
-            "conversation_id",
+        int expected = preferences.getInt(
+            "expected_transition_count",
+            0
+        );
+        int invalid = preferences.getInt(
+            "invalid_transition_count",
+            0
+        );
+        String coreUser = preferences.getString(
+            "core_user",
             "Not synchronised"
         );
+        String conversationId = conversationContextSummary();
         int messageCount = preferences.getInt("message_count", 0);
         String lastTool = preferences.getString("last_tool", "None");
         boolean lastToolSuccess = preferences.getBoolean(
             "last_tool_success",
             false
         );
-        boolean memoryUsed = preferences.getBoolean("memory_used", false);
+        boolean memoryUsed = preferences.getBoolean(
+            "memory_used",
+            false
+        );
+        String lifecycle = preferences.getString(
+            "lifecycle_state",
+            "Not measured"
+        );
+        int serviceStarts = preferences.getInt(
+            "service_start_count",
+            0
+        );
+        boolean systemPassed = preferences.getBoolean(
+            "system_test_passed",
+            false
+        );
+        long systemAt = preferences.getLong(
+            "system_test_updated_at",
+            0L
+        );
         long updated = preferences.getLong("updated_at", 0L);
 
         String time = updated <= 0L
@@ -221,10 +362,14 @@ public final class VoiceDiagnosticsStore {
                 DateFormat.SHORT,
                 DateFormat.SHORT
             ).format(new Date(updated));
+        String systemStatus = systemAt <= 0L
+            ? "not run"
+            : systemPassed ? "passed" : "attention required";
 
         return "State: " + state
             + "\nMicrophone: " + owner
             + "\nAudio: " + audio
+            + "\nAudio route: " + audioRoute
             + "\nNetwork online: " + (networkOnline ? "yes" : "no")
             + " · " + networkDetail
             + "\nCore: " + coreReachability + " · " + coreDetail
@@ -233,6 +378,14 @@ public final class VoiceDiagnosticsStore {
             + "\nConnect: " + latency(connect)
             + " · RTT: " + latency(roundTrip)
             + " · first audio: " + latency(firstAudio)
+            + "\nLast turn: brain " + latency(turnBrain)
+            + " · first token " + latency(firstToken)
+            + " · first audio " + latency(turnFirstAudio)
+            + " · total " + latency(turnTotal)
+            + "\nLast " + turnSamples + " turns: median "
+            + latency(turnMedian) + " · worst " + latency(turnWorst)
+            + "\nDropped audio frames: " + droppedTurn
+            + " last turn · " + droppedTotal + " total"
             + "\nCore context: " + coreUser
             + " · " + messageCount + " messages"
             + "\nConversation: " + conversationId
@@ -243,9 +396,13 @@ public final class VoiceDiagnosticsStore {
                     ? ""
                     : lastToolSuccess ? " · success" : " · failed"
             )
+            + "\nLifecycle: " + lifecycle
+            + " · service starts " + serviceStarts
+            + "\nSystem test: " + systemStatus
             + "\nLast reconnect: #" + reconnectAttempt
             + " after " + reconnectDelay + " ms"
             + "\nRecoveries: " + recoveries
+            + " · expected transitions: " + expected
             + " · ordering warnings: " + invalid
             + "\nUpdated: " + time;
     }

@@ -1,4 +1,4 @@
-name: Build Jarvis Assistant v19.0.0-alpha5.1
+name: Build Jarvis Assistant v19.0.0-alpha6
 
 on:
   workflow_dispatch:
@@ -11,8 +11,8 @@ on:
       - bridge/app/main.py
       - bridge/app/ai_engine.py
       - bridge/tests/test_realtime_voice_alpha5*.py
-      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha5.1.yml
-      - CHANGES_V19_0_0_ALPHA5_1.md
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha6.yml
+      - CHANGES_V19_0_0_ALPHA6.md
 
 permissions:
   contents: read
@@ -33,15 +33,19 @@ jobs:
         run: |
           set -euo pipefail
           git diff --check
-          grep -q 'versionCode = 190051' \
+          grep -q 'versionCode = 190060' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'versionName = "19.0.0-alpha5.1"' \
+          grep -q 'versionName = "19.0.0-alpha6"' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'client_release", "19.0.0-alpha5.1"' \
+          grep -q 'client_release", "19.0.0-alpha6"' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
           grep -q '100.127.215.111:8000' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/CoreEndpointSelector.java
           grep -q 'Europe/London' bridge/app/realtime_voice.py
+          grep -q 'TurnPerformanceTracker' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java
+          grep -q 'Run Jarvis system test' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java
 
       - uses: actions/setup-java@v4
         with:
@@ -186,7 +190,7 @@ jobs:
           ! grep -RniE 'picovoice|porcupine|AccessKey' \
             app/src/main app/build.gradle.kts
 
-      - name: Test Jarvis Core alpha5.1 context and timezone protocol
+      - name: Test Jarvis Core alpha6 performance and lifecycle protocol
         working-directory: .
         run: |
           python3 -m py_compile \
@@ -202,11 +206,11 @@ jobs:
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha5.1-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha6-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v19.0.0-alpha5.1-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha5.1-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha6-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha6-debug.apk
           if-no-files-found: error
           retention-days: 30

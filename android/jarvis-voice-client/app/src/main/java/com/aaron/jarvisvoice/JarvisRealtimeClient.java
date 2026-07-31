@@ -54,6 +54,7 @@ public final class JarvisRealtimeClient {
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final VoiceDiagnosticsStore diagnostics;
+    private final TurnPerformanceTracker performance;
     private final NetworkQualityMonitor network;
     private final OkHttpClient http = new OkHttpClient.Builder()
         .pingInterval(12, TimeUnit.SECONDS)
@@ -104,6 +105,7 @@ public final class JarvisRealtimeClient {
         this.conversationId = conversationId;
         this.listener = listener;
         diagnostics = new VoiceDiagnosticsStore(context);
+        performance = new TurnPerformanceTracker(diagnostics);
         endpoints = new CoreEndpointSelector(context, coreUrl);
         lanRecheckTask = () -> {
             if (!ready || endpoints.isLan(activeCoreUrl)) return;
@@ -149,6 +151,7 @@ public final class JarvisRealtimeClient {
 
     public void close() {
         shouldReconnect = false;
+        performance.abandonTurn();
         authenticated = false;
         ready = false;
         opening = false;
@@ -168,13 +171,17 @@ public final class JarvisRealtimeClient {
     public boolean sendAudio(byte[] pcm16) {
         WebSocket current = socket;
         if (!ready || current == null || pcm16 == null || pcm16.length == 0) return false;
-        if (current.queueSize() > 384_000L) return false;
+        if (current.queueSize() > 384_000L) {
+            performance.recordDroppedAudioFrame();
+            return false;
+        }
         return current.send(ByteString.of(pcm16, 0, pcm16.length));
     }
 
     public void cancelResponse() {
         WebSocket current = socket;
         if (authenticated && current != null) {
+            performance.abandonTurn();
             current.send(RealtimeProtocol.cancel());
         }
     }
@@ -185,6 +192,7 @@ public final class JarvisRealtimeClient {
         try {
             turnStartedAtMs = SystemClock.elapsedRealtime();
             firstAudioMeasured = false;
+            performance.beginTurn();
             return current.send(RealtimeProtocol.text(text.trim(), speak));
         } catch (Exception exception) {
             post(() -> listener.onError("Could not send text: " + safeMessage(exception)));
@@ -316,6 +324,7 @@ public final class JarvisRealtimeClient {
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
                 if (currentGeneration != generation) return;
+                performance.markFirstAudio();
                 if (!firstAudioMeasured && turnStartedAtMs > 0L) {
                     firstAudioMeasured = true;
                     diagnostics.recordFirstAudioLatency(
@@ -425,16 +434,23 @@ public final class JarvisRealtimeClient {
                 schedulePing();
             }
             case "status" -> post(() -> listener.onStatus(event.message));
-            case "speech.started" -> post(listener::onSpeechStarted);
+            case "speech.started" -> {
+                performance.beginTurn();
+                post(listener::onSpeechStarted);
+            }
             case "user.transcript" -> {
                 turnStartedAtMs = SystemClock.elapsedRealtime();
                 firstAudioMeasured = false;
                 post(() -> listener.onUserTranscript(event.text));
             }
-            case "assistant.transcript.delta" -> post(() -> listener.onAssistantTranscriptDelta(event.text));
+            case "assistant.transcript.delta" -> {
+                performance.markFirstToken();
+                post(() -> listener.onAssistantTranscriptDelta(event.text));
+            }
             case "assistant.transcript.done" -> post(() -> listener.onAssistantTranscriptDone(event.text));
             case "audio.done" -> post(listener::onAudioDone);
             case "brain.started" -> {
+                performance.markBrainStarted();
                 if (turnStartedAtMs <= 0L) {
                     turnStartedAtMs = SystemClock.elapsedRealtime();
                 }
@@ -443,10 +459,16 @@ public final class JarvisRealtimeClient {
                     event.command.isBlank() ? event.text : event.command
                 ));
             }
-            case "brain.delta" -> post(() -> listener.onBrainDelta(event.text));
+            case "brain.delta" -> {
+                performance.markFirstToken();
+                post(() -> listener.onBrainDelta(event.text));
+            }
             case "brain.response" -> post(() -> listener.onBrainResponse(event.text, event.success, event.conversationId));
             case "original.tts" -> post(() -> listener.onOriginalTts(event.text));
-            case "turn.done" -> post(listener::onTurnDone);
+            case "turn.done" -> {
+                performance.finishTurn();
+                post(listener::onTurnDone);
+            }
             case "session.context",
                  "tool.started",
                  "tool.completed",
