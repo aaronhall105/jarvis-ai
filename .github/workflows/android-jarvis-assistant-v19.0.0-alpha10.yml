@@ -30,16 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify alpha9 combined Core and Android source
+      - name: Verify alpha10 combined Core and Android source
         working-directory: .
         run: |
           set -euo pipefail
           git diff --check
           grep -q 'versionCode = 190100' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'versionName = "19.0.0-alpha9"' \
+          grep -q 'versionName = "19.0.0-alpha10"' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'client_release", "19.0.0-alpha9"' \
+          grep -q 'client_release", "19.0.0-alpha10"' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
           grep -q '100.127.215.111:8000' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/CoreEndpointSelector.java
