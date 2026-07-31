@@ -57,10 +57,9 @@ DEFAULT_LABELS = {
     "bicycle",
 }
 VISION_QUERY = re.compile(
-    r"\b(?:camera|cameras|frigate|snapshot|front door|front_door|"
-    r"hallway|living room|living_room|bedroom|visitor|package|"
-    r"person detected|who was|who is|what happened|anyone|someone|"
-    r"movement|motion|recording)\b",
+    r"\b(?:camera|cameras|frigate|snapshot|visitor|package|"
+    r"person detected|detection|who was|who is|what happened|"
+    r"anyone|someone|movement|motion|recording)\b",
     re.IGNORECASE,
 )
 DESCRIBE_QUERY = re.compile(
