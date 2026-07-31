@@ -83,7 +83,7 @@ public final class ProactiveActivity extends Activity {
         LinearLayout titleBlock = new LinearLayout(this);
         titleBlock.setOrientation(LinearLayout.VERTICAL);
         titleBlock.setPadding(dp(12), 0, 0, 0);
-        TextView title = text("House activity", 23, BLACK);
+        TextView title = text("Jarvis activity", 23, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         titleBlock.addView(title, wrap());
         status = text("Connecting to Jarvis Core", 12, MID);
@@ -216,7 +216,7 @@ public final class ProactiveActivity extends Activity {
     }
 
     private void load() {
-        status.setText("Loading house activity");
+        status.setText("Loading Jarvis activity");
         client.feed(new ProactiveClient.FeedCallback() {
             @Override public void onSuccess(
                 List<ProactiveEvent> loaded,

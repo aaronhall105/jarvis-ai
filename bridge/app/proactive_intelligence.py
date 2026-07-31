@@ -940,7 +940,7 @@ async def status(_: None = Depends(authorise)) -> dict[str, Any]:
     engine.initialise()
     return {
         "ready": True,
-        "release": "19.0.0-alpha8",
+        "release": "19.0.0-alpha9",
         "poller_running": bool(engine.task and not engine.task.done()),
         "home_assistant_configured": bool(engine.ha_url and engine.ha_token),
         "min_importance": engine.min_importance,

@@ -9,6 +9,7 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -1289,8 +1290,14 @@ public final class VoiceService extends Service implements
             this, 3, stop, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
         );
         return new Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(com.aaron.jarvisvoice.R.drawable.ic_jarvis)
+            .setSmallIcon(R.drawable.ic_jarvis_status)
             .setContentTitle("Jarvis")
+            .setLargeIcon(
+                BitmapFactory.decodeResource(
+                    getResources(),
+                    R.drawable.jarvis_logo_ui
+                )
+            )
             .setContentText(shorten(text, 120))
             .setOngoing(true)
             .setOnlyAlertOnce(true)

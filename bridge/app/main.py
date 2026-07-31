@@ -605,6 +605,7 @@ async def _execute_ai_request(
     """Execute one user-scoped Jarvis request."""
 
     request_started = time.monotonic()
+    vision_payload: dict[str, object] | None = None
     actor = UserContext.from_request(
         user_id=request.user_id,
         user_name=request.user_name,
@@ -663,6 +664,21 @@ async def _execute_ai_request(
             actor=actor,
             raw_text=request.text,
         )
+        if vision_engine.matches_query(request.text):
+            try:
+                vision_payload = await vision_engine.context_for_query(
+                    request.text
+                )
+            except Exception:
+                logger.exception(
+                    "Vision Intelligence context lookup failed"
+                )
+            else:
+                prompt = vision_payload.get("prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    trusted_context = dict(trusted_context or {})
+                    trusted_context["vision_context"] = prompt
+
         result = await ai.ask(
             text=request.text,
             conversation_id=storage_conversation_id,
@@ -670,6 +686,14 @@ async def _execute_ai_request(
             on_text_delta=on_text_delta,
             trusted_context=trusted_context,
         )
+
+    if vision_payload:
+        primary = vision_payload.get("primary_event")
+        if isinstance(primary, dict):
+            result["vision_event"] = primary
+        related = vision_payload.get("events")
+        if isinstance(related, list):
+            result["vision_events"] = related[:8]
 
     # Home Assistant should keep its own opaque conversation ID. Jarvis uses a
     # user-scoped ID internally so Aaron and Amber can never share history.
@@ -1164,3 +1188,8 @@ async def dashboard() -> str:
 # Jarvis v19 alpha8 proactive router
 from app.proactive_intelligence import router as proactive_router
 app.include_router(proactive_router)
+
+# Jarvis v19 alpha9 Core-first vision intelligence
+from app.vision_intelligence import engine as vision_engine
+from app.vision_intelligence import router as vision_router
+app.include_router(vision_router)

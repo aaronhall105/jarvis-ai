@@ -100,7 +100,7 @@ public final class RealtimeProtocol {
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
             .put("transport", "websocket_pcm")
-            .put("client_release", "19.0.0-alpha8"))
+            .put("client_release", "19.0.0-alpha9"))
             .toString();
     }
 

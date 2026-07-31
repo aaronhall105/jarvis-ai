@@ -4909,6 +4909,20 @@ class AIEngine:
                 "morning, evening and the current time."
             )
 
+        vision_context = str(
+            trusted_context.get("vision_context") or ""
+        ).strip()
+        trusted_vision = ""
+        if vision_context:
+            trusted_vision = (
+                "\nTrusted Jarvis Vision Intelligence context "
+                "for this request:\n"
+                f"{vision_context}\n"
+                "Use only the recorded observations above. Do not "
+                "identify a person by name, infer intent or claim "
+                "that missing events prove nothing happened."
+            )
+
         input_items: list[Any] = [
             {
                 "role": "developer",
@@ -4924,7 +4938,7 @@ class AIEngine:
                     "Resolve first-person references such as 'my phone', "
                     "'notify me' and 'my battery' to this user. Address the "
                     "user naturally by name only when useful."
-                    f"{trusted_time}"
+                    f"{trusted_time}{trusted_vision}"
                 ),
             }
         ]
