@@ -59,7 +59,12 @@ public final class VoiceService extends Service implements
         "conversation_id";
 
     private static final int NOTIFICATION_ID = 1800;
-    private static final String CHANNEL_ID = "jarvis_chat_voice";
+    private static final String ACTIVE_NOTIFICATION_CHANNEL_ID =
+        "jarvis_chat_voice";
+    public static final String WAKE_NOTIFICATION_CHANNEL_ID =
+        "jarvis_background_wake";
+    private static final long WAKE_WATCHDOG_INTERVAL_MS =
+        8_000L;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private SecureStore store;
@@ -98,6 +103,58 @@ public final class VoiceService extends Service implements
     private long confirmedBargeInUntilMs;
     private boolean wakeOwnedVoiceSession;
     private long followUpOwnerUntilMs;
+    private int wakeRearmGeneration;
+    private int wakeUnhealthyChecks;
+    private boolean wakeOnlyForeground;
+
+    private final Runnable wakeWatchdog =
+        new Runnable() {
+            @Override public void run() {
+                if (
+                    WakeRecoveryPolicy.shouldWatch(
+                        stopping,
+                        voiceActive,
+                        store != null && store.wakeEnabled(),
+                        hasMicrophonePermission()
+                    )
+                ) {
+                    boolean running =
+                        wakePhraseEngine != null
+                            && wakePhraseEngine.isRunning();
+                    boolean listening =
+                        wakePhraseEngine != null
+                            && wakePhraseEngine
+                                .isListeningForWake();
+
+                    if (!running) {
+                        wakeUnhealthyChecks = 0;
+                        scheduleWakeRearm(
+                            "wake watchdog found detector stopped"
+                        );
+                    } else if (!listening) {
+                        wakeUnhealthyChecks++;
+                        if (wakeUnhealthyChecks >= 2) {
+                            wakeUnhealthyChecks = 0;
+                            wakePhraseEngine.stop();
+                            scheduleWakeRearm(
+                                "wake watchdog repaired detector"
+                            );
+                        }
+                    } else {
+                        wakeUnhealthyChecks = 0;
+                    }
+                } else {
+                    wakeUnhealthyChecks = 0;
+                }
+
+                if (!stopping) {
+                    main.postDelayed(
+                        this,
+                        WAKE_WATCHDOG_INTERVAL_MS
+                    );
+                }
+            }
+        };
 
     @Override public void onCreate() {
         super.onCreate();
@@ -116,6 +173,10 @@ public final class VoiceService extends Service implements
         speechFallback = new ReliableSpeechFallback(this, this);
         audioManager = getSystemService(AudioManager.class);
         createNotificationChannel();
+        main.postDelayed(
+            wakeWatchdog,
+            WAKE_WATCHDOG_INTERVAL_MS
+        );
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -133,7 +194,7 @@ public final class VoiceService extends Service implements
             case ACTION_ARM_WAKE -> {
                 requestedVoiceActive = false;
                 ensureConnected();
-                if (ready) armWakeWord();
+                scheduleWakeRearm("wake arm action");
             }
             case ACTION_START_VOICE -> {
                 wakeOwnedVoiceSession = false;
@@ -223,11 +284,24 @@ public final class VoiceService extends Service implements
     private boolean promoteForeground(String action) {
         boolean wantsMicrophone = actionNeedsMicrophone(action);
         boolean microphoneGranted = hasMicrophonePermission();
-
-        Notification activeNotification = notification(
+        boolean wakeOnly =
             wantsMicrophone
-                ? "Jarvis is starting voice"
-                : "Jarvis is connected"
+                && !voiceActive
+                && !ACTION_START_VOICE.equals(action)
+                && !ACTION_ASSISTANT_INVOKE.equals(action)
+                && !(
+                    ACTION_START.equals(action)
+                        && store.startWithVoice()
+                );
+
+        wakeOnlyForeground = wakeOnly;
+        Notification activeNotification = notification(
+            wakeOnly
+                ? "Wake word is active"
+                : wantsMicrophone
+                    ? "Jarvis is starting voice"
+                    : "Jarvis is connected",
+            wakeOnly
         );
 
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
@@ -246,7 +320,8 @@ public final class VoiceService extends Service implements
                     NOTIFICATION_ID,
                     activeNotification,
                     dataSyncType
-                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        | ServiceInfo
+                            .FOREGROUND_SERVICE_TYPE_MICROPHONE
                 );
                 microphoneForegroundActive = true;
                 return true;
@@ -256,9 +331,13 @@ public final class VoiceService extends Service implements
             }
         }
 
+        wakeOnlyForeground = false;
         startForeground(
             NOTIFICATION_ID,
-            notification("Jarvis text chat is active"),
+            notification(
+                "Jarvis text chat is active",
+                false
+            ),
             dataSyncType
         );
 
@@ -287,6 +366,11 @@ public final class VoiceService extends Service implements
         ready = false;
         voiceFoundation.opening("connecting to Jarvis Core");
         closeClientAndAudio();
+        if (!requestedVoiceActive && store.wakeEnabled()) {
+            scheduleWakeRearm(
+                "wake stays active during Core connection"
+            );
+        }
         prepareOriginalVoice();
         VoiceCatalog.Entry selected = VoiceCatalog.fromId(store.voiceId());
         client = new JarvisRealtimeClient(
@@ -459,6 +543,8 @@ public final class VoiceService extends Service implements
 
     private void beginVoice() {
         if (!ready || stopping) return;
+
+        promoteForeground(ACTION_START_VOICE);
 
         if (!microphoneForegroundActive
                 || !hasMicrophonePermission()) {
@@ -689,33 +775,93 @@ public final class VoiceService extends Service implements
         broadcastState(false, false);
         if (stopService) {
             stopJarvis();
-        } else if (ready && store.wakeEnabled()) {
-            armWakeWord();
+        } else if (store.wakeEnabled()) {
+            scheduleWakeRearm("voice session ended");
         } else {
             status("Ready — type a message or tap Voice");
         }
     }
 
+    private void scheduleWakeRearm(String reason) {
+        int generation = ++wakeRearmGeneration;
+
+        for (long delay : WakeRecoveryPolicy.retryDelaysMs()) {
+            main.postDelayed(
+                () -> {
+                    if (generation != wakeRearmGeneration) {
+                        return;
+                    }
+
+                    boolean running =
+                        wakePhraseEngine != null
+                            && wakePhraseEngine.isRunning();
+
+                    if (
+                        WakeRecoveryPolicy.shouldStart(
+                            stopping,
+                            voiceActive,
+                            store.wakeEnabled(),
+                            hasMicrophonePermission(),
+                            running
+                        )
+                    ) {
+                        voiceFoundation.offlineWake(reason);
+                        armWakeWord();
+                    }
+                },
+                delay
+            );
+        }
+    }
+
     private void armWakeWord() {
-        if (!ready || stopping || voiceActive || !store.wakeEnabled()) return;
+        if (
+            stopping
+                || voiceActive
+                || !store.wakeEnabled()
+        ) {
+            return;
+        }
+
+        promoteForeground(ACTION_ARM_WAKE);
         voiceFoundation.offlineWake("dedicated wake armed");
 
         standardSpeechEngine.stop();
         audio.stop();
         releaseAudioFocus();
 
-        if (!microphoneForegroundActive || !hasMicrophonePermission()) {
+        if (
+            !microphoneForegroundActive
+                || !hasMicrophonePermission()
+        ) {
             wakePhraseEngine.stop();
             status(
-                "Wake word paused — open Jarvis and allow microphone access"
+                "Wake word paused — open Jarvis and "
+                    + "allow microphone access"
             );
             broadcastState(false, false);
             return;
         }
 
+        if (wakePhraseEngine.isRunning()) {
+            status(
+                wakePhraseEngine.isListeningForWake()
+                    ? "Wake word ready — say \""
+                        + store.wakePhrase() + "\""
+                    : "Wake word is starting"
+            );
+            broadcastState(
+                false,
+                wakePhraseEngine.isListeningForWake()
+            );
+            return;
+        }
+
+        wakeUnhealthyChecks = 0;
         wakePhraseEngine.start(store.wakePhrase());
         status(
-            "Wake word ready — say \"" + store.wakePhrase() + "\""
+            "Wake word ready — say \""
+                + store.wakePhrase() + "\""
         );
         broadcastState(false, true);
     }
@@ -782,7 +928,7 @@ public final class VoiceService extends Service implements
         if (requestedVoiceActive) {
             beginVoice();
         } else if (store.wakeEnabled()) {
-            armWakeWord();
+            scheduleWakeRearm("Core ready");
         } else {
             broadcastState(false, false);
         }
@@ -797,6 +943,11 @@ public final class VoiceService extends Service implements
         standardSpeechEngine.stop();
         status("Reconnecting: " + safe(reason, "connection lost"));
         broadcastState(voiceActive, false);
+        if (!voiceActive && store.wakeEnabled()) {
+            scheduleWakeRearm(
+                "wake remains active while Core reconnects"
+            );
+        }
     }
 
     @Override public void onStatus(String message) {
@@ -1246,8 +1397,8 @@ public final class VoiceService extends Service implements
 
         if (verifiedCommand.isEmpty()) {
             requestedVoiceActive = false;
-            if (ready && !voiceActive) {
-                armWakeWord();
+            if (!voiceActive) {
+                scheduleWakeRearm("empty wake command");
             }
             return;
         }
@@ -1273,11 +1424,22 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onWakeStatus(String message) {
-        if (!voiceActive && !stopping) status(message);
+        if (
+            wakePhraseEngine != null
+                && wakePhraseEngine.isListeningForWake()
+        ) {
+            wakeUnhealthyChecks = 0;
+        }
+        if (!voiceActive && !stopping) {
+            status(message);
+        }
     }
 
     @Override public void onWakeError(String message) {
-        if (!voiceActive && !stopping) status(message);
+        if (!voiceActive && !stopping) {
+            status(message);
+            scheduleWakeRearm("wake engine reported an error");
+        }
     }
 
     @Override public void onStandardReady() {
@@ -1477,14 +1639,12 @@ public final class VoiceService extends Service implements
         endConversationAfterReply = false;
         store.resetToDedicatedWake();
         stopVoice(false);
-        broadcastEvent("conversation.ended", "", "", false, false);
-        main.postDelayed(
-            () -> {
-                if (ready && !voiceActive && store.wakeEnabled()) {
-                    armWakeWord();
-                }
-            },
-            300L
+        broadcastEvent(
+            "conversation.ended",
+            "",
+            "",
+            false,
+            false
         );
     }
 
@@ -1501,8 +1661,14 @@ public final class VoiceService extends Service implements
             .putExtra(EXTRA_STATUS, message);
         sendBroadcast(update);
         broadcastEvent("status", "", message, voiceActive, false);
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) manager.notify(NOTIFICATION_ID, notification(message));
+        NotificationManager manager =
+            getSystemService(NotificationManager.class);
+        if (manager != null && !wakeOnlyForeground) {
+            manager.notify(
+                NOTIFICATION_ID,
+                notification(message, false)
+            );
+        }
     }
 
     private void broadcastState(boolean active, boolean listening) {
@@ -1521,50 +1687,116 @@ public final class VoiceService extends Service implements
         sendBroadcast(update);
     }
 
-    private Notification notification(String text) {
+    private Notification notification(
+        String text,
+        boolean wakeOnly
+    ) {
         Intent open = new Intent(this, MainActivity.class);
         PendingIntent openPending = PendingIntent.getActivity(
-            this, 1, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
+            this,
+            1,
+            open,
+            PendingIntent.FLAG_IMMUTABLE
+                | PendingIntent.FLAG_UPDATE_CURRENT
         );
-        Intent stopVoice = new Intent(this, VoiceService.class).setAction(ACTION_STOP_VOICE);
-        PendingIntent stopVoicePending = PendingIntent.getService(
-            this, 2, stopVoice, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
-        Intent stop = new Intent(this, VoiceService.class).setAction(ACTION_STOP);
-        PendingIntent stopPending = PendingIntent.getService(
-            this, 3, stop, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
-        );
-        return new Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_jarvis_status)
-            .setContentTitle("Jarvis")
-            .setLargeIcon(
-                BitmapFactory.decodeResource(
-                    getResources(),
-                    R.drawable.jarvis_logo_ui
-                )
+
+        Notification.Builder builder =
+            new Notification.Builder(
+                this,
+                wakeOnly
+                    ? WAKE_NOTIFICATION_CHANNEL_ID
+                    : ACTIVE_NOTIFICATION_CHANNEL_ID
             )
-            .setContentText(shorten(text, 120))
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setContentIntent(openPending)
-            .addAction(new Notification.Action.Builder(
-                com.aaron.jarvisvoice.R.drawable.ic_jarvis, "End voice", stopVoicePending
-            ).build())
-            .addAction(new Notification.Action.Builder(
-                com.aaron.jarvisvoice.R.drawable.ic_jarvis, "Stop", stopPending
-            ).build())
-            .build();
+                .setSmallIcon(R.drawable.ic_jarvis_status)
+                .setContentTitle("Jarvis")
+                .setLargeIcon(
+                    BitmapFactory.decodeResource(
+                        getResources(),
+                        R.drawable.jarvis_logo_ui
+                    )
+                )
+                .setContentText(
+                    wakeOnly
+                        ? "Wake word is active"
+                        : shorten(text, 120)
+                )
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setShowWhen(false)
+                .setContentIntent(openPending);
+
+        if (!wakeOnly) {
+            Intent stopVoice = new Intent(
+                this,
+                VoiceService.class
+            ).setAction(ACTION_STOP_VOICE);
+            PendingIntent stopVoicePending = PendingIntent.getService(
+                this,
+                2,
+                stopVoice,
+                PendingIntent.FLAG_IMMUTABLE
+                    | PendingIntent.FLAG_UPDATE_CURRENT
+            );
+            Intent stop = new Intent(
+                this,
+                VoiceService.class
+            ).setAction(ACTION_STOP);
+            PendingIntent stopPending = PendingIntent.getService(
+                this,
+                3,
+                stop,
+                PendingIntent.FLAG_IMMUTABLE
+                    | PendingIntent.FLAG_UPDATE_CURRENT
+            );
+
+            builder
+                .addAction(
+                    new Notification.Action.Builder(
+                        R.drawable.ic_jarvis,
+                        "End voice",
+                        stopVoicePending
+                    ).build()
+                )
+                .addAction(
+                    new Notification.Action.Builder(
+                        R.drawable.ic_jarvis,
+                        "Stop",
+                        stopPending
+                    ).build()
+                );
+        }
+
+        return builder.build();
     }
 
     private void createNotificationChannel() {
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) {
-            manager.createNotificationChannel(new NotificationChannel(
-                CHANNEL_ID,
-                "Jarvis assistant and chat",
-                NotificationManager.IMPORTANCE_LOW
-            ));
-        }
+        NotificationManager manager =
+            getSystemService(NotificationManager.class);
+        if (manager == null) return;
+
+        NotificationChannel active = new NotificationChannel(
+            ACTIVE_NOTIFICATION_CHANNEL_ID,
+            "Jarvis voice and chat",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        active.setShowBadge(false);
+        active.enableVibration(false);
+        active.setSound(null, null);
+
+        NotificationChannel wake = new NotificationChannel(
+            WAKE_NOTIFICATION_CHANNEL_ID,
+            "Jarvis wake word",
+            NotificationManager.IMPORTANCE_LOW
+        );
+        wake.setDescription(
+            "Silent Android disclosure for the always-listening wake word"
+        );
+        wake.setShowBadge(false);
+        wake.enableVibration(false);
+        wake.setSound(null, null);
+
+        manager.createNotificationChannel(active);
+        manager.createNotificationChannel(wake);
     }
 
     private void acquireAudioFocus() {
@@ -1621,6 +1853,7 @@ public final class VoiceService extends Service implements
             true
         );
         stopping = true;
+        main.removeCallbacks(wakeWatchdog);
         VoiceSessionState.setActive(false);
         closeClientAndAudio();
         if (speechFallback != null) {
@@ -1659,6 +1892,13 @@ public final class VoiceService extends Service implements
             "Task removed — session recoverable",
             true
         );
+        if (
+            store != null
+                && store.wakeEnabled()
+                && !voiceActive
+        ) {
+            scheduleWakeRearm("app removed from recent tasks");
+        }
         super.onTaskRemoved(rootIntent);
     }
 

@@ -28,6 +28,7 @@ from app.house_context import HouseContextEngine
 from app.house_awareness import HouseAwarenessEngine
 from app.memory_engine import MemoryEngine
 from app.registry import RegistryEngine
+from app.reply_policy import ReplyBudgetPolicy
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine, ToneProfile
 from app.understanding_engine import UnderstandingEngine
@@ -64,6 +65,8 @@ Response style:
 - Never suggest Alexa, Google Assistant, Siri, Developer Tools, service calls,
   entity IDs, dashboards, apps or physical switches unless specifically requested.
 - In voice mode, keep ordinary replies to one brief sentence wherever possible.
+- For requested stories, writing or detailed explanations, begin with one short, self-contained sentence that can be spoken immediately, then provide the complete answer in chat.
+- Finish requested writing cleanly. Do not stop halfway through a sentence or paragraph.
 
 Conversation, understanding and identity:
 - The authenticated Home Assistant user for this request is supplied separately in
@@ -1017,15 +1020,15 @@ class AIEngine:
         )
         self.max_output_tokens = _env_int(
             "JARVIS_MAX_OUTPUT_TOKENS",
-            default=700,
+            default=2600,
             minimum=100,
             maximum=4000,
         )
         self.voice_max_output_tokens = _env_int(
             "JARVIS_VOICE_MAX_OUTPUT_TOKENS",
-            default=260,
+            default=1800,
             minimum=80,
-            maximum=1000,
+            maximum=4000,
         )
         self.max_tool_rounds = _env_int(
             "JARVIS_MAX_TOOL_ROUNDS",
@@ -3197,10 +3200,12 @@ class AIEngine:
         tool_definitions: list[dict[str, Any]],
         actor: UserContext,
     ) -> dict[str, Any]:
-        max_output_tokens = (
-            min(self.max_output_tokens, self.voice_max_output_tokens)
-            if actor.voice_mode
-            else self.max_output_tokens
+        request_text = ReplyBudgetPolicy.latest_user_text(input_items)
+        max_output_tokens = ReplyBudgetPolicy.output_tokens(
+            request_text,
+            voice_mode=actor.voice_mode,
+            text_cap=self.max_output_tokens,
+            voice_cap=self.voice_max_output_tokens,
         )
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -3301,6 +3306,17 @@ class AIEngine:
                                 getattr(details, "reason", "unknown")
                                 or "unknown"
                             )
+                            if reason == "max_output_tokens":
+                                current_budget = int(
+                                    response_kwargs.get(
+                                        "max_output_tokens",
+                                        self.max_output_tokens,
+                                    )
+                                )
+                                response_kwargs["max_output_tokens"] = min(
+                                    4000,
+                                    max(current_budget + 500, current_budget * 2),
+                                )
                             stream_error = AIEngineError(
                                 "OpenAI returned an incomplete response: "
                                 f"{reason}."

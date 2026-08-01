@@ -311,33 +311,6 @@ public final class MainActivity extends Activity {
             iconParams(dp(40), dp(6))
         );
 
-        ImageButton historyButton = iconButton(
-            R.drawable.ic_history,
-            "Chat history",
-            SOFT,
-            BLACK
-        );
-        historyButton.setOnClickListener(view -> openHistory());
-        bar.addView(
-            historyButton,
-            iconParams(dp(40), dp(6))
-        );
-
-
-        ImageButton deleteChat = iconButton(
-            R.drawable.ic_delete,
-            "Delete current chat",
-            SOFT,
-            BLACK
-        );
-        deleteChat.setOnClickListener(
-            view -> confirmDeleteChat()
-        );
-        bar.addView(
-            deleteChat,
-            iconParams(dp(40), dp(6))
-        );
-
         ImageButton newChat = iconButton(
             R.drawable.ic_add,
             "New chat",
@@ -345,14 +318,50 @@ public final class MainActivity extends Activity {
             BLACK
         );
         newChat.setOnClickListener(view -> newChat());
-        bar.addView(newChat, iconParams(dp(40), dp(6)));
-
-        ImageButton settings = iconButton(R.drawable.ic_settings, "Settings", SOFT, BLACK);
-        settings.setOnClickListener(view ->
-            startActivity(new Intent(this, SettingsActivity.class))
+        bar.addView(
+            newChat,
+            iconParams(dp(40), dp(6))
         );
-        bar.addView(settings, iconParams(dp(40), 0));
+
+        ImageButton more = iconButton(
+            R.drawable.ic_more,
+            "More options",
+            SOFT,
+            BLACK
+        );
+        more.setOnClickListener(this::showTopMenu);
+        bar.addView(
+            more,
+            iconParams(dp(40), 0)
+        );
         return bar;
+    }
+
+    private void showTopMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, "Chat history");
+        menu.getMenu().add(0, 2, 1, "Delete current chat");
+        menu.getMenu().add(0, 3, 2, "Settings");
+        menu.setOnMenuItemClickListener(item -> {
+            return switch (item.getItemId()) {
+                case 1 -> {
+                    openHistory();
+                    yield true;
+                }
+                case 2 -> {
+                    confirmDeleteChat();
+                    yield true;
+                }
+                case 3 -> {
+                    startActivity(
+                        new Intent(this, SettingsActivity.class)
+                    );
+                    yield true;
+                }
+                default -> false;
+            };
+        });
+        menu.show();
     }
 
     private LinearLayout buildComposer() {

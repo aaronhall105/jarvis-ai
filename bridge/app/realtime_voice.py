@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "19.0.0-alpha12"
-CORE_APPLICATION_VERSION = "3.5.0"
+from app.speech_render_policy import SpeechRenderPolicy
+
+VERSION = "19.0.0-alpha13"
+CORE_APPLICATION_VERSION = "3.6.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000
@@ -804,7 +806,11 @@ class RealtimeVoiceProxy:
         self.total_brain_turns += 1
         await self._send_json(client, {"type": "brain.started", "command": command})
 
+        speech_buffer = ""
+        early_speech_sent = False
+
         async def on_delta(delta: str) -> None:
+            nonlocal speech_buffer, early_speech_sent
             if generation != int(state.get("generation", 0)):
                 return
             text = str(delta or "")
@@ -812,6 +818,28 @@ class RealtimeVoiceProxy:
                 return
             self.total_streamed_text_chunks += 1
             await self._send_json(client, {"type": "brain.delta", "text": text})
+
+            if not speak or early_speech_sent:
+                return
+
+            speech_buffer += text
+            segment = SpeechRenderPolicy.early_segment(speech_buffer)
+            if not segment:
+                return
+
+            early_speech_sent = True
+            if voice_mode == VOICE_MODE_HOME_ASSISTANT:
+                await self._send_json(
+                    client,
+                    {
+                        "type": "original.tts",
+                        "text": segment,
+                        "streaming_preview": True,
+                    },
+                )
+            else:
+                state["suppress_audio"] = False
+                await upstream.send(json.dumps(speak_response_event(segment, voice)))
 
         try:
             turn_metadata = dict(metadata)
@@ -964,14 +992,28 @@ class RealtimeVoiceProxy:
         )
 
         if not speak or bool(result.get("quiet_control")):
-            await self._send_json(client, {"type": "turn.done", "status": "completed", "usage": None})
+            await self._send_json(
+                client,
+                {"type": "turn.done", "status": "completed", "usage": None},
+            )
             return
 
+        if early_speech_sent:
+            await self._send_json(
+                client,
+                {"type": "turn.done", "status": "completed", "usage": None},
+            )
+            return
+
+        spoken_response = SpeechRenderPolicy.spoken_text(result["response"])
         state["suppress_audio"] = False
         if voice_mode == VOICE_MODE_HOME_ASSISTANT:
-            await self._send_json(client, {"type": "original.tts", "text": result["response"]})
+            await self._send_json(
+                client,
+                {"type": "original.tts", "text": spoken_response},
+            )
             return
-        await upstream.send(json.dumps(speak_response_event(result["response"], voice)))
+        await upstream.send(json.dumps(speak_response_event(spoken_response, voice)))
 
     @staticmethod
     async def _send_json(client: Any, payload: dict[str, Any]) -> None:

@@ -105,6 +105,18 @@ public final class WakePhraseEngine implements RecognitionListener {
         return running;
     }
 
+    public boolean isListeningForWake() {
+        return running
+            && (
+                listening
+                    || awaitingCommand
+                    || (
+                        dedicated
+                            && sherpaEngine != null
+                    )
+            );
+    }
+
     private void restartWakeDetector() {
         if (!running || triggered || awaitingCommand) return;
 

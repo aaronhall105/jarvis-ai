@@ -118,57 +118,40 @@ public final class SettingsActivity extends Activity {
         page.addView(buildHeader(), matchWrap(0, dp(20)));
 
         page.addView(sectionHeader(
-            "Android assistant",
-            "Make Jarvis the system assistant and keep it available from the Side button."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildAssistantCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Wake word",
-            "Use a dedicated on-device detector for faster and more reliable Jarvis activation."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildWakeCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Voice",
-            "Choose how Jarvis listens, responds and continues the conversation."
+            "Voice and conversation",
+            "Choose Jarvis's voice, response mode and follow-up behaviour."
         ), matchWrap(0, dp(10)));
         page.addView(buildVoiceCard(), matchWrap(0, dp(24)));
 
         page.addView(sectionHeader(
-            "Voice foundation",
-            "Live state, microphone ownership and native audio processing."
+            "Wake word and background",
+            "Keep the dedicated offline detector available when the chat is closed."
         ), matchWrap(0, dp(10)));
-        page.addView(
-            buildVoiceFoundationCard(),
-            matchWrap(0, dp(24))
-        );
+        page.addView(buildWakeCard(), matchWrap(0, dp(24)));
 
         page.addView(sectionHeader(
-            "Assistant behaviour",
-            "Control the overlay and background voice experience."
+            "Assistant and overlay",
+            "Control the Side button, compact overlay and background conversation."
         ), matchWrap(0, dp(10)));
+        page.addView(buildAssistantCard(), matchWrap(0, dp(12)));
         page.addView(buildBehaviourCard(), matchWrap(0, dp(24)));
 
         page.addView(sectionHeader(
-            "Jarvis Core",
-            "Private connection details used by the Android assistant."
+            "Connections",
+            "Private Jarvis Core and optional Home Assistant voice credentials."
         ), matchWrap(0, dp(10)));
-        page.addView(buildCoreCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Original Home Assistant voice",
-            "Only required when the Home Assistant Jarvis voice is selected."
-        ), matchWrap(0, dp(10)));
+        page.addView(buildCoreCard(), matchWrap(0, dp(12)));
         page.addView(buildHomeAssistantCard(), matchWrap(0, dp(24)));
 
-        Button save = primaryButton("Save settings");
-        save.setOnClickListener(view -> saveSettings());
-        page.addView(save, matchWrap(0, dp(10)));
+        page.addView(sectionHeader(
+            "Diagnostics",
+            "Connection, microphone, wake and response-performance checks."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildVoiceFoundationCard(), matchWrap(0, dp(24)));
 
-        Button clear = secondaryButton("Clear chat and start a new conversation");
-        clear.setOnClickListener(view -> clearChat());
-        page.addView(clear, matchWrap());
+        Button save = primaryButton("Save changes");
+        save.setOnClickListener(view -> saveSettings());
+        page.addView(save, matchWrap());
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -279,12 +262,22 @@ public final class SettingsActivity extends Activity {
 
         TextView note = note(
             "The dedicated detector runs fully offline and needs no account "
-                + "or credential. Android speech recognition remains available "
-                + "as an automatic fallback."
+                + "or credential. Android requires a silent foreground-service "
+                + "disclosure while the microphone remains active."
         );
-        card.addView(note, matchWrap(dp(14), 0));
+        card.addView(note, matchWrap(dp(14), dp(14)));
 
-        dedicatedWake.setOnCheckedChangeListener((button, checked) -> updateWakeControls());
+        Button notificationSettings = secondaryButton(
+            "Wake-word notification settings"
+        );
+        notificationSettings.setOnClickListener(
+            view -> openWakeNotificationSettings()
+        );
+        card.addView(notificationSettings, matchWrap());
+
+        dedicatedWake.setOnCheckedChangeListener(
+            (button, checked) -> updateWakeControls()
+        );
         return card;
     }
 
@@ -372,7 +365,7 @@ public final class SettingsActivity extends Activity {
     private void runJarvisSystemTest() {
         if (voiceFoundationStatus == null) return;
         voiceFoundationStatus.setText(
-            "Running Jarvis alpha6 system test…"
+            "Running Jarvis system test…"
         );
         String configured = coreUrl == null
             ? ""
@@ -583,6 +576,30 @@ public final class SettingsActivity extends Activity {
                 : "Jarvis is not the default Android assistant",
             active
         );
+    }
+
+    private void openWakeNotificationSettings() {
+        try {
+            startActivity(
+                new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(
+                        Settings.EXTRA_APP_PACKAGE,
+                        getPackageName()
+                    )
+                    .putExtra(
+                        Settings.EXTRA_CHANNEL_ID,
+                        VoiceService.WAKE_NOTIFICATION_CHANNEL_ID
+                    )
+            );
+        } catch (Exception exception) {
+            startActivity(
+                new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(
+                        Settings.EXTRA_APP_PACKAGE,
+                        getPackageName()
+                    )
+            );
+        }
     }
 
     private void openDefaultAssistantSettings() {

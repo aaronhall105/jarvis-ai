@@ -1,11 +1,11 @@
-name: Build Jarvis Assistant v19.0.0-alpha12
+name: Build Jarvis Assistant v19.0.0-alpha13
 
 on:
   workflow_dispatch:
   push:
     branches:
       - conversation-engine
-      - 'alpha12-validation-*'
+      - 'alpha13-validation-*'
     paths:
       - android/jarvis-voice-client/**
       - bridge/app/proactive_intelligence.py
@@ -15,14 +15,17 @@ on:
       - bridge/app/ai_engine.py
       - bridge/app/vision_intelligence.py
       - bridge/app/realtime_voice.py
+      - bridge/app/reply_policy.py
+      - bridge/app/speech_render_policy.py
+      - bridge/tests/test_final_polish_alpha13.py
       - bridge/tests/test_proactive_intelligence_alpha8.py
       - bridge/tests/test_smart_alerts_alpha11.py
       - bridge/tests/test_person_room_alpha12.py
       - bridge/tests/test_vision_intelligence_alpha9.py
       - bridge/tests/test_realtime_voice_alpha5*.py
       - bridge/tests/test_natural_control_alpha10.py
-      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha12.yml
-      - CHANGES_V19_0_0_ALPHA12.md
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha13.yml
+      - CHANGES_V19_0_0_ALPHA13.md
       - .env.example
 
 permissions:
@@ -39,18 +42,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify alpha12 combined Core and Android source
+      - name: Verify alpha13 combined Core and Android source
         working-directory: .
         run: |
           set -euo pipefail
           git diff --check
-          grep -Fq 'versionCode = 190120' \
+          grep -Fq 'versionCode = 190130' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -Fq 'versionName = "19.0.0-alpha12"' \
+          grep -Fq 'versionName = "19.0.0-alpha13"' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -Fq 'client_release", "19.0.0-alpha12"' \
+          grep -Fq 'client_release", "19.0.0-alpha13"' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
-          grep -Fq 'VERSION = "19.0.0-alpha12"' \
+          grep -Fq 'VERSION = "19.0.0-alpha13"' \
             bridge/app/realtime_voice.py
           grep -Fq 'battery_transition' \
             bridge/app/proactive_intelligence.py
@@ -66,6 +69,18 @@ jobs:
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SecureStore.java
           grep -Fq 'ACTION_DELETE_CHAT' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
+          grep -Fq 'class WakeRecoveryPolicy' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/WakeRecoveryPolicy.java
+          grep -Fq 'WAKE_NOTIFICATION_CHANNEL_ID' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
+          ! grep -Fq '.setSilent(' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
+          grep -Fq 'wake.setSound(null, null);' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
+          grep -Fq 'class ReplyBudgetPolicy' bridge/app/reply_policy.py
+          grep -Fq 'class SpeechRenderPolicy' bridge/app/speech_render_policy.py
+          grep -Fq 'class FinalPolishAlpha13Test' \
+            android/jarvis-voice-client/app/src/test/java/com/aaron/jarvisvoice/FinalPolishAlpha13Test.java
           grep -Fq 'class FollowUpVoicePolicy' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/FollowUpVoicePolicy.java
           grep -Fq 'person_room_evidence' \
@@ -244,7 +259,7 @@ jobs:
         working-directory: .
         run: python3 -m pip install -r bridge/requirements.txt
 
-      - name: Test Jarvis Core alpha12 room context
+      - name: Test Jarvis Core alpha13 final polish
         working-directory: .
         run: |
           python3 -m py_compile \
@@ -252,6 +267,8 @@ jobs:
             bridge/app/proactive_intelligence.py \
             bridge/app/person_room_context.py \
             bridge/app/realtime_voice.py \
+            bridge/app/reply_policy.py \
+            bridge/app/speech_render_policy.py \
             bridge/app/main.py \
             bridge/app/ai_engine.py \
             bridge/app/vision_intelligence.py
@@ -269,6 +286,8 @@ jobs:
             bridge/tests/test_smart_alerts_alpha11.py
           PYTHONPATH=bridge python3 \
             bridge/tests/test_person_room_alpha12.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_final_polish_alpha13.py
 
       - name: Unit tests and debug APK
         run: |
@@ -279,11 +298,11 @@ jobs:
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha12-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha13-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v19.0.0-alpha12-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha12-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha13-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha13-debug.apk
           if-no-files-found: error
           retention-days: 30
