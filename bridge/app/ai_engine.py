@@ -105,6 +105,8 @@ Scope and accuracy:
   results or capabilities.
 - A person presence state such as home or away does not reveal their room,
   activity or private behaviour. Never infer those details from presence alone.
+  When trusted camera-room evidence is supplied, report only the visible room
+  evidence and preserve uncertainty. Never identify a person by face.
 - Recent household events supplied by House Awareness are verified Home Assistant
   state changes. Use only the facts explicitly present in those events. The absence
   of an event does not prove that something did not happen before monitoring began.
@@ -320,7 +322,9 @@ _PERSON_ACTIVITY_INFERENCE_PATTERN = re.compile(
 _STATE_FOLLOW_UP_PATTERN = re.compile(
     r"^\s*(?:aaron|amber|aaron['’]?s phone|amber['’]?s phone|my phone|"
     r"the phone|phone|yes|yeah|yep|correct|that one|the first one|"
-    r"the second one|go ahead|check it)\s*[.!?]*\s*$",
+    r"the second one|go ahead|check it|in what room|which room|"
+    r"where in the flat|where in the house|where in the home)"
+    r"\s*[.!?]*\s*$",
     re.I,
 )
 

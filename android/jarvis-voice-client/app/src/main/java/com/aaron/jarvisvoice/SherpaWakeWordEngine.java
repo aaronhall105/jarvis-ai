@@ -174,7 +174,7 @@ final class SherpaWakeWordEngine {
                 ).getAbsolutePath()
             );
             config.setKeywordsScore(
-                strictPhrase ? 1.6f : 1.7f
+                strictPhrase ? 1.7f : 1.9f
             );
             config.setKeywordsThreshold(
                 thresholdFor(
@@ -446,13 +446,13 @@ final class SherpaWakeWordEngine {
 
         float threshold =
             strictPhrase
-                ? 0.28f - (0.12f * clamped)
-                : 0.30f - (0.10f * clamped);
+                ? 0.27f - (0.14f * clamped)
+                : 0.27f - (0.17f * clamped);
 
         return Math.max(
-            strictPhrase ? 0.16f : 0.20f,
+            strictPhrase ? 0.13f : 0.11f,
             Math.min(
-                strictPhrase ? 0.27f : 0.29f,
+                strictPhrase ? 0.25f : 0.24f,
                 threshold
             )
         );

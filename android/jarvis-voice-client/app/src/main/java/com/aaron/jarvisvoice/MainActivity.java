@@ -2,6 +2,7 @@ package com.aaron.jarvisvoice;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -322,6 +323,21 @@ public final class MainActivity extends Activity {
             iconParams(dp(40), dp(6))
         );
 
+
+        ImageButton deleteChat = iconButton(
+            R.drawable.ic_delete,
+            "Delete current chat",
+            SOFT,
+            BLACK
+        );
+        deleteChat.setOnClickListener(
+            view -> confirmDeleteChat()
+        );
+        bar.addView(
+            deleteChat,
+            iconParams(dp(40), dp(6))
+        );
+
         ImageButton newChat = iconButton(
             R.drawable.ic_add,
             "New chat",
@@ -576,6 +592,40 @@ public final class MainActivity extends Activity {
             new Intent(this, VoiceService.class)
                 .setAction(VoiceService.ACTION_NEW_CHAT)
         );
+    }
+
+
+    private void confirmDeleteChat() {
+        new AlertDialog.Builder(this)
+            .setTitle("Delete this chat?")
+            .setMessage(
+                "This removes the current chat from the app "
+                    + "and starts a fresh conversation."
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton(
+                "Delete",
+                (dialog, which) -> deleteCurrentChat()
+            )
+            .show();
+    }
+
+    private void deleteCurrentChat() {
+        generating = false;
+        finishStreaming();
+
+        startForegroundService(
+            new Intent(this, VoiceService.class)
+                .setAction(
+                    VoiceService.ACTION_DELETE_CHAT
+                )
+        );
+
+        Toast.makeText(
+            this,
+            "Chat deleted",
+            Toast.LENGTH_SHORT
+        ).show();
     }
 
     private void renderHistory() {

@@ -26,6 +26,10 @@ from app.home_assistant import (
 )
 from app.logging_config import configure_logging
 from app.memory_engine import MemoryEngine
+from app.person_room_context import (
+    resolve_person_room,
+    room_followup_person,
+)
 from app.self_improvement import SelfImprovementEngine
 from app.memory_models import (
     SaveMemoryRequest,
@@ -624,68 +628,176 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
-    improvement_command = await improvement.handle_command(
-        text=request.text,
-        actor=actor,
+    history_before = await conversations.get_ai_history(
         conversation_id=storage_conversation_id,
+        limit=12,
+    )
+    room_person = room_followup_person(
+        request.text,
+        history_before,
     )
 
-    if improvement_command.handled:
+    room_result: dict[str, object] | None = None
+
+    if room_person:
+        try:
+            fresh_states = await tools.readable_entity_states(
+                refresh=True
+            )
+            room_evidence = (
+                await vision_engine.person_room_evidence()
+            )
+            room_result = resolve_person_room(
+                room_person,
+                fresh_states,
+                room_evidence,
+            )
+
+            primary = room_result.get(
+                "primary_event"
+            )
+            evidence_events = room_evidence.get(
+                "events"
+            )
+            if (
+                isinstance(primary, dict)
+                or isinstance(evidence_events, list)
+            ):
+                vision_payload = {
+                    "primary_event": primary,
+                    "events": (
+                        evidence_events
+                        if isinstance(
+                            evidence_events,
+                            list,
+                        )
+                        else []
+                    ),
+                }
+        except Exception:
+            logger.exception(
+                "Person room context lookup failed"
+            )
+            room_result = {
+                "handled": True,
+                "response": (
+                    f"I can confirm {room_person.title()}'s "
+                    "home status, but the cameras could not "
+                    "provide a reliable room match."
+                ),
+            }
+
+    if (
+        room_result is not None
+        and bool(room_result.get("handled"))
+    ):
+        response = str(
+            room_result.get("response") or ""
+        ).strip()
         await conversations.add_user_message(
             conversation_id=storage_conversation_id,
             content=request.text,
         )
         await conversations.add_assistant_message(
             conversation_id=storage_conversation_id,
-            content=improvement_command.response,
+            content=response,
         )
-        result: dict[str, object] = {
-            "success": improvement_command.success,
-            "response": improvement_command.response,
-            "model": "self-improvement",
-            "intent": improvement_command.intent,
+        result = {
+            "success": True,
+            "response": response,
+            "model": "person-room-context",
+            "intent": "person_room_follow_up",
             "deterministic": True,
-            "tool_called": False,
-            "tool_rounds": 0,
-            "calls": [],
+            "tool_called": True,
+            "tool_rounds": 1,
+            "calls": [{
+                "tool": "person_room_context",
+                "success": True,
+                "message": response,
+            }],
             "memory_used": False,
-            "conversation_id": storage_conversation_id,
             "usage": {
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "cached_tokens": 0,
             },
         }
-        if improvement_command.details is not None:
-            result["improvement"] = improvement_command.details
     else:
-        await improvement.capture_feedback_before_request(
-            conversation_id=storage_conversation_id,
-            actor=actor,
-            raw_text=request.text,
+        improvement_command = (
+            await improvement.handle_command(
+                text=request.text,
+                actor=actor,
+                conversation_id=storage_conversation_id,
+            )
         )
-        if vision_engine.matches_query(request.text):
-            try:
-                vision_payload = await vision_engine.context_for_query(
-                    request.text
-                )
-            except Exception:
-                logger.exception(
-                    "Vision Intelligence context lookup failed"
-                )
-            else:
-                prompt = vision_payload.get("prompt")
-                if isinstance(prompt, str) and prompt.strip():
-                    trusted_context = dict(trusted_context or {})
-                    trusted_context["vision_context"] = prompt
 
-        result = await ai.ask(
-            text=request.text,
-            conversation_id=storage_conversation_id,
-            actor=actor,
-            on_text_delta=on_text_delta,
-            trusted_context=trusted_context,
-        )
+        if improvement_command.handled:
+            await conversations.add_user_message(
+                conversation_id=storage_conversation_id,
+                content=request.text,
+            )
+            await conversations.add_assistant_message(
+                conversation_id=storage_conversation_id,
+                content=improvement_command.response,
+            )
+            result = {
+                "success": improvement_command.success,
+                "response": improvement_command.response,
+                "model": "self-improvement",
+                "intent": improvement_command.intent,
+                "deterministic": True,
+                "tool_called": False,
+                "tool_rounds": 0,
+                "calls": [],
+                "memory_used": False,
+                "conversation_id": storage_conversation_id,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cached_tokens": 0,
+                },
+            }
+            if improvement_command.details is not None:
+                result["improvement"] = (
+                    improvement_command.details
+                )
+        else:
+            await improvement.capture_feedback_before_request(
+                conversation_id=storage_conversation_id,
+                actor=actor,
+                raw_text=request.text,
+            )
+            if vision_engine.matches_query(request.text):
+                try:
+                    vision_payload = (
+                        await vision_engine.context_for_query(
+                            request.text
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "Vision Intelligence context lookup failed"
+                    )
+                else:
+                    prompt = vision_payload.get("prompt")
+                    if (
+                        isinstance(prompt, str)
+                        and prompt.strip()
+                    ):
+                        trusted_context = dict(
+                            trusted_context or {}
+                        )
+                        trusted_context[
+                            "vision_context"
+                        ] = prompt
+
+            result = await ai.ask(
+                text=request.text,
+                conversation_id=storage_conversation_id,
+                actor=actor,
+                on_text_delta=on_text_delta,
+                trusted_context=trusted_context,
+            )
 
     if vision_payload:
         primary = vision_payload.get("primary_event")

@@ -36,6 +36,7 @@ public final class SecureStore {
         migrateProductionVoiceDefaults();
         migrateReliableVoiceDefaults();
         migrateWakeReliabilityAlpha11();
+        migrateVoiceOwnershipAlpha12();
     }
 
     private void migrateAssistantDefaults() {
@@ -166,20 +167,70 @@ public final class SecureStore {
             .apply();
     }
 
-    public void resetToDedicatedWake() {
-        float sensitivity = preferences.getFloat(
+
+    private void migrateVoiceOwnershipAlpha12() {
+        if (
+            preferences.getBoolean(
+                "voice_ownership_migration_v190120",
+                false
+            )
+        ) {
+            return;
+        }
+
+        float existing = preferences.getFloat(
             "wake_sensitivity_v1830",
-            0.72f
+            0.90f
         );
 
         preferences.edit()
             .putBoolean("wake_enabled", true)
-            .putString("wake_phrase", "hey jarvis")
+            .putString("wake_phrase", "jarvis")
+            .putBoolean(
+                "dedicated_wake_enabled_v1830",
+                true
+            )
+            .putBoolean(
+                "assistant_wake_always_v1810",
+                true
+            )
+            .putBoolean(
+                "standard_auto_listen_v1800",
+                true
+            )
+            .putBoolean(
+                "keep_conversation_open_v1800",
+                true
+            )
+            .putFloat(
+                "wake_sensitivity_v1830",
+                Math.max(existing, 0.90f)
+            )
+            .putString(
+                "voice_id",
+                VoiceCatalog.ORIGINAL_ID
+            )
+            .putBoolean(
+                "voice_ownership_migration_v190120",
+                true
+            )
+            .apply();
+    }
+
+    public void resetToDedicatedWake() {
+        float sensitivity = preferences.getFloat(
+            "wake_sensitivity_v1830",
+            0.90f
+        );
+
+        preferences.edit()
+            .putBoolean("wake_enabled", true)
+            .putString("wake_phrase", "jarvis")
             .putBoolean("dedicated_wake_enabled_v1830", true)
             .putBoolean("assistant_wake_always_v1810", true)
             .putFloat(
                 "wake_sensitivity_v1830",
-                Math.min(sensitivity, 0.72f)
+                Math.max(sensitivity, 0.90f)
             )
             .apply();
     }
@@ -278,7 +329,12 @@ public final class SecureStore {
     }
 
     public String voiceId() {
-        return VoiceCatalog.fromId(preferences.getString("voice_id", "marin")).id;
+        return VoiceCatalog.fromId(
+            preferences.getString(
+                "voice_id",
+                VoiceCatalog.ORIGINAL_ID
+            )
+        ).id;
     }
 
     public String vadEagerness() {
@@ -301,7 +357,7 @@ public final class SecureStore {
         return normaliseWakePhrase(
             preferences.getString(
                 "wake_phrase",
-                "hey jarvis"
+                "jarvis"
             )
         );
     }
@@ -311,7 +367,12 @@ public final class SecureStore {
     }
 
     public float wakeSensitivity() {
-        return clampSensitivity(preferences.getFloat("wake_sensitivity_v1830", 0.78f));
+        return clampSensitivity(
+            preferences.getFloat(
+                "wake_sensitivity_v1830",
+                0.90f
+            )
+        );
     }
 
     public void setWakeWordOptions(

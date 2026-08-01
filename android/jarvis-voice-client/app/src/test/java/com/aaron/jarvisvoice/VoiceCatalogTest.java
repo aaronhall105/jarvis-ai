@@ -7,33 +7,68 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class VoiceCatalogTest {
-    @Test public void jarvisUsesReliableRealtimeAudio() {
-        assertFalse(VoiceCatalog.isOriginal("original"));
-        assertEquals("realtime", VoiceCatalog.serverMode("original"));
-        assertEquals("marin", VoiceCatalog.serverVoice("original"));
-    }
-
-    @Test public void homeAssistantOriginalRemainsSelectable() {
-        assertTrue(VoiceCatalog.isOriginal(
-            VoiceCatalog.HOME_ASSISTANT_ID
-        ));
+    @Test public void originalJarvisUsesHomeAssistantAudio() {
+        assertTrue(
+            VoiceCatalog.isOriginal(
+                VoiceCatalog.ORIGINAL_ID
+            )
+        );
         assertEquals(
-            "home_assistant",
-            VoiceCatalog.serverMode(VoiceCatalog.HOME_ASSISTANT_ID)
+            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.serverMode(
+                VoiceCatalog.ORIGINAL_ID
+            )
         );
         assertEquals(
             "marin",
-            VoiceCatalog.serverVoice(VoiceCatalog.HOME_ASSISTANT_ID)
+            VoiceCatalog.serverVoice(
+                VoiceCatalog.ORIGINAL_ID
+            )
+        );
+    }
+
+    @Test public void homeAssistantAliasUsesOriginalJarvis() {
+        assertTrue(
+            VoiceCatalog.isOriginal(
+                VoiceCatalog.HOME_ASSISTANT_ID
+            )
+        );
+        assertEquals(
+            VoiceCatalog.ORIGINAL_ID,
+            VoiceCatalog.fromId(
+                VoiceCatalog.HOME_ASSISTANT_ID
+            ).id
+        );
+        assertEquals(
+            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.serverMode(
+                VoiceCatalog.HOME_ASSISTANT_ID
+            )
         );
     }
 
     @Test public void realtimeVoicesRemainSelectable() {
-        assertFalse(VoiceCatalog.isOriginal("cedar"));
-        assertEquals("realtime", VoiceCatalog.serverMode("cedar"));
-        assertEquals("cedar", VoiceCatalog.serverVoice("cedar"));
+        assertFalse(
+            VoiceCatalog.isOriginal("cedar")
+        );
+        assertEquals(
+            VoiceCatalog.MODE_REALTIME,
+            VoiceCatalog.serverMode("cedar")
+        );
+        assertEquals(
+            "cedar",
+            VoiceCatalog.serverVoice("cedar")
+        );
     }
 
-    @Test public void unknownVoiceFallsBackToMarin() {
-        assertEquals("marin", VoiceCatalog.fromId("unknown").id);
+    @Test public void unknownVoiceFallsBackToOriginalJarvis() {
+        assertEquals(
+            VoiceCatalog.ORIGINAL_ID,
+            VoiceCatalog.fromId("unknown").id
+        );
+        assertEquals(
+            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.serverMode("unknown")
+        );
     }
 }

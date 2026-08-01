@@ -24,8 +24,8 @@ public final class WakePhraseEngine implements RecognitionListener {
         void onWakeError(String message);
     }
 
-    private static final long COMMAND_TIMEOUT_MS = 5_500L;
-    private static final long FALSE_WAKE_COOLDOWN_MS = 2_500L;
+    private static final long COMMAND_TIMEOUT_MS = 5_000L;
+    private static final long FALSE_WAKE_COOLDOWN_MS = 1_500L;
 
     private final Context context;
     private final Listener listener;
@@ -40,11 +40,11 @@ public final class WakePhraseEngine implements RecognitionListener {
     private boolean dedicated;
     private boolean dedicatedRequested;
     private boolean awaitingCommand;
-    private String wakePhrase = "hey jarvis";
+    private String wakePhrase = "jarvis";
     private String detectedWakePhrase = "";
     private int restartCount;
     private int dedicatedRetryCount;
-    private float dedicatedSensitivity = 0.72f;
+    private float dedicatedSensitivity = 0.90f;
     private long wakeCooldownUntilMs;
 
     private final Runnable commandTimeout =
@@ -74,7 +74,7 @@ public final class WakePhraseEngine implements RecognitionListener {
                 configuredWakePhrase
             );
             if (wakePhrase.isEmpty()) {
-                wakePhrase = "hey jarvis";
+                wakePhrase = "jarvis";
             }
 
             running = true;
@@ -247,7 +247,7 @@ public final class WakePhraseEngine implements RecognitionListener {
 
         main.removeCallbacks(commandTimeout);
         main.postDelayed(commandTimeout, COMMAND_TIMEOUT_MS);
-        listenSoon(260L);
+        listenSoon(80L);
     }
 
     private void rejectUnverifiedWake() {

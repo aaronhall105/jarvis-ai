@@ -30,6 +30,7 @@ public final class StandardSpeechEngine
     private SpeechRecognizer recognizer;
     private boolean running;
     private boolean onDeviceFallback;
+    private float lastConfidence = -1.0f;
 
     public StandardSpeechEngine(
         Context context,
@@ -84,6 +85,10 @@ public final class StandardSpeechEngine
 
     public boolean isRunning() {
         return running;
+    }
+
+    public float lastConfidence() {
+        return lastConfidence;
     }
 
     private void createRecognizer() {
@@ -175,7 +180,22 @@ public final class StandardSpeechEngine
         }
     }
 
-    private static String best(Bundle bundle) {
+    private static final class RecognitionResult {
+        final String text;
+        final float confidence;
+
+        RecognitionResult(
+            String text,
+            float confidence
+        ) {
+            this.text = text;
+            this.confidence = confidence;
+        }
+    }
+
+    private static RecognitionResult best(
+        Bundle bundle
+    ) {
         ArrayList<String> results = bundle == null
             ? null
             : bundle.getStringArrayList(
@@ -183,7 +203,7 @@ public final class StandardSpeechEngine
             );
 
         if (results == null || results.isEmpty()) {
-            return "";
+            return new RecognitionResult("", -1.0f);
         }
 
         float[] confidence = bundle.getFloatArray(
@@ -191,7 +211,7 @@ public final class StandardSpeechEngine
         );
 
         int bestIndex = 0;
-        float bestScore = -1f;
+        float bestScore = -1.0f;
 
         if (confidence != null) {
             int maximum = Math.min(
@@ -199,7 +219,11 @@ public final class StandardSpeechEngine
                 results.size()
             );
 
-            for (int index = 0; index < maximum; index++) {
+            for (
+                int index = 0;
+                index < maximum;
+                index++
+            ) {
                 if (confidence[index] > bestScore) {
                     bestScore = confidence[index];
                     bestIndex = index;
@@ -208,7 +232,10 @@ public final class StandardSpeechEngine
         }
 
         String value = results.get(bestIndex);
-        return value == null ? "" : value.trim();
+        return new RecognitionResult(
+            value == null ? "" : value.trim(),
+            bestScore
+        );
     }
 
     @Override public void onReadyForSpeech(Bundle params) {
@@ -245,24 +272,30 @@ public final class StandardSpeechEngine
     }
 
     @Override public void onResults(Bundle results) {
-        String text = best(results);
+        RecognitionResult result = best(results);
+        lastConfidence = result.confidence;
         stopInternal();
 
-        if (text.isEmpty()) {
+        if (result.text.isEmpty()) {
             listener.onStandardError(
                 "I did not catch that."
             );
         } else {
-            listener.onStandardFinal(text);
+            listener.onStandardFinal(result.text);
         }
     }
 
     @Override public void onPartialResults(
         Bundle partialResults
     ) {
-        String text = best(partialResults);
-        if (!text.isEmpty()) {
-            listener.onStandardPartial(text);
+        RecognitionResult result = best(
+            partialResults
+        );
+        lastConfidence = result.confidence;
+        if (!result.text.isEmpty()) {
+            listener.onStandardPartial(
+                result.text
+            );
         }
     }
 

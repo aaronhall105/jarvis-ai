@@ -40,6 +40,7 @@ public final class VoiceService extends Service implements
     public static final String ACTION_SEND_TEXT = "com.aaron.jarvisvoice.SEND_TEXT";
     public static final String ACTION_APPLY_SETTINGS = "com.aaron.jarvisvoice.APPLY_SETTINGS";
     public static final String ACTION_NEW_CHAT = "com.aaron.jarvisvoice.NEW_CHAT";
+    public static final String ACTION_DELETE_CHAT = "com.aaron.jarvisvoice.DELETE_CHAT";
     public static final String ACTION_SWITCH_CHAT = "com.aaron.jarvisvoice.SWITCH_CHAT";
     public static final String ACTION_CANCEL_RESPONSE = "com.aaron.jarvisvoice.CANCEL_RESPONSE";
     public static final String ACTION_ASSISTANT_INVOKE = "com.aaron.jarvisvoice.ASSISTANT_INVOKE";
@@ -95,6 +96,8 @@ public final class VoiceService extends Service implements
     private String pendingBargeInPartial = "";
     private long pendingBargeInPartialAtMs;
     private long confirmedBargeInUntilMs;
+    private boolean wakeOwnedVoiceSession;
+    private long followUpOwnerUntilMs;
 
     @Override public void onCreate() {
         super.onCreate();
@@ -133,6 +136,8 @@ public final class VoiceService extends Service implements
                 if (ready) armWakeWord();
             }
             case ACTION_START_VOICE -> {
+                wakeOwnedVoiceSession = false;
+                followUpOwnerUntilMs = 0L;
                 requestedVoiceActive = microphoneForeground;
                 ensureConnected();
                 if (ready && requestedVoiceActive) beginVoice();
@@ -144,6 +149,7 @@ public final class VoiceService extends Service implements
             }
             case ACTION_APPLY_SETTINGS -> reconnectForSettings();
             case ACTION_NEW_CHAT -> newChat();
+            case ACTION_DELETE_CHAT -> deleteCurrentChat();
             case ACTION_SWITCH_CHAT -> switchChat(
                 intent.getStringExtra(
                     EXTRA_CONVERSATION_ID
@@ -329,6 +335,33 @@ public final class VoiceService extends Service implements
         switchChat(id);
     }
 
+    private void deleteCurrentChat() {
+        String current =
+            history.activeConversationId();
+
+        if (!history.deleteConversation(current)) {
+            status("Unable to delete the current chat");
+            return;
+        }
+
+        requestedVoiceActive = false;
+        voiceActive = false;
+        wakeOwnedVoiceSession = false;
+        followUpOwnerUntilMs = 0L;
+        VoiceSessionState.setActive(false);
+        stopCaptureAndPlayback();
+
+        broadcastEvent(
+            "clear",
+            "",
+            "",
+            false,
+            false
+        );
+
+        connect();
+    }
+
     private void switchChat(String id) {
         if (!history.switchConversation(id)) {
             status("Unable to open that conversation");
@@ -465,8 +498,28 @@ public final class VoiceService extends Service implements
     }
 
     private void startStandardListening() {
-        if (!voiceActive || stopping || endConversationAfterReply) return;
-        if (standardSpeechEngine.isRunning()) return;
+        if (
+            !voiceActive
+                || stopping
+                || endConversationAfterReply
+        ) {
+            return;
+        }
+
+        if (
+            wakeOwnedVoiceSession
+                && !hasInterruptibleTurn()
+                && followUpOwnerUntilMs > 0L
+                && SystemClock.elapsedRealtime()
+                    > followUpOwnerUntilMs
+        ) {
+            stopVoice(false);
+            return;
+        }
+
+        if (standardSpeechEngine.isRunning()) {
+            return;
+        }
 
         standardSpeechEngine.start();
         status(
@@ -492,11 +545,15 @@ public final class VoiceService extends Service implements
     }
 
     private long bargeInArmDelayMs() {
-        return usesPrivateAudioRoute() ? 180L : 850L;
+        return usesPrivateAudioRoute()
+            ? 160L
+            : 480L;
     }
 
     private long followUpListenDelayMs() {
-        return usesPrivateAudioRoute() ? 180L : 500L;
+        return usesPrivateAudioRoute()
+            ? 120L
+            : 160L;
     }
 
     private boolean explicitSpeakerBargeIn(String candidate) {
@@ -529,7 +586,12 @@ public final class VoiceService extends Service implements
 
     private void markAssistantAudioEnded() {
         echoSuppressionUntilMs =
-            SystemClock.elapsedRealtime() + (usesPrivateAudioRoute() ? 650L : 3_200L);
+            SystemClock.elapsedRealtime()
+                + (
+                    usesPrivateAudioRoute()
+                        ? 500L
+                        : 1_800L
+                );
         clearPendingBargeInPartial();
     }
 
@@ -558,7 +620,7 @@ public final class VoiceService extends Service implements
             return true;
         }
         boolean repeated =
-            wordCount >= 4
+            wordCount >= 2
                 && normalised.equals(pendingBargeInPartial)
                 && now - pendingBargeInPartialAtMs
                     <= 1_300L;
@@ -617,6 +679,8 @@ public final class VoiceService extends Service implements
         requestedVoiceActive = false;
         voiceActive = false;
         brainActive = false;
+        wakeOwnedVoiceSession = false;
+        followUpOwnerUntilMs = 0L;
         stopCaptureAndPlayback();
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
@@ -1096,6 +1160,12 @@ public final class VoiceService extends Service implements
             return;
         }
         if (!voiceActive) return;
+
+        if (wakeOwnedVoiceSession) {
+            followUpOwnerUntilMs =
+                SystemClock.elapsedRealtime()
+                    + 9_000L;
+        }
         if (!store.keepConversationOpen()) {
             stopVoice(false);
         } else if (ConversationMode.STANDARD.equals(store.conversationMode()) && store.standardAutoListen()) {
@@ -1194,6 +1264,9 @@ public final class VoiceService extends Service implements
             return;
         }
 
+        wakeOwnedVoiceSession = true;
+        followUpOwnerUntilMs =
+            SystemClock.elapsedRealtime() + 30_000L;
         requestedVoiceActive = true;
         beginVoice();
         queueOrSend(verifiedCommand, true);
@@ -1215,8 +1288,12 @@ public final class VoiceService extends Service implements
         broadcastState(true, true);
     }
 
-    @Override public void onStandardPartial(String text) {
-        if (text == null || text.isBlank()) return;
+    @Override public void onStandardPartial(
+        String text
+    ) {
+        if (text == null || text.isBlank()) {
+            return;
+        }
 
         if (isLikelyPlaybackEcho(text)) {
             return;
@@ -1225,6 +1302,21 @@ public final class VoiceService extends Service implements
         if (hasInterruptibleTurn()) {
             boolean outputActive =
                 playbackActive || fallbackSpeaking;
+
+            if (
+                !outputActive
+                    && wakeOwnedVoiceSession
+                    && !FollowUpVoicePolicy
+                        .acceptFollowUp(
+                            text,
+                            standardSpeechEngine
+                                .lastConfidence(),
+                            true,
+                            usesPrivateAudioRoute()
+                        )
+            ) {
+                return;
+            }
 
             if (
                 !outputActive
@@ -1246,20 +1338,57 @@ public final class VoiceService extends Service implements
     }
 
 
-    @Override public void onStandardFinal(String text) {
+    @Override public void onStandardFinal(
+        String text
+    ) {
         if (!voiceActive) return;
 
-        String command = text == null ? "" : text.trim();
-        if (command.isEmpty()) {
-            main.postDelayed(this::keepStandardBargeInArmed, 400L);
+        String heard =
+            text == null ? "" : text.trim();
+
+        if (heard.isEmpty()) {
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                300L
+            );
             return;
         }
 
-        boolean outputActive = playbackActive || fallbackSpeaking;
-        boolean confirmed = SystemClock.elapsedRealtime() < confirmedBargeInUntilMs;
-        if (outputActive && !usesPrivateAudioRoute() && !confirmed && !explicitSpeakerBargeIn(command)) {
+        boolean explicitWake =
+            FollowUpVoicePolicy.hasExplicitWake(
+                heard
+            );
+        String command =
+            FollowUpVoicePolicy.stripWakePrefix(
+                heard
+            );
+
+        if (command.isEmpty()) {
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                250L
+            );
+            return;
+        }
+
+        boolean outputActive =
+            playbackActive || fallbackSpeaking;
+        boolean confirmed =
+            SystemClock.elapsedRealtime()
+                < confirmedBargeInUntilMs
+                || explicitWake;
+
+        if (
+            outputActive
+                && !usesPrivateAudioRoute()
+                && !confirmed
+                && !explicitSpeakerBargeIn(heard)
+        ) {
             clearPendingBargeInPartial();
-            main.postDelayed(this::keepStandardBargeInArmed, 450L);
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                300L
+            );
             return;
         }
 
@@ -1267,18 +1396,48 @@ public final class VoiceService extends Service implements
             clearPendingBargeInPartial();
             main.postDelayed(
                 this::keepStandardBargeInArmed,
-                350L
+                250L
             );
             return;
         }
 
+        boolean withinOwnerWindow =
+            followUpOwnerUntilMs <= 0L
+                || SystemClock.elapsedRealtime()
+                    <= followUpOwnerUntilMs;
+
+        if (
+            !outputActive
+                && wakeOwnedVoiceSession
+                && !FollowUpVoicePolicy
+                    .acceptFollowUp(
+                        heard,
+                        standardSpeechEngine
+                            .lastConfidence(),
+                        withinOwnerWindow,
+                        usesPrivateAudioRoute()
+                    )
+        ) {
+            status("Background speech ignored");
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                250L
+            );
+            return;
+        }
+
+        followUpOwnerUntilMs =
+            SystemClock.elapsedRealtime() + 30_000L;
         clearPendingBargeInPartial();
         interruptCurrentTurnForBargeIn();
         queueOrSend(command, true);
         broadcastState(true, false);
 
         if (!endConversationAfterReply) {
-            main.postDelayed(this::keepStandardBargeInArmed, 250L);
+            main.postDelayed(
+                this::keepStandardBargeInArmed,
+                200L
+            );
         }
     }
 
@@ -1286,6 +1445,16 @@ public final class VoiceService extends Service implements
     @Override public void onStandardError(String message) {
         status(message);
         broadcastState(voiceActive, false);
+
+        if (
+            wakeOwnedVoiceSession
+                && followUpOwnerUntilMs > 0L
+                && SystemClock.elapsedRealtime()
+                    > followUpOwnerUntilMs
+        ) {
+            stopVoice(false);
+            return;
+        }
 
         if (
             voiceActive

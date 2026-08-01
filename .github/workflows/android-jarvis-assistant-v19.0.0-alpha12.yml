@@ -1,20 +1,29 @@
-name: Build Jarvis Assistant v19.0.0-alpha10
+name: Build Jarvis Assistant v19.0.0-alpha12
 
 on:
   workflow_dispatch:
   push:
     branches:
       - conversation-engine
+      - 'alpha12-validation-*'
     paths:
       - android/jarvis-voice-client/**
-      - bridge/app/realtime_voice.py
+      - bridge/app/proactive_intelligence.py
+      - bridge/app/proactive_policy.py
+      - bridge/app/person_room_context.py
       - bridge/app/main.py
       - bridge/app/ai_engine.py
       - bridge/app/vision_intelligence.py
+      - bridge/app/realtime_voice.py
+      - bridge/tests/test_proactive_intelligence_alpha8.py
+      - bridge/tests/test_smart_alerts_alpha11.py
+      - bridge/tests/test_person_room_alpha12.py
       - bridge/tests/test_vision_intelligence_alpha9.py
       - bridge/tests/test_realtime_voice_alpha5*.py
-      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha10.yml
-      - CHANGES_V19_0_0_ALPHA10.md
+      - bridge/tests/test_natural_control_alpha10.py
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha12.yml
+      - CHANGES_V19_0_0_ALPHA12.md
+      - .env.example
 
 permissions:
   contents: read
@@ -30,38 +39,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify alpha10 combined Core and Android source
+      - name: Verify alpha12 combined Core and Android source
         working-directory: .
         run: |
           set -euo pipefail
           git diff --check
-          grep -q 'versionCode = 190100' \
+          grep -Fq 'versionCode = 190120' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'versionName = "19.0.0-alpha10"' \
+          grep -Fq 'versionName = "19.0.0-alpha12"' \
             android/jarvis-voice-client/app/build.gradle.kts
-          grep -q 'client_release", "19.0.0-alpha10"' \
+          grep -Fq 'client_release", "19.0.0-alpha12"' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
-          grep -q '100.127.215.111:8000' \
-            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/CoreEndpointSelector.java
-          grep -q 'Europe/London' bridge/app/realtime_voice.py
-          grep -q 'TurnPerformanceTracker' \
-            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java
-          grep -q 'Run Jarvis system test' \
-            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java
-          grep -q 'conversations_v190070' \
-            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ChatHistoryStore.java
-          grep -q 'ChatHistoryActivity' \
-            android/jarvis-voice-client/app/src/main/AndroidManifest.xml
-          grep -q 'ACTION_CANCEL_RESPONSE' \
+          grep -Fq 'VERSION = "19.0.0-alpha12"' \
+            bridge/app/realtime_voice.py
+          grep -Fq 'battery_transition' \
+            bridge/app/proactive_intelligence.py
+          grep -Fq 'proactive_speech_allowed' \
+            bridge/app/proactive_intelligence.py
+          grep -Fq 'class WakeCommandPolicy' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/WakeCommandPolicy.java
+          grep -Fq 'False wake ignored' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/WakePhraseEngine.java
+          grep -Fq 'keywords-hey-jarvis.txt' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SherpaWakeWordEngine.java
+          grep -Fq 'voice_ownership_migration_v190120' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SecureStore.java
+          grep -Fq 'ACTION_DELETE_CHAT' \
             android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
-          grep -q 'ProactiveActivity' \
-            android/jarvis-voice-client/app/src/main/AndroidManifest.xml
-          grep -q 'jarvis_proactive.db' bridge/app/proactive_intelligence.py
-          grep -q 'notify.mobile_app_aaron_s_phone' bridge/app/proactive_intelligence.py
-          grep -q 'jarvis_vision.db' bridge/app/vision_intelligence.py
-          grep -q 'ic_jarvis_status' \
-            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/VoiceService.java
-          grep -q 'app.main:app' bridge/Dockerfile
+          grep -Fq 'class FollowUpVoicePolicy' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/FollowUpVoicePolicy.java
+          grep -Fq 'person_room_evidence' \
+            bridge/app/vision_intelligence.py
+          grep -Fq 'app.main:app' bridge/Dockerfile
 
       - uses: actions/setup-java@v4
         with:
@@ -79,7 +88,7 @@ jobs:
         with:
           gradle-version: '9.4.1'
 
-      - name: Prepare account-free offline wake-word engine
+      - name: Prepare strict account-free wake-word assets
         shell: bash
         run: |
           set -euo pipefail
@@ -101,37 +110,62 @@ jobs:
           fi
 
           unzip -t "$AAR" >/dev/null
-          unzip -p "$AAR" classes.jar > "$RUNNER_TEMP/sherpa-classes.jar"
-          jar tf "$RUNNER_TEMP/sherpa-classes.jar" |
-            grep -q 'com/k2fsa/sherpa/onnx/KeywordSpotter.class'
+          unzip -p "$AAR" classes.jar \
+            > "$RUNNER_TEMP/sherpa-classes.jar"
+          jar tf "$RUNNER_TEMP/sherpa-classes.jar" \
+            > "$RUNNER_TEMP/sherpa-classes.list"
+          grep -Fq \
+            'com/k2fsa/sherpa/onnx/KeywordSpotter.class' \
+            "$RUNNER_TEMP/sherpa-classes.list"
 
           curl -fL --retry 4 --retry-delay 3 \
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_NAME.tar.bz2" \
             -o "$MODEL_ARCHIVE"
           tar -xjf "$MODEL_ARCHIVE" -C "$MODEL_ROOT"
 
-          MODEL_DIR="$(find "$MODEL_ROOT" -type d -name "$MODEL_NAME" -print -quit)"
+          MODEL_DIR="$(
+            find "$MODEL_ROOT" \
+              -type d \
+              -name "$MODEL_NAME" \
+              -print \
+              -quit
+          )"
           test -n "$MODEL_DIR"
 
           choose_model() {
             local component="$1"
             local selected
-            selected="$(find "$MODEL_DIR" -maxdepth 1 -type f \
-              -name "${component}-epoch-13-avg-2-chunk-16-left-64.int8.onnx" \
-              -print -quit)"
+            selected="$(
+              find "$MODEL_DIR" \
+                -maxdepth 1 \
+                -type f \
+                -name "${component}-epoch-13-avg-2-chunk-16-left-64.int8.onnx" \
+                -print \
+                -quit
+            )"
             if [ -z "$selected" ]; then
-              selected="$(find "$MODEL_DIR" -maxdepth 1 -type f \
-                -name "${component}-epoch-13-avg-2-chunk-16-left-64.onnx" \
-                -print -quit)"
+              selected="$(
+                find "$MODEL_DIR" \
+                  -maxdepth 1 \
+                  -type f \
+                  -name "${component}-epoch-13-avg-2-chunk-16-left-64.onnx" \
+                  -print \
+                  -quit
+              )"
             fi
             test -n "$selected"
             printf '%s\n' "$selected"
           }
 
-          cp "$(choose_model encoder)" "$ASSETS/encoder.onnx"
-          cp "$(choose_model decoder)" "$ASSETS/decoder.onnx"
-          cp "$(choose_model joiner)" "$ASSETS/joiner.onnx"
-          cp "$MODEL_DIR/tokens.txt" "$ASSETS/tokens.txt"
+          cp "$(choose_model encoder)" \
+            "$ASSETS/encoder.onnx"
+          cp "$(choose_model decoder)" \
+            "$ASSETS/decoder.onnx"
+          cp "$(choose_model joiner)" \
+            "$ASSETS/joiner.onnx"
+          cp "$MODEL_DIR/tokens.txt" \
+            "$ASSETS/tokens.txt"
+
           JARVIS_PRONUNCIATION="$(
             awk '
               toupper($1) == "JARVIS" {
@@ -153,28 +187,24 @@ jobs:
             ' "$MODEL_DIR/en.phone"
           )"
 
-          if [ -z "$JARVIS_PRONUNCIATION" ]; then
-            echo "JARVIS was not found in the model lexicon."
-            exit 1
-          fi
-          if [ -z "$HEY_PRONUNCIATION" ]; then
-            echo "HEY was not found in the model lexicon."
-            exit 1
-          fi
+          test -n "$JARVIS_PRONUNCIATION"
+          test -n "$HEY_PRONUNCIATION"
 
-          {
-            printf '%s :2.2 @JARVIS\n' \
-              "$JARVIS_PRONUNCIATION"
-            printf '%s %s :2.5 @HEY_JARVIS\n' \
-              "$HEY_PRONUNCIATION" \
-              "$JARVIS_PRONUNCIATION"
-          } > "$ASSETS/keywords.txt"
+          printf '%s :2.0 @JARVIS\n' \
+            "$JARVIS_PRONUNCIATION" \
+            > "$ASSETS/keywords-jarvis.txt"
+
+          printf '%s %s :2.2 @HEY_JARVIS\n' \
+            "$HEY_PRONUNCIATION" \
+            "$JARVIS_PRONUNCIATION" \
+            > "$ASSETS/keywords-hey-jarvis.txt"
 
           test -s "$ASSETS/encoder.onnx"
           test -s "$ASSETS/decoder.onnx"
           test -s "$ASSETS/joiner.onnx"
           test -s "$ASSETS/tokens.txt"
-          test -s "$ASSETS/keywords.txt"
+          test -s "$ASSETS/keywords-jarvis.txt"
+          test -s "$ASSETS/keywords-hey-jarvis.txt"
 
           echo "Offline wake assets:"
           du -h "$AAR" "$ASSETS"/*
@@ -214,32 +244,46 @@ jobs:
         working-directory: .
         run: python3 -m pip install -r bridge/requirements.txt
 
-      - name: Test Jarvis Core alpha10 natural control
+      - name: Test Jarvis Core alpha12 room context
         working-directory: .
         run: |
           python3 -m py_compile \
+            bridge/app/proactive_policy.py \
+            bridge/app/proactive_intelligence.py \
+            bridge/app/person_room_context.py \
             bridge/app/realtime_voice.py \
             bridge/app/main.py \
             bridge/app/ai_engine.py \
-            bridge/app/proactive_intelligence.py \
             bridge/app/vision_intelligence.py
-          PYTHONPATH=bridge python3 bridge/tests/test_realtime_voice_alpha5.py
-          PYTHONPATH=bridge python3 bridge/tests/test_realtime_voice_alpha5_1.py
-          PYTHONPATH=bridge python3 bridge/tests/test_proactive_intelligence_alpha8.py
-          PYTHONPATH=bridge python3 bridge/tests/test_vision_intelligence_alpha9.py
-          PYTHONPATH=bridge python3 bridge/tests/test_natural_control_alpha10.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_realtime_voice_alpha5.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_realtime_voice_alpha5_1.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_proactive_intelligence_alpha8.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_vision_intelligence_alpha9.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_natural_control_alpha10.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_smart_alerts_alpha11.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_person_room_alpha12.py
 
       - name: Unit tests and debug APK
-        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: |
+          gradle --no-daemon \
+            :app:testDebugUnitTest \
+            :app:assembleDebug
 
       - name: Rename APK
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk \
-            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha10-debug.apk
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha12-debug.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: jarvis-assistant-v19.0.0-alpha10-debug
-          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha10-debug.apk
+          name: jarvis-assistant-v19.0.0-alpha12-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha12-debug.apk
           if-no-files-found: error
           retention-days: 30

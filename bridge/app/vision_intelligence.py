@@ -960,6 +960,218 @@ class VisionEngine:
             raise RuntimeError("Vision event disappeared")
         return self.public_event(updated)
 
+
+    async def live_person_rooms(
+        self,
+    ) -> dict[str, Any]:
+        if not (
+            self.ha_url
+            and self.ha_token
+            and self.openai is not None
+        ):
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": [],
+                "available": False,
+            }
+
+        cameras = [
+            (
+                details.get("area", key.replace("_", " ").title()),
+                details.get("entity_id", ""),
+            )
+            for key, details in self.camera_map.items()
+            if key != "front_door"
+                and details.get("entity_id")
+        ]
+
+        if not cameras:
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": [],
+                "available": False,
+            }
+
+        async def fetch_camera(
+            area: str,
+            entity_id: str,
+        ) -> tuple[str, str, bytes] | None:
+            url = (
+                f"{self.ha_url}/api/camera_proxy/"
+                f"{quote(entity_id, safe='._')}"
+            )
+            try:
+                async with httpx.AsyncClient(
+                    timeout=8.0,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get(
+                        url,
+                        headers=self._ha_headers(),
+                    )
+                    response.raise_for_status()
+            except Exception:
+                logger.warning(
+                    "Live room snapshot failed for %s",
+                    entity_id,
+                )
+                return None
+
+            data = response.content
+            if not data or len(data) > 12_000_000:
+                return None
+
+            content_type = response.headers.get(
+                "content-type",
+                "image/jpeg",
+            )
+            return area, content_type, data
+
+        fetched = await asyncio.gather(
+            *(
+                fetch_camera(area, entity_id)
+                for area, entity_id in cameras
+            )
+        )
+        images = [
+            item for item in fetched
+            if item is not None
+        ]
+
+        if not images:
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": [],
+                "available": False,
+            }
+
+        allowed = [area for area, _, _ in images]
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": (
+                    "These are private home camera snapshots. "
+                    "For each labelled room, state only whether "
+                    "at least one person is visibly present. "
+                    "Do not identify anyone, compare faces, infer "
+                    "identity or infer intent. Return strict JSON "
+                    'only: {"rooms":["Room name"],'
+                    '"uncertain":false}. Use only these room '
+                    f"names: {', '.join(allowed)}."
+                ),
+            }
+        ]
+
+        for area, content_type, data in images:
+            encoded = base64.b64encode(data).decode(
+                "ascii"
+            )
+            content.append({
+                "type": "input_text",
+                "text": f"Camera room: {area}",
+            })
+            content.append({
+                "type": "input_image",
+                "image_url": (
+                    f"data:{content_type};base64,"
+                    f"{encoded}"
+                ),
+            })
+
+        try:
+            response = await self.openai.responses.create(
+                model=self.model,
+                input=[{
+                    "role": "user",
+                    "content": content,
+                }],
+                max_output_tokens=120,
+            )
+        except Exception:
+            logger.exception(
+                "Live room camera analysis failed"
+            )
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": allowed,
+                "available": False,
+            }
+
+        raw = clean(
+            getattr(response, "output_text", ""),
+            1200,
+        )
+        match = re.search(r"\{.*\}", raw, re.S)
+
+        if not match:
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": allowed,
+                "available": True,
+            }
+
+        try:
+            payload = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {
+                "source": "live_snapshots",
+                "rooms": [],
+                "checked": allowed,
+                "available": True,
+            }
+
+        supplied = payload.get("rooms")
+        if not isinstance(supplied, list):
+            supplied = []
+
+        room_lookup = {
+            area.casefold(): area
+            for area in allowed
+        }
+        rooms = []
+        for value in supplied:
+            resolved = room_lookup.get(
+                str(value).strip().casefold()
+            )
+            if resolved and resolved not in rooms:
+                rooms.append(resolved)
+
+        return {
+            "source": "live_snapshots",
+            "rooms": rooms,
+            "checked": allowed,
+            "available": True,
+        }
+
+    async def person_room_evidence(
+        self,
+    ) -> dict[str, Any]:
+        live = await self.live_person_rooms()
+        if live.get("rooms"):
+            live["events"] = []
+            live["primary_event"] = None
+            return live
+
+        from app.person_room_context import (
+            recent_person_rooms,
+        )
+
+        recent = recent_person_rooms(
+            self.recent(
+                after=time.time() - 180,
+                limit=20,
+            )
+        )
+        recent["available"] = bool(
+            recent.get("events")
+        )
+        return recent
+
     def matches_query(self, text: str) -> bool:
         return bool(VISION_QUERY.search(clean(text, 1000)))
 
@@ -1222,7 +1434,7 @@ class VisionEngine:
             ).fetchone()["count"]
         return {
             "ready": True,
-            "release": "19.0.0-alpha9",
+            "release": "19.0.0-alpha12",
             "enabled": self.enabled,
             "frigate_configured": bool(self.frigate_url),
             "home_assistant_configured": bool(
