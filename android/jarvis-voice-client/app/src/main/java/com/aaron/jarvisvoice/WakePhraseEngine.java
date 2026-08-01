@@ -15,10 +15,8 @@ import android.speech.SpeechRecognizer;
 import java.util.ArrayList;
 import java.util.Locale;
 
-**()
- * Dedicated local wake phrase with a separate command-verification stage.
- * A wake detection never opens a Jarvis conversation by itself.
- */
+// Dedicated local wake phrase with a separate command-verification stage.
+// A wake detection never opens a Jarvis conversation by itself.
 public final class WakePhraseEngine implements RecognitionListener {
     public interface Listener {
         void onWakePhrase(String transcript, String command);

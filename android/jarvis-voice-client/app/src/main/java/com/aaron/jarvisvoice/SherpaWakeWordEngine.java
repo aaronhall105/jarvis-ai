@@ -20,7 +20,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 
-**(Fully, local,, account-free, Jarvis, keyword, detector., */)
+// Fully local, account-free Jarvis keyword detector.
 final class SherpaWakeWordEngine {
     interface Listener {
         void onDetected(String phrase);
