@@ -35,6 +35,7 @@ public final class SecureStore {
         migrateWakeStabilityDefaults();
         migrateProductionVoiceDefaults();
         migrateReliableVoiceDefaults();
+        migrateWakeReliabilityAlpha11();
     }
 
     private void migrateAssistantDefaults() {
@@ -134,15 +135,52 @@ public final class SecureStore {
             .apply();
     }
 
-    public void resetToDedicatedWake() {
-        float sensitivity = preferences.getFloat("wake_sensitivity_v1830", 0.90f);
+    private void migrateWakeReliabilityAlpha11() {
+        if (
+            preferences.getBoolean(
+                "wake_reliability_migration_v190110",
+                false
+            )
+        ) {
+            return;
+        }
+
+        float existing = preferences.getFloat(
+            "wake_sensitivity_v1830",
+            0.90f
+        );
 
         preferences.edit()
             .putBoolean("wake_enabled", true)
-            .putString("wake_phrase", "jarvis")
+            .putString("wake_phrase", "hey jarvis")
             .putBoolean("dedicated_wake_enabled_v1830", true)
             .putBoolean("assistant_wake_always_v1810", true)
-            .putFloat("wake_sensitivity_v1830", Math.max(sensitivity, 0.90f))
+            .putFloat(
+                "wake_sensitivity_v1830",
+                Math.min(existing, 0.72f)
+            )
+            .putBoolean(
+                "wake_reliability_migration_v190110",
+                true
+            )
+            .apply();
+    }
+
+    public void resetToDedicatedWake() {
+        float sensitivity = preferences.getFloat(
+            "wake_sensitivity_v1830",
+            0.72f
+        );
+
+        preferences.edit()
+            .putBoolean("wake_enabled", true)
+            .putString("wake_phrase", "hey jarvis")
+            .putBoolean("dedicated_wake_enabled_v1830", true)
+            .putBoolean("assistant_wake_always_v1810", true)
+            .putFloat(
+                "wake_sensitivity_v1830",
+                Math.min(sensitivity, 0.72f)
+            )
             .apply();
     }
 
@@ -260,7 +298,12 @@ public final class SecureStore {
     }
 
     public String wakePhrase() {
-        return normaliseWakePhrase(preferences.getString("wake_phrase", "jarvis"));
+        return normaliseWakePhrase(
+            preferences.getString(
+                "wake_phrase",
+                "hey jarvis"
+            )
+        );
     }
 
     public boolean dedicatedWakeEnabled() {

@@ -1,0 +1,274 @@
+name: Build Jarvis Assistant v19.0.0-alpha11
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - conversation-engine
+    paths:
+      - android/jarvis-voice-client/**
+      - bridge/app/proactive_intelligence.py
+      - bridge/app/proactive_policy.py
+      - bridge/app/realtime_voice.py
+      - bridge/tests/test_proactive_intelligence_alpha8.py
+      - bridge/tests/test_smart_alerts_alpha11.py
+      - bridge/tests/test_vision_intelligence_alpha9.py
+      - bridge/tests/test_realtime_voice_alpha5*.py
+      - bridge/tests/test_natural_control_alpha10.py
+      - .github/workflows/android-jarvis-assistant-v19.0.0-alpha11.yml
+      - CHANGES_V19_0_0_ALPHA11.md
+      - .env.example
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: android/jarvis-voice-client
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify alpha11 combined Core and Android source
+        working-directory: .
+        run: |
+          set -euo pipefail
+          git diff --check
+          grep -Fq 'versionCode = 190110' \
+            android/jarvis-voice-client/app/build.gradle.kts
+          grep -Fq 'versionName = "19.0.0-alpha11"' \
+            android/jarvis-voice-client/app/build.gradle.kts
+          grep -Fq 'client_release", "19.0.0-alpha11"' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/RealtimeProtocol.java
+          grep -Fq 'VERSION = "19.0.0-alpha11"' \
+            bridge/app/realtime_voice.py
+          grep -Fq 'battery_transition' \
+            bridge/app/proactive_intelligence.py
+          grep -Fq 'proactive_speech_allowed' \
+            bridge/app/proactive_intelligence.py
+          grep -Fq 'class WakeCommandPolicy' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/WakeCommandPolicy.java
+          grep -Fq 'False wake ignored' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/WakePhraseEngine.java
+          grep -Fq 'keywords-hey-jarvis.txt' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SherpaWakeWordEngine.java
+          grep -Fq 'wake_reliability_migration_v190110' \
+            android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SecureStore.java
+          grep -Fq 'app.main:app' bridge/Dockerfile
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.4.1'
+
+      - name: Prepare strict account-free wake-word assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAR="app/libs/sherpa-onnx-1.13.2.aar"
+          ASSETS="app/src/main/assets/sherpa-kws-v1831"
+          MODEL_NAME="sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+          MODEL_ARCHIVE="$RUNNER_TEMP/$MODEL_NAME.tar.bz2"
+          MODEL_ROOT="$RUNNER_TEMP/jarvis-sherpa-model"
+
+          mkdir -p app/libs "$ASSETS" "$MODEL_ROOT"
+
+          if ! curl -fL --retry 4 --retry-delay 3 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-1.13.2.aar" \
+            -o "$AAR"; then
+            curl -fL --retry 4 --retry-delay 3 \
+              "https://downloads.sourceforge.net/project/sherpa-onnx.mirror/v1.13.2/sherpa-onnx-1.13.2.aar" \
+              -o "$AAR"
+          fi
+
+          unzip -t "$AAR" >/dev/null
+          unzip -p "$AAR" classes.jar \
+            > "$RUNNER_TEMP/sherpa-classes.jar"
+          jar tf "$RUNNER_TEMP/sherpa-classes.jar" \
+            > "$RUNNER_TEMP/sherpa-classes.list"
+          grep -Fq \
+            'com/k2fsa/sherpa/onnx/KeywordSpotter.class' \
+            "$RUNNER_TEMP/sherpa-classes.list"
+
+          curl -fL --retry 4 --retry-delay 3 \
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$MODEL_NAME.tar.bz2" \
+            -o "$MODEL_ARCHIVE"
+          tar -xjf "$MODEL_ARCHIVE" -C "$MODEL_ROOT"
+
+          MODEL_DIR="$(
+            find "$MODEL_ROOT" \
+              -type d \
+              -name "$MODEL_NAME" \
+              -print \
+              -quit
+          )"
+          test -n "$MODEL_DIR"
+
+          choose_model() {
+            local component="$1"
+            local selected
+            selected="$(
+              find "$MODEL_DIR" \
+                -maxdepth 1 \
+                -type f \
+                -name "${component}-epoch-13-avg-2-chunk-16-left-64.int8.onnx" \
+                -print \
+                -quit
+            )"
+            if [ -z "$selected" ]; then
+              selected="$(
+                find "$MODEL_DIR" \
+                  -maxdepth 1 \
+                  -type f \
+                  -name "${component}-epoch-13-avg-2-chunk-16-left-64.onnx" \
+                  -print \
+                  -quit
+              )"
+            fi
+            test -n "$selected"
+            printf '%s\n' "$selected"
+          }
+
+          cp "$(choose_model encoder)" \
+            "$ASSETS/encoder.onnx"
+          cp "$(choose_model decoder)" \
+            "$ASSETS/decoder.onnx"
+          cp "$(choose_model joiner)" \
+            "$ASSETS/joiner.onnx"
+          cp "$MODEL_DIR/tokens.txt" \
+            "$ASSETS/tokens.txt"
+
+          JARVIS_PRONUNCIATION="$(
+            awk '
+              toupper($1) == "JARVIS" {
+                $1 = ""
+                sub(/^ /, "")
+                print
+                exit
+              }
+            ' "$MODEL_DIR/en.phone"
+          )"
+          HEY_PRONUNCIATION="$(
+            awk '
+              toupper($1) == "HEY" {
+                $1 = ""
+                sub(/^ /, "")
+                print
+                exit
+              }
+            ' "$MODEL_DIR/en.phone"
+          )"
+
+          test -n "$JARVIS_PRONUNCIATION"
+          test -n "$HEY_PRONUNCIATION"
+
+          printf '%s :2.0 @JARVIS\n' \
+            "$JARVIS_PRONUNCIATION" \
+            > "$ASSETS/keywords-jarvis.txt"
+
+          printf '%s %s :2.2 @HEY_JARVIS\n' \
+            "$HEY_PRONUNCIATION" \
+            "$JARVIS_PRONUNCIATION" \
+            > "$ASSETS/keywords-hey-jarvis.txt"
+
+          test -s "$ASSETS/encoder.onnx"
+          test -s "$ASSETS/decoder.onnx"
+          test -s "$ASSETS/joiner.onnx"
+          test -s "$ASSETS/tokens.txt"
+          test -s "$ASSETS/keywords-jarvis.txt"
+          test -s "$ASSETS/keywords-hey-jarvis.txt"
+
+          echo "Offline wake assets:"
+          du -h "$AAR" "$ASSETS"/*
+
+      - name: Restore Jarvis debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: jarvis-voice-debug-keystore-v1730-v1
+
+      - name: Create Jarvis debug signing key when absent
+        working-directory: .
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Jarvis Voice Debug,O=Aaron Hall,C=GB" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000
+          fi
+
+      - name: Verify Picovoice is absent
+        run: |
+          ! grep -RniE 'picovoice|porcupine|AccessKey' \
+            app/src/main app/build.gradle.kts
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Jarvis Core test dependencies
+        working-directory: .
+        run: python3 -m pip install -r bridge/requirements.txt
+
+      - name: Test Jarvis Core alpha11 smart alerts
+        working-directory: .
+        run: |
+          python3 -m py_compile \
+            bridge/app/proactive_policy.py \
+            bridge/app/proactive_intelligence.py \
+            bridge/app/realtime_voice.py \
+            bridge/app/main.py \
+            bridge/app/ai_engine.py \
+            bridge/app/vision_intelligence.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_realtime_voice_alpha5.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_realtime_voice_alpha5_1.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_proactive_intelligence_alpha8.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_vision_intelligence_alpha9.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_natural_control_alpha10.py
+          PYTHONPATH=bridge python3 \
+            bridge/tests/test_smart_alerts_alpha11.py
+
+      - name: Unit tests and debug APK
+        run: |
+          gradle --no-daemon \
+            :app:testDebugUnitTest \
+            :app:assembleDebug
+
+      - name: Rename APK
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk \
+            app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha11-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-assistant-v19.0.0-alpha11-debug
+          path: android/jarvis-voice-client/app/build/outputs/apk/debug/jarvis-assistant-v19.0.0-alpha11-debug.apk
+          if-no-files-found: error
+          retention-days: 30

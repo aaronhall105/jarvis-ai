@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-VERSION = "19.0.0-alpha10"
-CORE_APPLICATION_VERSION = "3.3.0"
+VERSION = "19.0.0-alpha11"
+CORE_APPLICATION_VERSION = "3.4.0"
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000

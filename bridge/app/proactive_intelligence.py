@@ -20,6 +20,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from .proactive_policy import (
+    battery_transition,
+    is_real_oven_entity,
+    proactive_notification_tag,
+    proactive_speech_allowed,
+    safety_kind,
+)
+
 
 logger = logging.getLogger("jarvis-core.proactive")
 router = APIRouter(prefix="/api/proactive", tags=["proactive"])
@@ -107,6 +115,22 @@ class Rules:
         self.door_seconds = max(60, door_seconds)
         self.oven_seconds = max(300, oven_seconds)
         self.high_power_w = max(250.0, high_power_w)
+        self.battery_low_percent = float(env(
+            "JARVIS_PROACTIVE_BATTERY_LOW_PERCENT",
+            default="15",
+        ))
+        self.battery_critical_percent = float(env(
+            "JARVIS_PROACTIVE_BATTERY_CRITICAL_PERCENT",
+            default="5",
+        ))
+        self.oven_entities = {
+            item.strip()
+            for item in env(
+                "JARVIS_PROACTIVE_OVEN_ENTITIES",
+                default="",
+            ).split(",")
+            if item.strip()
+        }
 
     def evaluate(
         self,
@@ -128,6 +152,38 @@ class Rules:
         age = max(0, now - first_seen)
         away = all(value != "home" for value in presence.values())
         result: list[Candidate] = []
+
+        safety = safety_kind(previous, current)
+        if safety:
+            title, message = {
+                "smoke_detected": (
+                    "Smoke detected",
+                    f"{name} reports smoke.",
+                ),
+                "carbon_monoxide_detected": (
+                    "Carbon monoxide detected",
+                    f"{name} reports carbon monoxide.",
+                ),
+                "gas_detected": (
+                    "Gas detected",
+                    f"{name} reports gas.",
+                ),
+                "water_leak": (
+                    "Water leak detected",
+                    f"{name} reports moisture or a leak.",
+                ),
+            }[safety]
+            result.append(Candidate(
+                "security",
+                safety,
+                entity_id,
+                title,
+                message,
+                f"{entity_id} changed from {old or 'unknown'} to {state}",
+                100,
+                "all",
+                ("dismiss",),
+            ))
 
         if entity_domain == "person":
             if state == "home" and old not in {"", "home"}:
@@ -204,8 +260,15 @@ class Rules:
                 82,
             ))
 
-        oven = any(word in lowered for word in ("oven", "hob", "cooker"))
-        if oven and state in {"on", "heating", "preheating"} and age >= self.oven_seconds:
+        oven = is_real_oven_entity(
+            current,
+            explicit_entities=self.oven_entities,
+        )
+        if (
+            oven
+            and state in {"on", "heating", "preheating"}
+            and age >= self.oven_seconds
+        ):
             actions = (
                 ("turn_off", "remind_later", "dismiss")
                 if entity_domain in SAFE_TURN_OFF
@@ -223,24 +286,33 @@ class Rules:
                 actions,
             ))
 
-        if entity_domain == "sensor" and "battery" in lowered:
-            level = number(current.get("state"))
-            if level is not None and level <= 15:
-                target = (
-                    "amber" if "amber" in lowered else
-                    "aaron" if "aaron" in lowered else
-                    "all"
-                )
-                result.append(Candidate(
-                    "batteries",
-                    "battery_low",
-                    entity_id,
-                    "Battery low",
-                    f"{name} is at {int(level)}%.",
-                    f"{entity_id} reported {level}% battery",
-                    92 if level <= 5 else 80,
-                    target,
-                ))
+        battery = battery_transition(
+            previous,
+            current,
+            low_percent=self.battery_low_percent,
+            critical_percent=self.battery_critical_percent,
+        )
+        if battery:
+            kind, importance, level = battery
+            target = (
+                "amber" if "amber" in lowered else
+                "aaron" if "aaron" in lowered else
+                "all"
+            )
+            result.append(Candidate(
+                "batteries",
+                kind,
+                entity_id,
+                (
+                    "Battery critically low"
+                    if kind == "battery_critical"
+                    else "Battery low"
+                ),
+                f"{name} is at {int(level)}%.",
+                f"{entity_id} crossed the {int(level)}% battery threshold",
+                importance,
+                target,
+            ))
 
         power = entity_domain == "sensor" and any(
             word in lowered for word in ("power", "current consumption", "current_consumption")
@@ -683,8 +755,10 @@ class ProactiveEngine:
                         logger.exception("Mobile proactive notification failed")
             if (
                 settings["speak_enabled"]
-                and not self.quiet(settings)
-                and event["importance"] >= 90
+                and proactive_speech_allowed(
+                    event,
+                    quiet=self.quiet(settings),
+                )
             ):
                 speak = True
 
@@ -729,7 +803,9 @@ class ProactiveEngine:
                 "message": event["message"],
                 "data": {
                     "channel": channel,
-                    "tag": "jarvis_proactive_" + event["fingerprint"],
+                    "tag": proactive_notification_tag(event),
+                    "group": "jarvis_" + event["category"],
+                    "alert_once": event["importance"] < 95,
                     "importance": "high" if event["importance"] >= 90 else "default",
                     "priority": "high" if event["importance"] >= 90 else "normal",
                     "clickAction": "jarvis://proactive",

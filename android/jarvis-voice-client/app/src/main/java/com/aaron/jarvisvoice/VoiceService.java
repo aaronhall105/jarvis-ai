@@ -1014,7 +1014,21 @@ public final class VoiceService extends Service implements
 
     @Override public void onAudioFrame(byte[] pcm16) {
         JarvisRealtimeClient current = client;
-        if (voiceActive && ConversationMode.LIVE.equals(store.conversationMode()) && current != null) {
+
+        if (
+            playbackActive
+                && !usesPrivateAudioRoute()
+        ) {
+            return;
+        }
+
+        if (
+            voiceActive
+                && ConversationMode.LIVE.equals(
+                    store.conversationMode()
+                )
+                && current != null
+        ) {
             current.sendAudio(pcm16);
         }
     }
@@ -1109,7 +1123,7 @@ public final class VoiceService extends Service implements
         broadcastState(true, false);
         main.postDelayed(
             this::keepStandardBargeInArmed,
-            260L
+            bargeInArmDelayMs()
         );
     }
 
@@ -1151,17 +1165,38 @@ public final class VoiceService extends Service implements
         afterPlayback();
     }
 
-    @Override public void onWakePhrase(String transcript, String command) {
+    @Override public void onWakePhrase(
+        String transcript,
+        String command
+    ) {
         if (stopping) return;
-        if (store.assistantOverlayEnabled() &&
-            JarvisVoiceInteractionService.showOverlayIfActive(this, command, "wake_word")) {
+
+        String verifiedCommand =
+            command == null ? "" : command.trim();
+
+        if (verifiedCommand.isEmpty()) {
+            requestedVoiceActive = false;
+            if (ready && !voiceActive) {
+                armWakeWord();
+            }
             return;
         }
+
+        if (
+            store.assistantOverlayEnabled()
+                && JarvisVoiceInteractionService
+                    .showOverlayIfActive(
+                        this,
+                        verifiedCommand,
+                        "wake_word"
+                    )
+        ) {
+            return;
+        }
+
         requestedVoiceActive = true;
         beginVoice();
-        if (command != null && !command.isBlank()) {
-            queueOrSend(command, true);
-        }
+        queueOrSend(verifiedCommand, true);
     }
 
     @Override public void onWakeStatus(String message) {

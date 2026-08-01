@@ -12,7 +12,11 @@ public final class WakePhrasePolicy {
         public final String command;
         public final String matchedPhrase;
 
-        private Decision(boolean triggered, String command, String matchedPhrase) {
+        private Decision(
+            boolean triggered,
+            String command,
+            String matchedPhrase
+        ) {
             this.triggered = triggered;
             this.command = command;
             this.matchedPhrase = matchedPhrase;
@@ -25,7 +29,10 @@ public final class WakePhrasePolicy {
 
     private WakePhrasePolicy() {}
 
-    public static Decision evaluate(String transcript, String configuredWakePhrase) {
+    public static Decision evaluate(
+        String transcript,
+        String configuredWakePhrase
+    ) {
         String heard = normalise(transcript);
         if (heard.isEmpty()) return Decision.ignore();
 
@@ -34,7 +41,11 @@ public final class WakePhrasePolicy {
                 return new Decision(true, "", prefix);
             }
             if (heard.startsWith(prefix + " ")) {
-                return new Decision(true, heard.substring(prefix.length()).trim(), prefix);
+                return new Decision(
+                    true,
+                    heard.substring(prefix.length()).trim(),
+                    prefix
+                );
             }
         }
         return Decision.ignore();
@@ -42,19 +53,32 @@ public final class WakePhrasePolicy {
 
     static List<String> prefixes(String configuredWakePhrase) {
         String wake = normalise(configuredWakePhrase);
-        if (wake.isEmpty()) wake = "jarvis";
+        if (wake.isEmpty()) wake = "hey jarvis";
+
         Set<String> values = new LinkedHashSet<>();
+
+        if ("hey jarvis".equals(wake)) {
+            values.add("hey jarvis");
+            values.add("okay jarvis");
+            values.add("ok jarvis");
+            values.add("hey jervis");
+            values.add("okay jervis");
+            values.add("hey javis");
+            return new ArrayList<>(values);
+        }
+
         values.add(wake);
         values.add("hey " + wake);
         values.add("okay " + wake);
         values.add("ok " + wake);
+
         if ("jarvis".equals(wake)) {
-            // Common UK-English recogniser variants. Prefix-only matching limits false wakes.
             values.add("jervis");
             values.add("hey jervis");
             values.add("javis");
             values.add("hey javis");
         }
+
         return new ArrayList<>(values);
     }
 
