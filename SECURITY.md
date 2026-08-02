@@ -1,35 +1,29 @@
-# Security boundaries
+# Security policy
 
-Jarvis v14 is intentionally supervised rather than an unrestricted self-modifying
-agent.
+## Reporting a vulnerability
 
-## Never granted to the live container
+Do not disclose credentials, private URLs, household data or exploitable details
+in a public issue.
 
-- Write access to the Git source tree.
-- Docker socket access.
-- Host shell access.
-- Permission to deploy generated code.
+Use GitHub's private vulnerability-reporting or Security Advisory feature for
+this repository. Include:
 
-## Never editable by generated patches
+- A concise description.
+- Affected component and version.
+- Reproduction steps.
+- Security impact.
+- Suggested mitigation when known.
 
-- Secrets and `.env`.
-- Authentication and token files.
-- Docker/systemd/GitHub control files.
-- Dependency manifests.
-- The improvement policy or worker.
-- Persistent user data and memories.
+## Sensitive data
 
-## Deployment approval
+The following must never be committed:
 
-A candidate needs its ID and random six-digit code. Voice/chat deployment is
-limited to Aaron's authenticated administrator account. REST write endpoints use
-a separate random admin token generated during installation.
+- `.env`
+- API keys and access tokens
+- Home Assistant long-lived tokens
+- Private keys or signing files
+- Runtime databases
+- Household camera images
+- Personal conversation logs
 
-## Emergency controls
-
-```bash
-touch ~/jarvis/data/self_improvement.disabled
-systemctl --user stop jarvis-improver
-```
-
-This stops self-improvement without stopping normal Jarvis Core operation.
+Rotate any credential immediately if it is exposed.

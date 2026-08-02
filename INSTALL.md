@@ -1,252 +1,118 @@
-# Jarvis Self-Improvement Engine v14 — Installation
+# Installing Jarvis AI
 
-This is a **Jarvis Ubuntu/Core-only update**. It does not replace the Home
-Assistant Conversation integration and does not require a Home Assistant restart.
+These instructions install the current `v19.0.0-alpha13` Jarvis Core and
+describe where to obtain the Android client.
 
-## What the installer does
+## Requirements
 
-- Creates a protected host-side improvement worker.
-- Creates a Python virtual environment for code generation and testing.
-- Adds self-improvement settings to `.env` without exposing its contents.
-- Commits the current working Jarvis code as the safe Git baseline.
-- Rebuilds Jarvis Core.
-- Installs and starts a per-user `systemd` service.
-- Leaves automatic source-code deployment disabled.
+- Ubuntu or another Docker-capable Linux host
+- Git
+- Docker Engine with Docker Compose
+- A configured model provider
+- Home Assistant URL and long-lived access token when smart-home control is used
+- Android device for the mobile assistant client
 
-## 1. Upload and extract
-
-Upload `jarvis-self-improvement-engine-v14-core.tar.gz` to:
-
-`/home/aaron/jarvis/`
-
-Run on the Ubuntu terminal showing `aaron@arvis`:
+## 1. Clone the current branch
 
 ```bash
-cd ~/jarvis
+git clone \
+  --branch conversation-engine \
+  https://github.com/aaronhall105/jarvis-ai.git
 
-mkdir -p backup/self-improvement-v14
-
-cp bridge/app/config.py \
-  backup/self-improvement-v14/config.py.before-v14
-
-cp bridge/app/main.py \
-  backup/self-improvement-v14/main.py.before-v14
-
-[ -f bridge/app/self_improvement.py ] && \
-  cp bridge/app/self_improvement.py \
-  backup/self-improvement-v14/self_improvement.py.before-v14 || true
-
-cp .gitignore \
-  backup/self-improvement-v14/gitignore.before-v14 2>/dev/null || true
-
-tar -xzf jarvis-self-improvement-engine-v14-core.tar.gz
+cd jarvis-ai
 ```
 
-## 2. Compile the new Python files
+## 2. Configure the Core
+
+Create the private environment file:
 
 ```bash
-cd ~/jarvis
-
-python3 -m py_compile \
-  bridge/app/self_improvement.py \
-  bridge/app/config.py \
-  bridge/app/main.py \
-  tools/self_improvement_worker.py
-
-bash -n tools/install_self_improvement_v14.sh
-bash -n tools/jarvis-improve
+cp .env.example .env
+chmod 600 .env
 ```
 
-No output means the checks passed.
+Edit `.env` and provide the settings required by your deployment. Do not commit
+this file.
 
-## 3. Run the installer
-
-```bash
-cd ~/jarvis
-
-chmod +x \
-  tools/install_self_improvement_v14.sh \
-  tools/jarvis-improve \
-  tools/self_improvement_worker.py
-
-./tools/install_self_improvement_v14.sh
-```
-
-The installer may take several minutes while it creates the isolated Python
-environment and installs testing/security tools.
-
-If it reports that Python venv support is missing:
-
-```bash
-sudo apt update
-sudo apt install -y python3-venv
-
-cd ~/jarvis
-./tools/install_self_improvement_v14.sh
-```
-
-## 4. Keep the worker running after logout
-
-Run once:
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-Then verify:
-
-```bash
-systemctl --user restart jarvis-improver
-systemctl --user --no-pager --full status jarvis-improver
-```
-
-## 5. Verify Jarvis Core and the worker
-
-```bash
-cd ~/jarvis
-
-curl -s http://localhost:8000/health
-printf '\n'
-
-./tools/jarvis-improve status
-
-curl -s http://localhost:8000/api/improvement/status
-printf '\n'
-```
-
-Expected Jarvis Core version: `2.1.0`.
-
-The improvement status should show that the feature and worker are enabled. The
-worker heartbeat may take up to the configured polling interval to appear.
-
-## 6. First safe test
-
-In Home Assistant Assist, from Aaron's administrator account, say:
+The Compose service bind-mounts:
 
 ```text
-Show self-improvement status.
+./config -> /app/config
+./data   -> /app/data
+./logs   -> /app/logs
 ```
 
-Then deliberately record a harmless test failure:
+Back up `data/` before major upgrades because it contains persistent Jarvis
+state and databases.
 
-```text
-Record that as a mistake.
-```
-
-Review the queue:
-
-```text
-Show recorded mistakes.
-```
-
-Ask Jarvis to prepare a candidate:
-
-```text
-Prepare a fix for the last mistake.
-```
-
-The worker will not modify the live code. It creates an isolated Git worktree,
-generates a bounded patch, runs local tests/security checks, starts a restricted
-candidate container, and performs an independent review.
-
-When a candidate passes, Jarvis sends Aaron a notification containing its ID and
-six-digit approval code.
-
-Review it:
-
-```text
-Show pending improvements.
-```
-
-Deploy only after reviewing the summary:
-
-```text
-Deploy improvement 12 code 123456.
-```
-
-Use the actual candidate ID and code supplied by Jarvis.
-
-## Emergency stop
-
-Voice/chat command:
-
-```text
-Emergency stop self-improvement.
-```
-
-Host command:
+## 3. Start Jarvis Core
 
 ```bash
-cd ~/jarvis
-
-touch data/self_improvement.disabled
-systemctl --user stop jarvis-improver
-```
-
-Jarvis Core and normal Home Assistant control continue running.
-
-Resume:
-
-```bash
-cd ~/jarvis
-
-rm -f data/self_improvement.disabled
-systemctl --user start jarvis-improver
-```
-
-Or say:
-
-```text
-Resume self-improvement.
-```
-
-## GitHub hardening
-
-The package installs Jarvis CI, CodeQL, CODEOWNERS and a pull-request template.
-After pushing the v14 baseline, protect the production branch in GitHub:
-
-- Require a pull request before merging.
-- Require Aaron's approval.
-- Require Jarvis CI and CodeQL status checks.
-- Dismiss stale approvals after new commits.
-- Block force pushes and branch deletion.
-- Apply the rules to administrators.
-
-Remote pull-request creation is disabled by default. Enable it only after the
-GitHub CLI is authenticated:
-
-```bash
-cd ~/jarvis
-
-gh auth status
-sed -i \
-  's/^JARVIS_IMPROVEMENT_GITHUB_ENABLED=.*/JARVIS_IMPROVEMENT_GITHUB_ENABLED=true/' \
-  .env
-
-systemctl --user restart jarvis-improver
-```
-
-## Rollback v14 installation
-
-The installer commits the current baseline. The preferred rollback is Git:
-
-```bash
-cd ~/jarvis
-
-git log --oneline -n 5
-```
-
-Select the commit immediately before `Install Jarvis Self-Improvement Engine v14`,
-then:
-
-```bash
-cd ~/jarvis
-
-systemctl --user disable --now jarvis-improver
-
-git reset --hard <PREVIOUS_COMMIT_SHA>
-
 docker compose up -d --build
 ```
 
-Do not paste a placeholder SHA literally.
+Verify container and API health:
+
+```bash
+docker compose ps
+curl -fsS http://localhost:8000/health
+```
+
+The default API address is:
+
+```text
+http://<jarvis-host>:8000
+```
+
+Use a trusted private network, VPN or authenticated reverse proxy for remote
+access. Do not expose an unauthenticated Core directly to the public internet.
+
+## 4. Install the Android client
+
+Download the APK from the
+[`v19.0.0-alpha13` GitHub prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13).
+
+On Android:
+
+1. Permit installation from the browser or file manager used to open the APK.
+2. Install the APK over the existing Jarvis application when upgrading.
+3. Open Jarvis and configure the local and remote Core endpoints.
+4. Grant microphone and notification permissions.
+5. Select Jarvis as the default digital assistant when assistant-button support
+   is required.
+6. Exclude Jarvis from aggressive battery optimisation for reliable wake-word
+   recovery.
+
+Android requires an ongoing foreground-service disclosure while continuous
+microphone capture is active. The dedicated wake notification channel is
+configured as silent and low priority.
+
+## 5. Home Assistant integration
+
+Copy the integration directory into Home Assistant's
+`custom_components` directory:
+
+```text
+home_assistant/custom_components/jarvis_core_conversation/
+```
+
+The resulting Home Assistant path should be:
+
+```text
+/config/custom_components/jarvis_core_conversation/
+```
+
+Restart Home Assistant, add the Jarvis Core Conversation integration and provide
+the reachable Core endpoint.
+
+## Updating
+
+```bash
+cd ~/jarvis
+git fetch origin conversation-engine
+git pull --ff-only origin conversation-engine
+docker compose up -d --build
+curl -fsS http://localhost:8000/health
+```
+
+Use `--ff-only`; do not force-reset a checkout containing uncommitted work.

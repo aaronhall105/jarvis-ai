@@ -1,94 +1,92 @@
-# Jarvis v14 self-improvement architecture
+# Jarvis AI architecture
+
+Jarvis is split into three product surfaces with explicit ownership boundaries.
+
+## Android client
+
+The Android application is the conversational client. It owns:
+
+- Microphone capture and speech recognition.
+- Offline wake phrase detection.
+- Default-assistant and overlay entry points.
+- Typed chat and streamed answer rendering.
+- Audio playback, interruption and conversation closure.
+- Connection failover, diagnostics and user-facing settings.
+
+The Android client does not become a second Home Assistant dashboard and is not
+the authority for memory or smart-home decisions.
+
+## Jarvis Core
+
+Jarvis Core is the authoritative AI service. It owns:
+
+- Conversation orchestration.
+- Model-provider access.
+- Persistent conversation and household context.
+- Memory and response policies.
+- Home Assistant tool selection and action execution.
+- Proactive intelligence, smart alerts and vision processing.
+- Realtime voice protocol events.
+- Validation, diagnostics and release identity.
+
+The Core runs as the `jarvis-core` Docker service on port `8000`.
+
+## Home Assistant
+
+Home Assistant remains authoritative for:
+
+- Entities, devices and areas.
+- Automations and scripts.
+- Dashboards and camera views.
+- Integrations, energy data and configuration.
+- Permission checks for smart-home actions.
+
+Jarvis requests controlled operations through the Home Assistant integration;
+it does not replace Home Assistant's state model.
+
+## Data flow
 
 ```text
-Live Home Assistant request
+User voice or text
         │
         ▼
-Jarvis Core records redacted evidence
+Android client
+        │  realtime protocol
+        ▼
+Jarvis Core
+        ├── conversation context
+        ├── model request
+        ├── policy and safety checks
+        └── optional Home Assistant tool call
+                          │
+                          ▼
+                   Home Assistant
+                          │
+                          ▼
+                 verified tool result
         │
-        ├── normal success ──────────────► continue normally
-        │
-        └── correction/repeated failure
-                     │
-                     ▼
-          Improvement SQLite queue
-                     │
-                     ▼
-      Host-side jarvis-improver service
-                     │
-          ┌──────────┴──────────┐
-          ▼                     ▼
-  Isolated Git worktree   Coding-model patch
-          │                     │
-          └──────────┬──────────┘
-                     ▼
-       Policy + regression/security tests
-                     │
-                     ▼
-       Restricted candidate Docker container
-                     │
-                     ▼
-        Independent second AI review
-                     │
-                     ▼
-      Candidate summary + six-digit code
-                     │
-              Aaron approval/deploy
-                     │
-                     ▼
-      Fast-forward merge and Docker rebuild
-                     │
-          ┌──────────┴──────────┐
-          ▼                     ▼
-     Health passes          Health fails
-          │                     │
-          ▼                     ▼
-       Deployed        Automatic Git rollback
+        ▼
+streamed text and bounded speech
 ```
-
-## Separation of duties
-
-### Live Jarvis Core
-
-- Records evidence.
-- Groups failure signatures.
-- Exposes status and approval commands.
-- Never writes source code.
-- Never receives Docker daemon access.
-
-### Host worker
-
-- Runs as the ordinary Jarvis Linux user.
-- Owns Git worktrees and candidate branches.
-- Calls the coding/review model.
-- Applies static policy checks.
-- Runs tests and candidate containers.
-- Performs approved deployments and automatic rollback.
-
-### Aaron
-
-- Reviews candidate summary, risk, changed files and test results.
-- Supplies the six-digit code for deployment.
-- Can reject, stop or roll back the system.
-
-## Trust model
-
-AI-generated output is treated as untrusted input. It must pass deterministic
-allow-list checks, compilation, regression tests, security scans, a restricted
-container smoke test and a separate review before it can become deployable.
 
 ## Persistence
 
-- Improvement database: `data/jarvis_improvement.db`
-- Worktrees and patch artifacts: `.jarvis-improver/`
-- Production source history: Git repository
-- Runtime service: `jarvis-improver.service`
+Runtime persistence is stored outside the container through Compose bind mounts:
 
-## Failure containment
+- `config/` for local configuration
+- `data/` for databases, memory and durable state
+- `logs/` for runtime logs
 
-- Candidate containers have no network, no extra capabilities, a read-only root
-  filesystem and CPU/memory/process limits.
-- Production deployment is fast-forward only.
-- A changed production base invalidates stale candidates.
-- Failed startup, health or log checks trigger automatic rollback.
-- The emergency-disable file immediately stops further improvement work.
+Secrets belong in `.env`, which must remain outside Git.
+
+## Release safety
+
+Release scripts use isolated worktrees and validation branches. A candidate must
+pass source checks, Core regressions and Android compilation before the
+production branch is advanced. The deployed Core retains a rollback image until
+the new release is confirmed healthy.
+
+## Current release
+
+`v19.0.0-alpha13` adds persistent wake recovery, adaptive response budgets,
+earlier bounded speech, a simplified toolbar and reorganised Android settings.
