@@ -135,6 +135,7 @@ class RealtimeVoiceConfig:
     enabled: bool
     api_key: str
     mobile_token: str
+    voice_pe_token: str
     model: str
     voice: str
     user_id: str
@@ -150,6 +151,7 @@ class RealtimeVoiceConfig:
             enabled=_env_bool("JARVIS_REALTIME_ENABLED", True),
             api_key=_env_text("OPENAI_API_KEY"),
             mobile_token=_env_text("JARVIS_MOBILE_VOICE_TOKEN"),
+            voice_pe_token=_env_text("JARVIS_VOICE_PE_TOKEN"),
             model=_env_text("JARVIS_REALTIME_MODEL", DEFAULT_MODEL),
             voice=normalise_voice(_env_text("JARVIS_REALTIME_VOICE", DEFAULT_VOICE)),
             user_id=_env_text("JARVIS_REALTIME_USER_ID", "aaron"),
@@ -382,7 +384,21 @@ class RealtimeVoiceProxy:
             "version": VERSION,
             "core_application_version": CORE_APPLICATION_VERSION,
             "enabled": self.config.enabled,
-            "configured": bool(self.config.api_key and self.config.mobile_token),
+            "configured": bool(
+                self.config.api_key
+                and (
+                    self.config.mobile_token
+                    or self.config.voice_pe_token
+                )
+            ),
+            "mobile_configured": bool(
+                self.config.api_key
+                and self.config.mobile_token
+            ),
+            "voice_pe_configured": bool(
+                self.config.api_key
+                and self.config.voice_pe_token
+            ),
             "model": self.config.model,
             "default_voice": self.config.voice,
             "supported_voices": list(SUPPORTED_VOICES),
@@ -414,10 +430,22 @@ class RealtimeVoiceProxy:
             "last_error": self.last_error,
         }
 
-    def token_is_valid(self, supplied: str | None) -> bool:
-        expected = self.config.mobile_token
+    def token_is_valid(
+        self,
+        supplied: str | None,
+        client_kind: str = "mobile",
+    ) -> bool:
+        expected = (
+            self.config.voice_pe_token
+            if client_kind == "voice_pe"
+            else self.config.mobile_token
+        )
         candidate = (supplied or "").strip()
-        return bool(expected and candidate and secrets.compare_digest(expected, candidate))
+        return bool(
+            expected
+            and candidate
+            and secrets.compare_digest(expected, candidate)
+        )
 
     async def handle(self, client: Any, brain_handler: BrainHandler) -> None:
         await client.accept()
@@ -439,10 +467,47 @@ class RealtimeVoiceProxy:
             await self._close(client, 4401)
             return
 
-        if auth_payload.get("type") != "auth" or not self.token_is_valid(auth_payload.get("token")):
-            await self._send_json(client, {"type": "auth.error", "message": "Invalid mobile voice token"})
+        client_kind = (
+            str(auth_payload.get("client_kind") or "mobile")
+            .strip()
+            .casefold()
+            .replace("-", "_")
+        )
+
+        if client_kind not in {"mobile", "voice_pe"}:
+            await self._send_json(
+                client,
+                {
+                    "type": "auth.error",
+                    "message": "Unsupported realtime voice client",
+                },
+            )
             await self._close(client, 4403)
             return
+
+        if (
+            auth_payload.get("type") != "auth"
+            or not self.token_is_valid(
+                auth_payload.get("token"),
+                client_kind,
+            )
+        ):
+            await self._send_json(
+                client,
+                {
+                    "type": "auth.error",
+                    "message": "Invalid realtime voice token",
+                },
+            )
+            await self._close(client, 4403)
+            return
+
+        metadata["client_kind"] = client_kind
+        metadata["voice_endpoint_kind"] = (
+            "voice_pe"
+            if client_kind == "voice_pe"
+            else "android"
+        )
 
         for key in ("device_id", "user_name"):
             value = auth_payload.get(key)
@@ -500,6 +565,7 @@ class RealtimeVoiceProxy:
             client,
             {
                 "type": "auth.ok",
+                "client_kind": client_kind,
                 "version": VERSION,
                 "model": self.config.model,
                 "voice": voice,
