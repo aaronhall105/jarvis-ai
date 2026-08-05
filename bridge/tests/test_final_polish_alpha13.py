@@ -53,8 +53,50 @@ class FinalPolishAlpha13Test(unittest.TestCase):
                 "Here is the useful opening sentence. "
                 "The full explanation continues in the chat."
             ),
-            "Here is the useful opening sentence. "
-            "The full explanation continues in the chat.",
+            "Here is the useful opening sentence.",
+        )
+
+    def test_early_speech_uses_first_sentence(self):
+        value = SpeechRenderPolicy.early_segment(
+            "Here is the first useful sentence. "
+            "This second sentence is still streaming."
+        )
+
+        self.assertEqual(
+            value,
+            "Here is the first useful sentence.",
+        )
+
+    def test_early_speech_falls_back_for_long_unpunctuated_text(self):
+        value = SpeechRenderPolicy.early_segment(
+            (
+                "This is a deliberately long streamed response "
+                "without normal sentence punctuation and it "
+                "continues with enough words to pass the safe "
+                "streaming threshold while remaining natural "
+                "for the listener"
+            ),
+            preferred_chars=70,
+            maximum_chars=110,
+        )
+
+        self.assertTrue(value)
+        self.assertLessEqual(len(value), 111)
+
+    def test_remaining_text_does_not_repeat_early_segment(self):
+        complete = (
+            "Here is the first useful sentence. "
+            "This is the remaining explanation."
+        )
+
+        remainder = SpeechRenderPolicy.remaining_text(
+            complete,
+            "Here is the first useful sentence.",
+        )
+
+        self.assertEqual(
+            remainder,
+            "This is the remaining explanation.",
         )
 
     def test_long_speech_is_complete_and_bounded(self):

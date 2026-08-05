@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import audioop
 import base64
 import json
 import logging
@@ -9,6 +10,7 @@ import re
 import secrets
 import time
 import uuid
+import httpx
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -144,7 +146,11 @@ class RealtimeVoiceConfig:
     transcription_prompt: str
     timezone: str = "Europe/London"
     quiet_controls: bool = True
-
+    tts_provider: str = "openai"
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = ""
+    elevenlabs_model_id: str = "eleven_turbo_v2_5"
+    elevenlabs_output_format: str = "pcm_24000"
     @classmethod
     def from_environment(cls) -> "RealtimeVoiceConfig":
         return cls(
@@ -171,6 +177,24 @@ class RealtimeVoiceConfig:
             quiet_controls=_env_bool(
                 "JARVIS_MOBILE_QUIET_CONTROLS",
                 True,
+            ),
+            tts_provider=_env_text(
+                "JARVIS_TTS_PROVIDER",
+                "openai",
+            ).casefold(),
+            elevenlabs_api_key=_env_text(
+                "ELEVENLABS_API_KEY",
+            ),
+            elevenlabs_voice_id=_env_text(
+                "ELEVENLABS_VOICE_ID",
+            ),
+            elevenlabs_model_id=_env_text(
+                "ELEVENLABS_MODEL_ID",
+                "eleven_turbo_v2_5",
+            ),
+            elevenlabs_output_format=_env_text(
+                "ELEVENLABS_OUTPUT_FORMAT",
+                "pcm_24000",
             ),
         )
 
@@ -259,6 +283,153 @@ def speak_response_event(text: str, voice: str) -> dict[str, Any]:
             "metadata": {"source": "jarvis_core", "release": VERSION},
         },
     }
+
+
+
+def _normalise_voice_closure(value: Any) -> str:
+    text = str(value or "").casefold()
+    text = text.replace("’", "'").replace("‘", "'")
+    text = re.sub(r"[^a-z0-9'\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.replace("'", "")
+
+    prefixes = re.compile(
+        r"^(?:(?:okay|ok|alright|all right|right|well)\s+)+"
+    )
+    jarvis_prefix = re.compile(r"^(?:hey\s+)?jarvis\s+")
+    jarvis_suffix = re.compile(r"\s+jarvis$")
+    polite_edge = re.compile(
+        r"^(?:please\s+)|(?:\s+please)$"
+    )
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = prefixes.sub("", text).strip()
+        text = jarvis_prefix.sub("", text).strip()
+        text = jarvis_suffix.sub("", text).strip()
+        text = polite_edge.sub("", text).strip()
+        text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def _match_voice_closure(
+    value: Any,
+    user_name: str = "",
+) -> tuple[str, str] | None:
+    text = _normalise_voice_closure(value)
+
+    if not text or len(text.split()) > 7:
+        return None
+
+    silent = {
+        "be quiet",
+        "be quiet now",
+        "stay quiet",
+        "stay quiet now",
+        "keep quiet",
+        "keep quiet now",
+        "quiet",
+        "quiet now",
+        "hush",
+        "hush now",
+        "silence",
+        "silence now",
+        "stop listening",
+        "stop listening now",
+        "quit listening",
+        "quit listening now",
+        "stop talking",
+        "stop talking now",
+        "quit talking",
+        "quit talking now",
+        "do not listen",
+        "dont listen",
+        "do not listen anymore",
+        "dont listen anymore",
+        "leave me alone",
+        "never mind",
+        "nevermind",
+        "cancel",
+        "stop",
+    }
+
+    done = {
+        "thats all",
+        "that is all",
+        "thatll be all",
+        "that will be all",
+        "thats everything",
+        "that is everything",
+        "thatll do",
+        "that will do",
+        "all done",
+        "were done",
+        "we are done",
+        "im done",
+        "i am done",
+        "done for now",
+        "were finished",
+        "we are finished",
+        "im finished",
+        "i am finished",
+        "finished",
+        "end conversation",
+        "end the conversation",
+        "finish conversation",
+        "finish the conversation",
+        "close conversation",
+        "close the conversation",
+        "end chat",
+        "end the chat",
+        "close chat",
+        "close the chat",
+        "no more",
+    }
+
+    thanks = {
+        "thanks",
+        "thanks a lot",
+        "many thanks",
+        "thank you",
+        "thank you very much",
+        "cheers",
+    }
+
+    goodbye = {
+        "bye",
+        "bye bye",
+        "goodbye",
+        "good bye",
+        "goodnight",
+        "good night",
+        "see you",
+        "see you later",
+        "speak later",
+        "talk later",
+        "catch you later",
+    }
+
+    if text in silent:
+        return ("silent", "")
+
+    if text in goodbye:
+        first_name = str(user_name or "").strip().split(" ", 1)[0]
+        response = (
+            f"Goodbye, {first_name}."
+            if first_name
+            else "Goodbye."
+        )
+        return ("goodbye", response)
+
+    if text in thanks:
+        return ("thanks", "You're welcome.")
+
+    if text in done:
+        return ("done", "Okay.")
+
+    return None
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -673,6 +844,35 @@ class RealtimeVoiceProxy:
             if isinstance(pcm, bytes):
                 if not pcm or conversation_mode != CONVERSATION_MODE_LIVE:
                     continue
+
+                if metadata.get("client_kind") == "voice_pe":
+                    pcm, resample_state = audioop.ratecv(
+                        pcm,
+                        2,
+                        1,
+                        16_000,
+                        INPUT_RATE,
+                        state.get("voice_pe_resample_state"),
+                    )
+                    state["voice_pe_resample_state"] = resample_state
+
+                    if not pcm:
+                        continue
+
+                state["pcm_diagnostic_chunks"] = (
+                    int(state.get("pcm_diagnostic_chunks", 0)) + 1
+                )
+                diagnostic_chunks = int(state["pcm_diagnostic_chunks"])
+
+                if diagnostic_chunks == 1 or diagnostic_chunks % 100 == 0:
+                    _LOGGER.info(
+                        "Voice PE PCM diagnostic: chunks=%d bytes=%d rms=%d peak=%d",
+                        diagnostic_chunks,
+                        len(pcm),
+                        audioop.rms(pcm, 2),
+                        audioop.max(pcm, 2),
+                    )
+
                 self.total_audio_input_bytes += len(pcm)
                 await upstream.send(json.dumps(audio_append_event(pcm)))
                 continue
@@ -757,27 +957,125 @@ class RealtimeVoiceProxy:
                 )
                 self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
+                if (
+                    metadata.get("client_kind") == "voice_pe"
+                    and bool(state.get("turn_in_progress"))
+                ):
+                    continue
                 state["generation"] = int(state.get("generation", 0)) + 1
                 state["suppress_audio"] = True
                 await self._send_json(client, {"type": "speech.started"})
             elif kind == "input_audio_buffer.speech_stopped":
+                if (
+                    metadata.get("client_kind") == "voice_pe"
+                    and bool(state.get("turn_in_progress"))
+                ):
+                    continue
                 await self._send_json(client, {"type": "speech.stopped"})
             elif kind == "conversation.item.input_audio_transcription.completed":
-                transcript = str(event.get("transcript") or "").strip()
-                if transcript and conversation_mode == CONVERSATION_MODE_LIVE:
-                    await self._send_json(client, {"type": "user.transcript", "text": transcript})
-                    await self._start_brain_turn(
-                        transcript,
-                        True,
+                transcript = str(
+                    event.get("transcript") or ""
+                ).strip()
+
+                if (
+                    transcript
+                    and conversation_mode
+                    == CONVERSATION_MODE_LIVE
+                ):
+                    await self._send_json(
                         client,
-                        upstream,
-                        brain_handler,
-                        metadata,
-                        voice_mode,
-                        voice,
-                        turn_tasks,
-                        state,
+                        {
+                            "type": "user.transcript",
+                            "text": transcript,
+                        },
                     )
+
+                    closure = _match_voice_closure(
+                        transcript,
+                        str(
+                            metadata.get("user_name")
+                            or ""
+                        ),
+                    )
+
+                    if closure is not None:
+                        closure_kind, closure_response = closure
+
+                        state["generation"] = (
+                            int(state.get("generation", 0))
+                            + 1
+                        )
+                        state["suppress_audio"] = True
+
+                        await upstream.send(
+                            json.dumps(
+                                {
+                                    "type": "response.cancel"
+                                }
+                            )
+                        )
+
+                        await self._send_json(
+                            client,
+                            {
+                                "type": "closure.detected",
+                                "kind": closure_kind,
+                                "text": transcript,
+                            },
+                        )
+
+                        if not closure_response:
+                            await self._send_json(
+                                client,
+                                {
+                                    "type": "session.close",
+                                    "reason": "voice_closure",
+                                    "kind": closure_kind,
+                                },
+                            )
+                        else:
+                            state[
+                                "close_after_response"
+                            ] = closure_kind
+                            state["suppress_audio"] = False
+
+                            if self._use_direct_elevenlabs(metadata):
+                                handled = await self._stream_elevenlabs_response(
+                                    client,
+                                    closure_response,
+                                    state,
+                                )
+                                if not handled:
+                                    await upstream.send(
+                                        json.dumps(
+                                            speak_response_event(
+                                                closure_response,
+                                                voice,
+                                            )
+                                        )
+                                    )
+                            else:
+                                await upstream.send(
+                                    json.dumps(
+                                        speak_response_event(
+                                            closure_response,
+                                            voice,
+                                        )
+                                    )
+                                )
+                    else:
+                        await self._start_brain_turn(
+                            transcript,
+                            True,
+                            client,
+                            upstream,
+                            brain_handler,
+                            metadata,
+                            voice_mode,
+                            voice,
+                            turn_tasks,
+                            state,
+                        )
             elif kind == "response.created":
                 state["suppress_audio"] = False
             elif kind == "response.output_audio.delta":
@@ -791,6 +1089,7 @@ class RealtimeVoiceProxy:
                         continue
                     self.total_audio_output_bytes += len(audio)
                     await client.send_bytes(audio)
+                    await asyncio.sleep(len(audio) / 48000.0)
             elif kind == "response.output_audio_transcript.delta":
                 delta = str(event.get("delta") or "")
                 if delta and voice_mode == VOICE_MODE_REALTIME:
@@ -803,16 +1102,38 @@ class RealtimeVoiceProxy:
                 if voice_mode == VOICE_MODE_REALTIME:
                     await self._send_json(client, {"type": "audio.done"})
             elif kind == "response.done":
-                response = event.get("response") if isinstance(event.get("response"), dict) else {}
-                usage = response.get("usage") if isinstance(response.get("usage"), dict) else None
-                await self._send_json(
-                    client,
-                    {
-                        "type": "turn.done",
-                        "status": response.get("status", "completed"),
-                        "usage": usage,
-                    },
+                response = (
+                    event.get("response")
+                    if isinstance(
+                        event.get("response"),
+                        dict,
+                    )
+                    else {}
                 )
+
+                usage = (
+                    response.get("usage")
+                    if isinstance(
+                        response.get("usage"),
+                        dict,
+                    )
+                    else None
+                )
+
+                await self._complete_audio_response(
+                    client,
+                    upstream,
+                    state,
+                    status=str(
+                        response.get(
+                            "status",
+                            "completed",
+                        )
+                    ),
+                    usage=usage,
+                )
+
+
             elif kind == "error":
                 error = event.get("error") if isinstance(event.get("error"), dict) else {}
                 message = str(error.get("message") or "OpenAI realtime error")
@@ -820,6 +1141,268 @@ class RealtimeVoiceProxy:
                     continue
                 self.last_error = message[:500]
                 await self._send_json(client, {"type": "error", "message": self.last_error})
+
+    async def _complete_audio_response(
+        self,
+        client: Any,
+        upstream: Any,
+        state: dict[str, Any],
+        *,
+        status: str = "completed",
+        usage: Any = None,
+    ) -> None:
+        """
+        Finish the current audio response or start its queued
+        continuation.
+
+        The first streamed speech response may finish before the
+        Jarvis brain has produced the complete final text. In that
+        case completion is deferred until the remainder is known.
+        """
+
+        if bool(
+            state.get("early_speech_active")
+        ):
+            if not bool(
+                state.get("brain_turn_complete")
+            ):
+                state["early_audio_done"] = True
+                return
+
+            state["early_speech_active"] = False
+
+            remainder = str(
+                state.pop(
+                    "queued_speech_remainder",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if remainder:
+                state[
+                    "continuation_speech_active"
+                ] = True
+
+                await upstream.send(
+                    json.dumps(
+                        speak_response_event(
+                            remainder,
+                            str(
+                                state.get(
+                                    "active_voice",
+                                    self.config.voice,
+                                )
+                            ),
+                        )
+                    )
+                )
+
+                await self._send_json(
+                    client,
+                    {
+                        "type": "speech.continuation",
+                        "characters": len(remainder),
+                    },
+                )
+
+                return
+
+        state[
+            "continuation_speech_active"
+        ] = False
+        state["turn_in_progress"] = False
+
+        await self._send_json(
+            client,
+            {
+                "type": "turn.done",
+                "status": status,
+                "usage": usage,
+            },
+        )
+
+        closure_kind = state.pop(
+            "close_after_response",
+            None,
+        )
+
+        if closure_kind:
+            await self._send_json(
+                client,
+                {
+                    "type": "session.close",
+                    "reason": "voice_closure",
+                    "kind": closure_kind,
+                },
+            )
+
+    def _use_direct_elevenlabs(
+        self,
+        metadata: dict[str, Any],
+    ) -> bool:
+        return (
+            self.config.tts_provider == "elevenlabs"
+            and metadata.get("client_kind") == "voice_pe"
+        )
+
+    async def _stream_elevenlabs_response(
+        self,
+        client: Any,
+        text: str,
+        state: dict[str, Any],
+    ) -> bool:
+        spoken_text = " ".join(str(text or "").split()).strip()
+        if not spoken_text:
+            return False
+
+        api_key = self.config.elevenlabs_api_key
+        voice_id = self.config.elevenlabs_voice_id
+
+        if not api_key or not voice_id:
+            self.last_error = (
+                "ElevenLabs API key or voice ID is not configured"
+            )
+            await self._send_json(
+                client,
+                {
+                    "type": "status",
+                    "message": (
+                        "Original Jarvis voice is not configured; "
+                        "using realtime fallback"
+                    ),
+                },
+            )
+            return False
+
+        url = (
+            "https://api.elevenlabs.io/v1/text-to-speech/"
+            f"{quote(voice_id, safe='')}/stream"
+        )
+
+        headers = {
+            "xi-api-key": api_key,
+            "accept": "audio/pcm",
+            "content-type": "application/json",
+        }
+
+        payload = {
+            "text": spoken_text,
+            "model_id": self.config.elevenlabs_model_id,
+        }
+
+        await self._send_json(
+            client,
+            {
+                "type": "status",
+                "message": "Rendering original Jarvis voice",
+            },
+        )
+
+        try:
+            timeout = httpx.Timeout(
+                60.0,
+                connect=10.0,
+            )
+
+            async with httpx.AsyncClient(timeout=timeout) as session:
+                async with session.stream(
+                    "POST",
+                    url,
+                    params={
+                        "output_format":
+                            self.config.elevenlabs_output_format,
+                    },
+                    headers=headers,
+                    json=payload,
+                ) as response:
+                    response.raise_for_status()
+
+                    pending = bytearray()
+                    frame_size = 4096
+
+                    async for data in response.aiter_bytes():
+                        if not data:
+                            continue
+
+                        pending.extend(data)
+
+                        while len(pending) >= frame_size:
+                            chunk = bytes(pending[:frame_size])
+                            del pending[:frame_size]
+
+                            self.total_audio_output_bytes += len(chunk)
+                            await client.send_bytes(chunk)
+
+                            # 24 kHz, mono, signed 16-bit PCM.
+                            await asyncio.sleep(len(chunk) / 48_000.0)
+
+                    if len(pending) % 2:
+                        pending = pending[:-1]
+
+                    if pending:
+                        chunk = bytes(pending)
+                        self.total_audio_output_bytes += len(chunk)
+                        await client.send_bytes(chunk)
+                        await asyncio.sleep(len(chunk) / 48_000.0)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = f"ElevenLabs TTS failed: {exc}"[:500]
+            _LOGGER.exception("Direct ElevenLabs speech failed")
+
+            await self._send_json(
+                client,
+                {
+                    "type": "status",
+                    "message": (
+                        "Original Jarvis voice failed; "
+                        "using realtime fallback"
+                    ),
+                },
+            )
+            return False
+
+        await self._send_json(
+            client,
+            {
+                "type": "assistant.transcript.done",
+                "text": spoken_text,
+            },
+        )
+        await self._send_json(
+            client,
+            {"type": "audio.done"},
+        )
+
+        state["turn_in_progress"] = False
+
+        await self._send_json(
+            client,
+            {
+                "type": "turn.done",
+                "status": "completed",
+                "usage": None,
+            },
+        )
+
+        closure_kind = state.pop(
+            "close_after_response",
+            None,
+        )
+
+        if closure_kind:
+            await self._send_json(
+                client,
+                {
+                    "type": "session.close",
+                    "reason": "voice_closure",
+                    "kind": closure_kind,
+                },
+            )
+
+        return True
 
     async def _start_brain_turn(
         self,
@@ -837,8 +1420,26 @@ class RealtimeVoiceProxy:
         command = " ".join(str(transcript or "").split()).strip()
         if not command:
             return
+        if (
+            metadata.get("client_kind") == "voice_pe"
+            and bool(state.get("turn_in_progress"))
+        ):
+            await self._send_json(
+                client,
+                {
+                    "type": "turn.ignored",
+                    "reason": "voice_pe_turn_in_progress",
+                },
+            )
+            return
+        state["turn_in_progress"] = True
         generation = int(state.get("generation", 0)) + 1
         state["generation"] = generation
+        state.pop("queued_speech_remainder", None)
+        state["brain_turn_complete"] = False
+        state["early_audio_done"] = False
+        state["early_speech_active"] = False
+        state["continuation_speech_active"] = False
         task = asyncio.create_task(
             self._run_brain_turn(
                 generation,
@@ -854,7 +1455,15 @@ class RealtimeVoiceProxy:
             )
         )
         turn_tasks.add(task)
-        task.add_done_callback(turn_tasks.discard)
+
+        def finish_turn_task(completed: asyncio.Task[Any]) -> None:
+            turn_tasks.discard(completed)
+            if completed.cancelled():
+                state["turn_in_progress"] = False
+            elif completed.exception() is not None:
+                state["turn_in_progress"] = False
+
+        task.add_done_callback(finish_turn_task)
 
     async def _run_brain_turn(
         self,
@@ -870,13 +1479,15 @@ class RealtimeVoiceProxy:
         state: dict[str, Any],
     ) -> None:
         self.total_brain_turns += 1
+        state["active_voice"] = voice
         await self._send_json(client, {"type": "brain.started", "command": command})
 
         speech_buffer = ""
         early_speech_sent = False
+        early_speech_text = ""
 
         async def on_delta(delta: str) -> None:
-            nonlocal speech_buffer, early_speech_sent
+            nonlocal speech_buffer, early_speech_sent, early_speech_text
             if generation != int(state.get("generation", 0)):
                 return
             text = str(delta or "")
@@ -885,7 +1496,7 @@ class RealtimeVoiceProxy:
             self.total_streamed_text_chunks += 1
             await self._send_json(client, {"type": "brain.delta", "text": text})
 
-            if not speak or early_speech_sent:
+            if not speak or early_speech_sent or metadata.get("client_kind") == "voice_pe":
                 return
 
             speech_buffer += text
@@ -894,6 +1505,10 @@ class RealtimeVoiceProxy:
                 return
 
             early_speech_sent = True
+            early_speech_text = segment
+            state["early_speech_active"] = True
+            state["brain_turn_complete"] = False
+            state["early_audio_done"] = False
             if voice_mode == VOICE_MODE_HOME_ASSISTANT:
                 await self._send_json(
                     client,
@@ -930,7 +1545,7 @@ class RealtimeVoiceProxy:
             quiet_control, compact_response = control_voice_policy(
                 command,
                 tool_events,
-                enabled=self.config.quiet_controls,
+                enabled=self.config.quiet_controls and metadata.get("client_kind") != "voice_pe",
             )
             if quiet_control:
                 response = compact_response
@@ -1058,17 +1673,56 @@ class RealtimeVoiceProxy:
         )
 
         if not speak or bool(result.get("quiet_control")):
+            state["turn_in_progress"] = False
             await self._send_json(
                 client,
                 {"type": "turn.done", "status": "completed", "usage": None},
             )
             return
-
         if early_speech_sent:
+            complete_spoken_response = (
+                SpeechRenderPolicy.spoken_text(
+                    result["response"]
+                )
+            )
+
+            remainder = (
+                SpeechRenderPolicy.remaining_text(
+                    complete_spoken_response,
+                    early_speech_text,
+                )
+            )
+
+            state[
+                "queued_speech_remainder"
+            ] = remainder
+
+            state[
+                "brain_turn_complete"
+            ] = True
+
             await self._send_json(
                 client,
-                {"type": "turn.done", "status": "completed", "usage": None},
+                {
+                    "type": "speech.remainder.ready",
+                    "characters": len(remainder),
+                },
             )
+
+            if bool(
+                state.pop(
+                    "early_audio_done",
+                    False,
+                )
+            ):
+                await self._complete_audio_response(
+                    client,
+                    upstream,
+                    state,
+                    status="completed",
+                    usage=None,
+                )
+
             return
 
         spoken_response = SpeechRenderPolicy.spoken_text(result["response"])
@@ -1078,8 +1732,25 @@ class RealtimeVoiceProxy:
                 client,
                 {"type": "original.tts", "text": spoken_response},
             )
+            state["turn_in_progress"] = False
             return
-        await upstream.send(json.dumps(speak_response_event(spoken_response, voice)))
+        if self._use_direct_elevenlabs(metadata):
+            handled = await self._stream_elevenlabs_response(
+                client,
+                spoken_response,
+                state,
+            )
+            if handled:
+                return
+
+        await upstream.send(
+            json.dumps(
+                speak_response_event(
+                    spoken_response,
+                    voice,
+                )
+            )
+        )
 
     @staticmethod
     async def _send_json(client: Any, payload: dict[str, Any]) -> None:
