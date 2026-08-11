@@ -1,0 +1,32 @@
+services:
+  jarvis-speaker-verifier:
+    image: jarvis-speaker-lab:v1
+    container_name: jarvis-speaker-verifier
+    command:
+      - python
+      - /verifier/server.py
+    restart: unless-stopped
+    cpus: 4.0
+    mem_limit: 6g
+    environment:
+      JARVIS_SPEAKER_PORT: "8091"
+      JARVIS_SPEAKER_ENROLL_DIR: /enroll
+      JARVIS_SPEAKER_SHORT_ENROLL_DIR: /short-enroll
+      JARVIS_SPEAKER_MODEL_DIR: /models/spkrec-ecapa-voxceleb
+    volumes:
+      - ./speaker-verifier:/verifier:ro
+      - ./speaker-data/aaron/enrollment-v1:/enroll:ro
+      - ./speaker-data/aaron/short-enrollment-v1:/short-enroll:ro
+      - ./speaker-data/models:/models
+    ports:
+      - "127.0.0.1:8091:8091"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

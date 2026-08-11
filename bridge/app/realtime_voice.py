@@ -10,6 +10,9 @@ import re
 import secrets
 import time
 import uuid
+import wave
+from pathlib import Path
+
 import httpx
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -132,6 +135,688 @@ def trusted_local_context(timezone_name: Any) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Voice PE speaker-profile capture
+#
+# Capture-only diagnostic phase. This DOES NOT decide whether a speaker is
+# Aaron and DOES NOT block transcripts. It stores the exact 24 kHz PCM span
+# associated with each OpenAI server-VAD item_id so that speaker embeddings
+# can be calibrated later.
+# ---------------------------------------------------------------------------
+
+SPEAKER_CAPTURE_RATE = INPUT_RATE
+SPEAKER_CAPTURE_SAMPLE_WIDTH = 2
+SPEAKER_CAPTURE_DIR = Path("/tmp/jarvis-speaker-captures")
+
+SPEAKER_VERIFY_URL = os.getenv(
+    "JARVIS_SPEAKER_VERIFY_URL",
+    "http://jarvis-speaker-verifier:8091/score",
+).strip()
+SPEAKER_VERIFY_TIMEOUT_SECONDS = 3.0
+
+# Conservative Core-side speaker suppression.
+#
+# OFF by default. The sidecar remains observe-only.
+# Core fails open for short audio, setup/wake-like residue,
+# missing audio, verifier errors, policy mismatches, uncertain
+# results and Aaron-like results.
+SPEAKER_SUPPRESSION_ENABLED = (
+    os.getenv(
+        "JARVIS_SPEAKER_SUPPRESSION_ENABLED",
+        "false",
+    )
+    .strip()
+    .lower()
+    in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+)
+
+SPEAKER_SUPPRESSION_MIN_SECONDS = 1.0
+SPEAKER_SUPPRESSION_POLICY_VERSION = "V1.3"
+
+
+
+def _speaker_capture_append_pcm(
+    state: dict[str, Any],
+    pcm: bytes,
+) -> None:
+    archive = state.get("speaker_capture_pcm_24k")
+
+    if not isinstance(archive, bytearray):
+        archive = bytearray()
+        state["speaker_capture_pcm_24k"] = archive
+
+    archive.extend(pcm)
+
+
+def _speaker_capture_mark_start(
+    state: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    item_id = str(event.get("item_id") or "").strip()
+    audio_start_ms = event.get("audio_start_ms")
+
+    if (
+        not item_id
+        or not isinstance(audio_start_ms, (int, float))
+    ):
+        return
+
+    segments = state.get("speaker_capture_segments")
+
+    if not isinstance(segments, dict):
+        segments = {}
+        state["speaker_capture_segments"] = segments
+
+    segments[item_id] = {
+        "start_ms": int(audio_start_ms),
+    }
+
+
+def _speaker_capture_mark_stop(
+    state: dict[str, Any],
+    event: dict[str, Any],
+) -> None:
+    item_id = str(event.get("item_id") or "").strip()
+    audio_end_ms = event.get("audio_end_ms")
+
+    if (
+        not item_id
+        or not isinstance(audio_end_ms, (int, float))
+    ):
+        return
+
+    segments = state.get("speaker_capture_segments")
+
+    if not isinstance(segments, dict):
+        segments = {}
+        state["speaker_capture_segments"] = segments
+
+    segment = segments.get(item_id)
+
+    if not isinstance(segment, dict):
+        segment = {}
+        segments[item_id] = segment
+
+    segment["end_ms"] = int(audio_end_ms)
+
+
+def _speaker_capture_write_segment(
+    state: dict[str, Any],
+    event: dict[str, Any],
+    transcript: str,
+) -> None:
+    item_id = str(event.get("item_id") or "").strip()
+
+    if not item_id:
+        return
+
+    segments = state.get("speaker_capture_segments")
+
+    if not isinstance(segments, dict):
+        return
+
+    segment = segments.get(item_id)
+
+    if not isinstance(segment, dict):
+        _LOGGER.info(
+            "JARVIS SPEAKER CAPTURE SKIP: "
+            "missing VAD segment item=%s transcript=%r",
+            item_id,
+            transcript,
+        )
+        return
+
+    start_ms = segment.get("start_ms")
+    end_ms = segment.get("end_ms")
+
+    if (
+        not isinstance(start_ms, int)
+        or not isinstance(end_ms, int)
+        or end_ms <= start_ms
+    ):
+        _LOGGER.info(
+            "JARVIS SPEAKER CAPTURE SKIP: "
+            "invalid timing item=%s start_ms=%r end_ms=%r "
+            "transcript=%r",
+            item_id,
+            start_ms,
+            end_ms,
+            transcript,
+        )
+        return
+
+    archive = state.get("speaker_capture_pcm_24k")
+
+    if not isinstance(archive, bytearray):
+        return
+
+    start_frame = round(
+        (start_ms / 1000.0) * SPEAKER_CAPTURE_RATE
+    )
+    end_frame = round(
+        (end_ms / 1000.0) * SPEAKER_CAPTURE_RATE
+    )
+
+    start_byte = max(
+        0,
+        start_frame * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+    )
+    end_byte = min(
+        len(archive),
+        end_frame * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+    )
+
+    if end_byte <= start_byte:
+        _LOGGER.info(
+            "JARVIS SPEAKER CAPTURE SKIP: "
+            "audio not yet available item=%s "
+            "start_byte=%s end_byte=%s archive=%s",
+            item_id,
+            start_byte,
+            end_byte,
+            len(archive),
+        )
+        return
+
+    pcm = bytes(archive[start_byte:end_byte])
+
+    SPEAKER_CAPTURE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    safe_item = re.sub(
+        r"[^A-Za-z0-9_-]+",
+        "_",
+        item_id,
+    )[:80]
+
+    stamp = time.time_ns()
+
+    wav_path = SPEAKER_CAPTURE_DIR / (
+        f"{stamp}-{safe_item}.wav"
+    )
+
+    json_path = wav_path.with_suffix(".json")
+
+    with wave.open(str(wav_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(SPEAKER_CAPTURE_SAMPLE_WIDTH)
+        wav_file.setframerate(SPEAKER_CAPTURE_RATE)
+        wav_file.writeframes(pcm)
+
+    metadata = {
+        "item_id": item_id,
+        "transcript": transcript,
+        "audio_start_ms": start_ms,
+        "audio_end_ms": end_ms,
+        "duration_ms": end_ms - start_ms,
+        "sample_rate": SPEAKER_CAPTURE_RATE,
+        "sample_width_bytes": SPEAKER_CAPTURE_SAMPLE_WIDTH,
+        "channels": 1,
+        "pcm_bytes": len(pcm),
+        "wav": str(wav_path),
+    }
+
+    json_path.write_text(
+        json.dumps(
+            metadata,
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+    _LOGGER.info(
+        "JARVIS SPEAKER CAPTURE SAVED | "
+        "item=%s duration_ms=%s bytes=%s "
+        "transcript=%r wav=%s",
+        item_id,
+        end_ms - start_ms,
+        len(pcm),
+        transcript,
+        wav_path,
+    )
+
+
+
+
+
+def _speaker_capture_segment_pcm(
+    state: dict[str, Any],
+    event: dict[str, Any],
+) -> bytes | None:
+    """Return the exact 24 kHz PCM span for one VAD item."""
+
+    item_id = str(
+        event.get("item_id")
+        or ""
+    ).strip()
+
+    if not item_id:
+        return None
+
+    segments = state.get(
+        "speaker_capture_segments"
+    )
+
+    if not isinstance(
+        segments,
+        dict,
+    ):
+        return None
+
+    segment = segments.get(
+        item_id
+    )
+
+    if not isinstance(
+        segment,
+        dict,
+    ):
+        return None
+
+    start_ms = segment.get(
+        "start_ms"
+    )
+
+    end_ms = segment.get(
+        "end_ms"
+    )
+
+    if (
+        not isinstance(
+            start_ms,
+            int,
+        )
+        or not isinstance(
+            end_ms,
+            int,
+        )
+        or end_ms <= start_ms
+    ):
+        return None
+
+    archive = state.get(
+        "speaker_capture_pcm_24k"
+    )
+
+    if not isinstance(
+        archive,
+        bytearray,
+    ):
+        return None
+
+    start_frame = round(
+        (
+            start_ms
+            / 1000.0
+        )
+        * SPEAKER_CAPTURE_RATE
+    )
+
+    end_frame = round(
+        (
+            end_ms
+            / 1000.0
+        )
+        * SPEAKER_CAPTURE_RATE
+    )
+
+    start_byte = max(
+        0,
+        start_frame
+        * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+    )
+
+    end_byte = min(
+        len(archive),
+        end_frame
+        * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+    )
+
+    if end_byte <= start_byte:
+        return None
+
+    return bytes(
+        archive[
+            start_byte:end_byte
+        ]
+    )
+
+
+def _speaker_verify_request(
+    pcm: bytes,
+) -> dict[str, Any]:
+    """Blocking HTTP request; called only through asyncio.to_thread()."""
+
+    import urllib.request
+
+    request = urllib.request.Request(
+        SPEAKER_VERIFY_URL,
+        data=pcm,
+        method="POST",
+        headers={
+            "Content-Type":
+                "application/octet-stream",
+        },
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=SPEAKER_VERIFY_TIMEOUT_SECONDS,
+    ) as response:
+        payload = json.load(
+            response
+        )
+
+    if not isinstance(
+        payload,
+        dict,
+    ):
+        raise RuntimeError(
+            "speaker verifier returned "
+            "non-object response"
+        )
+
+    return payload
+
+
+
+async def _speaker_verify_gate_decision(
+    event: dict[str, Any],
+    transcript: str,
+    pcm: bytes,
+) -> tuple[bool, str]:
+    """Return True only for confirmed V1.3 strong background.
+
+    This function is deliberately fail-open.
+    """
+
+    item_id = str(
+        event.get("item_id")
+        or ""
+    ).strip()
+
+    if (
+        not item_id
+        or not pcm
+    ):
+        return (
+            False,
+            "MISSING_AUDIO_FAIL_OPEN",
+        )
+
+    duration_seconds = (
+        len(pcm)
+        / (
+            SPEAKER_CAPTURE_RATE
+            * SPEAKER_CAPTURE_SAMPLE_WIDTH
+        )
+    )
+
+    if (
+        duration_seconds
+        < SPEAKER_SUPPRESSION_MIN_SECONDS
+    ):
+        _LOGGER.info(
+            "JARVIS SPEAKER GATE BYPASS | "
+            "item=%s reason=SHORT_ALLOW "
+            "duration=%.3f transcript=%r",
+            item_id,
+            duration_seconds,
+            transcript,
+        )
+
+        return (
+            False,
+            "SHORT_ALLOW",
+        )
+
+    started = time.monotonic()
+
+    try:
+        result = await asyncio.to_thread(
+            _speaker_verify_request,
+            pcm,
+        )
+
+    except Exception as exc:
+        _LOGGER.warning(
+            "JARVIS SPEAKER GATE FAIL OPEN | "
+            "item=%s reason=VERIFY_ERROR "
+            "error=%s transcript=%r",
+            item_id,
+            str(exc)[:300],
+            transcript,
+        )
+
+        return (
+            False,
+            "VERIFY_ERROR_FAIL_OPEN",
+        )
+
+    elapsed_ms = round(
+        (
+            time.monotonic()
+            - started
+        )
+        * 1000
+    )
+
+    policy_version = str(
+        result.get(
+            "policy_version",
+            "",
+        )
+    )
+
+    policy_decision = str(
+        result.get(
+            "policy_decision",
+            "UNKNOWN",
+        )
+    )
+
+    suppress_candidate = (
+        result.get(
+            "policy_suppress_candidate"
+        )
+        is True
+    )
+
+    window_short_score = result.get(
+        "window_short_score"
+    )
+
+    if (
+        policy_version
+        != SPEAKER_SUPPRESSION_POLICY_VERSION
+    ):
+        _LOGGER.warning(
+            "JARVIS SPEAKER GATE FAIL OPEN | "
+            "item=%s reason=POLICY_VERSION "
+            "expected=%s actual=%s "
+            "decision=%s request_ms=%s "
+            "transcript=%r",
+            item_id,
+            SPEAKER_SUPPRESSION_POLICY_VERSION,
+            policy_version,
+            policy_decision,
+            elapsed_ms,
+            transcript,
+        )
+
+        return (
+            False,
+            "POLICY_VERSION_FAIL_OPEN",
+        )
+
+    suppress = (
+        policy_decision
+        == "STRONG_BACKGROUND"
+        and suppress_candidate
+    )
+
+    reason = (
+        "STRONG_BACKGROUND_DROP"
+        if suppress
+        else "ALLOW"
+    )
+
+    _LOGGER.info(
+        "JARVIS SPEAKER GATE | "
+        "item=%s duration=%.3f "
+        "window_short=%s "
+        "decision=%s "
+        "candidate=%s "
+        "suppress=%s "
+        "reason=%s "
+        "request_ms=%s "
+        "transcript=%r",
+        item_id,
+        duration_seconds,
+        window_short_score,
+        policy_decision,
+        suppress_candidate,
+        suppress,
+        reason,
+        elapsed_ms,
+        transcript,
+    )
+
+    return (
+        suppress,
+        reason,
+    )
+
+def _speaker_verify_schedule(
+    state: dict[str, Any],
+    event: dict[str, Any],
+    transcript: str,
+    pcm: bytes,
+) -> None:
+    """Schedule observe-only verification without delaying the brain."""
+
+    item_id = str(
+        event.get("item_id")
+        or ""
+    ).strip()
+
+    if (
+        not item_id
+        or not pcm
+    ):
+        return
+
+    tasks = state.get(
+        "speaker_verify_tasks"
+    )
+
+    if not isinstance(
+        tasks,
+        set,
+    ):
+        tasks = set()
+        state[
+            "speaker_verify_tasks"
+        ] = tasks
+
+    async def observe() -> None:
+        started = time.monotonic()
+
+        try:
+            result = await asyncio.to_thread(
+                _speaker_verify_request,
+                pcm,
+            )
+
+        except Exception as exc:
+            _LOGGER.warning(
+                "JARVIS SPEAKER VERIFY FAILED | "
+                "item=%s error=%s transcript=%r",
+                item_id,
+                str(exc)[:300],
+                transcript,
+            )
+            return
+
+        elapsed_ms = round(
+            (
+                time.monotonic()
+                - started
+            )
+            * 1000
+        )
+
+        score = result.get(
+            "score"
+        )
+
+        classification = str(
+            result.get(
+                "classification",
+                "UNKNOWN",
+            )
+        )
+
+        action = str(
+            result.get(
+                "action",
+                "OBSERVE_ONLY",
+            )
+        )
+
+        inference_ms = result.get(
+            "inference_ms"
+        )
+
+        gate_enabled = bool(
+            result.get(
+                "gate_enabled",
+                False,
+            )
+        )
+
+        _LOGGER.info(
+            "JARVIS SPEAKER VERIFY | "
+            "item=%s score=%s "
+            "classification=%s "
+            "action=%s "
+            "gate_enabled=%s "
+            "request_ms=%s "
+            "inference_ms=%s "
+            "bytes=%s "
+            "transcript=%r",
+            item_id,
+            score,
+            classification,
+            action,
+            gate_enabled,
+            elapsed_ms,
+            inference_ms,
+            len(pcm),
+            transcript,
+        )
+
+    task = asyncio.create_task(
+        observe()
+    )
+
+    tasks.add(
+        task
+    )
+
+    task.add_done_callback(
+        tasks.discard
+    )
+
+
 @dataclass(frozen=True)
 class RealtimeVoiceConfig:
     enabled: bool
@@ -165,11 +850,7 @@ class RealtimeVoiceConfig:
             user_is_admin=_env_bool("JARVIS_REALTIME_USER_IS_ADMIN", True),
             transcription_prompt=_env_text(
                 "JARVIS_REALTIME_TRANSCRIPTION_PROMPT",
-                (
-                    "Private names and smart-home terms may include Aaron, Amber, Jarvis, "
-                    "Home Assistant, bedroom floodlight, living room, hallway, front door, "
-                    "Reolink, Frigate, Tamworth and Durham. Preserve names exactly."
-                ),
+                "",
             ),
             timezone=normalise_timezone(
                 _env_text("JARVIS_TIMEZONE", "Europe/London")
@@ -208,8 +889,10 @@ def build_session_update(
     turn_detection: dict[str, Any] | None
     if normalise_conversation_mode(conversation_mode) == CONVERSATION_MODE_LIVE:
         turn_detection = {
-            "type": "semantic_vad",
-            "eagerness": normalise_eagerness(eagerness),
+            "type": "server_vad",
+            "threshold": 0.85,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 500,
             "create_response": False,
             "interrupt_response": True,
         }
@@ -231,7 +914,7 @@ def build_session_update(
             "audio": {
                 "input": {
                     "format": {"type": "audio/pcm", "rate": INPUT_RATE},
-                    "noise_reduction": {"type": "near_field"},
+                    "noise_reduction": {"type": "far_field"},
                     "transcription": {
                         "model": "gpt-4o-transcribe",
                         "language": "en",
@@ -751,7 +1434,11 @@ class RealtimeVoiceProxy:
 
         headers = {"Authorization": f"Bearer {self.config.api_key}"}
         turn_tasks: set[asyncio.Task[Any]] = set()
-        state: dict[str, Any] = {"generation": 0, "suppress_audio": False}
+        state: dict[str, Any] = {
+            "generation": 0,
+            "suppress_audio": False,
+            "voice_pe_session_started_at": time.monotonic(),
+        }
         self.active_sessions += 1
         self.total_sessions += 1
         try:
@@ -859,19 +1546,92 @@ class RealtimeVoiceProxy:
                     if not pcm:
                         continue
 
+                if metadata.get("client_kind") == "voice_pe":
+                    _speaker_capture_append_pcm(
+                        state,
+                        pcm,
+                    )
+
                 state["pcm_diagnostic_chunks"] = (
                     int(state.get("pcm_diagnostic_chunks", 0)) + 1
                 )
                 diagnostic_chunks = int(state["pcm_diagnostic_chunks"])
 
                 if diagnostic_chunks == 1 or diagnostic_chunks % 100 == 0:
-                    _LOGGER.info(
-                        "Voice PE PCM diagnostic: chunks=%d bytes=%d rms=%d peak=%d",
-                        diagnostic_chunks,
-                        len(pcm),
-                        audioop.rms(pcm, 2),
-                        audioop.max(pcm, 2),
-                    )
+                    sample_values = [
+                        int.from_bytes(
+                            pcm[index:index + 2],
+                            byteorder="little",
+                            signed=True,
+                        )
+                        for index in range(0, len(pcm) - 1, 2)
+                    ]
+
+                    if sample_values:
+                        sample_count = len(sample_values)
+
+                        dc_mean = (
+                            sum(sample_values) /
+                            sample_count
+                        )
+
+                        raw_rms = int(
+                            (
+                                sum(
+                                    sample * sample
+                                    for sample in sample_values
+                                ) /
+                                sample_count
+                            )
+                            ** 0.5
+                        )
+
+                        centered_rms = int(
+                            (
+                                sum(
+                                    (sample - dc_mean)
+                                    * (sample - dc_mean)
+                                    for sample in sample_values
+                                ) /
+                                sample_count
+                            )
+                            ** 0.5
+                        )
+
+                        raw_peak = max(
+                            abs(sample)
+                            for sample in sample_values
+                        )
+
+                        centered_peak = int(
+                            max(
+                                abs(sample - dc_mean)
+                                for sample in sample_values
+                            )
+                        )
+
+                        clipped_samples = sum(
+                            1
+                            for sample in sample_values
+                            if abs(sample) >= 32760
+                        )
+
+                        _LOGGER.info(
+                            "Voice PE PCM diagnostic: "
+                            "chunks=%d bytes=%d samples=%d "
+                            "dc_mean=%.1f raw_rms=%d "
+                            "centered_rms=%d raw_peak=%d "
+                            "centered_peak=%d clipped=%d",
+                            diagnostic_chunks,
+                            len(pcm),
+                            sample_count,
+                            dc_mean,
+                            raw_rms,
+                            centered_rms,
+                            raw_peak,
+                            centered_peak,
+                            clipped_samples,
+                        )
 
                 self.total_audio_input_bytes += len(pcm)
                 await upstream.send(json.dumps(audio_append_event(pcm)))
@@ -957,31 +1717,246 @@ class RealtimeVoiceProxy:
                 )
                 self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
+                if metadata.get("client_kind") == "voice_pe":
+                    _speaker_capture_mark_start(
+                        state,
+                        event,
+                    )
+
+                _LOGGER.info(
+                    "JARVIS DIAG | SPEECH STARTED | generation=%s turn_in_progress=%s",
+                    state.get("generation"),
+                    state.get("turn_in_progress"),
+                )
                 if (
                     metadata.get("client_kind") == "voice_pe"
                     and bool(state.get("turn_in_progress"))
                 ):
                     continue
+
+                if metadata.get("client_kind") == "voice_pe":
+                    state["voice_pe_speech_active"] = True
+                    state["voice_pe_speech_start_count"] = (
+                        int(state.get("voice_pe_speech_start_count", 0)) + 1
+                    )
+                    state["voice_pe_speech_started_at"] = time.monotonic()
+
                 state["generation"] = int(state.get("generation", 0)) + 1
                 state["suppress_audio"] = True
                 await self._send_json(client, {"type": "speech.started"})
             elif kind == "input_audio_buffer.speech_stopped":
+                if metadata.get("client_kind") == "voice_pe":
+                    _speaker_capture_mark_stop(
+                        state,
+                        event,
+                    )
+
+                _LOGGER.info(
+                    "JARVIS DIAG | SPEECH STOPPED | generation=%s turn_in_progress=%s",
+                    state.get("generation"),
+                    state.get("turn_in_progress"),
+                )
                 if (
                     metadata.get("client_kind") == "voice_pe"
                     and bool(state.get("turn_in_progress"))
                 ):
                     continue
+
+                if metadata.get("client_kind") == "voice_pe":
+                    speech_started_at = state.get("voice_pe_speech_started_at")
+                    if isinstance(speech_started_at, (int, float)):
+                        state["voice_pe_last_completed_speech_ms"] = round(
+                            (time.monotonic() - float(speech_started_at)) * 1000
+                        )
+                    state["voice_pe_speech_active"] = False
+
                 await self._send_json(client, {"type": "speech.stopped"})
             elif kind == "conversation.item.input_audio_transcription.completed":
                 transcript = str(
                     event.get("transcript") or ""
                 ).strip()
 
+                _LOGGER.info(
+                    "JARVIS DIAG | STT FINAL | JARVIS HEARD: %r",
+                    transcript,
+                )
+
+                speaker_pcm = b""
+
+                if metadata.get("client_kind") == "voice_pe":
+                    _speaker_capture_write_segment(
+                        state,
+                        event,
+                        transcript,
+                    )
+                    speaker_pcm = (
+                        _speaker_capture_segment_pcm(
+                            state,
+                            event,
+                        )
+                    )
+                    if (
+                        speaker_pcm
+                        and not SPEAKER_SUPPRESSION_ENABLED
+                    ):
+                        _speaker_verify_schedule(
+                            state,
+                            event,
+                            transcript,
+                            speaker_pcm,
+                        )
+
                 if (
                     transcript
                     and conversation_mode
                     == CONVERSATION_MODE_LIVE
                 ):
+                    if metadata.get("client_kind") == "voice_pe":
+                        transcript_index = (
+                            int(state.get("voice_pe_transcripts_seen", 0)) + 1
+                        )
+                        state["voice_pe_transcripts_seen"] = transcript_index
+
+                        last_speech_ms = state.get(
+                            "voice_pe_last_completed_speech_ms"
+                        )
+                        session_started_at = state.get(
+                            "voice_pe_session_started_at"
+                        )
+                        session_age_ms = (
+                            round(
+                                (
+                                    time.monotonic()
+                                    - float(session_started_at)
+                                )
+                                * 1000
+                            )
+                            if isinstance(
+                                session_started_at,
+                                (int, float),
+                            )
+                            else None
+                        )
+
+                        drop_wake_residue = (
+                            transcript_index == 1
+                            and not bool(
+                                state.get("voice_pe_wake_guard_used")
+                            )
+                            and bool(
+                                state.get("voice_pe_speech_active")
+                            )
+                            and int(
+                                state.get(
+                                    "voice_pe_speech_start_count",
+                                    0,
+                                )
+                            )
+                            >= 2
+                            and isinstance(
+                                last_speech_ms,
+                                (int, float),
+                            )
+                            and float(last_speech_ms) <= 750
+                            and isinstance(session_age_ms, int)
+                            and session_age_ms <= 6000
+                            and len(transcript) <= 24
+                            and len(transcript.split()) <= 3
+                        )
+
+                        if drop_wake_residue:
+                            state["voice_pe_wake_guard_used"] = True
+                            _LOGGER.info(
+                                "JARVIS DIAG | VOICE PE WAKE RESIDUE DROPPED | "
+                                "transcript=%r previous_speech_ms=%s "
+                                "session_age_ms=%s speech_starts=%s",
+                                transcript,
+                                last_speech_ms,
+                                session_age_ms,
+                                state.get("voice_pe_speech_start_count"),
+                            )
+                            continue
+
+                    # Core-side conservative speaker suppression.
+                    #
+                    # Do not use the biometric result for a short,
+                    # wake/setup-like first transcript. This protects
+                    # wake residue while still allowing a real longer
+                    # first command to be evaluated.
+                    if SPEAKER_SUPPRESSION_ENABLED:
+                        setup_or_wake_bypass = (
+                            transcript_index == 1
+                            and isinstance(
+                                session_age_ms,
+                                int,
+                            )
+                            and session_age_ms <= 6000
+                            and len(transcript) <= 24
+                            and len(
+                                transcript.split()
+                            ) <= 3
+                        )
+
+                        if setup_or_wake_bypass:
+                            _LOGGER.info(
+                                "JARVIS SPEAKER GATE BYPASS | "
+                                "item=%s "
+                                "reason=FIRST_SHORT_SETUP_ALLOW "
+                                "transcript=%r",
+                                str(
+                                    event.get(
+                                        "item_id"
+                                    )
+                                    or ""
+                                ),
+                                transcript,
+                            )
+
+                        elif not speaker_pcm:
+                            _LOGGER.warning(
+                                "JARVIS SPEAKER GATE FAIL OPEN | "
+                                "item=%s "
+                                "reason=NO_PCM "
+                                "transcript=%r",
+                                str(
+                                    event.get(
+                                        "item_id"
+                                    )
+                                    or ""
+                                ),
+                                transcript,
+                            )
+
+                        else:
+                            (
+                                suppress_background,
+                                speaker_gate_reason,
+                            ) = (
+                                await _speaker_verify_gate_decision(
+                                    event,
+                                    transcript,
+                                    speaker_pcm,
+                                )
+                            )
+
+                            if suppress_background:
+                                _LOGGER.info(
+                                    "JARVIS SPEAKER BACKGROUND DROPPED | "
+                                    "item=%s "
+                                    "reason=%s "
+                                    "transcript=%r",
+                                    str(
+                                        event.get(
+                                            "item_id"
+                                        )
+                                        or ""
+                                    ),
+                                    speaker_gate_reason,
+                                    transcript,
+                                )
+
+                                continue
+
                     await self._send_json(
                         client,
                         {
@@ -1246,11 +2221,617 @@ class RealtimeVoiceProxy:
             and metadata.get("client_kind") == "voice_pe"
         )
 
+    async def _finish_direct_elevenlabs_turn(
+        self,
+        client: Any,
+        state: dict[str, Any],
+        spoken_text: str,
+    ) -> None:
+        _LOGGER.info(
+            "JARVIS DIAG | TURN COMPLETE | generation=%s "
+            "spoken_characters=%d text=%r",
+            state.get("generation"),
+            len(spoken_text),
+            spoken_text,
+        )
+
+        await self._send_json(
+            client,
+            {
+                "type": "assistant.transcript.done",
+                "text": spoken_text,
+            },
+        )
+
+        await self._send_json(
+            client,
+            {"type": "audio.done"},
+        )
+
+        state["turn_in_progress"] = False
+
+        await self._send_json(
+            client,
+            {
+                "type": "turn.done",
+                "status": "completed",
+                "usage": None,
+            },
+        )
+
+        closure_kind = state.pop(
+            "close_after_response",
+            None,
+        )
+
+        if closure_kind:
+            await self._send_json(
+                client,
+                {
+                    "type": "session.close",
+                    "reason": "voice_closure",
+                    "kind": closure_kind,
+                },
+            )
+
+
+    async def _stream_elevenlabs_websocket(
+        self,
+        client: Any,
+        text_queue: asyncio.Queue[str | None],
+        state: dict[str, Any],
+        generation: int,
+    ) -> dict[str, Any]:
+        api_key = self.config.elevenlabs_api_key
+        voice_id = self.config.elevenlabs_voice_id
+        model_id = self.config.elevenlabs_model_id
+        output_format = self.config.elevenlabs_output_format
+
+        if not api_key or not voice_id:
+            return {
+                "success": False,
+                "audio_started": False,
+                "error": "ElevenLabs API key or voice ID is not configured",
+            }
+
+        url = (
+            "wss://api.elevenlabs.io/v1/text-to-speech/"
+            f"{quote(voice_id, safe='')}/stream-input"
+            f"?model_id={quote(model_id, safe='')}"
+            f"&output_format={quote(output_format, safe='')}"
+            "&inactivity_timeout=60"
+            "&auto_mode=true"
+        )
+
+        started_at = time.monotonic()
+        first_text_at: float | None = None
+        first_audio_at: float | None = None
+        audio_started = False
+
+        # ElevenLabs audio must be drained independently from playback.
+        # Otherwise real-time playback sleeps block the WebSocket receiver
+        # and cause jitter, pauses and apparent jumps.
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+            maxsize=128
+        )
+
+        websocket_connect = _load_websocket_connect()
+
+        try:
+            async with websocket_connect(
+                url,
+                max_size=None,
+                max_queue=128,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=10,
+                close_timeout=5,
+            ) as tts_ws:
+                _LOGGER.info(
+                    "ELEVENLABS WS CONNECTED: latency_ms=%d",
+                    round(
+                        (time.monotonic() - started_at) * 1000
+                    ),
+                )
+
+                # JARVIS LOW-LATENCY SENTENCE MODE:
+                # send_text() now supplies complete sentences whenever
+                # possible, so ElevenLabs auto_mode can generate them
+                # directly without applying a second chunk buffer.
+                await tts_ws.send(
+                    json.dumps(
+                        {
+                            "text": " ",
+                            "xi_api_key": api_key,
+                            # JARVIS VOICE CONSISTENCY SETTINGS
+                            "voice_settings": {
+                                "stability": 0.75,
+                                "similarity_boost": 0.80,
+                                "style": 0.0,
+                                "use_speaker_boost": True,
+                                "speed": 1.0,
+                            },
+                        }
+                    )
+                )
+
+                async def send_text() -> None:
+                    nonlocal first_text_at
+
+                    buffer = ""
+                    total_characters = 0
+                    text_chunk_count = 0
+
+                    async def send_chunk(
+                        chunk: str,
+                        *,
+                        flush: bool = False,
+                    ) -> None:
+                        nonlocal first_text_at
+                        nonlocal total_characters
+                        nonlocal text_chunk_count
+
+                        if not chunk:
+                            return
+
+                        # Preserve GPT output exactly. Do not inject spaces
+                        # or split words simply to hit a byte threshold.
+                        payload: dict[str, Any] = {
+                            "text": chunk,
+                        }
+
+                        if flush:
+                            payload["flush"] = True
+
+                        if first_text_at is None:
+                            first_text_at = time.monotonic()
+
+                            _LOGGER.info(
+                                "ELEVENLABS WS FIRST TEXT: "
+                                "latency_ms=%d characters=%d",
+                                round(
+                                    (
+                                        first_text_at
+                                        - started_at
+                                    )
+                                    * 1000
+                                ),
+                                len(chunk),
+                            )
+
+                        total_characters += len(chunk)
+                        text_chunk_count += 1
+
+                        _LOGGER.info(
+                            "ELEVENLABS WS TEXT CHUNK: "
+                            "index=%d characters=%d flush=%s "
+                            "head=%r tail=%r",
+                            text_chunk_count,
+                            len(chunk),
+                            flush,
+                            chunk[:40],
+                            chunk[-40:],
+                        )
+
+                        await tts_ws.send(
+                            json.dumps(payload)
+                        )
+
+                    while True:
+                        item = await text_queue.get()
+
+                        if item is None:
+                            # The final buffered text carries flush=True so
+                            # ElevenLabs renders everything still pending.
+                            if buffer:
+                                await send_chunk(
+                                    buffer,
+                                    flush=True,
+                                )
+                                buffer = ""
+                            else:
+                                # Flush any text already buffered inside
+                                # ElevenLabs without adding spoken content.
+                                await tts_ws.send(
+                                    json.dumps(
+                                        {
+                                            "text": " ",
+                                            "flush": True,
+                                        }
+                                    )
+                                )
+
+                            _LOGGER.info(
+                                "ELEVENLABS WS TEXT COMPLETE: "
+                                "characters=%d",
+                                total_characters,
+                            )
+
+                            # EOS after flush.
+                            await tts_ws.send(
+                                json.dumps(
+                                    {
+                                        "text": "",
+                                    }
+                                )
+                            )
+                            return
+
+                        value = str(item or "")
+
+                        if not value:
+                            continue
+
+                        buffer += value
+
+                        # JARVIS VOICE CONSISTENCY:
+                        # Send complete sentences whenever possible so
+                        # ElevenLabs has natural linguistic context before
+                        # committing to intonation, pace and tone.
+                        while buffer:
+                            cut = 0
+
+                            # Use the FIRST complete sentence in the
+                            # accumulated GPT stream. Leading whitespace
+                            # in the next chunk is preserved naturally.
+                            #
+                            # A period immediately after a digit can be a
+                            # streamed decimal such as 3.8. If the next
+                            # character has not arrived yet, wait instead
+                            # of incorrectly committing "3." to TTS.
+                            for character_index, character in enumerate(buffer):
+                                if character not in ".?!":
+                                    continue
+
+                                next_index = character_index + 1
+
+                                if (
+                                    character == "."
+                                    and character_index > 0
+                                    and buffer[
+                                        character_index - 1
+                                    ].isdigit()
+                                ):
+                                    # "3." at the current streaming edge may
+                                    # become "3.8" in the next GPT delta.
+                                    if next_index == len(buffer):
+                                        continue
+
+                                    # A digit on both sides proves this is
+                                    # decimal punctuation, not sentence end.
+                                    if buffer[next_index].isdigit():
+                                        continue
+
+                                if (
+                                    next_index == len(buffer)
+                                    or buffer[next_index].isspace()
+                                ):
+                                    cut = next_index
+                                    break
+
+                            # Exceptional very-long sentence protection.
+                            # Do not revert to the old 80-180 character
+                            # fragmentation. Wait for substantially more
+                            # context, then choose a natural punctuation
+                            # or whitespace boundary.
+                            if not cut and len(buffer) >= 320:
+                                soft_end = max(
+                                    buffer.rfind(",", 180, 320),
+                                    buffer.rfind(";", 180, 320),
+                                    buffer.rfind(":", 180, 320),
+                                )
+
+                                if soft_end >= 180:
+                                    cut = soft_end + 1
+                                else:
+                                    boundary = max(
+                                        buffer.rfind(" ", 220, 320),
+                                        buffer.rfind("\n", 220, 320),
+                                        buffer.rfind("\t", 220, 320),
+                                    )
+                                    cut = (
+                                        boundary + 1
+                                        if boundary >= 220
+                                        else 320
+                                    )
+
+                            if not cut:
+                                break
+
+                            chunk = buffer[:cut]
+                            buffer = buffer[cut:]
+                            await send_chunk(chunk)
+                async def receive_audio() -> None:
+                    previous_audio_at: float | None = None
+                    audio_event_count = 0
+
+                    try:
+                        async for raw_message in tts_ws:
+                            if isinstance(raw_message, bytes):
+                                try:
+                                    raw_message = (
+                                        raw_message.decode("utf-8")
+                                    )
+                                except UnicodeDecodeError:
+                                    continue
+
+                            try:
+                                event = json.loads(raw_message)
+                            except Exception:
+                                continue
+
+                            if not isinstance(event, dict):
+                                continue
+
+                            encoded = event.get("audio")
+
+                            if isinstance(encoded, str) and encoded:
+                                try:
+                                    audio = base64.b64decode(
+                                        encoded,
+                                        validate=True,
+                                    )
+                                except Exception:
+                                    audio = b""
+
+                                if audio:
+                                    now = time.monotonic()
+                                    audio_event_count += 1
+
+                                    if previous_audio_at is not None:
+                                        gap_ms = round(
+                                            (now - previous_audio_at) * 1000
+                                        )
+
+                                        if gap_ms >= 100:
+                                            _LOGGER.info(
+                                                "ELEVENLABS WS AUDIO GAP: "
+                                                "event=%d gap_ms=%d bytes=%d",
+                                                audio_event_count,
+                                                gap_ms,
+                                                len(audio),
+                                            )
+
+                                    previous_audio_at = now
+
+                                    if generation != int(
+                                        state.get(
+                                            "generation",
+                                            0,
+                                        )
+                                    ):
+                                        return
+
+                                    # Drain ElevenLabs immediately. Playback
+                                    # happens in a separate coroutine.
+                                    await audio_queue.put(audio)
+
+                            if bool(event.get("is_final")):
+                                return
+
+                    finally:
+                        # Always release the player.
+                        await audio_queue.put(None)
+
+                async def play_audio() -> None:
+                    nonlocal audio_started
+                    nonlocal first_audio_at
+
+                    pending = bytearray()
+                    finished = False
+
+                    # HTTP fallback already uses 4096-byte PCM frames.
+                    frame_size = 4096
+
+                    # Keep roughly 120 ms queued ahead on the Voice PE.
+                    # 24 kHz * 2 bytes * 0.12 sec = 5760 bytes.
+                    playback_lead_seconds = 0.120
+                    playback_started_at: float | None = None
+                    audio_seconds_sent = 0.0
+
+                    while True:
+                        while (
+                            len(pending) < frame_size
+                            and not finished
+                        ):
+                            queue_wait_started = time.monotonic()
+                            item = await audio_queue.get()
+                            queue_wait_ms = round(
+                                (time.monotonic() - queue_wait_started) * 1000
+                            )
+
+                            if (
+                                playback_started_at is not None
+                                and queue_wait_ms >= 40
+                            ):
+                                _LOGGER.info(
+                                    "ELEVENLABS PLAYER STARVATION: "
+                                    "wait_ms=%d pending_bytes=%d",
+                                    queue_wait_ms,
+                                    len(pending),
+                                )
+
+                            if item is None:
+                                finished = True
+                                break
+
+                            pending.extend(item)
+
+                        if not pending and finished:
+                            return
+
+                        if len(pending) >= frame_size:
+                            frame = bytes(
+                                pending[:frame_size]
+                            )
+                            del pending[:frame_size]
+                        elif finished:
+                            frame = bytes(pending)
+                            pending.clear()
+                        else:
+                            continue
+
+                        if generation != int(
+                            state.get("generation", 0)
+                        ):
+                            return
+
+                        if not frame:
+                            continue
+
+                        if not audio_started:
+                            audio_started = True
+                            first_audio_at = time.monotonic()
+                            playback_started_at = first_audio_at
+
+                            _LOGGER.info(
+                                "ELEVENLABS WS FIRST AUDIO: "
+                                "latency_ms=%d",
+                                round(
+                                    (
+                                        first_audio_at
+                                        - started_at
+                                    )
+                                    * 1000
+                                ),
+                            )
+
+                            _LOGGER.info(
+                                "ELEVENLABS WS SMOOTH PLAYER: "
+                                "frame_bytes=%d lead_ms=%d",
+                                frame_size,
+                                round(
+                                    playback_lead_seconds
+                                    * 1000
+                                ),
+                            )
+
+                        await client.send_bytes(frame)
+
+                        self.total_audio_output_bytes += len(
+                            frame
+                        )
+
+                        audio_seconds_sent += (
+                            len(frame) / 48_000.0
+                        )
+
+                        # Absolute pacing rather than sleeping for the
+                        # complete chunk duration. This accounts for network
+                        # send time and intentionally keeps audio queued ahead
+                        # of the speaker to prevent underruns.
+                        if playback_started_at is not None:
+                            target = (
+                                playback_started_at
+                                + audio_seconds_sent
+                                - playback_lead_seconds
+                            )
+
+                            delay = (
+                                target
+                                - time.monotonic()
+                            )
+
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+
+                sender_task = asyncio.create_task(
+                    send_text()
+                )
+                receiver_task = asyncio.create_task(
+                    receive_audio()
+                )
+                player_task = asyncio.create_task(
+                    play_audio()
+                )
+
+                try:
+                    # Limit ElevenLabs text/audio generation, not the
+                    # real-time duration of already-buffered playback.
+                    #
+                    # A long response can legitimately take more than
+                    # 90 seconds to play even after ElevenLabs has
+                    # finished delivering all of its PCM.
+                    async with asyncio.timeout(90.0):
+                        await asyncio.gather(
+                            sender_task,
+                            receiver_task,
+                        )
+
+                    # The player drains a finite PCM queue at real-time
+                    # speed. Do not cancel valid speech simply because
+                    # its playback duration exceeds the generation
+                    # timeout above.
+                    await player_task
+                finally:
+                    for task in (
+                        sender_task,
+                        receiver_task,
+                        player_task,
+                    ):
+                        if not task.done():
+                            task.cancel()
+
+                    await asyncio.gather(
+                        sender_task,
+                        receiver_task,
+                        player_task,
+                        return_exceptions=True,
+                    )
+
+            return {
+                "success": bool(audio_started),
+                "audio_started": bool(audio_started),
+                "first_text_ms": (
+                    round(
+                        (
+                            first_text_at
+                            - started_at
+                        )
+                        * 1000
+                    )
+                    if first_text_at is not None
+                    else None
+                ),
+                "first_audio_ms": (
+                    round(
+                        (
+                            first_audio_at
+                            - started_at
+                        )
+                        * 1000
+                    )
+                    if first_audio_at is not None
+                    else None
+                ),
+            }
+
+        except asyncio.CancelledError:
+            raise
+
+        except Exception as exc:
+            self.last_error = (
+                f"ElevenLabs WebSocket TTS failed: {exc}"
+            )[:500]
+
+            _LOGGER.exception(
+                "ElevenLabs streaming WebSocket failed"
+            )
+
+            return {
+                "success": False,
+                "audio_started": bool(audio_started),
+                "error": str(exc)[:300],
+            }
+
+
     async def _stream_elevenlabs_response(
         self,
         client: Any,
         text: str,
         state: dict[str, Any],
+        *,
+        finalize_turn: bool = True,
     ) -> bool:
         spoken_text = " ".join(str(text or "").split()).strip()
         if not spoken_text:
@@ -1364,45 +2945,15 @@ class RealtimeVoiceProxy:
             )
             return False
 
-        await self._send_json(
-            client,
-            {
-                "type": "assistant.transcript.done",
-                "text": spoken_text,
-            },
-        )
-        await self._send_json(
-            client,
-            {"type": "audio.done"},
-        )
-
-        state["turn_in_progress"] = False
-
-        await self._send_json(
-            client,
-            {
-                "type": "turn.done",
-                "status": "completed",
-                "usage": None,
-            },
-        )
-
-        closure_kind = state.pop(
-            "close_after_response",
-            None,
-        )
-
-        if closure_kind:
-            await self._send_json(
+        if finalize_turn:
+            await self._finish_direct_elevenlabs_turn(
                 client,
-                {
-                    "type": "session.close",
-                    "reason": "voice_closure",
-                    "kind": closure_kind,
-                },
+                state,
+                spoken_text,
             )
 
         return True
+
 
     async def _start_brain_turn(
         self,
@@ -1480,27 +3031,118 @@ class RealtimeVoiceProxy:
     ) -> None:
         self.total_brain_turns += 1
         state["active_voice"] = voice
-        await self._send_json(client, {"type": "brain.started", "command": command})
+
+        _LOGGER.info(
+            "JARVIS DIAG | BRAIN START | generation=%s command=%r "
+            "client=%s voice_mode=%s",
+            generation,
+            command,
+            metadata.get("client_kind"),
+            voice_mode,
+        )
+
+        await self._send_json(
+            client,
+            {
+                "type": "brain.started",
+                "command": command,
+            },
+        )
 
         speech_buffer = ""
         early_speech_sent = False
         early_speech_text = ""
+        early_speech_task: asyncio.Task[bool] | None = None
+
+        direct_elevenlabs_stream = bool(
+            speak
+            and self._use_direct_elevenlabs(metadata)
+            and voice_mode != VOICE_MODE_HOME_ASSISTANT
+        )
+
+        elevenlabs_text_queue: asyncio.Queue[str | None] | None = (
+            asyncio.Queue()
+            if direct_elevenlabs_stream
+            else None
+        )
+
+        elevenlabs_stream_task: asyncio.Task[dict[str, Any]] | None = (
+            asyncio.create_task(
+                self._stream_elevenlabs_websocket(
+                    client,
+                    elevenlabs_text_queue,
+                    state,
+                    generation,
+                )
+            )
+            if elevenlabs_text_queue is not None
+            else None
+        )
+
+        elevenlabs_streamed_text = ""
+
+        if direct_elevenlabs_stream:
+            # OpenAI realtime audio must never mix with ElevenLabs PCM.
+            state["suppress_audio"] = True
 
         async def on_delta(delta: str) -> None:
             nonlocal speech_buffer, early_speech_sent, early_speech_text
+            nonlocal early_speech_task, elevenlabs_streamed_text
             if generation != int(state.get("generation", 0)):
                 return
             text = str(delta or "")
             if not text:
                 return
             self.total_streamed_text_chunks += 1
-            await self._send_json(client, {"type": "brain.delta", "text": text})
 
-            if not speak or early_speech_sent or metadata.get("client_kind") == "voice_pe":
+            _LOGGER.info(
+                "JARVIS DIAG | GPT DELTA | generation=%s text=%r",
+                generation,
+                text,
+            )
+
+            await self._send_json(
+                client,
+                {
+                    "type": "brain.delta",
+                    "text": text,
+                },
+            )
+
+            if (
+                direct_elevenlabs_stream
+                and elevenlabs_text_queue is not None
+            ):
+                # Stream the complete GPT response. Do not truncate at
+                # 420 characters; the WebSocket can remain open for the
+                # entire turn.
+                elevenlabs_streamed_text += text
+                elevenlabs_text_queue.put_nowait(text)
+
+                # The dedicated Voice PE is now spoken by the
+                # persistent ElevenLabs stream, not early HTTP TTS.
+                return
+
+            if not speak or early_speech_sent:
                 return
 
             speech_buffer += text
-            segment = SpeechRenderPolicy.early_segment(speech_buffer)
+
+            if self._use_direct_elevenlabs(metadata):
+                # Dedicated hardware can begin speaking earlier than the
+                # generic UI path. Still wait for a natural boundary so
+                # Jarvis does not speak broken token fragments.
+                segment = SpeechRenderPolicy.early_segment(
+                    speech_buffer,
+                    minimum_chars=16,
+                    preferred_chars=48,
+                    maximum_chars=96,
+                )
+            else:
+                segment = SpeechRenderPolicy.early_segment(
+                    speech_buffer
+                )
+
             if not segment:
                 return
 
@@ -1518,9 +3160,45 @@ class RealtimeVoiceProxy:
                         "streaming_preview": True,
                     },
                 )
+
+            elif self._use_direct_elevenlabs(metadata):
+                # Do NOT await this here. The brain must keep generating
+                # the rest of the reply while ElevenLabs renders and the
+                # Voice PE begins playing this first phrase.
+                state["suppress_audio"] = True
+
+                _LOGGER.info(
+                    "VOICE PE EARLY TTS START: characters=%d",
+                    len(segment),
+                )
+
+                early_speech_task = asyncio.create_task(
+                    self._stream_elevenlabs_response(
+                        client,
+                        segment,
+                        state,
+                        finalize_turn=False,
+                    )
+                )
+
+                await self._send_json(
+                    client,
+                    {
+                        "type": "speech.early.started",
+                        "characters": len(segment),
+                    },
+                )
+
             else:
                 state["suppress_audio"] = False
-                await upstream.send(json.dumps(speak_response_event(segment, voice)))
+                await upstream.send(
+                    json.dumps(
+                        speak_response_event(
+                            segment,
+                            voice,
+                        )
+                    )
+                )
 
         try:
             turn_metadata = dict(metadata)
@@ -1536,7 +3214,19 @@ class RealtimeVoiceProxy:
             response = str(raw_result.get("response") or "").strip()
             if not response:
                 response = "I completed that, but Jarvis Core did not return a response."
-            conversation_id = str(raw_result.get("conversation_id") or "").strip()
+
+            _LOGGER.info(
+                "JARVIS DIAG | BRAIN COMPLETE | generation=%s "
+                "success=%s tool_called=%s response=%r",
+                generation,
+                raw_result.get("success", True),
+                raw_result.get("tool_called", False),
+                response,
+            )
+
+            conversation_id = str(
+                raw_result.get("conversation_id") or ""
+            ).strip()
             if conversation_id:
                 metadata["conversation_id"] = conversation_id
             tool_events = sanitise_tool_events(
@@ -1570,12 +3260,23 @@ class RealtimeVoiceProxy:
                 "tool_called": bool(
                     raw_result.get("tool_called", bool(tool_events))
                 ),
+                "streamed": bool(
+                    raw_result.get("streamed", False)
+                ),
                 "quiet_control": quiet_control,
                 "memory_used": memory_used,
                 "message_count": message_count,
                 "user_name": user_name,
             }
         except asyncio.CancelledError:
+            if elevenlabs_stream_task is not None:
+                elevenlabs_stream_task.cancel()
+
+                await asyncio.gather(
+                    elevenlabs_stream_task,
+                    return_exceptions=True,
+                )
+
             raise
         except Exception as exc:
             _LOGGER.exception("Jarvis brain turn failed")
@@ -1596,6 +3297,14 @@ class RealtimeVoiceProxy:
             }
 
         if generation != int(state.get("generation", 0)):
+            if elevenlabs_stream_task is not None:
+                elevenlabs_stream_task.cancel()
+
+                await asyncio.gather(
+                    elevenlabs_stream_task,
+                    return_exceptions=True,
+                )
+
             self.total_discarded_stale_turns += 1
             await self._send_json(client, {"type": "brain.discarded", "command": command})
             return
@@ -1679,6 +3388,120 @@ class RealtimeVoiceProxy:
                 {"type": "turn.done", "status": "completed", "usage": None},
             )
             return
+        if (
+            direct_elevenlabs_stream
+            and elevenlabs_text_queue is not None
+            and elevenlabs_stream_task is not None
+        ):
+            # Voice PE should speak the full answer, not the generic
+            # 520-character voice preview used by shorter UI surfaces.
+            complete_spoken_response = (
+                SpeechRenderPolicy.spoken_text(
+                    result["response"],
+                    maximum_chars=max(
+                        520,
+                        len(result["response"]) + 32,
+                    ),
+                )
+            )
+
+            if bool(result.get("streamed")):
+                # AIEngine already delivered the complete answer through
+                # on_delta. Do not reconstruct a remainder from normalised
+                # text; doing so can repeat, skip or jump at the join.
+                if not elevenlabs_streamed_text:
+                    elevenlabs_text_queue.put_nowait(
+                        complete_spoken_response
+                    )
+            else:
+                # Tool turns intentionally do not stream provisional text.
+                # Once tools are complete, speak the final answer once.
+                elevenlabs_text_queue.put_nowait(
+                    complete_spoken_response
+                )
+
+            # Flush and finalise this SAME ElevenLabs generation.
+            elevenlabs_text_queue.put_nowait(None)
+
+            try:
+                ws_result = await elevenlabs_stream_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOGGER.exception(
+                    "Voice PE ElevenLabs WS task failed"
+                )
+
+                ws_result = {
+                    "success": False,
+                    "audio_started": False,
+                    "error": str(exc),
+                }
+
+            if bool(ws_result.get("success")):
+                _LOGGER.info(
+                    "ELEVENLABS WS TURN COMPLETE: "
+                    "first_text_ms=%s first_audio_ms=%s",
+                    ws_result.get("first_text_ms"),
+                    ws_result.get("first_audio_ms"),
+                )
+
+                await self._finish_direct_elevenlabs_turn(
+                    client,
+                    state,
+                    complete_spoken_response,
+                )
+                return
+
+            if bool(ws_result.get("audio_started")):
+                # Some of the answer has already been spoken.
+                # Never replay it using another TTS provider.
+                _LOGGER.warning(
+                    "ElevenLabs WS ended after audio started; "
+                    "not replaying spoken text"
+                )
+
+                await self._send_json(
+                    client,
+                    {
+                        "type": "status",
+                        "message": "Jarvis voice stream ended early",
+                    },
+                )
+
+                await self._finish_direct_elevenlabs_turn(
+                    client,
+                    state,
+                    complete_spoken_response,
+                )
+                return
+
+            _LOGGER.warning(
+                "ElevenLabs WS produced no audio; "
+                "falling back to HTTP TTS"
+            )
+
+            handled = await self._stream_elevenlabs_response(
+                client,
+                complete_spoken_response,
+                state,
+            )
+
+            if handled:
+                return
+
+            state["suppress_audio"] = False
+
+            await upstream.send(
+                json.dumps(
+                    speak_response_event(
+                        complete_spoken_response,
+                        voice,
+                    )
+                )
+            )
+            return
+
         if early_speech_sent:
             complete_spoken_response = (
                 SpeechRenderPolicy.spoken_text(
@@ -1692,6 +3515,77 @@ class RealtimeVoiceProxy:
                     early_speech_text,
                 )
             )
+
+            if (
+                self._use_direct_elevenlabs(metadata)
+                and voice_mode != VOICE_MODE_HOME_ASSISTANT
+            ):
+                state["brain_turn_complete"] = True
+                state["early_speech_active"] = False
+
+                early_ok = True
+
+                if early_speech_task is not None:
+                    try:
+                        early_ok = await early_speech_task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        _LOGGER.exception(
+                            "Voice PE early ElevenLabs task failed"
+                        )
+                        early_ok = False
+
+                if not early_ok:
+                    # Preserve the existing OpenAI realtime fallback if
+                    # original Jarvis TTS fails.
+                    state["suppress_audio"] = False
+
+                    await upstream.send(
+                        json.dumps(
+                            speak_response_event(
+                                complete_spoken_response,
+                                voice,
+                            )
+                        )
+                    )
+                    return
+
+                if remainder:
+                    _LOGGER.info(
+                        "VOICE PE REMAINDER TTS START: characters=%d",
+                        len(remainder),
+                    )
+
+                    remainder_ok = (
+                        await self._stream_elevenlabs_response(
+                            client,
+                            remainder,
+                            state,
+                            finalize_turn=False,
+                        )
+                    )
+
+                    if not remainder_ok:
+                        state["suppress_audio"] = False
+
+                        await upstream.send(
+                            json.dumps(
+                                speak_response_event(
+                                    remainder,
+                                    voice,
+                                )
+                            )
+                        )
+                        return
+
+                await self._finish_direct_elevenlabs_turn(
+                    client,
+                    state,
+                    complete_spoken_response,
+                )
+
+                return
 
             state[
                 "queued_speech_remainder"

@@ -62,10 +62,19 @@ Response style:
 - Do not produce a list of alternative methods unless the user asks for alternatives.
 - Speak as Jarvis. For questions about using Jarvis, explain the simplest phrase the
   user can say rather than giving a generic Home Assistant tutorial.
-- Never suggest Alexa, Google Assistant, Siri, Developer Tools, service calls,
-  entity IDs, dashboards, apps or physical switches unless specifically requested.
-- In voice mode, keep ordinary replies to one brief sentence wherever possible.
-- For requested stories, writing or detailed explanations, begin with one short, self-contained sentence that can be spoken immediately, then provide the complete answer in chat.
+- In voice mode, every part of the response is spoken. Keep ordinary replies to one
+  brief sentence wherever possible.
+- In voice mode, make the first sentence short and self-contained so speech can begin
+  quickly; normally aim for roughly 15 words or fewer.
+- In voice mode, when giving several facts or steps, use separate short sentences
+  ending with full stops. Do not chain several facts together with semicolons,
+  colon-led lists, bullet points or numbered lists unless the user explicitly asks
+  for that format.
+- If the user asks for a specific number of short facts, give exactly that many
+  short standalone sentences.
+- In voice mode, do not write a brief spoken introduction followed by a long
+  supposedly chat-only answer. The same response is spoken. Expand substantially
+  only when the user explicitly asks for detail.
 - Finish requested writing cleanly. Do not stop halfway through a sentence or paragraph.
 
 Conversation, understanding and identity:
@@ -1056,6 +1065,7 @@ class AIEngine:
         ).strip().lower()
         if self.reasoning_effort not in {
             "none",
+            "minimal",
             "low",
             "medium",
             "high",
@@ -3251,10 +3261,37 @@ class AIEngine:
             # fully inspected before any text is shown because the first model
             # round may contain function calls rather than a user-facing reply.
             if on_text_delta is not None and not tool_definitions:
+                openai_request_started_at = time.monotonic()
+
+                logger.info(
+                    "JARVIS PERF | OPENAI REQUEST START | "
+                    "input_items=%s tools=%s reasoning=%s verbosity=%s",
+                    len(input_items),
+                    len(tool_definitions),
+                    response_kwargs.get("reasoning"),
+                    response_kwargs.get("text"),
+                )
+
                 stream = await self.client.responses.create(
                     **response_kwargs,
                     stream=True,
                 )
+
+                stream_opened_at = time.monotonic()
+
+                logger.info(
+                    "JARVIS PERF | OPENAI STREAM OPEN | "
+                    "request_to_stream_ms=%s",
+                    round(
+                        (
+                            stream_opened_at
+                            - openai_request_started_at
+                        )
+                        * 1000
+                    ),
+                )
+
+                first_delta_at: float | None = None
                 completed_response: Any | None = None
                 emitted_parts: list[str] = []
                 stream_error: Exception | None = None
@@ -3291,6 +3328,29 @@ class AIEngine:
                         if event_type == "response.output_text.delta":
                             delta = str(getattr(event, "delta", "") or "")
                             if delta:
+                                if first_delta_at is None:
+                                    first_delta_at = time.monotonic()
+
+                                    logger.info(
+                                        "JARVIS PERF | OPENAI FIRST DELTA | "
+                                        "request_to_first_delta_ms=%s "
+                                        "stream_to_first_delta_ms=%s",
+                                        round(
+                                            (
+                                                first_delta_at
+                                                - openai_request_started_at
+                                            )
+                                            * 1000
+                                        ),
+                                        round(
+                                            (
+                                                first_delta_at
+                                                - stream_opened_at
+                                            )
+                                            * 1000
+                                        ),
+                                    )
+
                                 emitted_parts.append(delta)
                                 await on_text_delta(delta)
                         elif event_type == "response.completed":

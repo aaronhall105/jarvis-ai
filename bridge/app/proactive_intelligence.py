@@ -416,6 +416,7 @@ class ProactiveEngine:
         self.presence = {"aaron": "unknown", "amber": "unknown"}
         self.task: asyncio.Task | None = None
         self.initialised = False
+        self.state_provider: Any = None
 
     @classmethod
     def from_env(cls) -> "ProactiveEngine":
@@ -872,7 +873,22 @@ class ProactiveEngine:
                 "Home Assistant returned invalid JSON"
             ) from exc
 
+    def set_state_provider(self, provider: Any) -> None:
+        """Use Jarvis's shared live Home Assistant state cache."""
+        self.state_provider = provider
+
     async def fetch_states(self) -> list[dict[str, Any]]:
+        if self.state_provider is not None:
+            states = self.state_provider()
+            if isinstance(states, (list, tuple)):
+                return [
+                    item
+                    for item in states
+                    if isinstance(item, dict)
+                ]
+
+        # Compatibility fallback for standalone use when the shared
+        # House Awareness cache hasn't been wired.
         return await asyncio.to_thread(
             self.request_json,
             f"{self.ha_url}/api/states",
@@ -907,7 +923,10 @@ class ProactiveEngine:
             self.first_seen = {key: now for key in current}
             logger.info("Proactive baseline loaded: %s states", len(current))
             return
-        for entity_id, item in current.items():
+        for index, (entity_id, item) in enumerate(
+            current.items(),
+            start=1,
+        ):
             previous = self.states.get(entity_id)
             state = str(item.get("state") or "")
             old = str((previous or {}).get("state") or "")
@@ -918,6 +937,13 @@ class ProactiveEngine:
                 item,
                 self.first_seen.get(entity_id, now),
             )
+
+            # Most rule evaluations complete synchronously because no
+            # candidate is produced. Yield between small batches so a
+            # large Home Assistant registry cannot monopolise Uvicorn's
+            # asyncio event loop.
+            if index % 32 == 0:
+                await asyncio.sleep(0)
         self.states = current
 
     def update(self, event_id: str, **fields: Any) -> None:

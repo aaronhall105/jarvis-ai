@@ -1,4 +1,8 @@
 import asyncio
+import os
+import sys
+import threading
+import traceback
 import json
 import logging
 import secrets
@@ -142,8 +146,113 @@ def _conversation_scope(
     return external_id, f"usr:{user_key}:{external_id}"
 
 
+# EVENT LOOP STALL DIAGNOSTICS
+_EVENT_LOOP_HEARTBEAT_AT = 0.0
+_EVENT_LOOP_THREAD_ID: int | None = None
+_EVENT_LOOP_MONITOR_STARTED = False
+
+
+def _event_loop_stack_monitor() -> None:
+    """Capture the event-loop stack once per >=300 ms stall."""
+    in_stall = False
+
+    while True:
+        time.sleep(0.050)
+
+        heartbeat = _EVENT_LOOP_HEARTBEAT_AT
+        thread_id = _EVENT_LOOP_THREAD_ID
+
+        if heartbeat <= 0.0 or thread_id is None:
+            continue
+
+        stale_ms = (
+            time.monotonic() - heartbeat
+        ) * 1000.0
+
+        if stale_ms < 300.0:
+            in_stall = False
+            continue
+
+        if in_stall:
+            continue
+
+        in_stall = True
+
+        frame = sys._current_frames().get(thread_id)
+
+        if frame is None:
+            continue
+
+        stack = "".join(
+            traceback.format_stack(frame)
+        )
+
+        timestamp = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        message = (
+            "\n========== EVENT LOOP STALL STACK =========="
+            f"\ntime={timestamp}"
+            f"\nstale_ms={stale_ms:.1f}"
+            f"\nthread_id={thread_id}"
+            "\n"
+            + stack
+            + "========== EVENT LOOP STALL STACK END ==========\n"
+        )
+
+        try:
+            os.write(
+                2,
+                message.encode(
+                    "utf-8",
+                    errors="replace",
+                ),
+            )
+        except Exception:
+            pass
+
+
+def _start_event_loop_stack_monitor() -> None:
+    global _EVENT_LOOP_MONITOR_STARTED
+
+    if _EVENT_LOOP_MONITOR_STARTED:
+        return
+
+    _EVENT_LOOP_MONITOR_STARTED = True
+
+    threading.Thread(
+        target=_event_loop_stack_monitor,
+        name="jarvis-event-loop-stack-monitor",
+        daemon=True,
+    ).start()
+
+
+async def _event_loop_watchdog() -> None:
+    global _EVENT_LOOP_HEARTBEAT_AT
+    global _EVENT_LOOP_THREAD_ID
+
+    _EVENT_LOOP_THREAD_ID = threading.get_ident()
+    _EVENT_LOOP_HEARTBEAT_AT = time.monotonic()
+
+    logger.info(
+        "Event-loop stall monitor armed threshold_ms=300"
+    )
+
+    while True:
+        await asyncio.sleep(0.050)
+        _EVENT_LOOP_HEARTBEAT_AT = time.monotonic()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _start_event_loop_stack_monitor()
+
+    asyncio.create_task(
+        _event_loop_watchdog(),
+        name="jarvis_event_loop_watchdog",
+    )
+
     logger.info("%s starting", settings.jarvis_name)
 
     status = await connection_test_with_timeout(home_assistant)
@@ -166,6 +275,18 @@ async def lifespan(_: FastAPI):
 
         try:
             await awareness.start()
+
+            proactive_engine.set_state_provider(
+                awareness.state_snapshot
+            )
+            vision_engine.set_state_provider(
+                awareness.state_snapshot
+            )
+
+            logger.info(
+                "Shared Home Assistant state cache wired to "
+                "Proactive and Vision Intelligence"
+            )
         except Exception:
             logger.exception("House Awareness failed to start")
     else:
@@ -1298,7 +1419,10 @@ async def dashboard() -> str:
     """
 
 # Jarvis v19 alpha8 proactive router
-from app.proactive_intelligence import router as proactive_router
+from app.proactive_intelligence import (
+    engine as proactive_engine,
+    router as proactive_router,
+)
 app.include_router(proactive_router)
 
 # Jarvis v19 alpha9 Core-first vision intelligence

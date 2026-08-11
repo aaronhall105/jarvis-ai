@@ -276,6 +276,20 @@ class HouseAwarenessEngine:
             self._timezone = timezone.utc
             self._timezone_name = "UTC"
 
+    def state_snapshot(self) -> list[dict[str, Any]]:
+        """Return a stable list of references to live HA state objects.
+
+        Cache entries are replaced on state_changed events rather than
+        mutated in place, so copying every ~1,000 state dictionary on
+        each consumer poll is unnecessary. Copy only the container;
+        retain the immutable-by-convention state object references.
+        """
+        return [
+            item
+            for item in self._state_cache.values()
+            if isinstance(item, dict)
+        ]
+
     async def _seed_state_cache(self) -> None:
         states = await self.client.get_states()
         self._state_cache = {
@@ -329,7 +343,17 @@ class HouseAwarenessEngine:
         if event_record is None:
             return
 
-        event_id = await asyncio.to_thread(self._insert_event_sync, event_record)
+        event_id = await asyncio.to_thread(
+            self._insert_event_sync,
+            event_record,
+        )
+
+        # Integration-derived entities can emit the same physical
+        # transition more than once. The database layer suppresses
+        # those duplicates; do not log or deliver them again.
+        if event_id is None:
+            return
+
         self._last_event_at = event_record.occurred_at
         await self._maybe_deliver_proactive(event_id, event_record)
         logger.info(
@@ -673,7 +697,10 @@ class HouseAwarenessEngine:
             payload=payload,
         )
 
-    def _insert_event_sync(self, event: AwarenessEvent) -> int:
+    def _insert_event_sync(
+        self,
+        event: AwarenessEvent,
+    ) -> int | None:
         # Suppress duplicate integration updates for the same physical change.
         cutoff = self._iso(self._utc_now() - timedelta(seconds=4))
         with self._connect() as connection:
@@ -687,7 +714,7 @@ class HouseAwarenessEngine:
                 (event.entity_id, event.event_type, event.new_state, cutoff),
             ).fetchone()
             if duplicate is not None:
-                return int(duplicate["event_id"])
+                return None
             cursor = connection.execute(
                 """
                 INSERT INTO house_events (

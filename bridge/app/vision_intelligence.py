@@ -210,6 +210,7 @@ class VisionEngine:
         } or set(DEFAULT_LABELS)
         self.task: asyncio.Task[None] | None = None
         self.initialised = False
+        self.state_provider: Any = None
         self.last_frigate_event_time = 0.0
         self.presence_cache: tuple[float, dict[str, str]] = (
             0.0,
@@ -1300,6 +1301,10 @@ class VisionEngine:
             ],
         }
 
+    def set_state_provider(self, provider: Any) -> None:
+        """Use Jarvis's shared live Home Assistant state cache."""
+        self.state_provider = provider
+
     async def poll_loop(self) -> None:
         cleanup_at = 0.0
         while True:
@@ -1354,8 +1359,13 @@ class VisionEngine:
         self.last_frigate_event_time = newest
 
     async def poll_camera_health(self) -> None:
-        states = await self._ha_json("/api/states")
-        if not isinstance(states, list):
+        if self.state_provider is not None:
+            states = self.state_provider()
+        else:
+            # Compatibility fallback for standalone Vision use.
+            states = await self._ha_json("/api/states")
+
+        if not isinstance(states, (list, tuple)):
             return
         indexed = {
             clean(item.get("entity_id"), 180): item

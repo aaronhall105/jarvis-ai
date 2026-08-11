@@ -63,3 +63,7 @@ backup/
 # Logs
 *.log
 logs/
+# Local speaker-verification data
+speaker-data/
+speaker-verifier/__pycache__/
+speaker-verifier/*.before-*
