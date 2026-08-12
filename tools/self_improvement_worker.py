@@ -862,18 +862,44 @@ def update_failure(failure_id: int, **fields: Any) -> None:
 
 
 def attempts_today() -> int:
-    today = datetime.now(timezone.utc).date().isoformat()
+    """
+    Count actual candidate-generation starts for the
+    current UTC day.
+
+    Candidate rows may be queued on one day and generated
+    on another, so candidate.created_at is not a reliable
+    generation-attempt ledger. The audit event is written
+    immediately when generation starts and therefore
+    provides the conservative daily-cap boundary.
+    """
+    today = (
+        datetime.now(
+            timezone.utc
+        )
+        .date()
+        .isoformat()
+    )
+
     with connect() as connection:
         row = connection.execute(
             """
-            SELECT COUNT(*) AS count FROM improvement_candidates
-            WHERE substr(created_at, 1, 10) = ?
-              AND status NOT IN ('queued')
+            SELECT COUNT(*) AS count
+            FROM improvement_audit
+            WHERE event_type = 'candidate_generation_started'
+              AND substr(created_at, 1, 10) = ?
             """,
-            (today,),
+            (
+                today,
+            ),
         ).fetchone()
-    return int(row["count"] if row else 0)
 
+    return (
+        int(
+            row["count"]
+        )
+        if row
+        else 0
+    )
 
 def infer_context_files(failure: dict[str, Any], policy: dict[str, Any]) -> list[str]:
     category = str(failure.get("category") or "general")

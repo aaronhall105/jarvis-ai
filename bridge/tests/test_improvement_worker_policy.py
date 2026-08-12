@@ -83,6 +83,257 @@ def test_dangerous_added_code_is_rejected() -> None:
     with pytest.raises(worker.WorkerError):
         worker.validate_patch_policy(patch, policy(), config())
 
+def _initialise_attempt_cap_db(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    data_dir = (
+        tmp_path
+        / "data"
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DATA_DIR",
+        data_dir,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DB_PATH",
+        (
+            data_dir
+            / "improvement.db"
+        ),
+    )
+
+    with worker.connect() as connection:
+        connection.execute(
+            """
+            CREATE TABLE improvement_candidates (
+                candidate_id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            CREATE TABLE improvement_audit (
+                audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                actor TEXT,
+                failure_id INTEGER,
+                candidate_id INTEGER,
+                details_json TEXT
+            )
+            """
+        )
+
+
+def test_attempts_today_counts_previous_day_queue_generated_today(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _initialise_attempt_cap_db(
+        monkeypatch,
+        tmp_path,
+    )
+
+    now = worker.datetime.now(
+        worker.timezone.utc
+    )
+
+    today = (
+        now.date().isoformat()
+    )
+
+    yesterday = (
+        (
+            now
+            - worker.timedelta(
+                days=1
+            )
+        )
+        .date()
+        .isoformat()
+    )
+
+    with worker.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO improvement_candidates (
+                candidate_id,
+                created_at,
+                status
+            ) VALUES (?, ?, ?)
+            """,
+            (
+                11,
+                yesterday
+                + "T23:50:00+00:00",
+                "generating",
+            ),
+        )
+
+        connection.execute(
+            """
+            INSERT INTO improvement_audit (
+                created_at,
+                event_type,
+                actor,
+                failure_id,
+                candidate_id,
+                details_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                today
+                + "T00:05:00+00:00",
+                "candidate_generation_started",
+                "worker",
+                99,
+                11,
+                "{}",
+            ),
+        )
+
+    assert (
+        worker.attempts_today()
+        == 1
+    )
+
+
+def test_attempts_today_does_not_count_candidate_state_without_start_audit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _initialise_attempt_cap_db(
+        monkeypatch,
+        tmp_path,
+    )
+
+    today = (
+        worker.datetime.now(
+            worker.timezone.utc
+        )
+        .date()
+        .isoformat()
+    )
+
+    with worker.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO improvement_candidates (
+                candidate_id,
+                created_at,
+                status
+            ) VALUES (?, ?, ?)
+            """,
+            (
+                12,
+                today
+                + "T00:10:00+00:00",
+                "generating",
+            ),
+        )
+
+    assert (
+        worker.attempts_today()
+        == 0
+    )
+
+
+def test_attempts_today_counts_only_today_generation_start_events(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _initialise_attempt_cap_db(
+        monkeypatch,
+        tmp_path,
+    )
+
+    now = worker.datetime.now(
+        worker.timezone.utc
+    )
+
+    today = (
+        now.date().isoformat()
+    )
+
+    yesterday = (
+        (
+            now
+            - worker.timedelta(
+                days=1
+            )
+        )
+        .date()
+        .isoformat()
+    )
+
+    rows = [
+        (
+            today
+            + "T00:01:00+00:00",
+            "candidate_generation_started",
+            11,
+        ),
+        (
+            today
+            + "T12:00:00+00:00",
+            "candidate_generation_started",
+            12,
+        ),
+        (
+            today
+            + "T12:01:00+00:00",
+            "candidate_failed",
+            12,
+        ),
+        (
+            yesterday
+            + "T23:59:59+00:00",
+            "candidate_generation_started",
+            10,
+        ),
+    ]
+
+    with worker.connect() as connection:
+        for (
+            created_at,
+            event_type,
+            candidate_id,
+        ) in rows:
+            connection.execute(
+                """
+                INSERT INTO improvement_audit (
+                    created_at,
+                    event_type,
+                    actor,
+                    failure_id,
+                    candidate_id,
+                    details_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    created_at,
+                    event_type,
+                    "worker",
+                    99,
+                    candidate_id,
+                    "{}",
+                ),
+            )
+
+    assert (
+        worker.attempts_today()
+        == 2
+    )
+
+
 def test_proposal_only_blocks_direct_deploy() -> None:
     candidate = {
         "candidate_id": 1,
