@@ -1269,6 +1269,7 @@ def _load_pytest_junit(
     path: Path,
 ) -> tuple[
     Counter[str],
+    Counter[str],
     int,
 ]:
     if not path.is_file():
@@ -1289,12 +1290,29 @@ def _load_pytest_junit(
         ) from exc
 
     failures: Counter[str] = Counter()
+    tests: Counter[str] = Counter()
     total = 0
 
     for testcase in root.findall(
         ".//testcase"
     ):
         total += 1
+
+        identity = (
+            _pytest_failure_identity(
+                testcase
+            )
+        )
+
+        if not identity:
+            raise WorkerError(
+                "Pytest JUnit report contains "
+                "a testcase with no stable identity."
+            )
+
+        tests[
+            identity
+        ] += 1
 
         if (
             testcase.find(
@@ -1309,16 +1327,186 @@ def _load_pytest_junit(
             continue
 
         failures[
-            _pytest_failure_identity(
-                testcase
-            )
+            identity
         ] += 1
 
     return (
         failures,
+        tests,
         total,
     )
 
+
+def _prepare_pytest_build_context(
+    workspace: Path,
+    destination: Path,
+) -> None:
+    """
+    Build a deliberately narrow Docker build context.
+
+    Docker must never receive the whole Jarvis repository or
+    candidate worktree merely to run pytest.
+    """
+
+    workspace_root = workspace.resolve()
+
+    if not workspace_root.is_dir():
+        raise WorkerError(
+            f"Invalid pytest workspace: {workspace}"
+        )
+
+    destination.mkdir(
+        parents=True,
+        exist_ok=False,
+    )
+
+    allowed_sources = (
+        "bridge",
+        "config",
+        "tools",
+        "requirements-improver.txt",
+    )
+
+    forbidden_components = {
+        ".git",
+        ".ssh",
+        ".gnupg",
+    }
+
+    def validate_source(
+        source: Path,
+    ) -> None:
+        try:
+            resolved = source.resolve(
+                strict=True
+            )
+        except OSError as exc:
+            raise WorkerError(
+                f"Unable to resolve pytest context source: "
+                f"{source}: {exc}"
+            ) from exc
+
+        if not resolved.is_relative_to(
+            workspace_root
+        ):
+            raise WorkerError(
+                "Pytest context source escapes workspace: "
+                f"{source}"
+            )
+
+        if source.is_symlink():
+            raise WorkerError(
+                "Pytest context source may not be a symlink: "
+                f"{source}"
+            )
+
+        items = (
+            source.rglob("*")
+            if source.is_dir()
+            else ()
+        )
+
+        for item in items:
+            relative = item.relative_to(
+                workspace
+            )
+
+            if item.is_symlink():
+                raise WorkerError(
+                    "Pytest build context contains a symlink: "
+                    f"{relative}"
+                )
+
+            if any(
+                (
+                    part in forbidden_components
+                    or part == ".env"
+                    or part.startswith(
+                        ".env."
+                    )
+                )
+                for part in relative.parts
+            ):
+                raise WorkerError(
+                    "Pytest build context contains a "
+                    f"forbidden path: {relative}"
+                )
+
+    for name in allowed_sources:
+        source = (
+            workspace
+            / name
+        )
+
+        if not source.exists():
+            raise WorkerError(
+                "Required pytest build-context source "
+                f"is missing: {name}"
+            )
+
+        validate_source(
+            source
+        )
+
+        target = (
+            destination
+            / name
+        )
+
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                target,
+                symlinks=False,
+                ignore=shutil.ignore_patterns(
+                    "__pycache__",
+                    "*.pyc",
+                    ".pytest_cache",
+                    ".ruff_cache",
+                ),
+            )
+        else:
+            target.parent.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            shutil.copy2(
+                source,
+                target,
+            )
+
+    forbidden_top_level = (
+        ".env",
+        ".git",
+        "data",
+        "logs",
+        "backup",
+        ".jarvis-improver",
+        ".venv",
+        ".venv-improver",
+        "speaker-data",
+    )
+
+    leaked = [
+        name
+        for name in forbidden_top_level
+        if (
+            destination
+            / name
+        ).exists()
+    ]
+
+    if leaked:
+        raise WorkerError(
+            "Forbidden paths leaked into pytest "
+            "Docker context: "
+            + ", ".join(
+                sorted(
+                    leaked
+                )
+            )
+        )
 
 def _pytest_runtime_dockerfile() -> str:
     return """FROM python:3.12-slim
@@ -1390,20 +1578,14 @@ def _docker_pytest_scan(
         exist_ok=True,
     )
 
-    # This directory exists only for the duration of the
-    # locked-down container and is deleted in finally.
+    # Temporary result mount only.
     results_dir.chmod(
         0o777
     )
 
-    dockerfile = (
+    build_context = (
         temp_root
-        / "Dockerfile.pytest"
-    )
-
-    dockerfile.write_text(
-        _pytest_runtime_dockerfile(),
-        encoding="utf-8",
+        / "context"
     )
 
     image = (
@@ -1419,19 +1601,45 @@ def _docker_pytest_scan(
     )
 
     try:
+        try:
+            _prepare_pytest_build_context(
+                workspace,
+                build_context,
+            )
+        except WorkerError as exc:
+            return {
+                "ok": False,
+                "stage": "context",
+                "returncode": 1,
+                "total_tests": None,
+                "failures": Counter(),
+                "tests": Counter(),
+                "output": str(
+                    exc
+                ),
+            }
+
+        dockerfile = (
+            build_context
+            / "Dockerfile.pytest"
+        )
+
+        dockerfile.write_text(
+            _pytest_runtime_dockerfile(),
+            encoding="utf-8",
+        )
+
         build = run(
             [
                 "docker",
                 "build",
                 "-f",
-                str(
-                    dockerfile
-                ),
+                "Dockerfile.pytest",
                 "-t",
                 image,
                 ".",
             ],
-            cwd=workspace,
+            cwd=build_context,
             timeout=timeout,
             check=False,
         )
@@ -1445,6 +1653,7 @@ def _docker_pytest_scan(
                 ),
                 "total_tests": None,
                 "failures": Counter(),
+                "tests": Counter(),
                 "output": build.stdout[
                     -12000:
                 ],
@@ -1510,7 +1719,7 @@ def _docker_pytest_scan(
                     "/results/report.xml"
                 ),
             ],
-            cwd=workspace,
+            cwd=build_context,
             timeout=timeout,
             check=False,
         )
@@ -1530,6 +1739,7 @@ def _docker_pytest_scan(
                 ),
                 "total_tests": None,
                 "failures": Counter(),
+                "tests": Counter(),
                 "output": completed.stdout[
                     -12000:
                 ],
@@ -1544,6 +1754,7 @@ def _docker_pytest_scan(
                 ),
                 "total_tests": None,
                 "failures": Counter(),
+                "tests": Counter(),
                 "output": (
                     "Pytest finished but "
                     "did not create its "
@@ -1555,10 +1766,12 @@ def _docker_pytest_scan(
             }
 
         try:
-            failures, total = (
-                _load_pytest_junit(
-                    report
-                )
+            (
+                failures,
+                tests,
+                total,
+            ) = _load_pytest_junit(
+                report
             )
         except WorkerError as exc:
             return {
@@ -1569,6 +1782,7 @@ def _docker_pytest_scan(
                 ),
                 "total_tests": None,
                 "failures": Counter(),
+                "tests": Counter(),
                 "output": str(
                     exc
                 ),
@@ -1582,6 +1796,7 @@ def _docker_pytest_scan(
             ),
             "total_tests": total,
             "failures": failures,
+            "tests": tests,
             "output": completed.stdout[
                 -12000:
             ],
@@ -1606,7 +1821,6 @@ def _docker_pytest_scan(
             ignore_errors=True,
         )
 
-
 def pytest_baseline_result(
     workspace: Path,
     timeout: int,
@@ -1629,6 +1843,7 @@ def pytest_baseline_result(
                     "returncode"
                 )
             ),
+            "runtime": "python:3.12-slim",
             "baseline_total_tests": None,
             "candidate_total_tests": None,
             "baseline_failures": None,
@@ -1636,6 +1851,9 @@ def pytest_baseline_result(
             "new_failures_count": None,
             "new_failures": [],
             "resolved_failures_count": None,
+            "missing_tests_count": None,
+            "missing_tests": [],
+            "added_tests_count": None,
             "output": (
                 "Unable to establish "
                 "the production pytest "
@@ -1669,6 +1887,7 @@ def pytest_baseline_result(
                     "returncode"
                 )
             ),
+            "runtime": "python:3.12-slim",
             "baseline_total_tests": (
                 baseline.get(
                     "total_tests"
@@ -1684,6 +1903,9 @@ def pytest_baseline_result(
             "new_failures_count": None,
             "new_failures": [],
             "resolved_failures_count": None,
+            "missing_tests_count": None,
+            "missing_tests": [],
+            "added_tests_count": None,
             "output": (
                 "Unable to execute "
                 "candidate pytest "
@@ -1711,6 +1933,18 @@ def pytest_baseline_result(
         "failures"
     ]
 
+    baseline_tests: Counter[
+        str
+    ] = baseline[
+        "tests"
+    ]
+
+    candidate_tests: Counter[
+        str
+    ] = candidate[
+        "tests"
+    ]
+
     new_counts = (
         candidate_failures
         - baseline_failures
@@ -1719,6 +1953,16 @@ def pytest_baseline_result(
     resolved_counts = (
         baseline_failures
         - candidate_failures
+    )
+
+    missing_test_counts = (
+        baseline_tests
+        - candidate_tests
+    )
+
+    added_test_counts = (
+        candidate_tests
+        - baseline_tests
     )
 
     new_failures = [
@@ -1731,6 +1975,16 @@ def pytest_baseline_result(
         )
     ]
 
+    missing_tests = [
+        {
+            "test": identity,
+            "count": count,
+        }
+        for identity, count in sorted(
+            missing_test_counts.items()
+        )
+    ]
+
     new_count = sum(
         new_counts.values()
     )
@@ -1739,8 +1993,17 @@ def pytest_baseline_result(
         resolved_counts.values()
     )
 
+    missing_count = sum(
+        missing_test_counts.values()
+    )
+
+    added_count = sum(
+        added_test_counts.values()
+    )
+
     passed = (
         new_count == 0
+        and missing_count == 0
     )
 
     return {
@@ -1778,6 +2041,15 @@ def pytest_baseline_result(
         "resolved_failures_count": (
             resolved_count
         ),
+        "missing_tests_count": (
+            missing_count
+        ),
+        "missing_tests": (
+            missing_tests
+        ),
+        "added_tests_count": (
+            added_count
+        ),
         "output": (
             "Pytest baseline comparison: "
             f"baseline_total="
@@ -1788,11 +2060,12 @@ def pytest_baseline_result(
             f"{sum(baseline_failures.values())}, "
             f"candidate_failures="
             f"{sum(candidate_failures.values())}, "
-            f"new={new_count}, "
-            f"resolved={resolved_count}."
+            f"new_failures={new_count}, "
+            f"resolved_failures={resolved_count}, "
+            f"missing_tests={missing_count}, "
+            f"added_tests={added_count}."
         ),
     }
-
 
 def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     results: list[dict[str, Any]] = []

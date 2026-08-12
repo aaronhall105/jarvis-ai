@@ -368,9 +368,15 @@ def _pytest_scan(
     failures: dict[str, int],
     *,
     total: int,
+    tests: dict[str, int] | None = None,
     ok: bool = True,
     returncode: int = 1,
 ) -> dict[str, object]:
+    if tests is None:
+        tests = dict(
+            failures
+        )
+
     return {
         "ok": ok,
         "stage": "complete",
@@ -378,6 +384,9 @@ def _pytest_scan(
         "total_tests": total,
         "failures": worker.Counter(
             failures
+        ),
+        "tests": worker.Counter(
+            tests
         ),
         "output": "",
     }
@@ -956,3 +965,352 @@ def test_generation_and_review_have_completion_guards() -> None:
         "_require_completed_response("
         in review_source
     )
+
+def _make_minimal_pytest_workspace(
+    root: Path,
+) -> Path:
+    workspace = (
+        root
+        / "repo"
+    )
+
+    (
+        workspace
+        / "bridge"
+        / "app"
+    ).mkdir(
+        parents=True
+    )
+
+    (
+        workspace
+        / "bridge"
+        / "tests"
+    ).mkdir(
+        parents=True
+    )
+
+    (
+        workspace
+        / "config"
+    ).mkdir(
+        parents=True
+    )
+
+    (
+        workspace
+        / "tools"
+    ).mkdir(
+        parents=True
+    )
+
+    (
+        workspace
+        / "bridge"
+        / "requirements.txt"
+    ).write_text(
+        "pytest\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "bridge"
+        / "app"
+        / "example.py"
+    ).write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "bridge"
+        / "tests"
+        / "test_example.py"
+    ).write_text(
+        "def test_example():\n"
+        "    assert True\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "config"
+        / "policy.json"
+    ).write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "tools"
+        / "helper.py"
+    ).write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "requirements-improver.txt"
+    ).write_text(
+        "pytest\n",
+        encoding="utf-8",
+    )
+
+    return workspace
+
+
+def test_pytest_build_context_excludes_private_repository_paths(
+    tmp_path: Path,
+) -> None:
+    workspace = (
+        _make_minimal_pytest_workspace(
+            tmp_path
+        )
+    )
+
+    (
+        workspace
+        / ".env"
+    ).write_text(
+        "SECRET=do-not-copy\n",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "data"
+    ).mkdir()
+
+    (
+        workspace
+        / "data"
+        / "secret.db"
+    ).write_text(
+        "private",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / ".git"
+    ).mkdir()
+
+    (
+        workspace
+        / ".git"
+        / "config"
+    ).write_text(
+        "private",
+        encoding="utf-8",
+    )
+
+    (
+        workspace
+        / "backup"
+    ).mkdir()
+
+    (
+        workspace
+        / "backup"
+        / "secret.txt"
+    ).write_text(
+        "private",
+        encoding="utf-8",
+    )
+
+    destination = (
+        tmp_path
+        / "safe-context"
+    )
+
+    worker._prepare_pytest_build_context(
+        workspace,
+        destination,
+    )
+
+    assert (
+        destination
+        / "bridge"
+        / "app"
+        / "example.py"
+    ).is_file()
+
+    assert (
+        destination
+        / "config"
+        / "policy.json"
+    ).is_file()
+
+    assert (
+        destination
+        / "tools"
+        / "helper.py"
+    ).is_file()
+
+    assert (
+        destination
+        / "requirements-improver.txt"
+    ).is_file()
+
+    for forbidden in (
+        ".env",
+        "data",
+        ".git",
+        "backup",
+        ".jarvis-improver",
+        ".venv",
+        ".venv-improver",
+    ):
+        assert not (
+            destination
+            / forbidden
+        ).exists()
+
+
+def test_pytest_build_context_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace = (
+        _make_minimal_pytest_workspace(
+            tmp_path
+        )
+    )
+
+    outside = (
+        tmp_path
+        / "outside.py"
+    )
+
+    outside.write_text(
+        "SECRET = 1\n",
+        encoding="utf-8",
+    )
+
+    link = (
+        workspace
+        / "bridge"
+        / "app"
+        / "escape.py"
+    )
+
+    link.symlink_to(
+        outside
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="symlink",
+    ):
+        worker._prepare_pytest_build_context(
+            workspace,
+            tmp_path
+            / "unsafe-context",
+        )
+
+
+def test_pytest_baseline_blocks_missing_existing_test(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_scan(
+        workspace: Path,
+        *,
+        label: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        del workspace
+        del timeout
+
+        if label == "baseline":
+            return _pytest_scan(
+                {},
+                total=2,
+                tests={
+                    "suite::test_one": 1,
+                    "suite::test_two": 1,
+                },
+                returncode=0,
+            )
+
+        return _pytest_scan(
+            {},
+            total=1,
+            tests={
+                "suite::test_two": 1,
+            },
+            returncode=0,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "_docker_pytest_scan",
+        fake_scan,
+    )
+
+    result = worker.pytest_baseline_result(
+        tmp_path,
+        60,
+    )
+
+    assert result["passed"] is False
+    assert result["new_failures_count"] == 0
+    assert result["missing_tests_count"] == 1
+    assert result["missing_tests"] == [
+        {
+            "test": "suite::test_one",
+            "count": 1,
+        }
+    ]
+
+
+def test_pytest_baseline_allows_added_test(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_scan(
+        workspace: Path,
+        *,
+        label: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        del workspace
+        del timeout
+
+        if label == "baseline":
+            return _pytest_scan(
+                {},
+                total=1,
+                tests={
+                    "suite::test_existing": 1,
+                },
+                returncode=0,
+            )
+
+        return _pytest_scan(
+            {},
+            total=2,
+            tests={
+                "suite::test_existing": 1,
+                "suite::test_new": 1,
+            },
+            returncode=0,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "_docker_pytest_scan",
+        fake_scan,
+    )
+
+    result = worker.pytest_baseline_result(
+        tmp_path,
+        60,
+    )
+
+    assert result["passed"] is True
+    assert result["missing_tests_count"] == 0
+    assert result["added_tests_count"] == 1
