@@ -190,6 +190,7 @@ def _install_isolated_runtime(
     *,
     real_docker: bool = False,
     docker_image: str | None = None,
+    docker_failure_probe: bool = False,
 ) -> dict[str, Any]:
     sandbox = (
         tmp_path
@@ -347,6 +348,32 @@ def _install_isolated_runtime(
             / "compose.yaml"
         )
 
+        boundary_command = (
+            "sleep 300"
+        )
+
+        health_command = (
+            "exit 0"
+        )
+
+        environment_block = ""
+
+        if docker_failure_probe:
+            boundary_command = (
+                'if [ "$JARVIS_DRY_RUN_STATE" = "base" ]; '
+                "then sleep 300; else exit 42; fi"
+            )
+
+            health_command = (
+                'test "$JARVIS_DRY_RUN_STATE" = "base"'
+            )
+
+            environment_block = (
+                "    environment:\n"
+                "      JARVIS_DRY_RUN_STATE: "
+                '"${JARVIS_DRY_RUN_STATE:-unknown}"\n'
+            )
+
         compose_file.write_text(
             (
                 "services:\n"
@@ -356,8 +383,9 @@ def _install_isolated_runtime(
                 "    entrypoint:\n"
                 "      - /bin/sh\n"
                 "      - -c\n"
-                "      - sleep 300\n"
-                "    read_only: true\n"
+                f"      - {json.dumps(boundary_command)}\n"
+                + environment_block
+                + "    read_only: true\n"
                 "    cap_drop:\n"
                 "      - ALL\n"
                 "    security_opt:\n"
@@ -367,7 +395,7 @@ def _install_isolated_runtime(
                 "        - CMD\n"
                 "        - /bin/sh\n"
                 "        - -c\n"
-                "        - exit 0\n"
+                f"        - {json.dumps(health_command)}\n"
                 "      interval: 1s\n"
                 "      timeout: 2s\n"
                 "      retries: 10\n"
@@ -576,6 +604,39 @@ def _install_isolated_runtime(
                 "COMPOSE_PROJECT_NAME"
             ] = docker_project
 
+            if (
+                docker_failure_probe
+                and command[
+                    :3
+                ]
+                == [
+                    "docker",
+                    "compose",
+                    "up",
+                ]
+            ):
+                source = (
+                    repo
+                    / "bridge"
+                    / "app"
+                    / "example.py"
+                ).read_text(
+                    encoding="utf-8"
+                ).strip()
+
+                if source == "VALUE = 1":
+                    state = "base"
+
+                elif source == "VALUE = 2":
+                    state = "candidate"
+
+                else:
+                    state = "unknown"
+
+                effective_env[
+                    "JARVIS_DRY_RUN_STATE"
+                ] = state
+
         if command[
             :3
         ] == [
@@ -737,6 +798,7 @@ def _install_isolated_runtime(
         "real_docker": real_docker,
         "docker_project": docker_project,
         "docker_image": docker_image,
+        "docker_failure_probe": docker_failure_probe,
     }
 
 
@@ -1709,6 +1771,443 @@ def test_v2115b_real_compose_deployment_boundary(
     # the same cleanup is attempted on any earlier failure.
     _cleanup_real_docker(
         environment
+    )
+
+    assert (
+        _docker_project_container_ids(
+            project
+        )
+        == []
+    )
+
+    assert (
+        _docker_project_network_ids(
+            project
+        )
+        == []
+    )
+
+@pytest.mark.skipif(
+    os.environ.get(
+        "JARVIS_V2115C_REAL_DOCKER"
+    )
+    != "1",
+    reason=(
+        "V2.1.15C real rollback test runs "
+        "only when explicitly enabled."
+    ),
+)
+def test_v2115c_real_compose_failure_auto_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    docker_image = str(
+        os.environ.get(
+            "JARVIS_V2115C_IMAGE"
+        )
+        or ""
+    ).strip()
+
+    assert docker_image
+
+    environment = _install_isolated_runtime(
+        monkeypatch,
+        tmp_path,
+        real_docker=True,
+        docker_image=docker_image,
+        docker_failure_probe=True,
+    )
+
+    request.addfinalizer(
+        lambda: _cleanup_real_docker(
+            environment
+        )
+    )
+
+    candidate = _prepare_and_request_deploy(
+        environment
+    )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    base_commit = str(
+        environment[
+            "base_commit"
+        ]
+    )
+
+    candidate_commit = str(
+        candidate[
+            "candidate_commit"
+        ]
+    )
+
+    assert candidate_commit != base_commit
+
+    observations: list[
+        dict[str, Any]
+    ] = []
+
+    def deployment_health(
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[bool, str]:
+        del args
+        del kwargs
+
+        project = str(
+            environment[
+                "docker_project"
+            ]
+        )
+
+        try:
+            container = _wait_for_real_boundary(
+                environment
+            )
+
+        except AssertionError as exc:
+            ids = _docker_project_container_ids(
+                project
+            )
+
+            assert len(ids) == 1
+
+            completed = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    ids[
+                        0
+                    ],
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+
+            container = json.loads(
+                completed.stdout
+            )[0]
+
+            env = (
+                container[
+                    "Config"
+                ].get(
+                    "Env"
+                )
+                or []
+            )
+
+            state = next(
+                (
+                    value.split(
+                        "=",
+                        1,
+                    )[
+                        1
+                    ]
+                    for value in env
+                    if value.startswith(
+                        "JARVIS_DRY_RUN_STATE="
+                    )
+                ),
+                "",
+            )
+
+            observations.append(
+                {
+                    "state": state,
+                    "status": container[
+                        "State"
+                    ][
+                        "Status"
+                    ],
+                    "exit_code": container[
+                        "State"
+                    ][
+                        "ExitCode"
+                    ],
+                    "head": _git(
+                        environment[
+                            "repo"
+                        ],
+                        "rev-parse",
+                        "HEAD",
+                    ),
+                }
+            )
+
+            return (
+                False,
+                str(
+                    exc
+                ),
+            )
+
+        env = (
+            container[
+                "Config"
+            ].get(
+                "Env"
+            )
+            or []
+        )
+
+        state = next(
+            (
+                value.split(
+                    "=",
+                    1,
+                )[
+                    1
+                ]
+                for value in env
+                if value.startswith(
+                    "JARVIS_DRY_RUN_STATE="
+                )
+            ),
+            "",
+        )
+
+        observations.append(
+            {
+                "state": state,
+                "status": container[
+                    "State"
+                ][
+                    "Status"
+                ],
+                "health": (
+                    container[
+                        "State"
+                    ].get(
+                        "Health"
+                    )
+                    or {}
+                ).get(
+                    "Status"
+                ),
+                "exit_code": container[
+                    "State"
+                ][
+                    "ExitCode"
+                ],
+                "head": _git(
+                    environment[
+                        "repo"
+                    ],
+                    "rev-parse",
+                    "HEAD",
+                ),
+            }
+        )
+
+        return (
+            True,
+            (
+                "Disposable rollback boundary "
+                "is healthy."
+            ),
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "health_check",
+        deployment_health,
+    )
+
+    config = environment[
+        "config"
+    ]
+
+    config.proposal_only = False
+
+    with pytest.raises(
+        worker.WorkerError,
+        match=(
+            "Deployment health "
+            "verification failed"
+        ),
+    ):
+        worker.deploy_candidate(
+            worker.fetch_candidate_by_id(
+                candidate_id
+            ),
+            config,
+            {},
+        )
+
+    final = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert final is not None
+    assert final["status"] == "rolled_back"
+    assert final["deploy_phase"] == "rolled_back"
+    assert final["deploy_lease_id"] is None
+    assert final["rolled_back_at"] is not None
+
+    repo_head = _git(
+        environment[
+            "repo"
+        ],
+        "rev-parse",
+        "HEAD",
+    )
+
+    assert repo_head == base_commit
+
+    assert (
+        environment[
+            "repo"
+        ]
+        / "bridge"
+        / "app"
+        / "example.py"
+    ).read_text(
+        encoding="utf-8"
+    ) == "VALUE = 1\n"
+
+    assert len(observations) == 2
+
+    candidate_observation = observations[
+        0
+    ]
+
+    rollback_observation = observations[
+        1
+    ]
+
+    assert (
+        candidate_observation[
+            "state"
+        ]
+        == "candidate"
+    )
+
+    assert (
+        candidate_observation[
+            "status"
+        ]
+        == "exited"
+    )
+
+    assert (
+        candidate_observation[
+            "exit_code"
+        ]
+        == 42
+    )
+
+    assert (
+        candidate_observation[
+            "head"
+        ]
+        == candidate_commit
+    )
+
+    assert (
+        rollback_observation[
+            "state"
+        ]
+        == "base"
+    )
+
+    assert (
+        rollback_observation[
+            "status"
+        ]
+        == "running"
+    )
+
+    assert (
+        rollback_observation[
+            "health"
+        ]
+        == "healthy"
+    )
+
+    assert (
+        rollback_observation[
+            "head"
+        ]
+        == base_commit
+    )
+
+    assert (
+        environment[
+            "docker_commands"
+        ]
+        == [
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+        ]
+    )
+
+    failure = asyncio.run(
+        environment[
+            "engine"
+        ].get_failure(
+            int(
+                environment[
+                    "failure_id"
+                ]
+            )
+        )
+    )
+
+    assert failure is not None
+    assert failure["status"] == "recorded"
+
+    container = _wait_for_real_boundary(
+        environment
+    )
+
+    _assert_real_docker_isolation(
+        environment,
+        container,
+    )
+
+    assert (
+        container[
+            "Config"
+        ][
+            "Image"
+        ]
+        == docker_image
+    )
+
+    _cleanup_real_docker(
+        environment
+    )
+
+    project = str(
+        environment[
+            "docker_project"
+        ]
     )
 
     assert (
