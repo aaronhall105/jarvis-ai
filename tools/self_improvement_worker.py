@@ -1678,65 +1678,332 @@ def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig
     return {"passed": passed, "checks": results}, security
 
 
-def docker_smoke_test(workspace: Path, candidate_id: int, timeout: int) -> dict[str, Any]:
+def docker_smoke_test(
+    workspace: Path,
+    candidate_id: int,
+    timeout: int,
+) -> dict[str, Any]:
     image = f"jarvis-candidate:{candidate_id}"
     container = f"jarvis-candidate-{candidate_id}"
-    temp_root = Path(tempfile.mkdtemp(prefix=f"jarvis-candidate-{candidate_id}-", dir=WORK_ROOT))
-    for name in ("data", "logs", "config", "tmp"):
-        (temp_root / name).mkdir(parents=True, exist_ok=True)
+
+    temp_root = Path(
+        tempfile.mkdtemp(
+            prefix=f"jarvis-candidate-{candidate_id}-",
+            dir=WORK_ROOT,
+        )
+    )
+
+    for name in (
+        "data",
+        "logs",
+        "config",
+        "tmp",
+    ):
+        path = temp_root / name
+
+        path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        if name in {
+            "data",
+            "logs",
+            "config",
+        }:
+            # These directories are temporary and isolated to the
+            # candidate container. Docker user namespaces may map
+            # the container process to a host UID that is neither
+            # the worker owner nor group, so normal 0775 ownership
+            # is insufficient for SQLite and application logs.
+            path.chmod(
+                0o777
+            )
+
     try:
-        build = run(["docker", "build", "-t", image, "bridge"], cwd=workspace, timeout=timeout, check=False)
+        build = run(
+            [
+                "docker",
+                "build",
+                "-t",
+                image,
+                "bridge",
+            ],
+            cwd=workspace,
+            timeout=timeout,
+            check=False,
+        )
+
         if build.returncode != 0:
-            return {"passed": False, "stage": "build", "output": build.stdout[-12000:]}
+            return {
+                "passed": False,
+                "stage": "build",
+                "output": build.stdout[
+                    -12000:
+                ],
+            }
 
         run_command = [
-            "docker", "run", "-d", "--rm",
-            "--name", container,
-            "--network", "none",
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container,
+            "--network",
+            "none",
             "--read-only",
-            "--security-opt", "no-new-privileges:true",
-            "--cap-drop", "ALL",
-            "--memory", "512m",
-            "--cpus", "1.0",
-            "--pids-limit", "128",
-            "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
-            "-v", f"{temp_root / 'data'}:/app/data:rw",
-            "-v", f"{temp_root / 'logs'}:/app/logs:rw",
-            "-v", f"{temp_root / 'config'}:/app/config:rw",
-            "-e", "OPENAI_API_KEY=dummy",
-            "-e", "OPENAI_MODEL=gpt-5-mini",
-            "-e", "HOME_ASSISTANT_URL=http://127.0.0.1:9",
-            "-e", "HOME_ASSISTANT_TOKEN=dummy",
-            "-e", "JARVIS_ADMIN_MODE_ENABLED=false",
-            "-e", "JARVIS_AWARENESS_ENABLED=false",
-            "-e", "JARVIS_SELF_IMPROVEMENT_ENABLED=false",
+            "--security-opt",
+            "no-new-privileges:true",
+            "--cap-drop",
+            "ALL",
+            "--memory",
+            "512m",
+            "--cpus",
+            "1.0",
+            "--pids-limit",
+            "128",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "-v",
+            f"{temp_root / 'data'}:/app/data:rw",
+            "-v",
+            f"{temp_root / 'logs'}:/app/logs:rw",
+            "-v",
+            f"{temp_root / 'config'}:/app/config:rw",
+            "-e",
+            "OPENAI_API_KEY=dummy",
+            "-e",
+            "OPENAI_MODEL=gpt-5-mini",
+            "-e",
+            "HOME_ASSISTANT_URL=http://127.0.0.1:9",
+            "-e",
+            "HOME_ASSISTANT_TOKEN=dummy",
+            "-e",
+            "JARVIS_ADMIN_MODE_ENABLED=false",
+            "-e",
+            "JARVIS_AWARENESS_ENABLED=false",
+            "-e",
+            "JARVIS_SELF_IMPROVEMENT_ENABLED=false",
             image,
         ]
-        started = run(run_command, cwd=workspace, timeout=60, check=False)
-        if started.returncode != 0:
-            return {"passed": False, "stage": "start", "output": started.stdout[-12000:]}
 
-        deadline = time.monotonic() + min(timeout, 120)
+        started = run(
+            run_command,
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
+
+        if started.returncode != 0:
+            return {
+                "passed": False,
+                "stage": "start",
+                "output": started.stdout[
+                    -12000:
+                ],
+            }
+
+        deadline = (
+            time.monotonic()
+            + min(
+                timeout,
+                120,
+            )
+        )
+
         last_output = ""
-        while time.monotonic() < deadline:
-            check = run(
+
+        while (
+            time.monotonic()
+            < deadline
+        ):
+            state = run(
                 [
-                    "docker", "exec", container, "python", "-c",
-                    "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read().decode())",
+                    "docker",
+                    "inspect",
+                    "-f",
+                    (
+                        "{{.State.Running}} "
+                        "{{.State.ExitCode}}"
+                    ),
+                    container,
                 ],
                 cwd=workspace,
                 timeout=10,
                 check=False,
             )
-            last_output = check.stdout
-            if check.returncode == 0 and '"status":"healthy"' in check.stdout.replace(" ", ""):
-                return {"passed": True, "stage": "health", "output": check.stdout[-4000:]}
-            time.sleep(2)
-        logs = run(["docker", "logs", container], cwd=workspace, timeout=20, check=False).stdout
-        return {"passed": False, "stage": "health", "output": (last_output + "\n" + logs)[-12000:]}
+
+            if state.returncode != 0:
+                logs = run(
+                    [
+                        "docker",
+                        "logs",
+                        container,
+                    ],
+                    cwd=workspace,
+                    timeout=20,
+                    check=False,
+                )
+
+                return {
+                    "passed": False,
+                    "stage": "startup",
+                    "output": (
+                        state.stdout
+                        + "\n"
+                        + logs.stdout
+                    )[
+                        -12000:
+                    ],
+                }
+
+            state_parts = (
+                state.stdout
+                .strip()
+                .split()
+            )
+
+            running = bool(
+                state_parts
+                and state_parts[
+                    0
+                ].casefold()
+                == "true"
+            )
+
+            if not running:
+                exit_code = (
+                    state_parts[
+                        1
+                    ]
+                    if len(
+                        state_parts
+                    ) > 1
+                    else "unknown"
+                )
+
+                logs = run(
+                    [
+                        "docker",
+                        "logs",
+                        container,
+                    ],
+                    cwd=workspace,
+                    timeout=20,
+                    check=False,
+                )
+
+                return {
+                    "passed": False,
+                    "stage": "startup",
+                    "output": (
+                        "Candidate container exited "
+                        f"with code {exit_code}.\n"
+                        + logs.stdout
+                    )[
+                        -12000:
+                    ],
+                }
+
+            check = run(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "python",
+                    "-c",
+                    (
+                        "import urllib.request; "
+                        "print("
+                        "urllib.request.urlopen("
+                        "'http://127.0.0.1:8000/health', "
+                        "timeout=3"
+                        ").read().decode()"
+                        ")"
+                    ),
+                ],
+                cwd=workspace,
+                timeout=10,
+                check=False,
+            )
+
+            last_output = (
+                check.stdout
+            )
+
+            if (
+                check.returncode == 0
+                and '"status":"healthy"'
+                in check.stdout.replace(
+                    " ",
+                    "",
+                )
+            ):
+                return {
+                    "passed": True,
+                    "stage": "health",
+                    "output": check.stdout[
+                        -4000:
+                    ],
+                }
+
+            time.sleep(
+                2
+            )
+
+        logs = run(
+            [
+                "docker",
+                "logs",
+                container,
+            ],
+            cwd=workspace,
+            timeout=20,
+            check=False,
+        ).stdout
+
+        return {
+            "passed": False,
+            "stage": "health",
+            "output": (
+                last_output
+                + "\n"
+                + logs
+            )[
+                -12000:
+            ],
+        }
+
     finally:
-        run(["docker", "rm", "-f", container], cwd=workspace, timeout=30, check=False)
-        shutil.rmtree(temp_root, ignore_errors=True)
+        run(
+            [
+                "docker",
+                "rm",
+                "-f",
+                container,
+            ],
+            cwd=workspace,
+            timeout=30,
+            check=False,
+        )
+
+        run(
+            [
+                "docker",
+                "image",
+                "rm",
+                "-f",
+                image,
+            ],
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
+
+        shutil.rmtree(
+            temp_root,
+            ignore_errors=True,
+        )
 
 
 def determine_risk(paths: list[str], model_risk: str, policy: dict[str, Any]) -> str:

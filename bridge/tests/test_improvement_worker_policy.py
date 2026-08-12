@@ -599,3 +599,263 @@ def test_run_validation_uses_baseline_pytest(
     assert "pytest" not in names
     assert results["passed"] is True
     assert security["passed"] is True
+
+
+def test_docker_smoke_uses_writable_mounts_and_keeps_container_for_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands: list[
+        list[str]
+    ] = []
+
+    monkeypatch.setattr(
+        worker,
+        "WORK_ROOT",
+        tmp_path,
+    )
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        commands.append(
+            list(command)
+        )
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "build",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="built",
+            )
+
+        if (
+            command[:3]
+            == [
+                "docker",
+                "run",
+                "-d",
+            ]
+        ):
+            assert "--rm" not in command
+
+            mounts = [
+                command[index + 1]
+                for index, item in enumerate(
+                    command
+                )
+                if item == "-v"
+            ]
+
+            for mount in mounts:
+                source = Path(
+                    mount.split(
+                        ":",
+                        1,
+                    )[0]
+                )
+
+                assert (
+                    source.stat().st_mode
+                    & 0o777
+                ) == 0o777
+
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="container-id",
+            )
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "inspect",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="true 0",
+            )
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "exec",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    '{"status":"healthy",'
+                    '"service":"Jarvis Core"}'
+                ),
+            )
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.docker_smoke_test(
+        tmp_path,
+        123,
+        30,
+    )
+
+    assert result["passed"] is True
+    assert result["stage"] == "health"
+
+    assert any(
+        command[:4]
+        == [
+            "docker",
+            "rm",
+            "-f",
+            "jarvis-candidate-123",
+        ]
+        for command in commands
+    )
+
+    assert any(
+        command[:4]
+        == [
+            "docker",
+            "image",
+            "rm",
+            "-f",
+        ]
+        for command in commands
+    )
+
+
+def test_docker_smoke_preserves_startup_logs_for_exited_container(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        worker,
+        "WORK_ROOT",
+        tmp_path,
+    )
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "build",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="built",
+            )
+
+        if (
+            command[:3]
+            == [
+                "docker",
+                "run",
+                "-d",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="container-id",
+            )
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "inspect",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="false 1",
+            )
+
+        if (
+            command[:2]
+            == [
+                "docker",
+                "logs",
+            ]
+        ):
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=(
+                    "sqlite3.OperationalError: "
+                    "unable to open database file"
+                ),
+            )
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.docker_smoke_test(
+        tmp_path,
+        124,
+        30,
+    )
+
+    assert result["passed"] is False
+    assert result["stage"] == "startup"
+
+    assert (
+        "unable to open database file"
+        in result["output"]
+    )
