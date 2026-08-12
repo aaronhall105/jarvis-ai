@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -175,3 +177,189 @@ def test_proposal_only_skips_live_actions(
     ) is True
 
     assert processed == [3]
+
+def _bandit_issue(
+    *,
+    filename: str = "bridge/app/example.py",
+    test_id: str = "B101",
+    issue_text: str = "Use of assert detected.",
+    severity: str = "LOW",
+    confidence: str = "HIGH",
+    line_number: int = 10,
+) -> dict[str, object]:
+    return {
+        "filename": filename,
+        "test_id": test_id,
+        "issue_text": issue_text,
+        "issue_severity": severity,
+        "issue_confidence": confidence,
+        "line_number": line_number,
+    }
+
+
+def _bandit_completed(
+    findings: list[dict[str, object]],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(
+        args=["bandit"],
+        returncode=1 if findings else 0,
+        stdout=json.dumps(
+            {
+                "results": findings,
+            }
+        ),
+    )
+
+
+def test_bandit_baseline_allows_existing_findings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = [
+        _bandit_issue(
+            line_number=10,
+        ),
+    ]
+
+    candidate = [
+        _bandit_issue(
+            line_number=200,
+        ),
+    ]
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del command
+        del timeout
+        del check
+        del env
+
+        if Path(cwd) == worker.ROOT:
+            return _bandit_completed(
+                baseline
+            )
+
+        return _bandit_completed(
+            candidate
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.bandit_baseline_result(
+        tmp_path
+    )
+
+    assert result["passed"] is True
+    assert result["blocking"] is True
+    assert result["baseline_findings"] == 1
+    assert result["candidate_findings"] == 1
+    assert result["new_findings_count"] == 0
+
+
+def test_bandit_baseline_blocks_new_finding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    baseline = [
+        _bandit_issue(
+            line_number=10,
+        ),
+    ]
+
+    candidate = [
+        _bandit_issue(
+            line_number=200,
+        ),
+        _bandit_issue(
+            line_number=240,
+        ),
+    ]
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del command
+        del timeout
+        del check
+        del env
+
+        if Path(cwd) == worker.ROOT:
+            return _bandit_completed(
+                baseline
+            )
+
+        return _bandit_completed(
+            candidate
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.bandit_baseline_result(
+        tmp_path
+    )
+
+    assert result["passed"] is False
+    assert result["blocking"] is True
+    assert result["baseline_findings"] == 1
+    assert result["candidate_findings"] == 2
+    assert result["new_findings_count"] == 1
+    assert len(
+        result["new_findings"]
+    ) == 1
+
+
+def test_bandit_baseline_blocks_unparseable_scan(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del command
+        del cwd
+        del timeout
+        del check
+        del env
+
+        return subprocess.CompletedProcess(
+            args=["bandit"],
+            returncode=2,
+            stdout="Bandit execution failure",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.bandit_baseline_result(
+        tmp_path
+    )
+
+    assert result["passed"] is False
+    assert result["blocking"] is True

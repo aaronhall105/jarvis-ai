@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from collections import Counter
 import fcntl
 import hashlib
 import json
@@ -712,6 +713,358 @@ def command_result(name: str, completed: subprocess.CompletedProcess[str], block
     }
 
 
+def _normalise_bandit_filename(
+    value: Any,
+) -> str:
+    filename = str(
+        value or ""
+    ).replace(
+        "\\\\",
+        "/",
+    )
+
+    marker = "bridge/app/"
+
+    if marker in filename:
+        filename = (
+            marker
+            + filename.split(
+                marker,
+                1,
+            )[1]
+        )
+
+    return filename
+
+
+def _bandit_issue_key(
+    issue: dict[str, Any],
+) -> tuple[str, str, str, str, str]:
+    """
+    Build a line-number-independent Bandit fingerprint.
+
+    Counter semantics preserve duplicate findings in one file, while
+    excluding line numbers means harmless line shifts do not appear
+    to be newly introduced security findings.
+    """
+
+    return (
+        _normalise_bandit_filename(
+            issue.get(
+                "filename"
+            )
+        ),
+        str(
+            issue.get(
+                "test_id"
+            )
+            or ""
+        ),
+        str(
+            issue.get(
+                "issue_text"
+            )
+            or ""
+        ),
+        str(
+            issue.get(
+                "issue_severity"
+            )
+            or ""
+        ).upper(),
+        str(
+            issue.get(
+                "issue_confidence"
+            )
+            or ""
+        ).upper(),
+    )
+
+
+def _parse_bandit_json(
+    output: str,
+) -> list[dict[str, Any]] | None:
+    text = str(
+        output or ""
+    ).strip()
+
+    candidates = [
+        text,
+    ]
+
+    first = text.find(
+        "{"
+    )
+
+    last = text.rfind(
+        "}"
+    )
+
+    if (
+        first >= 0
+        and last >= first
+    ):
+        candidates.append(
+            text[
+                first : last + 1
+            ]
+        )
+
+    for candidate in candidates:
+        try:
+            payload = json.loads(
+                candidate
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        results = payload.get(
+            "results"
+        )
+
+        if not isinstance(
+            results,
+            list,
+        ):
+            continue
+
+        return [
+            item
+            for item in results
+            if isinstance(
+                item,
+                dict,
+            )
+        ]
+
+    return None
+
+
+def _run_bandit_json(
+    workspace: Path,
+) -> tuple[
+    subprocess.CompletedProcess[str],
+    list[dict[str, Any]] | None,
+]:
+    completed = run(
+        [
+            str(
+                VENV_PYTHON
+            ),
+            "-m",
+            "bandit",
+            "-q",
+            "-f",
+            "json",
+            "-r",
+            "bridge/app",
+        ],
+        cwd=workspace,
+        timeout=300,
+        check=False,
+    )
+
+    if completed.returncode not in {
+        0,
+        1,
+    }:
+        return (
+            completed,
+            None,
+        )
+
+    return (
+        completed,
+        _parse_bandit_json(
+            completed.stdout
+        ),
+    )
+
+
+def bandit_baseline_result(
+    workspace: Path,
+) -> dict[str, Any]:
+    """
+    Compare the candidate's Bandit findings with the clean live
+    repository baseline.
+
+    Existing security debt remains visible, but only a finding newly
+    introduced by the candidate is blocking.
+    """
+
+    baseline_completed, baseline_issues = (
+        _run_bandit_json(
+            ROOT
+        )
+    )
+
+    candidate_completed, candidate_issues = (
+        _run_bandit_json(
+            workspace
+        )
+    )
+
+    if baseline_issues is None:
+        return {
+            "name": "bandit_baseline",
+            "passed": False,
+            "blocking": True,
+            "returncode": (
+                baseline_completed.returncode
+            ),
+            "baseline_findings": None,
+            "candidate_findings": None,
+            "new_findings": [],
+            "fixed_findings": None,
+            "output": (
+                "Unable to parse or execute the "
+                "production Bandit baseline.\n"
+                + baseline_completed.stdout[
+                    -8000:
+                ]
+            ),
+        }
+
+    if candidate_issues is None:
+        return {
+            "name": "bandit_baseline",
+            "passed": False,
+            "blocking": True,
+            "returncode": (
+                candidate_completed.returncode
+            ),
+            "baseline_findings": len(
+                baseline_issues
+            ),
+            "candidate_findings": None,
+            "new_findings": [],
+            "fixed_findings": None,
+            "output": (
+                "Unable to parse or execute the "
+                "candidate Bandit scan.\n"
+                + candidate_completed.stdout[
+                    -8000:
+                ]
+            ),
+        }
+
+    baseline_counts = Counter(
+        _bandit_issue_key(
+            issue
+        )
+        for issue in baseline_issues
+    )
+
+    candidate_counts = Counter(
+        _bandit_issue_key(
+            issue
+        )
+        for issue in candidate_issues
+    )
+
+    new_counts = (
+        candidate_counts
+        - baseline_counts
+    )
+
+    fixed_counts = (
+        baseline_counts
+        - candidate_counts
+    )
+
+    remaining = Counter(
+        new_counts
+    )
+
+    new_findings: list[
+        dict[str, Any]
+    ] = []
+
+    for issue in candidate_issues:
+        key = _bandit_issue_key(
+            issue
+        )
+
+        if remaining.get(
+            key,
+            0,
+        ) <= 0:
+            continue
+
+        new_findings.append(
+            {
+                "filename": (
+                    _normalise_bandit_filename(
+                        issue.get(
+                            "filename"
+                        )
+                    )
+                ),
+                "test_id": issue.get(
+                    "test_id"
+                ),
+                "issue_text": issue.get(
+                    "issue_text"
+                ),
+                "severity": issue.get(
+                    "issue_severity"
+                ),
+                "confidence": issue.get(
+                    "issue_confidence"
+                ),
+                "line_number": issue.get(
+                    "line_number"
+                ),
+            }
+        )
+
+        remaining[
+            key
+        ] -= 1
+
+    new_count = sum(
+        new_counts.values()
+    )
+
+    fixed_count = sum(
+        fixed_counts.values()
+    )
+
+    passed = (
+        new_count == 0
+    )
+
+    return {
+        "name": "bandit_baseline",
+        "passed": passed,
+        "blocking": True,
+        "returncode": (
+            0
+            if passed
+            else 1
+        ),
+        "baseline_findings": len(
+            baseline_issues
+        ),
+        "candidate_findings": len(
+            candidate_issues
+        ),
+        "new_findings": new_findings,
+        "new_findings_count": new_count,
+        "fixed_findings": fixed_count,
+        "output": (
+            "Bandit baseline comparison: "
+            f"baseline={len(baseline_issues)}, "
+            f"candidate={len(candidate_issues)}, "
+            f"new={new_count}, "
+            f"fixed={fixed_count}."
+        ),
+    }
+
+
 def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
@@ -720,11 +1073,16 @@ def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig
         ("compileall", [str(VENV_PYTHON), "-m", "compileall", "-q", "bridge/app"], True, 180),
         ("pytest", [str(VENV_PYTHON), "-m", "pytest", "-q", "bridge/tests"], True, config.candidate_timeout_seconds),
         ("ruff", [str(VENV_PYTHON), "-m", "ruff", "check", "bridge/app", "bridge/tests"], True, 240),
-        ("bandit", [str(VENV_PYTHON), "-m", "bandit", "-q", "-r", "bridge/app"], True, 300),
     ]
     for name, command, blocking, timeout in commands:
         completed = run(command, cwd=workspace, timeout=timeout, check=False)
         results.append(command_result(name, completed, blocking))
+
+    results.append(
+        bandit_baseline_result(
+            workspace
+        )
+    )
 
     if (workspace / "bridge/requirements.txt").exists():
         completed = run(
@@ -736,7 +1094,15 @@ def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig
         results.append(command_result("pip_audit", completed, blocking=False))
 
     security = security_diff_scan(workspace, policy)
-    security["tools"] = [item for item in results if item["name"] in {"bandit", "pip_audit"}]
+    security["tools"] = [
+        item
+        for item in results
+        if item["name"]
+        in {
+            "bandit_baseline",
+            "pip_audit",
+        }
+    ]
     passed = all(item["passed"] for item in results if item["blocking"]) and security["passed"]
     return {"passed": passed, "checks": results}, security
 
