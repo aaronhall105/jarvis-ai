@@ -1345,6 +1345,80 @@ def _prepare_and_request_deploy(
     return candidate
 
 
+
+
+def _authorize_manual_rollback(
+    environment: dict[str, Any],
+    candidate_id: int,
+) -> dict[str, Any]:
+    engine = environment[
+        "engine"
+    ]
+
+    issued = asyncio.run(
+        engine.issue_rollback_ticket(
+            candidate_id,
+            "Aaron",
+        )
+    )
+
+    assert issued.success is True
+    assert issued.details is not None
+
+    rollback_code = str(
+        issued.details[
+            "rollback_code"
+        ]
+    )
+
+    assert len(
+        rollback_code
+    ) == 6
+
+    assert rollback_code.isdigit()
+
+    requested = asyncio.run(
+        engine.request_rollback(
+            candidate_id,
+            rollback_code,
+            "Aaron",
+        )
+    )
+
+    assert requested.success is True
+
+    candidate = asyncio.run(
+        engine.get_candidate(
+            candidate_id
+        )
+    )
+
+    assert candidate is not None
+
+    assert (
+        candidate[
+            "status"
+        ]
+        == "rollback_requested"
+    )
+
+    assert (
+        candidate[
+            "deploy_phase"
+        ]
+        == "manual_rollback_requested"
+    )
+
+    assert (
+        candidate[
+            "rollback_ticket_consumed_at"
+        ]
+        is not None
+    )
+
+    return candidate
+
+
 def test_v2115a_end_to_end_transaction_succeeds_in_sandbox(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -2222,4 +2296,532 @@ def test_v2115c_real_compose_failure_auto_rollback(
             project
         )
         == []
+    )
+
+@pytest.mark.skipif(
+    os.environ.get(
+        "JARVIS_V2116B_REAL_DOCKER"
+    )
+    != "1",
+    reason=(
+        "V2.1.16B real manual rollback test "
+        "runs only when explicitly enabled."
+    ),
+)
+def test_v2116b_manual_rollback_exact_candidate_real_docker(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    docker_image = str(
+        os.environ.get(
+            "JARVIS_V2116B_IMAGE"
+        )
+        or ""
+    ).strip()
+
+    assert docker_image
+
+    environment = _install_isolated_runtime(
+        monkeypatch,
+        tmp_path,
+        real_docker=True,
+        docker_image=docker_image,
+    )
+
+    request.addfinalizer(
+        lambda: _cleanup_real_docker(
+            environment
+        )
+    )
+
+    candidate = _prepare_and_request_deploy(
+        environment
+    )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    base_commit = str(
+        environment[
+            "base_commit"
+        ]
+    )
+
+    config = environment[
+        "config"
+    ]
+
+    config.proposal_only = False
+
+    worker.deploy_candidate(
+        worker.fetch_candidate_by_id(
+            candidate_id
+        ),
+        config,
+        {},
+    )
+
+    deployed = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert deployed is not None
+    assert deployed["status"] == "deployed"
+
+    candidate_commit = str(
+        deployed[
+            "candidate_commit"
+        ]
+    )
+
+    assert (
+        _git(
+            environment[
+                "repo"
+            ],
+            "rev-parse",
+            "HEAD",
+        )
+        == candidate_commit
+    )
+
+    _authorize_manual_rollback(
+        environment,
+        candidate_id,
+    )
+
+    worker.rollback_candidate(
+        worker.fetch_candidate_by_id(
+            candidate_id
+        ),
+        config,
+        {},
+    )
+
+    final = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert final is not None
+    assert final["status"] == "rolled_back"
+    assert final["deploy_phase"] == "rolled_back"
+
+    assert (
+        _git(
+            environment[
+                "repo"
+            ],
+            "rev-parse",
+            "HEAD",
+        )
+        == base_commit
+    )
+
+    assert (
+        environment[
+            "docker_commands"
+        ]
+        == [
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+        ]
+    )
+
+    container = _wait_for_real_boundary(
+        environment
+    )
+
+    _assert_real_docker_isolation(
+        environment,
+        container,
+    )
+
+    failure = asyncio.run(
+        environment[
+            "engine"
+        ].get_failure(
+            int(
+                environment[
+                    "failure_id"
+                ]
+            )
+        )
+    )
+
+    assert failure is not None
+    assert failure["status"] == "recorded"
+
+    _cleanup_real_docker(
+        environment
+    )
+
+    project = str(
+        environment[
+            "docker_project"
+        ]
+    )
+
+    assert (
+        _docker_project_container_ids(
+            project
+        )
+        == []
+    )
+
+    assert (
+        _docker_project_network_ids(
+            project
+        )
+        == []
+    )
+
+
+def test_v2116b_manual_rollback_already_at_base_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = _install_isolated_runtime(
+        monkeypatch,
+        tmp_path,
+    )
+
+    candidate = _prepare_and_request_deploy(
+        environment
+    )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    base_commit = str(
+        environment[
+            "base_commit"
+        ]
+    )
+
+    config = environment[
+        "config"
+    ]
+
+    config.proposal_only = False
+
+    worker.deploy_candidate(
+        worker.fetch_candidate_by_id(
+            candidate_id
+        ),
+        config,
+        {},
+    )
+
+    assert len(
+        environment[
+            "docker_commands"
+        ]
+    ) == 1
+
+    _git(
+        environment[
+            "repo"
+        ],
+        "reset",
+        "--hard",
+        base_commit,
+    )
+
+    assert (
+        _git(
+            environment[
+                "repo"
+            ],
+            "rev-parse",
+            "HEAD",
+        )
+        == base_commit
+    )
+
+    _authorize_manual_rollback(
+        environment,
+        candidate_id,
+    )
+
+    def forbidden_reset(
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        del args
+        del kwargs
+
+        raise AssertionError(
+            "Idempotent base rollback must not "
+            "execute git reset."
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "reset_repository_to_ref",
+        forbidden_reset,
+    )
+
+    worker.rollback_candidate(
+        worker.fetch_candidate_by_id(
+            candidate_id
+        ),
+        config,
+        {},
+    )
+
+    final = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert final is not None
+    assert final["status"] == "rolled_back"
+    assert final["deploy_phase"] == "rolled_back"
+
+    assert (
+        _git(
+            environment[
+                "repo"
+            ],
+            "rev-parse",
+            "HEAD",
+        )
+        == base_commit
+    )
+
+    assert len(
+        environment[
+            "docker_commands"
+        ]
+    ) == 2
+
+
+def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    environment = _install_isolated_runtime(
+        monkeypatch,
+        tmp_path,
+    )
+
+    candidate = _prepare_and_request_deploy(
+        environment
+    )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    config = environment[
+        "config"
+    ]
+
+    config.proposal_only = False
+
+    worker.deploy_candidate(
+        worker.fetch_candidate_by_id(
+            candidate_id
+        ),
+        config,
+        {},
+    )
+
+    assert len(
+        environment[
+            "docker_commands"
+        ]
+    ) == 1
+
+    newer_file = (
+        environment[
+            "repo"
+        ]
+        / "bridge"
+        / "app"
+        / "newer_commit.py"
+    )
+
+    newer_file.write_text(
+        "NEWER = True\n",
+        encoding="utf-8",
+    )
+
+    _git(
+        environment[
+            "repo"
+        ],
+        "add",
+        "bridge/app/newer_commit.py",
+    )
+
+    _git(
+        environment[
+            "repo"
+        ],
+        "commit",
+        "-m",
+        "newer unrelated commit",
+    )
+
+    newer_head = _git(
+        environment[
+            "repo"
+        ],
+        "rev-parse",
+        "HEAD",
+    )
+
+    deployed = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert deployed is not None
+
+    assert (
+        newer_head
+        != deployed[
+            "candidate_commit"
+        ]
+    )
+
+    assert (
+        newer_head
+        != deployed[
+            "base_commit"
+        ]
+    )
+
+    _authorize_manual_rollback(
+        environment,
+        candidate_id,
+    )
+
+    def forbidden_reset(
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        del args
+        del kwargs
+
+        raise AssertionError(
+            "Unexpected HEAD must never reach git reset."
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "reset_repository_to_ref",
+        forbidden_reset,
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="unexpected live HEAD",
+    ):
+        worker.rollback_candidate(
+            worker.fetch_candidate_by_id(
+                candidate_id
+            ),
+            config,
+            {},
+        )
+
+    final = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            candidate_id
+        )
+    )
+
+    assert final is not None
+
+    assert (
+        final[
+            "status"
+        ]
+        == "recovery_required"
+    )
+
+    assert (
+        final[
+            "deploy_phase"
+        ]
+        == "manual_rollback_blocked"
+    )
+
+    assert (
+        _git(
+            environment[
+                "repo"
+            ],
+            "rev-parse",
+            "HEAD",
+        )
+        == newer_head
+    )
+
+    # Only the original deployment crossed the
+    # Docker boundary. The blocked rollback did not.
+    assert len(
+        environment[
+            "docker_commands"
+        ]
+    ) == 1
+
+    failure = asyncio.run(
+        environment[
+            "engine"
+        ].get_failure(
+            int(
+                environment[
+                    "failure_id"
+                ]
+            )
+        )
+    )
+
+    assert failure is not None
+
+    assert (
+        failure[
+            "status"
+        ]
+        == "deployed"
     )

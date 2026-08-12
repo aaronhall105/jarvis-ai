@@ -4483,34 +4483,458 @@ def recover_interrupted_deployment(
         return "recovery_required"
 
 
-def rollback_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
-    if config.proposal_only:
-        raise WorkerError(
-            "Rollback execution is disabled while Proposal Mode is active."
+def claim_manual_rollback(
+    candidate_id: int,
+) -> dict[str, Any]:
+    ensure_candidate_transaction_columns()
+
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute(
+            "BEGIN IMMEDIATE"
         )
 
-    candidate_id = int(candidate["candidate_id"])
-    failure_id = int(candidate["failure_id"])
-    rollback_ref = str(candidate.get("rollback_ref") or "")
-    if not rollback_ref:
-        raise WorkerError("No rollback reference is stored for this candidate.")
-    ensure_repo()
-    update_candidate(candidate_id, status="rolling_back")
-    audit("candidate_rolling_back", failure_id=failure_id, candidate_id=candidate_id)
-    reset_repository_to_ref(
-        rollback_ref,
-        repo_root=ROOT,
+        row = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            raise WorkerError(
+                f"Candidate {candidate_id} was not found."
+            )
+
+        candidate = dict(
+            row
+        )
+
+        if str(
+            candidate.get(
+                "status"
+            )
+            or ""
+        ) != "rollback_requested":
+            raise WorkerError(
+                "Candidate is not available for "
+                "manual rollback claiming."
+            )
+
+        cursor = connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET
+                status = 'rolling_back',
+                updated_at = ?,
+                deploy_phase = 'manual_rollback_claimed'
+            WHERE candidate_id = ?
+              AND status = 'rollback_requested'
+            """,
+            (
+                now,
+                candidate_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            raise WorkerError(
+                "Manual rollback claim lost a database race."
+            )
+
+        claimed = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        if claimed is None:
+            raise WorkerError(
+                "Claimed rollback candidate disappeared."
+            )
+
+        return dict(
+            claimed
+        )
+
+
+def verify_manual_rollback_binding(
+    candidate: dict[str, Any],
+) -> dict[str, str]:
+    if str(
+        candidate.get(
+            "status"
+        )
+        or ""
+    ) != "rolling_back":
+        raise WorkerError(
+            "Candidate is not in a claimed manual "
+            "rollback state."
+        )
+
+    base_commit = _normalise_commit_sha(
+        candidate.get(
+            "base_commit"
+        ),
+        label="manual rollback base",
     )
-    run(["docker", "compose", "up", "-d", "--build"], timeout=600)
-    healthy, output = health_check(config.deploy_health_timeout_seconds)
+
+    candidate_commit = _normalise_commit_sha(
+        candidate.get(
+            "candidate_commit"
+        ),
+        label="manual rollback candidate",
+    )
+
+    rollback_ref = _normalise_commit_sha(
+        candidate.get(
+            "rollback_ref"
+        ),
+        label="stored rollback",
+    )
+
+    if rollback_ref != base_commit:
+        raise WorkerError(
+            "Stored rollback reference does not match "
+            "the candidate's exact validated base commit."
+        )
+
+    ensure_repo()
+
+    current_ref = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "HEAD",
+            ]
+        ).stdout.strip(),
+        label="manual rollback live HEAD",
+    )
+
+    if current_ref == candidate_commit:
+        action = "reset_candidate"
+
+    elif current_ref == base_commit:
+        action = "already_base"
+
+    else:
+        raise WorkerError(
+            "Manual rollback found an unexpected live HEAD. "
+            "Repository reset was refused. "
+            f"expected_candidate={candidate_commit} "
+            f"expected_base={base_commit} "
+            f"actual={current_ref}"
+        )
+
+    return {
+        "base_commit": base_commit,
+        "candidate_commit": candidate_commit,
+        "rollback_ref": rollback_ref,
+        "current_ref": current_ref,
+        "action": action,
+    }
+
+
+def rollback_candidate(
+    candidate: dict[str, Any],
+    config: WorkerConfig,
+    env_values: dict[str, str],
+) -> None:
+    if config.proposal_only:
+        raise WorkerError(
+            "Rollback execution is disabled while "
+            "Proposal Mode is active."
+        )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    failure_id = int(
+        candidate[
+            "failure_id"
+        ]
+    )
+
+    claimed = claim_manual_rollback(
+        candidate_id
+    )
+
+    try:
+        binding = verify_manual_rollback_binding(
+            claimed
+        )
+
+    except Exception as exc:
+        error = (
+            "Manual rollback safety verification failed. "
+            + str(
+                exc
+            )
+        )[-12000:]
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="manual_rollback_blocked",
+            error=error,
+        )
+
+        audit(
+            "candidate_manual_rollback_blocked",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": error[-4000:],
+            },
+        )
+
+        notify_aaron(
+            f"Manual rollback for improvement {candidate_id} "
+            "was blocked because the live repository no "
+            "longer matches its exact rollback binding.",
+            title="Jarvis rollback blocked",
+            config=config,
+            env_values=env_values,
+        )
+
+        raise
+
+    base_commit = binding[
+        "base_commit"
+    ]
+
+    candidate_commit = binding[
+        "candidate_commit"
+    ]
+
+    action = binding[
+        "action"
+    ]
+
+    audit(
+        "candidate_rolling_back",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "base_commit": base_commit,
+            "candidate_commit": candidate_commit,
+            "head_state": action,
+        },
+    )
+
+    try:
+        # Re-read HEAD immediately before any destructive
+        # action. Human or external Git activity between the
+        # first inspection and this point must fail closed.
+        pre_action_ref = _normalise_commit_sha(
+            run(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD",
+                ]
+            ).stdout.strip(),
+            label="manual rollback pre-action HEAD",
+        )
+
+        if action == "reset_candidate":
+            if pre_action_ref != candidate_commit:
+                raise WorkerError(
+                    "Live HEAD changed after manual rollback "
+                    "binding verification. Repository reset "
+                    "was refused."
+                )
+
+            reset_repository_to_ref(
+                base_commit,
+                repo_root=ROOT,
+            )
+
+        elif action == "already_base":
+            if pre_action_ref != base_commit:
+                raise WorkerError(
+                    "Live HEAD changed after the rollback "
+                    "base was verified. Repository mutation "
+                    "was refused."
+                )
+
+            audit(
+                "candidate_manual_rollback_already_at_base",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "base_commit": base_commit,
+                },
+            )
+
+        else:
+            raise WorkerError(
+                "Manual rollback action is invalid."
+            )
+
+        post_git_ref = _normalise_commit_sha(
+            run(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD",
+                ]
+            ).stdout.strip(),
+            label="manual rollback post-Git HEAD",
+        )
+
+        if post_git_ref != base_commit:
+            raise WorkerError(
+                "Manual rollback did not leave the "
+                "repository on the exact stored base."
+            )
+
+    except Exception as exc:
+        error = (
+            "Manual rollback Git safety operation failed. "
+            + str(
+                exc
+            )
+        )[-12000:]
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="manual_rollback_git_failed",
+            error=error,
+        )
+
+        audit(
+            "candidate_manual_rollback_recovery_required",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": error[-4000:],
+            },
+        )
+
+        raise
+
+    update_candidate(
+        candidate_id,
+        status="rolling_back",
+        deploy_phase="manual_rollback_rebuilding",
+        error=None,
+    )
+
+    run(
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
+        ],
+        timeout=600,
+    )
+
+    update_candidate(
+        candidate_id,
+        status="rolling_back",
+        deploy_phase="manual_rollback_verifying",
+    )
+
+    healthy, output = health_check(
+        config.deploy_health_timeout_seconds
+    )
+
     if not healthy:
-        update_candidate(candidate_id, status="rollback_failed", error=output)
-        raise WorkerError(f"Rollback health check failed: {output}")
-    update_candidate(candidate_id, status="rolled_back", rolled_back_at=utc_now(), error=None)
-    update_failure(failure_id, status="recorded")
-    audit("candidate_rolled_back", failure_id=failure_id, candidate_id=candidate_id)
+        update_candidate(
+            candidate_id,
+            status="rollback_failed",
+            deploy_phase="manual_rollback_verification_failed",
+            error=output,
+        )
+
+        audit(
+            "candidate_manual_rollback_failed",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": output[-4000:],
+                "rollback_ref": base_commit,
+            },
+        )
+
+        raise WorkerError(
+            f"Rollback health check failed: {output}"
+        )
+
+    final_ref = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "HEAD",
+            ]
+        ).stdout.strip(),
+        label="manual rollback final HEAD",
+    )
+
+    if final_ref != base_commit:
+        error = (
+            "Manual rollback runtime verification passed "
+            "but Git HEAD no longer matches the exact "
+            "stored base."
+        )
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="manual_rollback_final_head_changed",
+            error=error,
+        )
+
+        raise WorkerError(
+            error
+        )
+
+    update_candidate(
+        candidate_id,
+        status="rolled_back",
+        deploy_phase="rolled_back",
+        rolled_back_at=utc_now(),
+        error=None,
+    )
+
+    update_failure(
+        failure_id,
+        status="recorded",
+    )
+
+    audit(
+        "candidate_rolled_back",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "rollback_ref": base_commit,
+            "candidate_commit": candidate_commit,
+            "head_state": action,
+        },
+    )
+
     notify_aaron(
-        f"Improvement {candidate_id} was rolled back successfully.",
+        f"Improvement {candidate_id} was rolled back "
+        "successfully to its exact validated base.",
         title="Jarvis rollback completed",
         config=config,
         env_values=env_values,
