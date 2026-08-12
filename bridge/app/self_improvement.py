@@ -61,6 +61,13 @@ _REJECT_PATTERN = re.compile(
     r"^\s*(?:reject|discard|cancel)\s+improvement\s+#?(\d+)\s*[.!?]*\s*$",
     re.I,
 )
+_ROLLBACK_TICKET_PATTERN = re.compile(
+    r"^\s*(?:prepare|authorize|issue|create)\s+(?:a\s+)?"
+    r"rollback\s+(?:ticket\s+)?(?:for\s+)?"
+    r"improvement\s+#?(\d+)\s*[.!?]*\s*$",
+    re.I,
+)
+
 _ROLLBACK_PATTERN = re.compile(
     r"^\s*(?:roll\s*back|rollback|undo)\s+improvement\s+#?(\d+)\s+"
     r"(?:code\s+)?([0-9]{6})\s*[.!?]*\s*$",
@@ -163,6 +170,10 @@ class SelfImprovementEngine:
             "deploy_ticket_salt": "TEXT",
             "deploy_ticket_expires_at": "TEXT",
             "deploy_ticket_consumed_at": "TEXT",
+            "rollback_ticket_hash": "TEXT",
+            "rollback_ticket_salt": "TEXT",
+            "rollback_ticket_expires_at": "TEXT",
+            "rollback_ticket_consumed_at": "TEXT",
             "base_commit": "TEXT",
             "candidate_commit": "TEXT",
             "validated_patch_sha256": "TEXT",
@@ -1492,30 +1503,448 @@ class SelfImprovementEngine:
         await self.audit("candidate_rejected", actor=actor, candidate_id=candidate_id)
         return ImprovementCommandResult(True, True, f"Improvement {candidate_id} has been rejected.", "improvement_rejected")
 
-    async def request_rollback(self, candidate_id: int, code: str, actor: str) -> ImprovementCommandResult:
-        candidate = await self.get_candidate(candidate_id)
-        if not candidate:
-            return ImprovementCommandResult(True, False, f"I can’t find improvement {candidate_id}.", "improvement_rollback_missing")
-        if str(candidate.get("status")) != "deployed":
+    def _issue_rollback_ticket_sync(
+        self,
+        candidate_id: int,
+    ) -> tuple[
+        bool,
+        str,
+        str | None,
+        str | None,
+    ]:
+        now = self._utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM improvement_candidates
+                WHERE candidate_id = ?
+                """,
+                (
+                    candidate_id,
+                ),
+            ).fetchone()
+
+            if row is None:
+                return (
+                    False,
+                    "missing",
+                    None,
+                    None,
+                )
+
+            candidate = dict(
+                row
+            )
+
+            if str(
+                candidate.get(
+                    "status"
+                )
+                or ""
+            ) != "deployed":
+                return (
+                    False,
+                    "invalid_state",
+                    None,
+                    None,
+                )
+
+            if not (
+                str(
+                    candidate.get(
+                        "base_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "candidate_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "validated_patch_sha256"
+                    )
+                    or ""
+                ).strip()
+            ):
+                return (
+                    False,
+                    "binding_missing",
+                    None,
+                    None,
+                )
+
+            rollback_code = (
+                f"{secrets.randbelow(900000) + 100000:06d}"
+            )
+
+            salt = secrets.token_hex(
+                16
+            )
+
+            digest = self._ticket_digest(
+                candidate_id,
+                salt,
+                rollback_code,
+            )
+
+            expires_at = self._utc_after(
+                15 * 60
+            )
+
+            cursor = connection.execute(
+                """
+                UPDATE improvement_candidates
+                SET
+                    updated_at = ?,
+                    rollback_ticket_hash = ?,
+                    rollback_ticket_salt = ?,
+                    rollback_ticket_expires_at = ?,
+                    rollback_ticket_consumed_at = NULL
+                WHERE candidate_id = ?
+                  AND status = 'deployed'
+                """,
+                (
+                    now,
+                    digest,
+                    salt,
+                    expires_at,
+                    candidate_id,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                return (
+                    False,
+                    "race",
+                    None,
+                    None,
+                )
+
+            return (
+                True,
+                "ticket_issued",
+                rollback_code,
+                expires_at,
+            )
+
+    async def issue_rollback_ticket(
+        self,
+        candidate_id: int,
+        actor: str,
+    ) -> ImprovementCommandResult:
+        (
+            success,
+            reason,
+            rollback_code,
+            expires_at,
+        ) = await asyncio.to_thread(
+            self._issue_rollback_ticket_sync,
+            candidate_id,
+        )
+
+        if not success:
+            messages = {
+                "missing": (
+                    f"I can’t find improvement {candidate_id}."
+                ),
+                "invalid_state": (
+                    f"Improvement {candidate_id} must be "
+                    "currently deployed before a rollback "
+                    "ticket can be issued."
+                ),
+                "binding_missing": (
+                    "The deployed candidate is not bound to "
+                    "an exact validated commit, so rollback "
+                    "authorization was refused."
+                ),
+                "race": (
+                    "The candidate changed while rollback "
+                    "authorization was being created."
+                ),
+            }
+
             return ImprovementCommandResult(
                 True,
                 False,
-                f"Improvement {candidate_id} is not currently deployed.",
-                "improvement_rollback_invalid_state",
+                messages.get(
+                    reason,
+                    "Rollback authorization failed safely.",
+                ),
+                f"improvement_rollback_ticket_{reason}",
             )
-        if not self._code_matches(candidate, code):
-            return ImprovementCommandResult(True, False, "That rollback code is incorrect.", "improvement_rollback_bad_code")
-        await asyncio.to_thread(
-            self._set_candidate_status_sync,
-            candidate_id,
-            "rollback_requested",
-            rollback_requested=True,
+
+        await self.audit(
+            "candidate_rollback_ticket_issued",
+            actor=actor,
+            candidate_id=candidate_id,
+            details={
+                "rollback_ticket_expires_at": expires_at,
+            },
         )
-        await self.audit("candidate_rollback_requested", actor=actor, candidate_id=candidate_id)
+
         return ImprovementCommandResult(
             True,
             True,
-            f"Rollback requested for improvement {candidate_id}.",
+            (
+                f"Rollback code {rollback_code} for "
+                f"improvement {candidate_id} is valid "
+                "for 15 minutes. No rollback has been "
+                "requested yet."
+            ),
+            "improvement_rollback_ticket_issued",
+            {
+                "candidate_id": candidate_id,
+                "rollback_code": rollback_code,
+                "rollback_ticket_expires_at": expires_at,
+            },
+        )
+
+    def _request_rollback_sync(
+        self,
+        candidate_id: int,
+        code: str,
+    ) -> tuple[
+        bool,
+        str,
+    ]:
+        now = self._utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM improvement_candidates
+                WHERE candidate_id = ?
+                """,
+                (
+                    candidate_id,
+                ),
+            ).fetchone()
+
+            if row is None:
+                return (
+                    False,
+                    "missing",
+                )
+
+            candidate = dict(
+                row
+            )
+
+            if str(
+                candidate.get(
+                    "status"
+                )
+                or ""
+            ) != "deployed":
+                return (
+                    False,
+                    "invalid_state",
+                )
+
+            if candidate.get(
+                "rollback_ticket_consumed_at"
+            ):
+                return (
+                    False,
+                    "ticket_used",
+                )
+
+            if self._timestamp_expired(
+                candidate.get(
+                    "rollback_ticket_expires_at"
+                ),
+                missing_is_expired=True,
+            ):
+                return (
+                    False,
+                    "ticket_expired",
+                )
+
+            salt = str(
+                candidate.get(
+                    "rollback_ticket_salt"
+                )
+                or ""
+            )
+
+            expected = str(
+                candidate.get(
+                    "rollback_ticket_hash"
+                )
+                or ""
+            )
+
+            if not salt or not expected:
+                return (
+                    False,
+                    "ticket_missing",
+                )
+
+            supplied = self._ticket_digest(
+                candidate_id,
+                salt,
+                code,
+            )
+
+            if not secrets.compare_digest(
+                expected,
+                supplied,
+            ):
+                return (
+                    False,
+                    "bad_code",
+                )
+
+            if not (
+                str(
+                    candidate.get(
+                        "base_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "candidate_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "validated_patch_sha256"
+                    )
+                    or ""
+                ).strip()
+            ):
+                return (
+                    False,
+                    "binding_missing",
+                )
+
+            cursor = connection.execute(
+                """
+                UPDATE improvement_candidates
+                SET
+                    status = 'rollback_requested',
+                    updated_at = ?,
+                    rollback_requested_at = ?,
+                    rollback_ticket_consumed_at = ?,
+                    rollback_ticket_hash = NULL,
+                    rollback_ticket_salt = NULL,
+                    rollback_ticket_expires_at = NULL,
+                    deploy_phase = 'manual_rollback_requested'
+                WHERE candidate_id = ?
+                  AND status = 'deployed'
+                  AND rollback_ticket_consumed_at IS NULL
+                """,
+                (
+                    now,
+                    now,
+                    now,
+                    candidate_id,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                return (
+                    False,
+                    "race",
+                )
+
+            return (
+                True,
+                "rollback_requested",
+            )
+
+    async def request_rollback(
+        self,
+        candidate_id: int,
+        code: str,
+        actor: str,
+    ) -> ImprovementCommandResult:
+        (
+            success,
+            reason,
+        ) = await asyncio.to_thread(
+            self._request_rollback_sync,
+            candidate_id,
+            code,
+        )
+
+        if not success:
+            messages = {
+                "missing": (
+                    f"I can’t find improvement {candidate_id}."
+                ),
+                "invalid_state": (
+                    f"Improvement {candidate_id} is not "
+                    "currently deployed."
+                ),
+                "ticket_used": (
+                    "That rollback ticket has already been used."
+                ),
+                "ticket_expired": (
+                    "That rollback ticket has expired. "
+                    "Create a new rollback ticket first."
+                ),
+                "ticket_missing": (
+                    "This deployed candidate has no valid "
+                    "rollback ticket."
+                ),
+                "bad_code": (
+                    "That rollback code is incorrect."
+                ),
+                "binding_missing": (
+                    "The deployed candidate is not bound to "
+                    "an exact validated commit, so rollback "
+                    "was refused."
+                ),
+                "race": (
+                    "The candidate changed while the rollback "
+                    "request was being recorded."
+                ),
+            }
+
+            return ImprovementCommandResult(
+                True,
+                False,
+                messages.get(
+                    reason,
+                    "Rollback request failed safely.",
+                ),
+                f"improvement_rollback_{reason}",
+            )
+
+        await self.audit(
+            "candidate_rollback_requested",
+            actor=actor,
+            candidate_id=candidate_id,
+            details={
+                "rollback_ticket_consumed": True,
+            },
+        )
+
+        return ImprovementCommandResult(
+            True,
+            True,
+            (
+                f"Rollback requested for improvement "
+                f"{candidate_id}. The one-time rollback "
+                "ticket has been consumed."
+            ),
             "improvement_rollback_requested",
         )
 
@@ -1632,6 +2061,7 @@ class SelfImprovementEngine:
                 _APPROVE_PATTERN,
                 _DEPLOY_PATTERN,
                 _REJECT_PATTERN,
+                _ROLLBACK_TICKET_PATTERN,
                 _ROLLBACK_PATTERN,
                 _STATUS_PATTERN,
                 _FAILURES_PATTERN,
@@ -1772,8 +2202,31 @@ class SelfImprovementEngine:
         if match:
             return await self.reject_candidate(int(match.group(1)), actor_name)
 
+        match = _ROLLBACK_TICKET_PATTERN.fullmatch(
+            user_text
+        )
+        if match:
+            return await self.issue_rollback_ticket(
+                int(
+                    match.group(
+                        1
+                    )
+                ),
+                actor_name,
+            )
+
         match = _ROLLBACK_PATTERN.fullmatch(user_text)
         if match:
-            return await self.request_rollback(int(match.group(1)), match.group(2), actor_name)
+            return await self.request_rollback(
+                int(
+                    match.group(
+                        1
+                    )
+                ),
+                match.group(
+                    2
+                ),
+                actor_name,
+            )
 
         return ImprovementCommandResult(False)
