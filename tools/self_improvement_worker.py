@@ -20,7 +20,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -66,6 +66,15 @@ class WorkerConfig:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def utc_after(
+    seconds: int,
+) -> str:
+    return (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=seconds)
+    ).isoformat()
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -142,6 +151,52 @@ def connect() -> sqlite3.Connection:
     connection.execute("PRAGMA synchronous = NORMAL")
     connection.execute("PRAGMA busy_timeout = 30000")
     return connection
+
+
+TRANSACTION_COLUMNS: dict[str, str] = {
+    "approval_code_expires_at": "TEXT",
+    "deploy_ticket_hash": "TEXT",
+    "deploy_ticket_salt": "TEXT",
+    "deploy_ticket_expires_at": "TEXT",
+    "deploy_ticket_consumed_at": "TEXT",
+    "base_commit": "TEXT",
+    "candidate_commit": "TEXT",
+    "validated_patch_sha256": "TEXT",
+}
+
+
+def ensure_candidate_transaction_columns() -> None:
+    """
+    Keep the host worker compatible with the transactional
+    approval schema even before Jarvis Core is restarted.
+    """
+
+    with connect() as connection:
+        existing = {
+            str(
+                row["name"]
+            )
+            for row in connection.execute(
+                "PRAGMA table_info(improvement_candidates)"
+            ).fetchall()
+        }
+
+        if not existing:
+            raise WorkerError(
+                "improvement_candidates table is missing."
+            )
+
+        for (
+            name,
+            data_type,
+        ) in TRANSACTION_COLUMNS.items():
+            if name in existing:
+                continue
+
+            connection.execute(
+                "ALTER TABLE improvement_candidates "
+                f"ADD COLUMN {name} {data_type}"
+            )
 
 
 def json_load(value: str | None, default: Any) -> Any:
@@ -824,14 +879,60 @@ def validate_patch_policy(patch: str, policy: dict[str, Any], config: WorkerConf
     return paths, hashlib.sha256(patch.encode("utf-8")).hexdigest()
 
 
-def create_worktree(candidate_id: int, branch_name: str) -> Path:
-    workspace = WORKTREES / str(candidate_id)
+def create_worktree(
+    candidate_id: int,
+    branch_name: str,
+    base_ref: str = "HEAD",
+) -> Path:
+    workspace = (
+        WORKTREES
+        / str(candidate_id)
+    )
+
     if workspace.exists():
-        run(["git", "worktree", "remove", "--force", str(workspace)], check=False)
-        shutil.rmtree(workspace, ignore_errors=True)
-    run(["git", "branch", "-D", branch_name], check=False)
-    WORKTREES.mkdir(parents=True, exist_ok=True)
-    run(["git", "worktree", "add", "-b", branch_name, str(workspace), "HEAD"])
+        run(
+            [
+                "git",
+                "worktree",
+                "remove",
+                "--force",
+                str(workspace),
+            ],
+            check=False,
+        )
+
+        shutil.rmtree(
+            workspace,
+            ignore_errors=True,
+        )
+
+    run(
+        [
+            "git",
+            "branch",
+            "-D",
+            branch_name,
+        ],
+        check=False,
+    )
+
+    WORKTREES.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            branch_name,
+            str(workspace),
+            base_ref,
+        ]
+    )
+
     return workspace
 
 
@@ -2500,6 +2601,279 @@ def maybe_create_pr(workspace: Path, branch: str, candidate_id: int, summary: st
     return None
 
 
+def _normalise_commit_sha(
+    value: Any,
+    *,
+    label: str,
+) -> str:
+    sha = str(
+        value or ""
+    ).strip().lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{40}|[0-9a-f]{64}",
+        sha,
+    ):
+        raise WorkerError(
+            f"Invalid {label} commit SHA."
+        )
+
+    return sha
+
+
+def candidate_diff_sha256(
+    base_commit: str,
+    candidate_commit: str,
+    *,
+    cwd: Path = ROOT,
+) -> str:
+    base = _normalise_commit_sha(
+        base_commit,
+        label="base",
+    )
+
+    candidate = _normalise_commit_sha(
+        candidate_commit,
+        label="candidate",
+    )
+
+    completed = run(
+        [
+            "git",
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            candidate,
+            "--",
+        ],
+        cwd=cwd,
+        timeout=120,
+    )
+
+    diff = completed.stdout
+
+    if not diff.strip():
+        raise WorkerError(
+            "Validated candidate diff is empty."
+        )
+
+    return hashlib.sha256(
+        diff.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def verify_candidate_deploy_binding(
+    candidate: dict[str, Any],
+) -> dict[str, str]:
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    if str(
+        candidate.get(
+            "status"
+        )
+        or ""
+    ) != "deploy_requested":
+        raise WorkerError(
+            "Candidate is not in deploy_requested state."
+        )
+
+    expected_branch = (
+        f"jarvis/improvement-{candidate_id}"
+    )
+
+    branch = str(
+        candidate.get(
+            "branch_name"
+        )
+        or ""
+    )
+
+    if branch != expected_branch:
+        raise WorkerError(
+            "Candidate branch binding is invalid."
+        )
+
+    workspace_raw = str(
+        candidate.get(
+            "workspace_path"
+        )
+        or ""
+    ).strip()
+
+    if not workspace_raw:
+        raise WorkerError(
+            "Candidate workspace binding is missing."
+        )
+
+    workspace = Path(
+        workspace_raw
+    )
+
+    if (
+        not workspace.exists()
+        or workspace.is_symlink()
+    ):
+        raise WorkerError(
+            "Candidate workspace is missing or unsafe."
+        )
+
+    expected_workspace = (
+        WORKTREES
+        / str(candidate_id)
+    ).resolve()
+
+    try:
+        resolved_workspace = workspace.resolve(
+            strict=True
+        )
+    except OSError as exc:
+        raise WorkerError(
+            "Candidate workspace cannot be resolved."
+        ) from exc
+
+    if (
+        resolved_workspace
+        != expected_workspace
+    ):
+        raise WorkerError(
+            "Candidate workspace path does not match "
+            "the controlled worktree location."
+        )
+
+    base_commit = _normalise_commit_sha(
+        candidate.get(
+            "base_commit"
+        ),
+        label="stored base",
+    )
+
+    candidate_commit = _normalise_commit_sha(
+        candidate.get(
+            "candidate_commit"
+        ),
+        label="stored candidate",
+    )
+
+    stored_hash = str(
+        candidate.get(
+            "validated_patch_sha256"
+        )
+        or ""
+    ).strip().lower()
+
+    if not re.fullmatch(
+        r"[0-9a-f]{64}",
+        stored_hash,
+    ):
+        raise WorkerError(
+            "Validated candidate patch hash is missing "
+            "or invalid."
+        )
+
+    ensure_repo()
+
+    current_ref = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "HEAD",
+            ]
+        ).stdout.strip(),
+        label="live HEAD",
+    )
+
+    if current_ref != base_commit:
+        raise WorkerError(
+            "Live Jarvis HEAD no longer matches the "
+            "candidate's validated base commit."
+        )
+
+    branch_ref = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                branch,
+            ]
+        ).stdout.strip(),
+        label="candidate branch",
+    )
+
+    if branch_ref != candidate_commit:
+        raise WorkerError(
+            "Candidate branch moved after validation."
+        )
+
+    workspace_ref = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "HEAD",
+            ],
+            cwd=resolved_workspace,
+        ).stdout.strip(),
+        label="candidate workspace",
+    )
+
+    if workspace_ref != candidate_commit:
+        raise WorkerError(
+            "Candidate worktree moved after validation."
+        )
+
+    merge_base = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "merge-base",
+                base_commit,
+                candidate_commit,
+            ]
+        ).stdout.strip(),
+        label="merge base",
+    )
+
+    if merge_base != base_commit:
+        raise WorkerError(
+            "Candidate is no longer a direct descendant "
+            "of its validated base commit."
+        )
+
+    actual_hash = candidate_diff_sha256(
+        base_commit,
+        candidate_commit,
+        cwd=ROOT,
+    )
+
+    if not secrets.compare_digest(
+        stored_hash,
+        actual_hash,
+    ):
+        raise WorkerError(
+            "Candidate diff changed after validation."
+        )
+
+    return {
+        "base_commit": base_commit,
+        "candidate_commit": candidate_commit,
+        "validated_patch_sha256": actual_hash,
+        "branch": branch,
+        "workspace": str(
+            resolved_workspace
+        ),
+    }
+
+
 def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
     candidate_id = int(candidate["candidate_id"])
     failure_id = int(candidate["failure_id"])
@@ -2510,6 +2884,21 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
 
     policy = load_policy()
     ensure_repo()
+    ensure_candidate_transaction_columns()
+
+    base_commit = run(
+        [
+            "git",
+            "rev-parse",
+            "HEAD",
+        ]
+    ).stdout.strip()
+
+    base_commit = _normalise_commit_sha(
+        base_commit,
+        label="candidate base",
+    )
+
     failure = fetch_failure(failure_id)
     branch = f"jarvis/improvement-{candidate_id}"
     update_candidate(candidate_id, status="generating", model=config.model, branch_name=branch, error=None)
@@ -2535,7 +2924,36 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             patch = str(payload.get("patch") or "")
             try:
                 paths, patch_hash = validate_patch_policy(patch, policy, config)
-                workspace = create_worktree(candidate_id, branch)
+                workspace = create_worktree(
+                    candidate_id,
+                    branch,
+                    base_commit,
+                )
+
+                workspace_base = (
+                    run(
+                        [
+                            "git",
+                            "rev-parse",
+                            "HEAD",
+                        ],
+                        cwd=workspace,
+                    )
+                    .stdout
+                    .strip()
+                )
+
+                if (
+                    _normalise_commit_sha(
+                        workspace_base,
+                        label="worktree base",
+                    )
+                    != base_commit
+                ):
+                    raise WorkerError(
+                        "Candidate worktree was not created "
+                        "from the captured base commit."
+                    )
                 patch_path = apply_patch(workspace, patch, candidate_id)
                 break
             except Exception as exc:
@@ -2577,30 +2995,59 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         root_cause = str(payload.get("root_cause") or "")
         model_risk = str(payload.get("risk") or "medium").lower()
         risk = determine_risk(paths, model_risk, policy)
-        commit_sha = commit_candidate(workspace, candidate_id, failure_id, summary)
-        pr_url = maybe_create_pr(workspace, branch, candidate_id, summary, config)
-        approval_code = f"{secrets.randbelow(900000) + 100000:06d}"
+        commit_sha = commit_candidate(
+            workspace,
+            candidate_id,
+            failure_id,
+            summary,
+        )
+
+        commit_sha = _normalise_commit_sha(
+            commit_sha,
+            label="candidate",
+        )
+
+        validated_patch_hash = (
+            candidate_diff_sha256(
+                base_commit,
+                commit_sha,
+                cwd=workspace,
+            )
+        )
+
+        pr_url = maybe_create_pr(
+            workspace,
+            branch,
+            candidate_id,
+            summary,
+            config,
+        )
+
+        approval_code = (
+            f"{secrets.randbelow(900000) + 100000:06d}"
+        )
+
+        approval_code_expires_at = utc_after(
+            24 * 60 * 60
+        )
+
         diff_stats = {
             "changed_files": len(paths),
             "changed_lines": patch_line_count(str(payload.get("patch") or "")),
             "patch_sha256": patch_hash,
+            "source_patch_sha256": patch_hash,
+            "validated_patch_sha256": validated_patch_hash,
+            "base_commit": base_commit,
+            "candidate_commit": commit_sha,
             "commit_sha": commit_sha,
             "context_files": context_files,
             "tests_added": payload.get("tests_added", []),
             "notes": payload.get("notes", []),
         }
+        # Every candidate now requires the transactional
+        # human approval flow. There is deliberately no
+        # automatic transition to deploy_requested.
         next_status = "awaiting_approval"
-
-        if (
-            not config.proposal_only
-            and risk == "low"
-            and config.auto_deploy_low_risk
-            and policy.get(
-                "allow_auto_deploy_low_risk",
-                False,
-            )
-        ):
-            next_status = "deploy_requested"
         update_candidate(
             candidate_id,
             status=next_status,
@@ -2615,9 +3062,17 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             security_results_json=security,
             usage_json=usage,
             approval_code=approval_code,
+            approval_code_expires_at=approval_code_expires_at,
+            base_commit=base_commit,
+            candidate_commit=commit_sha,
+            validated_patch_sha256=validated_patch_hash,
+            deploy_ticket_hash=None,
+            deploy_ticket_salt=None,
+            deploy_ticket_expires_at=None,
+            deploy_ticket_consumed_at=None,
             pr_url=pr_url,
             error=None,
-            deploy_requested_at=utc_now() if next_status == "deploy_requested" else None,
+            deploy_requested_at=None,
         )
         update_failure(failure_id, status="candidate_ready")
         audit(
@@ -2627,13 +3082,16 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             details={
                 "summary": summary,
                 "risk": risk,
-                "approval_code": approval_code,
+                "base_commit": base_commit,
+                "candidate_commit": commit_sha,
+                "validated_patch_sha256": validated_patch_hash,
                 "pr_url": pr_url,
             },
         )
         notify_aaron(
             f"Improvement {candidate_id} passed isolated testing ({risk} risk). "
-            f"{summary} To deploy, say: Deploy improvement {candidate_id} code {approval_code}.",
+            f"{summary} To review and approve, say: "
+            f"Approve improvement {candidate_id} code {approval_code}.",
             title="Jarvis improvement ready",
             config=config,
             env_values=env_values,
@@ -2673,34 +3131,130 @@ def monitor_logs(seconds: int = 30) -> tuple[bool, str]:
     return bad is None, logs[-12000:]
 
 
-def deploy_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
+def deploy_candidate(
+    candidate: dict[str, Any],
+    config: WorkerConfig,
+    env_values: dict[str, str],
+) -> None:
     if config.proposal_only:
         raise WorkerError(
             "Deployment is disabled while Proposal Mode is active."
         )
 
-    candidate_id = int(candidate["candidate_id"])
-    failure_id = int(candidate["failure_id"])
-    workspace = Path(str(candidate.get("workspace_path") or ""))
-    branch = str(candidate.get("branch_name") or "")
-    if not workspace.exists() or not branch:
-        raise WorkerError("Candidate workspace or branch is missing.")
-    ensure_repo()
-    current_ref = run(["git", "rev-parse", "HEAD"]).stdout.strip()
-    branch_ref = run(["git", "rev-parse", branch]).stdout.strip()
-    merge_base = run(["git", "merge-base", "HEAD", branch]).stdout.strip()
-    if merge_base != current_ref:
-        raise WorkerError(
-            "The live branch changed after this candidate was created. Regenerate the candidate against the current code."
+    ensure_candidate_transaction_columns()
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    failure_id = int(
+        candidate[
+            "failure_id"
+        ]
+    )
+
+    binding = verify_candidate_deploy_binding(
+        candidate
+    )
+
+    current_ref = binding[
+        "base_commit"
+    ]
+
+    candidate_commit = binding[
+        "candidate_commit"
+    ]
+
+    update_candidate(
+        candidate_id,
+        status="deploying",
+        rollback_ref=current_ref,
+    )
+
+    audit(
+        "candidate_deploying",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "rollback_ref": current_ref,
+            "candidate_commit": candidate_commit,
+            "validated_patch_sha256": (
+                binding[
+                    "validated_patch_sha256"
+                ]
+            ),
+        },
+    )
+
+    try:
+        premerge_ref = _normalise_commit_sha(
+            run(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD",
+                ]
+            ).stdout.strip(),
+            label="pre-merge HEAD",
         )
 
-    update_candidate(candidate_id, status="deploying", rollback_ref=current_ref)
-    audit("candidate_deploying", failure_id=failure_id, candidate_id=candidate_id, details={"rollback_ref": current_ref})
-    try:
-        run(["git", "merge", "--ff-only", branch])
-        run(["docker", "compose", "up", "-d", "--build"], timeout=600)
-        healthy, health_output = health_check(config.deploy_health_timeout_seconds)
-        logs_ok, logs = monitor_logs(30)
+        if premerge_ref != current_ref:
+            raise WorkerError(
+                "Live Jarvis HEAD changed after deployment "
+                "binding verification."
+            )
+
+        # Merge the exact commit that passed validation.
+        # Never merge a movable branch ref here.
+        run(
+            [
+                "git",
+                "merge",
+                "--ff-only",
+                candidate_commit,
+            ]
+        )
+
+        merged_ref = _normalise_commit_sha(
+            run(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD",
+                ]
+            ).stdout.strip(),
+            label="merged HEAD",
+        )
+
+        if merged_ref != candidate_commit:
+            raise WorkerError(
+                "The live repository did not land on the "
+                "exact validated candidate commit."
+            )
+
+        run(
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+            timeout=600,
+        )
+
+        healthy, health_output = (
+            health_check(
+                config.deploy_health_timeout_seconds
+            )
+        )
+
+        logs_ok, logs = monitor_logs(
+            30
+        )
+
         if not healthy or not logs_ok:
             raise WorkerError(
                 "Deployment health verification failed.\n"
@@ -2708,27 +3262,99 @@ def deploy_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values
                 + "\n"
                 + logs
             )
-        update_candidate(candidate_id, status="deployed", deployed_at=utc_now(), error=None)
-        update_failure(failure_id, status="deployed")
-        audit("candidate_deployed", failure_id=failure_id, candidate_id=candidate_id, details={"commit": branch_ref})
+
+        update_candidate(
+            candidate_id,
+            status="deployed",
+            deployed_at=utc_now(),
+            error=None,
+        )
+
+        update_failure(
+            failure_id,
+            status="deployed",
+        )
+
+        audit(
+            "candidate_deployed",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "commit": candidate_commit,
+                "base_commit": current_ref,
+                "validated_patch_sha256": (
+                    binding[
+                        "validated_patch_sha256"
+                    ]
+                ),
+            },
+        )
+
         notify_aaron(
-            f"Improvement {candidate_id} deployed successfully and passed health checks.",
+            f"Improvement {candidate_id} deployed successfully "
+            "and passed health checks.",
             title="Jarvis updated",
             config=config,
             env_values=env_values,
         )
+
     except Exception as exc:
-        run(["git", "reset", "--hard", current_ref], check=False)
-        run(["docker", "compose", "up", "-d", "--build"], timeout=600, check=False)
-        update_candidate(candidate_id, status="rolled_back", rolled_back_at=utc_now(), error=str(exc)[-12000:])
-        update_failure(failure_id, status="recorded")
-        audit("candidate_auto_rolled_back", failure_id=failure_id, candidate_id=candidate_id, details={"error": str(exc)[-4000:]})
+        run(
+            [
+                "git",
+                "reset",
+                "--hard",
+                current_ref,
+            ],
+            check=False,
+        )
+
+        run(
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ],
+            timeout=600,
+            check=False,
+        )
+
+        update_candidate(
+            candidate_id,
+            status="rolled_back",
+            rolled_back_at=utc_now(),
+            error=str(
+                exc
+            )[-12000:],
+        )
+
+        update_failure(
+            failure_id,
+            status="recorded",
+        )
+
+        audit(
+            "candidate_auto_rolled_back",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": str(
+                    exc
+                )[-4000:],
+                "rollback_ref": current_ref,
+            },
+        )
+
         notify_aaron(
-            f"Improvement {candidate_id} failed deployment checks and was rolled back automatically.",
+            f"Improvement {candidate_id} failed deployment "
+            "checks and was rolled back automatically.",
             title="Jarvis rollback completed",
             config=config,
             env_values=env_values,
         )
+
         raise
 
 

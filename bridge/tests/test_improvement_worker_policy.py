@@ -1314,3 +1314,435 @@ def test_pytest_baseline_allows_added_test(
     assert result["passed"] is True
     assert result["missing_tests_count"] == 0
     assert result["added_tests_count"] == 1
+
+
+def test_worker_transaction_schema_migration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import sqlite3
+
+    database = (
+        tmp_path
+        / "improvement.db"
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DATA_DIR",
+        tmp_path,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DB_PATH",
+        database,
+    )
+
+    with sqlite3.connect(
+        database
+    ) as connection:
+        connection.execute(
+            """
+            CREATE TABLE improvement_candidates (
+                candidate_id INTEGER PRIMARY KEY
+            )
+            """
+        )
+
+    worker.ensure_candidate_transaction_columns()
+
+    with sqlite3.connect(
+        database
+    ) as connection:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(improvement_candidates)"
+            ).fetchall()
+        }
+
+    assert set(
+        worker.TRANSACTION_COLUMNS
+    ).issubset(
+        columns
+    )
+
+
+def test_candidate_diff_hash_is_stable(
+    tmp_path: Path,
+) -> None:
+    repo = (
+        tmp_path
+        / "repo"
+    )
+
+    repo.mkdir()
+
+    def git(
+        *args: str,
+    ) -> str:
+        completed = subprocess.run(
+            [
+                "git",
+                *args,
+            ],
+            cwd=repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+
+        return completed.stdout.strip()
+
+    git(
+        "init",
+        "-q",
+    )
+
+    git(
+        "config",
+        "user.email",
+        "jarvis-test@example.invalid",
+    )
+
+    git(
+        "config",
+        "user.name",
+        "Jarvis Test",
+    )
+
+    file = (
+        repo
+        / "example.py"
+    )
+
+    file.write_text(
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+
+    git(
+        "add",
+        "example.py",
+    )
+
+    git(
+        "commit",
+        "-q",
+        "-m",
+        "base",
+    )
+
+    base = git(
+        "rev-parse",
+        "HEAD",
+    )
+
+    file.write_text(
+        "VALUE = 2\n",
+        encoding="utf-8",
+    )
+
+    git(
+        "add",
+        "example.py",
+    )
+
+    git(
+        "commit",
+        "-q",
+        "-m",
+        "candidate",
+    )
+
+    candidate = git(
+        "rev-parse",
+        "HEAD",
+    )
+
+    first = worker.candidate_diff_sha256(
+        base,
+        candidate,
+        cwd=repo,
+    )
+
+    second = worker.candidate_diff_sha256(
+        base,
+        candidate,
+        cwd=repo,
+    )
+
+    assert first == second
+    assert len(first) == 64
+
+
+def test_exact_candidate_binding_passes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = "a" * 40
+    candidate_commit = "b" * 40
+    digest = "c" * 64
+    candidate_id = 7
+
+    worktrees = (
+        tmp_path
+        / "worktrees"
+    )
+
+    workspace = (
+        worktrees
+        / str(candidate_id)
+    )
+
+    workspace.mkdir(
+        parents=True
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "WORKTREES",
+        worktrees,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ensure_repo",
+        lambda: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "candidate_diff_sha256",
+        lambda *args, **kwargs: digest,
+    )
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        del check
+        del env
+
+        if command == [
+            "git",
+            "rev-parse",
+            "HEAD",
+        ]:
+            output = (
+                candidate_commit
+                if Path(cwd) == workspace
+                else base
+            )
+
+        elif command == [
+            "git",
+            "rev-parse",
+            "--verify",
+            f"jarvis/improvement-{candidate_id}",
+        ]:
+            output = candidate_commit
+
+        elif command == [
+            "git",
+            "merge-base",
+            base,
+            candidate_commit,
+        ]:
+            output = base
+
+        else:
+            pytest.fail(
+                f"Unexpected Git command: {command}"
+            )
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=output,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    result = worker.verify_candidate_deploy_binding(
+        {
+            "candidate_id": candidate_id,
+            "status": "deploy_requested",
+            "branch_name": (
+                f"jarvis/improvement-{candidate_id}"
+            ),
+            "workspace_path": str(
+                workspace
+            ),
+            "base_commit": base,
+            "candidate_commit": candidate_commit,
+            "validated_patch_sha256": digest,
+        }
+    )
+
+    assert result["base_commit"] == base
+    assert (
+        result["candidate_commit"]
+        == candidate_commit
+    )
+    assert (
+        result["validated_patch_sha256"]
+        == digest
+    )
+
+
+def test_exact_candidate_binding_rejects_moved_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = "a" * 40
+    candidate_commit = "b" * 40
+    moved = "d" * 40
+    digest = "c" * 64
+    candidate_id = 8
+
+    worktrees = (
+        tmp_path
+        / "worktrees"
+    )
+
+    workspace = (
+        worktrees
+        / str(candidate_id)
+    )
+
+    workspace.mkdir(
+        parents=True
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "WORKTREES",
+        worktrees,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ensure_repo",
+        lambda: None,
+    )
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        if command == [
+            "git",
+            "rev-parse",
+            "HEAD",
+        ]:
+            output = base
+
+        elif command == [
+            "git",
+            "rev-parse",
+            "--verify",
+            f"jarvis/improvement-{candidate_id}",
+        ]:
+            output = moved
+
+        else:
+            pytest.fail(
+                f"Unexpected Git command: {command}"
+            )
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=output,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="branch moved",
+    ):
+        worker.verify_candidate_deploy_binding(
+            {
+                "candidate_id": candidate_id,
+                "status": "deploy_requested",
+                "branch_name": (
+                    f"jarvis/improvement-{candidate_id}"
+                ),
+                "workspace_path": str(
+                    workspace
+                ),
+                "base_commit": base,
+                "candidate_commit": candidate_commit,
+                "validated_patch_sha256": digest,
+            }
+        )
+
+
+def test_candidate_generation_requires_transactional_approval() -> None:
+    import inspect
+
+    source = inspect.getsource(
+        worker.process_queued_candidate
+    )
+
+    assert (
+        "auto_deploy_low_risk"
+        not in source
+    )
+
+    assert (
+        'next_status = "awaiting_approval"'
+        in source
+    )
+
+    assert (
+        "base_commit=base_commit"
+        in source
+    )
+
+    assert (
+        "candidate_commit=commit_sha"
+        in source
+    )
+
+    assert (
+        "validated_patch_sha256=validated_patch_hash"
+        in source
+    )
+
+    assert (
+        "approval_code_expires_at="
+        "approval_code_expires_at"
+        in source
+    )
+
+    assert (
+        "To review and approve"
+        in source
+    )
