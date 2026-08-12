@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -184,6 +187,9 @@ def _seed_failure_and_candidate(
 def _install_isolated_runtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    real_docker: bool = False,
+    docker_image: str | None = None,
 ) -> dict[str, Any]:
     sandbox = (
         tmp_path
@@ -314,6 +320,65 @@ def _install_isolated_runtime(
         + "\n",
         encoding="utf-8",
     )
+
+    docker_project = ""
+
+    if real_docker:
+        image = str(
+            docker_image
+            or ""
+        ).strip()
+
+        if not image:
+            raise AssertionError(
+                "Real Docker dry-run requires "
+                "an explicitly pinned local image."
+            )
+
+        docker_project = (
+            "jarvis-v2115b-"
+            + uuid.uuid4().hex[
+                :12
+            ]
+        )
+
+        compose_file = (
+            repo
+            / "compose.yaml"
+        )
+
+        compose_file.write_text(
+            (
+                "services:\n"
+                "  boundary:\n"
+                f"    image: {json.dumps(image)}\n"
+                "    pull_policy: never\n"
+                "    entrypoint:\n"
+                "      - /bin/sh\n"
+                "      - -c\n"
+                "      - sleep 300\n"
+                "    read_only: true\n"
+                "    cap_drop:\n"
+                "      - ALL\n"
+                "    security_opt:\n"
+                "      - no-new-privileges:true\n"
+                "    healthcheck:\n"
+                "      test:\n"
+                "        - CMD\n"
+                "        - /bin/sh\n"
+                "        - -c\n"
+                "        - exit 0\n"
+                "      interval: 1s\n"
+                "      timeout: 2s\n"
+                "      retries: 10\n"
+                "    networks:\n"
+                "      - isolated\n"
+                "networks:\n"
+                "  isolated:\n"
+                "    internal: true\n"
+            ),
+            encoding="utf-8",
+        )
 
     _git(
         repo,
@@ -485,6 +550,32 @@ def _install_isolated_runtime(
                 f"{resolved_cwd}: {command}"
             )
 
+        is_compose = (
+            command[
+                :2
+            ]
+            == [
+                "docker",
+                "compose",
+            ]
+        )
+
+        effective_env = env
+
+        if (
+            is_compose
+            and real_docker
+        ):
+            effective_env = dict(
+                os.environ
+                if env is None
+                else env
+            )
+
+            effective_env[
+                "COMPOSE_PROJECT_NAME"
+            ] = docker_project
+
         if command[
             :3
         ] == [
@@ -498,14 +589,15 @@ def _install_isolated_runtime(
                 )
             )
 
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout=(
-                    "DRY-RUN: isolated Docker "
-                    "boundary simulated"
-                ),
-            )
+            if not real_docker:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout=(
+                        "DRY-RUN: isolated Docker "
+                        "boundary simulated"
+                    ),
+                )
 
         completed = subprocess.run(
             command,
@@ -514,7 +606,7 @@ def _install_isolated_runtime(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
-            env=env,
+            env=effective_env,
             check=False,
         )
 
@@ -642,7 +734,394 @@ def _install_isolated_runtime(
         "base_commit": base_commit,
         "config": _config(),
         "docker_commands": docker_commands,
+        "real_docker": real_docker,
+        "docker_project": docker_project,
+        "docker_image": docker_image,
     }
+
+
+
+
+def _real_compose_environment(
+    environment: dict[str, Any],
+) -> dict[str, str]:
+    project = str(
+        environment.get(
+            "docker_project"
+        )
+        or ""
+    ).strip()
+
+    if not project:
+        raise AssertionError(
+            "Disposable Compose project is missing."
+        )
+
+    result = dict(
+        os.environ
+    )
+
+    result[
+        "COMPOSE_PROJECT_NAME"
+    ] = project
+
+    return result
+
+
+def _docker_project_container_ids(
+    project: str,
+) -> list[str]:
+    completed = subprocess.run(
+        [
+            "docker",
+            "ps",
+            "-aq",
+            "--filter",
+            (
+                "label=com.docker.compose.project="
+                + project
+            ),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+
+    return [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _docker_project_network_ids(
+    project: str,
+) -> list[str]:
+    completed = subprocess.run(
+        [
+            "docker",
+            "network",
+            "ls",
+            "-q",
+            "--filter",
+            (
+                "label=com.docker.compose.project="
+                + project
+            ),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+
+    return [
+        line.strip()
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _cleanup_real_docker(
+    environment: dict[str, Any],
+) -> None:
+    if not bool(
+        environment.get(
+            "real_docker"
+        )
+    ):
+        return
+
+    project = str(
+        environment[
+            "docker_project"
+        ]
+    )
+
+    repo = Path(
+        environment[
+            "repo"
+        ]
+    )
+
+    compose_env = _real_compose_environment(
+        environment
+    )
+
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "down",
+            "--volumes",
+            "--remove-orphans",
+            "--timeout",
+            "0",
+        ],
+        cwd=repo,
+        env=compose_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    container_ids = (
+        _docker_project_container_ids(
+            project
+        )
+    )
+
+    if container_ids:
+        subprocess.run(
+            [
+                "docker",
+                "rm",
+                "-f",
+                *container_ids,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    network_ids = (
+        _docker_project_network_ids(
+            project
+        )
+    )
+
+    if network_ids:
+        subprocess.run(
+            [
+                "docker",
+                "network",
+                "rm",
+                *network_ids,
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+
+    remaining_containers = (
+        _docker_project_container_ids(
+            project
+        )
+    )
+
+    remaining_networks = (
+        _docker_project_network_ids(
+            project
+        )
+    )
+
+    if (
+        remaining_containers
+        or remaining_networks
+    ):
+        raise AssertionError(
+            "Disposable Docker project cleanup "
+            "left resources behind: "
+            f"containers={remaining_containers}, "
+            f"networks={remaining_networks}"
+        )
+
+
+def _wait_for_real_boundary(
+    environment: dict[str, Any],
+) -> dict[str, Any]:
+    project = str(
+        environment[
+            "docker_project"
+        ]
+    )
+
+    deadline = (
+        time.monotonic()
+        + 20.0
+    )
+
+    while time.monotonic() < deadline:
+        ids = _docker_project_container_ids(
+            project
+        )
+
+        if len(
+            ids
+        ) == 1:
+            inspect = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    ids[
+                        0
+                    ],
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+
+            payload = json.loads(
+                inspect.stdout
+            )[0]
+
+            state = payload[
+                "State"
+            ]
+
+            health = (
+                state.get(
+                    "Health"
+                )
+                or {}
+            ).get(
+                "Status"
+            )
+
+            if health == "healthy":
+                return payload
+
+            if state.get(
+                "Status"
+            ) in {
+                "dead",
+                "exited",
+            }:
+                raise AssertionError(
+                    "Disposable Docker boundary "
+                    f"exited early: {state}"
+                )
+
+        time.sleep(
+            0.2
+        )
+
+    raise AssertionError(
+        "Disposable Docker boundary did "
+        "not become healthy."
+    )
+
+
+def _assert_real_docker_isolation(
+    environment: dict[str, Any],
+    container: dict[str, Any],
+) -> None:
+    project = str(
+        environment[
+            "docker_project"
+        ]
+    )
+
+    host_config = container[
+        "HostConfig"
+    ]
+
+    port_bindings = (
+        host_config.get(
+            "PortBindings"
+        )
+        or {}
+    )
+
+    assert port_bindings == {}
+
+    mounts = container.get(
+        "Mounts"
+    ) or []
+
+    assert not any(
+        mount.get(
+            "Type"
+        )
+        == "bind"
+        for mount in mounts
+    )
+
+    assert host_config.get(
+        "ReadonlyRootfs"
+    ) is True
+
+    security_opt = (
+        host_config.get(
+            "SecurityOpt"
+        )
+        or []
+    )
+
+    assert any(
+        "no-new-privileges"
+        in str(
+            value
+        )
+        for value in security_opt
+    )
+
+    cap_drop = (
+        host_config.get(
+            "CapDrop"
+        )
+        or []
+    )
+
+    assert "ALL" in {
+        str(
+            value
+        ).upper()
+        for value in cap_drop
+    }
+
+    networks = (
+        container[
+            "NetworkSettings"
+        ].get(
+            "Networks"
+        )
+        or {}
+    )
+
+    assert set(
+        networks
+    ) == {
+        (
+            project
+            + "_isolated"
+        )
+    }
+
+    network_id = next(
+        iter(
+            _docker_project_network_ids(
+                project
+            )
+        )
+    )
+
+    network_inspect = subprocess.run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            network_id,
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=True,
+    )
+
+    network = json.loads(
+        network_inspect.stdout
+    )[0]
+
+    assert network.get(
+        "Internal"
+    ) is True
 
 
 def _prepare_and_request_deploy(
@@ -1075,5 +1554,173 @@ def test_v2115a_proposal_mode_blocks_transaction_before_claim(
         environment[
             "docker_commands"
         ]
+        == []
+    )
+
+@pytest.mark.skipif(
+    os.environ.get(
+        "JARVIS_V2115B_REAL_DOCKER"
+    )
+    != "1",
+    reason=(
+        "V2.1.15B real Docker test runs "
+        "only when explicitly enabled."
+    ),
+)
+def test_v2115b_real_compose_deployment_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    docker_image = str(
+        os.environ.get(
+            "JARVIS_V2115B_IMAGE"
+        )
+        or ""
+    ).strip()
+
+    assert docker_image
+
+    environment = _install_isolated_runtime(
+        monkeypatch,
+        tmp_path,
+        real_docker=True,
+        docker_image=docker_image,
+    )
+
+    request.addfinalizer(
+        lambda: _cleanup_real_docker(
+            environment
+        )
+    )
+
+    project = str(
+        environment[
+            "docker_project"
+        ]
+    )
+
+    assert project.startswith(
+        "jarvis-v2115b-"
+    )
+
+    assert (
+        _docker_project_container_ids(
+            project
+        )
+        == []
+    )
+
+    assert (
+        _docker_project_network_ids(
+            project
+        )
+        == []
+    )
+
+    candidate = _prepare_and_request_deploy(
+        environment
+    )
+
+    config = environment[
+        "config"
+    ]
+
+    config.proposal_only = False
+
+    worker.deploy_candidate(
+        worker.fetch_candidate_by_id(
+            int(
+                candidate[
+                    "candidate_id"
+                ]
+            )
+        ),
+        config,
+        {},
+    )
+
+    final = asyncio.run(
+        environment[
+            "engine"
+        ].get_candidate(
+            int(
+                candidate[
+                    "candidate_id"
+                ]
+            )
+        )
+    )
+
+    assert final is not None
+    assert final["status"] == "deployed"
+    assert final["deploy_phase"] == "deployed"
+
+    assert (
+        environment[
+            "docker_commands"
+        ]
+        == [
+            [
+                "docker",
+                "compose",
+                "up",
+                "-d",
+                "--build",
+            ]
+        ]
+    )
+
+    container = _wait_for_real_boundary(
+        environment
+    )
+
+    _assert_real_docker_isolation(
+        environment,
+        container,
+    )
+
+    assert (
+        container[
+            "Config"
+        ][
+            "Image"
+        ]
+        == docker_image
+    )
+
+    repo_head = _git(
+        environment[
+            "repo"
+        ],
+        "rev-parse",
+        "HEAD",
+    )
+
+    assert (
+        repo_head
+        == final[
+            "candidate_commit"
+        ]
+    )
+
+    # Explicit cleanup proves the successful path.
+    # The pytest finalizer above independently guarantees
+    # the same cleanup is attempted on any earlier failure.
+    _cleanup_real_docker(
+        environment
+    )
+
+    assert (
+        _docker_project_container_ids(
+            project
+        )
+        == []
+    )
+
+    assert (
+        _docker_project_network_ids(
+            project
+        )
         == []
     )
