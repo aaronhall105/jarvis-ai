@@ -1746,3 +1746,544 @@ def test_candidate_generation_requires_transactional_approval() -> None:
         "To review and approve"
         in source
     )
+
+
+def _create_lease_test_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    status: str,
+    base_commit: str,
+    candidate_commit: str,
+    lease_expires_at: str | None = None,
+) -> Path:
+    import sqlite3
+
+    database = (
+        tmp_path
+        / "lease-test.db"
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DATA_DIR",
+        tmp_path,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "DB_PATH",
+        database,
+    )
+
+    with sqlite3.connect(
+        database
+    ) as connection:
+        connection.execute(
+            """
+            CREATE TABLE improvement_candidates (
+                candidate_id INTEGER PRIMARY KEY,
+                failure_id INTEGER NOT NULL,
+                created_at TEXT,
+                updated_at TEXT,
+                status TEXT,
+                base_commit TEXT,
+                candidate_commit TEXT,
+                validated_patch_sha256 TEXT,
+                rollback_ref TEXT,
+                error TEXT
+            )
+            """
+        )
+
+        connection.execute(
+            """
+            INSERT INTO improvement_candidates (
+                candidate_id,
+                failure_id,
+                created_at,
+                updated_at,
+                status,
+                base_commit,
+                candidate_commit,
+                validated_patch_sha256,
+                rollback_ref
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                1,
+                1,
+                worker.utc_now(),
+                worker.utc_now(),
+                status,
+                base_commit,
+                candidate_commit,
+                "c" * 64,
+                base_commit,
+            ),
+        )
+
+    worker.ensure_candidate_transaction_columns()
+
+    if lease_expires_at is not None:
+        with worker.connect() as connection:
+            connection.execute(
+                """
+                UPDATE improvement_candidates
+                SET deploy_lease_expires_at = ?
+                WHERE candidate_id = 1
+                """,
+                (
+                    lease_expires_at,
+                ),
+            )
+
+    return database
+
+
+def test_deployment_claim_is_leased_and_one_time(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = "a" * 40
+    candidate_commit = "b" * 40
+
+    _create_lease_test_database(
+        monkeypatch,
+        tmp_path,
+        status="deploy_requested",
+        base_commit=base,
+        candidate_commit=candidate_commit,
+    )
+
+    claimed = worker.claim_deployment(
+        1
+    )
+
+    assert claimed["status"] == "deploying"
+    assert claimed["deploy_lease_id"]
+    assert claimed["deploy_lease_started_at"]
+    assert claimed["deploy_lease_expires_at"]
+    assert claimed["deploy_phase"] == "claimed"
+    assert claimed["rollback_ref"] == base
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="not available",
+    ):
+        worker.claim_deployment(
+            1
+        )
+
+
+def test_stale_deployment_before_merge_is_requeued(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = "a" * 40
+    candidate_commit = "b" * 40
+
+    _create_lease_test_database(
+        monkeypatch,
+        tmp_path,
+        status="deploying",
+        base_commit=base,
+        candidate_commit=candidate_commit,
+        lease_expires_at=worker.utc_after(
+            -60
+        ),
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ensure_repo",
+        lambda: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        if command == [
+            "git",
+            "rev-parse",
+            "HEAD",
+        ]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=base,
+            )
+
+        pytest.fail(
+            f"Unexpected command: {command}"
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    cfg = config()
+
+    cfg.proposal_only = False
+
+    result = worker.recover_interrupted_deployment(
+        {
+            "candidate_id": 1,
+            "failure_id": 1,
+            "status": "deploying",
+        },
+        cfg,
+        {},
+    )
+
+    assert result == "requeued"
+
+    recovered = worker.fetch_candidate_by_id(
+        1
+    )
+
+    assert recovered is not None
+    assert (
+        recovered["status"]
+        == "deploy_requested"
+    )
+    assert (
+        recovered["deploy_phase"]
+        == "recovered_requeued"
+    )
+    assert recovered["deploy_lease_id"] is None
+
+
+def test_stale_deployment_unknown_head_never_resets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base = "a" * 40
+    candidate_commit = "b" * 40
+    unexpected = "d" * 40
+
+    _create_lease_test_database(
+        monkeypatch,
+        tmp_path,
+        status="deploying",
+        base_commit=base,
+        candidate_commit=candidate_commit,
+        lease_expires_at=worker.utc_after(
+            -60
+        ),
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ensure_repo",
+        lambda: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "notify_aaron",
+        lambda *args, **kwargs: False,
+    )
+
+    commands: list[
+        list[str]
+    ] = []
+
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        commands.append(
+            command
+        )
+
+        if command == [
+            "git",
+            "rev-parse",
+            "HEAD",
+        ]:
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout=unexpected,
+            )
+
+        pytest.fail(
+            f"Unexpected command: {command}"
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    cfg = config()
+
+    cfg.proposal_only = False
+
+    result = worker.recover_interrupted_deployment(
+        {
+            "candidate_id": 1,
+            "failure_id": 1,
+            "status": "deploying",
+        },
+        cfg,
+        {},
+    )
+
+    assert result == "recovery_required"
+
+    assert not any(
+        command[
+            :3
+        ]
+        == [
+            "git",
+            "reset",
+            "--hard",
+        ]
+        for command in commands
+    )
+
+    recovered = worker.fetch_candidate_by_id(
+        1
+    )
+
+    assert recovered is not None
+    assert (
+        recovered["status"]
+        == "recovery_required"
+    )
+    assert (
+        recovered["deploy_phase"]
+        == "unexpected_head"
+    )
+
+
+def test_exact_reset_helper_uses_temporary_git_repository(
+    tmp_path: Path,
+) -> None:
+    repo = (
+        tmp_path
+        / "repo"
+    )
+
+    repo.mkdir()
+
+    def git(
+        *args: str,
+    ) -> str:
+        completed = subprocess.run(
+            [
+                "git",
+                *args,
+            ],
+            cwd=repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
+
+        return completed.stdout.strip()
+
+    git(
+        "init",
+        "-q",
+    )
+
+    git(
+        "config",
+        "user.email",
+        "jarvis-test@example.invalid",
+    )
+
+    git(
+        "config",
+        "user.name",
+        "Jarvis Test",
+    )
+
+    file = (
+        repo
+        / "value.txt"
+    )
+
+    file.write_text(
+        "base\n",
+        encoding="utf-8",
+    )
+
+    git(
+        "add",
+        "value.txt",
+    )
+
+    git(
+        "commit",
+        "-q",
+        "-m",
+        "base",
+    )
+
+    base = git(
+        "rev-parse",
+        "HEAD",
+    )
+
+    file.write_text(
+        "candidate\n",
+        encoding="utf-8",
+    )
+
+    git(
+        "add",
+        "value.txt",
+    )
+
+    git(
+        "commit",
+        "-q",
+        "-m",
+        "candidate",
+    )
+
+    candidate = git(
+        "rev-parse",
+        "HEAD",
+    )
+
+    assert candidate != base
+
+    reset = worker.reset_repository_to_ref(
+        base,
+        repo_root=repo,
+    )
+
+    assert reset == base
+    assert (
+        git(
+            "rev-parse",
+            "HEAD",
+        )
+        == base
+    )
+
+    assert (
+        file.read_text(
+            encoding="utf-8"
+        )
+        == "base\n"
+    )
+
+
+def test_run_once_prioritises_deployment_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config()
+
+    cfg.proposal_only = False
+
+    monkeypatch.setattr(
+        worker,
+        "update_setting",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "improvement_enabled",
+        lambda: True,
+    )
+
+    deploying = {
+        "candidate_id": 44,
+        "failure_id": 9,
+        "status": "deploying",
+    }
+
+    def fake_fetch(
+        statuses: tuple[str, ...],
+    ) -> dict[str, object] | None:
+        if statuses == (
+            "deploying",
+        ):
+            return deploying
+
+        pytest.fail(
+            "run_once continued past interrupted "
+            f"deployment: {statuses}"
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "fetch_candidate",
+        fake_fetch,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "deployment_lease_is_expired",
+        lambda candidate: True,
+    )
+
+    recovered: list[int] = []
+
+    monkeypatch.setattr(
+        worker,
+        "recover_interrupted_deployment",
+        lambda candidate, *args: (
+            recovered.append(
+                int(
+                    candidate[
+                        "candidate_id"
+                    ]
+                )
+            )
+            or "requeued"
+        ),
+    )
+
+    assert worker.run_once(
+        cfg,
+        {},
+    ) is True
+
+    assert recovered == [
+        44
+    ]

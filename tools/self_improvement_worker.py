@@ -77,6 +77,40 @@ def utc_after(
     ).isoformat()
 
 
+def timestamp_expired(
+    value: str | None,
+    *,
+    missing_is_expired: bool = True,
+) -> bool:
+    raw = str(
+        value or ""
+    ).strip()
+
+    if not raw:
+        return missing_is_expired
+
+    try:
+        parsed = datetime.fromisoformat(
+            raw
+        )
+    except ValueError:
+        return True
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(
+            tzinfo=timezone.utc
+        )
+
+    return (
+        parsed.astimezone(
+            timezone.utc
+        )
+        <= datetime.now(
+            timezone.utc
+        )
+    )
+
+
 def load_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -162,6 +196,10 @@ TRANSACTION_COLUMNS: dict[str, str] = {
     "base_commit": "TEXT",
     "candidate_commit": "TEXT",
     "validated_patch_sha256": "TEXT",
+    "deploy_lease_id": "TEXT",
+    "deploy_lease_started_at": "TEXT",
+    "deploy_lease_expires_at": "TEXT",
+    "deploy_phase": "TEXT",
 }
 
 
@@ -355,6 +393,279 @@ def fetch_candidate(statuses: tuple[str, ...]) -> dict[str, Any] | None:
             statuses,
         ).fetchone()
     return dict(row) if row else None
+
+
+def fetch_candidate_by_id(
+    candidate_id: int,
+) -> dict[str, Any] | None:
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+    return (
+        dict(row)
+        if row
+        else None
+    )
+
+
+def deployment_lease_is_expired(
+    candidate: dict[str, Any],
+) -> bool:
+    return timestamp_expired(
+        candidate.get(
+            "deploy_lease_expires_at"
+        ),
+        missing_is_expired=True,
+    )
+
+
+def claim_deployment(
+    candidate_id: int,
+    *,
+    lease_seconds: int = 15 * 60,
+) -> dict[str, Any]:
+    ensure_candidate_transaction_columns()
+
+    now = utc_now()
+    expires_at = utc_after(
+        lease_seconds
+    )
+    lease_id = secrets.token_hex(
+        16
+    )
+
+    with connect() as connection:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            raise WorkerError(
+                f"Candidate {candidate_id} was not found."
+            )
+
+        candidate = dict(
+            row
+        )
+
+        if str(
+            candidate.get(
+                "status"
+            )
+            or ""
+        ) != "deploy_requested":
+            raise WorkerError(
+                "Candidate is not available for "
+                "deployment claiming."
+            )
+
+        cursor = connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET
+                status = 'deploying',
+                updated_at = ?,
+                deploy_lease_id = ?,
+                deploy_lease_started_at = ?,
+                deploy_lease_expires_at = ?,
+                deploy_phase = 'claimed',
+                rollback_ref = COALESCE(
+                    rollback_ref,
+                    base_commit
+                )
+            WHERE candidate_id = ?
+              AND status = 'deploy_requested'
+            """,
+            (
+                now,
+                lease_id,
+                now,
+                expires_at,
+                candidate_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            raise WorkerError(
+                "Deployment claim lost a database race."
+            )
+
+        claimed = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        if claimed is None:
+            raise WorkerError(
+                "Claimed candidate disappeared."
+            )
+
+        return dict(
+            claimed
+        )
+
+
+def update_deployment_phase(
+    candidate_id: int,
+    lease_id: str,
+    phase: str,
+    *,
+    lease_seconds: int = 15 * 60,
+) -> None:
+    if not lease_id:
+        raise WorkerError(
+            "Deployment lease ID is missing."
+        )
+
+    now = utc_now()
+    expires_at = utc_after(
+        lease_seconds
+    )
+
+    with connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET
+                updated_at = ?,
+                deploy_phase = ?,
+                deploy_lease_expires_at = ?
+            WHERE candidate_id = ?
+              AND status = 'deploying'
+              AND deploy_lease_id = ?
+            """,
+            (
+                now,
+                phase,
+                expires_at,
+                candidate_id,
+                lease_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            raise WorkerError(
+                "Deployment lease was lost."
+            )
+
+
+def claim_stale_deployment_recovery(
+    candidate_id: int,
+    *,
+    lease_seconds: int = 15 * 60,
+) -> dict[str, Any] | None:
+    ensure_candidate_transaction_columns()
+
+    now = utc_now()
+    expires_at = utc_after(
+        lease_seconds
+    )
+    lease_id = secrets.token_hex(
+        16
+    )
+
+    with connect() as connection:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        row = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        candidate = dict(
+            row
+        )
+
+        if str(
+            candidate.get(
+                "status"
+            )
+            or ""
+        ) != "deploying":
+            return None
+
+        if not deployment_lease_is_expired(
+            candidate
+        ):
+            return None
+
+        cursor = connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET
+                updated_at = ?,
+                deploy_lease_id = ?,
+                deploy_lease_started_at = ?,
+                deploy_lease_expires_at = ?,
+                deploy_phase = 'recovery_claimed'
+            WHERE candidate_id = ?
+              AND status = 'deploying'
+            """,
+            (
+                now,
+                lease_id,
+                now,
+                expires_at,
+                candidate_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            return None
+
+        claimed = connection.execute(
+            """
+            SELECT *
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+        return (
+            dict(claimed)
+            if claimed
+            else None
+        )
 
 
 def fetch_failure(failure_id: int) -> dict[str, Any]:
@@ -2680,9 +2991,13 @@ def verify_candidate_deploy_binding(
             "status"
         )
         or ""
-    ) != "deploy_requested":
+    ) not in {
+        "deploy_requested",
+        "deploying",
+    }:
         raise WorkerError(
-            "Candidate is not in deploy_requested state."
+            "Candidate is not in an authorised "
+            "deployment state."
         )
 
     expected_branch = (
@@ -2872,6 +3187,60 @@ def verify_candidate_deploy_binding(
             resolved_workspace
         ),
     }
+
+
+def reset_repository_to_ref(
+    rollback_ref: str,
+    *,
+    repo_root: Path = ROOT,
+) -> str:
+    target = _normalise_commit_sha(
+        rollback_ref,
+        label="rollback",
+    )
+
+    run(
+        [
+            "git",
+            "rev-parse",
+            "--verify",
+            f"{target}^{{commit}}",
+        ],
+        cwd=repo_root,
+        timeout=60,
+    )
+
+    run(
+        [
+            "git",
+            "reset",
+            "--hard",
+            target,
+        ],
+        cwd=repo_root,
+        timeout=120,
+    )
+
+    actual = _normalise_commit_sha(
+        run(
+            [
+                "git",
+                "rev-parse",
+                "HEAD",
+            ],
+            cwd=repo_root,
+            timeout=60,
+        ).stdout.strip(),
+        label="post-reset HEAD",
+    )
+
+    if actual != target:
+        raise WorkerError(
+            "Repository reset did not land on "
+            "the requested rollback commit."
+        )
+
+    return actual
 
 
 def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
@@ -3070,6 +3439,10 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             deploy_ticket_salt=None,
             deploy_ticket_expires_at=None,
             deploy_ticket_consumed_at=None,
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            deploy_phase="awaiting_approval",
             pr_url=pr_url,
             error=None,
             deploy_requested_at=None,
@@ -3155,40 +3528,53 @@ def deploy_candidate(
         ]
     )
 
-    binding = verify_candidate_deploy_binding(
-        candidate
+    claimed = claim_deployment(
+        candidate_id
     )
 
-    current_ref = binding[
-        "base_commit"
-    ]
-
-    candidate_commit = binding[
-        "candidate_commit"
-    ]
-
-    update_candidate(
-        candidate_id,
-        status="deploying",
-        rollback_ref=current_ref,
+    lease_id = str(
+        claimed.get(
+            "deploy_lease_id"
+        )
+        or ""
     )
 
-    audit(
-        "candidate_deploying",
-        failure_id=failure_id,
-        candidate_id=candidate_id,
-        details={
-            "rollback_ref": current_ref,
-            "candidate_commit": candidate_commit,
-            "validated_patch_sha256": (
-                binding[
-                    "validated_patch_sha256"
-                ]
-            ),
-        },
-    )
+    if not lease_id:
+        raise WorkerError(
+            "Deployment claim did not produce a lease."
+        )
+
+    merged = False
 
     try:
+        binding = verify_candidate_deploy_binding(
+            claimed
+        )
+
+        current_ref = binding[
+            "base_commit"
+        ]
+
+        candidate_commit = binding[
+            "candidate_commit"
+        ]
+
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "premerge_verified",
+        )
+
+        audit(
+            "candidate_deployment_claimed",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "base_commit": current_ref,
+                "candidate_commit": candidate_commit,
+            },
+        )
+
         premerge_ref = _normalise_commit_sha(
             run(
                 [
@@ -3206,8 +3592,12 @@ def deploy_candidate(
                 "binding verification."
             )
 
-        # Merge the exact commit that passed validation.
-        # Never merge a movable branch ref here.
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "merging",
+        )
+
         run(
             [
                 "git",
@@ -3216,6 +3606,8 @@ def deploy_candidate(
                 candidate_commit,
             ]
         )
+
+        merged = True
 
         merged_ref = _normalise_commit_sha(
             run(
@@ -3234,6 +3626,18 @@ def deploy_candidate(
                 "exact validated candidate commit."
             )
 
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "merged",
+        )
+
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "rebuilding",
+        )
+
         run(
             [
                 "docker",
@@ -3243,6 +3647,12 @@ def deploy_candidate(
                 "--build",
             ],
             timeout=600,
+        )
+
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "verifying",
         )
 
         healthy, health_output = (
@@ -3267,6 +3677,10 @@ def deploy_candidate(
             candidate_id,
             status="deployed",
             deployed_at=utc_now(),
+            deploy_phase="deployed",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
             error=None,
         )
 
@@ -3299,14 +3713,316 @@ def deploy_candidate(
         )
 
     except Exception as exc:
-        run(
-            [
-                "git",
-                "reset",
-                "--hard",
-                current_ref,
-            ],
-            check=False,
+        error = str(
+            exc
+        )[-12000:]
+
+        if not merged:
+            update_candidate(
+                candidate_id,
+                status="deployment_blocked",
+                deploy_phase="premerge_failed",
+                deploy_lease_id=None,
+                deploy_lease_started_at=None,
+                deploy_lease_expires_at=None,
+                error=error,
+            )
+
+            audit(
+                "candidate_deployment_blocked",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "error": error[-4000:],
+                },
+            )
+
+            raise
+
+        rollback_ref = _normalise_commit_sha(
+            claimed.get(
+                "base_commit"
+            ),
+            label="rollback base",
+        )
+
+        try:
+            reset_repository_to_ref(
+                rollback_ref,
+                repo_root=ROOT,
+            )
+
+            run(
+                [
+                    "docker",
+                    "compose",
+                    "up",
+                    "-d",
+                    "--build",
+                ],
+                timeout=600,
+            )
+
+            healthy, rollback_health = (
+                health_check(
+                    config.deploy_health_timeout_seconds
+                )
+            )
+
+            if not healthy:
+                raise WorkerError(
+                    "Automatic rollback health check failed: "
+                    + rollback_health
+                )
+
+            update_candidate(
+                candidate_id,
+                status="rolled_back",
+                rolled_back_at=utc_now(),
+                deploy_phase="rolled_back",
+                deploy_lease_id=None,
+                deploy_lease_started_at=None,
+                deploy_lease_expires_at=None,
+                error=error,
+            )
+
+            update_failure(
+                failure_id,
+                status="recorded",
+            )
+
+            audit(
+                "candidate_auto_rolled_back",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "error": error[-4000:],
+                    "rollback_ref": rollback_ref,
+                },
+            )
+
+            notify_aaron(
+                f"Improvement {candidate_id} failed deployment "
+                "checks and was rolled back automatically.",
+                title="Jarvis rollback completed",
+                config=config,
+                env_values=env_values,
+            )
+
+        except Exception as rollback_exc:
+            rollback_error = (
+                "Deployment failed and automatic rollback "
+                "could not be verified. "
+                + str(
+                    rollback_exc
+                )
+            )[-12000:]
+
+            update_candidate(
+                candidate_id,
+                status="recovery_required",
+                deploy_phase="rollback_failed",
+                deploy_lease_id=None,
+                deploy_lease_started_at=None,
+                deploy_lease_expires_at=None,
+                error=rollback_error,
+            )
+
+            audit(
+                "candidate_recovery_required",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "error": rollback_error[-4000:],
+                },
+            )
+
+            notify_aaron(
+                f"Improvement {candidate_id} requires manual "
+                "recovery after a failed deployment rollback.",
+                title="Jarvis recovery required",
+                config=config,
+                env_values=env_values,
+            )
+
+        raise
+
+
+def recover_interrupted_deployment(
+    candidate: dict[str, Any],
+    config: WorkerConfig,
+    env_values: dict[str, str],
+) -> str:
+    if config.proposal_only:
+        raise WorkerError(
+            "Deployment recovery is disabled while "
+            "Proposal Mode is active."
+        )
+
+    candidate_id = int(
+        candidate[
+            "candidate_id"
+        ]
+    )
+
+    failure_id = int(
+        candidate[
+            "failure_id"
+        ]
+    )
+
+    claimed = claim_stale_deployment_recovery(
+        candidate_id
+    )
+
+    if claimed is None:
+        return "active"
+
+    lease_id = str(
+        claimed.get(
+            "deploy_lease_id"
+        )
+        or ""
+    )
+
+    base_commit = _normalise_commit_sha(
+        claimed.get(
+            "base_commit"
+        ),
+        label="recovery base",
+    )
+
+    candidate_commit = _normalise_commit_sha(
+        claimed.get(
+            "candidate_commit"
+        ),
+        label="recovery candidate",
+    )
+
+    try:
+        ensure_repo()
+
+        current_ref = _normalise_commit_sha(
+            run(
+                [
+                    "git",
+                    "rev-parse",
+                    "HEAD",
+                ]
+            ).stdout.strip(),
+            label="recovery live HEAD",
+        )
+
+    except Exception as exc:
+        error = (
+            "Interrupted deployment could not safely "
+            "inspect the live repository: "
+            + str(
+                exc
+            )
+        )[-12000:]
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="inspection_failed",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            error=error,
+        )
+
+        audit(
+            "candidate_recovery_required",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": error[-4000:],
+            },
+        )
+
+        return "recovery_required"
+
+    if current_ref == base_commit:
+        update_candidate(
+            candidate_id,
+            status="deploy_requested",
+            deploy_phase="recovered_requeued",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            error=(
+                "Recovered interrupted deployment "
+                "before the candidate commit was merged."
+            ),
+        )
+
+        audit(
+            "candidate_deployment_requeued",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "base_commit": base_commit,
+            },
+        )
+
+        return "requeued"
+
+    if current_ref != candidate_commit:
+        error = (
+            "Interrupted deployment found an unexpected "
+            "live HEAD. Automatic reset was refused. "
+            f"expected_base={base_commit} "
+            f"expected_candidate={candidate_commit} "
+            f"actual={current_ref}"
+        )
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="unexpected_head",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            error=error,
+        )
+
+        audit(
+            "candidate_recovery_required",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "reason": "unexpected_head",
+                "actual_head": current_ref,
+            },
+        )
+
+        notify_aaron(
+            f"Improvement {candidate_id} requires manual "
+            "recovery because live Git HEAD is unexpected.",
+            title="Jarvis recovery required",
+            config=config,
+            env_values=env_values,
+        )
+
+        return "recovery_required"
+
+    try:
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "recovery_rolling_back",
+        )
+
+        reset_repository_to_ref(
+            base_commit,
+            repo_root=ROOT,
+        )
+
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "recovery_rebuilding",
         )
 
         run(
@@ -3318,16 +4034,43 @@ def deploy_candidate(
                 "--build",
             ],
             timeout=600,
-            check=False,
         )
+
+        update_deployment_phase(
+            candidate_id,
+            lease_id,
+            "recovery_verifying",
+        )
+
+        healthy, output = health_check(
+            config.deploy_health_timeout_seconds
+        )
+
+        logs_ok, logs = monitor_logs(
+            30
+        )
+
+        if not healthy or not logs_ok:
+            raise WorkerError(
+                "Interrupted deployment rollback did "
+                "not pass verification.\n"
+                + output
+                + "\n"
+                + logs
+            )
 
         update_candidate(
             candidate_id,
             status="rolled_back",
             rolled_back_at=utc_now(),
-            error=str(
-                exc
-            )[-12000:],
+            deploy_phase="interrupted_rolled_back",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            error=(
+                "Interrupted deployment was automatically "
+                "rolled back to its validated base."
+            ),
         )
 
         update_failure(
@@ -3336,26 +4079,61 @@ def deploy_candidate(
         )
 
         audit(
-            "candidate_auto_rolled_back",
+            "candidate_interrupted_rolled_back",
             failure_id=failure_id,
             candidate_id=candidate_id,
             details={
-                "error": str(
-                    exc
-                )[-4000:],
-                "rollback_ref": current_ref,
+                "rollback_ref": base_commit,
+                "candidate_commit": candidate_commit,
             },
         )
 
         notify_aaron(
-            f"Improvement {candidate_id} failed deployment "
-            "checks and was rolled back automatically.",
-            title="Jarvis rollback completed",
+            f"Interrupted improvement {candidate_id} was "
+            "rolled back safely.",
+            title="Jarvis deployment recovered",
             config=config,
             env_values=env_values,
         )
 
-        raise
+        return "rolled_back"
+
+    except Exception as exc:
+        error = (
+            "Interrupted deployment recovery failed: "
+            + str(
+                exc
+            )
+        )[-12000:]
+
+        update_candidate(
+            candidate_id,
+            status="recovery_required",
+            deploy_phase="recovery_failed",
+            deploy_lease_id=None,
+            deploy_lease_started_at=None,
+            deploy_lease_expires_at=None,
+            error=error,
+        )
+
+        audit(
+            "candidate_recovery_required",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "error": error[-4000:],
+            },
+        )
+
+        notify_aaron(
+            f"Improvement {candidate_id} requires manual "
+            "recovery after an interrupted deployment.",
+            title="Jarvis recovery required",
+            config=config,
+            env_values=env_values,
+        )
+
+        return "recovery_required"
 
 
 def rollback_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
@@ -3372,7 +4150,10 @@ def rollback_candidate(candidate: dict[str, Any], config: WorkerConfig, env_valu
     ensure_repo()
     update_candidate(candidate_id, status="rolling_back")
     audit("candidate_rolling_back", failure_id=failure_id, candidate_id=candidate_id)
-    run(["git", "reset", "--hard", rollback_ref])
+    reset_repository_to_ref(
+        rollback_ref,
+        repo_root=ROOT,
+    )
     run(["docker", "compose", "up", "-d", "--build"], timeout=600)
     healthy, output = health_check(config.deploy_health_timeout_seconds)
     if not healthy:
@@ -3389,17 +4170,47 @@ def rollback_candidate(candidate: dict[str, Any], config: WorkerConfig, env_valu
     )
 
 
-def run_once(config: WorkerConfig, env_values: dict[str, str]) -> bool:
-    update_setting("worker_heartbeat", utc_now())
+def run_once(
+    config: WorkerConfig,
+    env_values: dict[str, str],
+) -> bool:
+    update_setting(
+        "worker_heartbeat",
+        utc_now(),
+    )
+
     if not improvement_enabled():
         return False
 
-    # Proposal Mode is deliberately one-way: it may inspect,
-    # generate, patch and validate isolated worktrees, but it may
-    # never alter the live branch or restart production services.
     if not config.proposal_only:
+        deploying = fetch_candidate(
+            (
+                "deploying",
+            )
+        )
+
+        if deploying:
+            if deployment_lease_is_expired(
+                deploying
+            ):
+                recover_interrupted_deployment(
+                    deploying,
+                    config,
+                    env_values,
+                )
+
+                return True
+
+            # A non-expired deployment lease represents an
+            # in-flight deployment transaction. Do not begin
+            # unrelated improvement work until it completes
+            # or the lease expires.
+            return False
+
         rollback = fetch_candidate(
-            ("rollback_requested",)
+            (
+                "rollback_requested",
+            )
         )
 
         if rollback:
@@ -3408,10 +4219,13 @@ def run_once(config: WorkerConfig, env_values: dict[str, str]) -> bool:
                 config,
                 env_values,
             )
+
             return True
 
         deploy = fetch_candidate(
-            ("deploy_requested",)
+            (
+                "deploy_requested",
+            )
         )
 
         if deploy:
@@ -3420,11 +4234,22 @@ def run_once(config: WorkerConfig, env_values: dict[str, str]) -> bool:
                 config,
                 env_values,
             )
+
             return True
 
-    queued = fetch_candidate(("queued",))
+    queued = fetch_candidate(
+        (
+            "queued",
+        )
+    )
+
     if queued:
-        process_queued_candidate(queued, config, env_values)
+        process_queued_candidate(
+            queued,
+            config,
+            env_values,
+        )
+
         return True
 
     return False

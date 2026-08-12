@@ -166,6 +166,10 @@ class SelfImprovementEngine:
             "base_commit": "TEXT",
             "candidate_commit": "TEXT",
             "validated_patch_sha256": "TEXT",
+            "deploy_lease_id": "TEXT",
+            "deploy_lease_started_at": "TEXT",
+            "deploy_lease_expires_at": "TEXT",
+            "deploy_phase": "TEXT",
         }
 
         for name, data_type in columns.items():
@@ -1120,7 +1124,11 @@ class SelfImprovementEngine:
                     deploy_ticket_hash = ?,
                     deploy_ticket_salt = ?,
                     deploy_ticket_expires_at = ?,
-                    deploy_ticket_consumed_at = NULL
+                    deploy_ticket_consumed_at = NULL,
+                    deploy_lease_id = NULL,
+                    deploy_lease_started_at = NULL,
+                    deploy_lease_expires_at = NULL,
+                    deploy_phase = 'approved'
                 WHERE candidate_id = ?
                   AND status IN (
                       'awaiting_approval',
@@ -1288,7 +1296,11 @@ class SelfImprovementEngine:
                     deploy_requested_at = ?,
                     deploy_ticket_consumed_at = ?,
                     deploy_ticket_hash = NULL,
-                    deploy_ticket_salt = NULL
+                    deploy_ticket_salt = NULL,
+                    deploy_lease_id = NULL,
+                    deploy_lease_started_at = NULL,
+                    deploy_lease_expires_at = NULL,
+                    deploy_phase = 'requested'
                 WHERE candidate_id = ?
                   AND status = 'approved'
                   AND deploy_ticket_consumed_at IS NULL

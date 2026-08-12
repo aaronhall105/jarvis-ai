@@ -407,6 +407,10 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
     )
     assert candidate["deploy_ticket_hash"] is None
     assert candidate["deploy_ticket_salt"] is None
+    assert candidate["deploy_lease_id"] is None
+    assert candidate["deploy_lease_started_at"] is None
+    assert candidate["deploy_lease_expires_at"] is None
+    assert candidate["deploy_phase"] == "requested"
 
 
 @pytest.mark.asyncio
