@@ -56,6 +56,7 @@ class WorkerConfig:
     notify_enabled: bool
     notify_service: str
     auto_deploy_low_risk: bool
+    proposal_only: bool
     candidate_timeout_seconds: int
     deploy_health_timeout_seconds: int
     base_branch: str
@@ -118,6 +119,11 @@ def load_config() -> tuple[WorkerConfig, dict[str, str]]:
             notify_enabled=env_bool(values, "JARVIS_IMPROVEMENT_NOTIFY_ENABLED", True),
             notify_service=values.get("JARVIS_IMPROVEMENT_NOTIFY_SERVICE", "notify.mobile_app_aaron_s_phone").strip(),
             auto_deploy_low_risk=env_bool(values, "JARVIS_IMPROVEMENT_AUTO_DEPLOY_LOW_RISK", False),
+            proposal_only=env_bool(
+                values,
+                "JARVIS_IMPROVEMENT_PROPOSAL_ONLY",
+                True,
+            ),
             candidate_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_CANDIDATE_TIMEOUT_SECONDS", 600, 60, 3600),
             deploy_health_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_DEPLOY_HEALTH_TIMEOUT_SECONDS", 90, 20, 600),
             base_branch=values.get("JARVIS_IMPROVEMENT_BASE_BRANCH", current_branch).strip() or current_branch,
@@ -943,7 +949,16 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             "notes": payload.get("notes", []),
         }
         next_status = "awaiting_approval"
-        if risk == "low" and config.auto_deploy_low_risk and policy.get("allow_auto_deploy_low_risk", False):
+
+        if (
+            not config.proposal_only
+            and risk == "low"
+            and config.auto_deploy_low_risk
+            and policy.get(
+                "allow_auto_deploy_low_risk",
+                False,
+            )
+        ):
             next_status = "deploy_requested"
         update_candidate(
             candidate_id,
@@ -1018,6 +1033,11 @@ def monitor_logs(seconds: int = 30) -> tuple[bool, str]:
 
 
 def deploy_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
+    if config.proposal_only:
+        raise WorkerError(
+            "Deployment is disabled while Proposal Mode is active."
+        )
+
     candidate_id = int(candidate["candidate_id"])
     failure_id = int(candidate["failure_id"])
     workspace = Path(str(candidate.get("workspace_path") or ""))
@@ -1072,6 +1092,11 @@ def deploy_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values
 
 
 def rollback_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
+    if config.proposal_only:
+        raise WorkerError(
+            "Rollback execution is disabled while Proposal Mode is active."
+        )
+
     candidate_id = int(candidate["candidate_id"])
     failure_id = int(candidate["failure_id"])
     rollback_ref = str(candidate.get("rollback_ref") or "")
@@ -1102,15 +1127,33 @@ def run_once(config: WorkerConfig, env_values: dict[str, str]) -> bool:
     if not improvement_enabled():
         return False
 
-    rollback = fetch_candidate(("rollback_requested",))
-    if rollback:
-        rollback_candidate(rollback, config, env_values)
-        return True
+    # Proposal Mode is deliberately one-way: it may inspect,
+    # generate, patch and validate isolated worktrees, but it may
+    # never alter the live branch or restart production services.
+    if not config.proposal_only:
+        rollback = fetch_candidate(
+            ("rollback_requested",)
+        )
 
-    deploy = fetch_candidate(("deploy_requested",))
-    if deploy:
-        deploy_candidate(deploy, config, env_values)
-        return True
+        if rollback:
+            rollback_candidate(
+                rollback,
+                config,
+                env_values,
+            )
+            return True
+
+        deploy = fetch_candidate(
+            ("deploy_requested",)
+        )
+
+        if deploy:
+            deploy_candidate(
+                deploy,
+                config,
+                env_values,
+            )
+            return True
 
     queued = fetch_candidate(("queued",))
     if queued:
@@ -1143,6 +1186,7 @@ def print_status() -> None:
         ).fetchall()
     print(json.dumps({
         "enabled": improvement_enabled(),
+        "proposal_only": load_config()[0].proposal_only,
         "worker_heartbeat": setting("worker_heartbeat", "") or None,
         "failures": {str(row["status"]): int(row["count"]) for row in failures},
         "candidates": {str(row["status"]): int(row["count"]) for row in candidates},

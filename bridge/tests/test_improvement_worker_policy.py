@@ -30,6 +30,7 @@ def config() -> object:
         notify_enabled=False,
         notify_service="notify.mobile_app_aaron_s_phone",
         auto_deploy_low_risk=False,
+        proposal_only=True,
         candidate_timeout_seconds=60,
         deploy_health_timeout_seconds=30,
         base_branch="main",
@@ -79,3 +80,98 @@ def test_dangerous_added_code_is_rejected() -> None:
 """
     with pytest.raises(worker.WorkerError):
         worker.validate_patch_policy(patch, policy(), config())
+
+def test_proposal_only_blocks_direct_deploy() -> None:
+    candidate = {
+        "candidate_id": 1,
+        "failure_id": 1,
+    }
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="Proposal Mode",
+    ):
+        worker.deploy_candidate(
+            candidate,
+            config(),
+            {},
+        )
+
+
+def test_proposal_only_blocks_direct_rollback() -> None:
+    candidate = {
+        "candidate_id": 1,
+        "failure_id": 1,
+    }
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="Proposal Mode",
+    ):
+        worker.rollback_candidate(
+            candidate,
+            config(),
+            {},
+        )
+
+
+def test_proposal_only_skips_live_actions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config()
+
+    processed: list[int] = []
+
+    monkeypatch.setattr(
+        worker,
+        "update_setting",
+        lambda *args, **kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "improvement_enabled",
+        lambda: True,
+    )
+
+    def fake_fetch(
+        statuses: tuple[str, ...],
+    ) -> dict[str, object] | None:
+        if statuses == ("queued",):
+            return {
+                "candidate_id": 3,
+                "failure_id": 3,
+            }
+
+        if statuses == ("deploy_requested",):
+            pytest.fail(
+                "Proposal Mode queried deployment"
+            )
+
+        if statuses == ("rollback_requested",):
+            pytest.fail(
+                "Proposal Mode queried rollback"
+            )
+
+        return None
+
+    monkeypatch.setattr(
+        worker,
+        "fetch_candidate",
+        fake_fetch,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "process_queued_candidate",
+        lambda candidate, *args: processed.append(
+            int(candidate["candidate_id"])
+        ),
+    )
+
+    assert worker.run_once(
+        cfg,
+        {},
+    ) is True
+
+    assert processed == [3]
