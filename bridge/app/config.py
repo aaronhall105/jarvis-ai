@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     jarvis_admin_mode_enabled: bool = False
     jarvis_admin_confirmation_ttl_seconds: int = 900
 
+    # Separate credential for privileged AI operations.
+    # A request body's user_name/user_is_admin fields are identity
+    # claims only and must never grant privileged authority.
+    jarvis_privileged_admin_token: str = ""
+
     jarvis_awareness_enabled: bool = True
     jarvis_awareness_retention_days: int = 30
     jarvis_proactive_enabled: bool = False

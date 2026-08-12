@@ -35,6 +35,7 @@ class UserContext:
     user_key: str
     display_name: str
     is_admin: bool
+    privilege_verified: bool = False
     device_id: str | None = None
     voice_mode: bool = False
 
@@ -47,6 +48,7 @@ class UserContext:
         user_is_admin: bool,
         device_id: str | None,
         voice_mode: bool,
+        privilege_verified: bool = False,
     ) -> "UserContext":
         display_name = (user_name or "").strip() or "Aaron"
         return cls(
@@ -54,6 +56,9 @@ class UserContext:
             user_key=normalise_user_key(user_id, display_name),
             display_name=display_name,
             is_admin=bool(user_is_admin),
+            privilege_verified=bool(
+                privilege_verified
+            ),
             device_id=(device_id or "").strip() or None,
             voice_mode=bool(voice_mode),
         )
@@ -62,4 +67,8 @@ class UserContext:
     def can_admin(self) -> bool:
         """Only Aaron's authenticated administrator account may change HA config."""
 
-        return self.user_key == "aaron" and self.is_admin
+        return bool(
+            self.user_key == "aaron"
+            and self.is_admin
+            and self.privilege_verified
+        )

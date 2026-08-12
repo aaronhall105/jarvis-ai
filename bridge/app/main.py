@@ -349,6 +349,30 @@ async def admin_audit(limit: int = 50) -> dict[str, object]:
     }
 
 
+def _privileged_admin_token_valid(
+    token: str | None,
+) -> bool:
+    """Validate the separate credential used for privileged AI authority."""
+
+    expected = (
+        settings.jarvis_privileged_admin_token
+        .strip()
+    )
+
+    supplied = (
+        token or ""
+    ).strip()
+
+    return bool(
+        expected
+        and supplied
+        and secrets.compare_digest(
+            expected,
+            supplied,
+        )
+    )
+
+
 def _require_improvement_token(token: str | None) -> None:
     expected = settings.jarvis_self_improvement_admin_token.strip()
     if not expected:
@@ -729,6 +753,7 @@ async def _execute_ai_request(
     request: TextCommandRequest,
     on_text_delta: Callable[[str], Awaitable[None]] | None = None,
     trusted_context: dict[str, object] | None = None,
+    privilege_verified: bool = False,
 ) -> dict[str, object]:
     """Execute one user-scoped Jarvis request."""
 
@@ -740,6 +765,7 @@ async def _execute_ai_request(
         user_is_admin=request.user_is_admin,
         device_id=request.device_id,
         voice_mode=request.voice_mode,
+        privilege_verified=privilege_verified,
     )
     external_conversation_id, storage_conversation_id = _conversation_scope(
         request.conversation_id,
@@ -941,6 +967,9 @@ async def _execute_ai_request(
         "key": actor.user_key,
         "name": actor.display_name,
         "is_admin": actor.is_admin,
+        "privilege_verified": (
+            actor.privilege_verified
+        ),
     }
     timings = result.get("timings")
     if not isinstance(timings, dict):
@@ -1013,10 +1042,24 @@ async def _realtime_brain_handler(
         "utc_offset_seconds": metadata.get("utc_offset_seconds"),
     }
 
+    # This handler is reachable only after RealtimeVoiceProxy
+    # successfully validates the mobile or Voice PE token. Admin
+    # privilege is therefore trusted only when the authenticated
+    # realtime identity was also resolved as Aaron/admin.
+    realtime_privilege_verified = bool(
+        metadata.get(
+            "user_is_admin",
+            False,
+        )
+    )
+
     return await _execute_ai_request(
         request,
         on_text_delta=on_text_delta,
         trusted_context=trusted_context,
+        privilege_verified=(
+            realtime_privilege_verified
+        ),
     )
 
 
@@ -1044,9 +1087,19 @@ async def realtime_voice_websocket(
 @app.post("/api/assistant/ai")
 async def assistant_ai(
     request: TextCommandRequest,
+    x_jarvis_admin_token: str | None = Header(
+        default=None
+    ),
 ) -> dict[str, object]:
     try:
-        return await _execute_ai_request(request)
+        return await _execute_ai_request(
+            request,
+            privilege_verified=(
+                _privileged_admin_token_valid(
+                    x_jarvis_admin_token
+                )
+            ),
+        )
     except AIEngineError as exc:
         raise HTTPException(
             status_code=502,
@@ -1057,8 +1110,17 @@ async def assistant_ai(
 @app.post("/api/assistant/ai/stream")
 async def assistant_ai_stream(
     request: TextCommandRequest,
+    x_jarvis_admin_token: str | None = Header(
+        default=None
+    ),
 ) -> StreamingResponse:
     """Stream Jarvis text deltas as newline-delimited JSON."""
+
+    privilege_verified = (
+        _privileged_admin_token_valid(
+            x_jarvis_admin_token
+        )
+    )
 
     async def stream_events() -> AsyncIterator[str]:
         queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue(
@@ -1106,6 +1168,9 @@ async def assistant_ai_stream(
                 result = await _execute_ai_request(
                     request,
                     on_text_delta=on_text_delta,
+                    privilege_verified=(
+                        privilege_verified
+                    ),
                 )
                 first_answer_event.set()
                 timings = result.get("timings")
