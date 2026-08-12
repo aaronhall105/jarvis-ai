@@ -476,20 +476,175 @@ Local validation summary:
         "tool_choice": {"type": "function", "name": "submit_review"},
         "parallel_tool_calls": False,
         "store": False,
-        "max_output_tokens": 4000
+        "max_output_tokens": 16000
     }
     if config.model.lower().startswith("gpt-5"):
         kwargs["reasoning"] = {"effort": "high"}
         kwargs["text"] = {"verbosity": "low"}
-    response = client.responses.create(**kwargs)
-    review = parse_tool_arguments(response, "submit_review")
+
+    response = client.responses.create(
+        **kwargs
+    )
+
+    review_usage = _require_completed_response(
+        response,
+        purpose="Independent review",
+    )
+
+    review = parse_tool_arguments(
+        response,
+        "submit_review",
+    )
+
     review["enabled"] = True
-    review["response_id"] = str(getattr(response, "id", "") or "")
+
+    review[
+        "response_id"
+    ] = review_usage[
+        "response_id"
+    ]
+
+    review[
+        "response_status"
+    ] = review_usage[
+        "response_status"
+    ]
+
+    review[
+        "output_tokens"
+    ] = review_usage[
+        "output_tokens"
+    ]
+
+    review[
+        "reasoning_tokens"
+    ] = review_usage[
+        "reasoning_tokens"
+    ]
+
     return review
 
 
 def parse_patch_arguments(response: Any) -> dict[str, Any]:
     return parse_tool_arguments(response, "submit_patch")
+
+
+def _response_completion_metadata(
+    response: Any,
+) -> dict[str, Any]:
+    status = str(
+        getattr(
+            response,
+            "status",
+            "",
+        )
+        or ""
+    )
+
+    incomplete = getattr(
+        response,
+        "incomplete_details",
+        None,
+    )
+
+    if isinstance(
+        incomplete,
+        dict,
+    ):
+        incomplete_reason = str(
+            incomplete.get(
+                "reason"
+            )
+            or ""
+        )
+    else:
+        incomplete_reason = str(
+            getattr(
+                incomplete,
+                "reason",
+                "",
+            )
+            or ""
+        )
+
+    usage = getattr(
+        response,
+        "usage",
+        None,
+    )
+
+    output_details = getattr(
+        usage,
+        "output_tokens_details",
+        None,
+    )
+
+    return {
+        "response_status": status,
+        "incomplete_reason": incomplete_reason,
+        "input_tokens": int(
+            getattr(
+                usage,
+                "input_tokens",
+                0,
+            )
+            or 0
+        ),
+        "output_tokens": int(
+            getattr(
+                usage,
+                "output_tokens",
+                0,
+            )
+            or 0
+        ),
+        "reasoning_tokens": int(
+            getattr(
+                output_details,
+                "reasoning_tokens",
+                0,
+            )
+            or 0
+        ),
+        "response_id": str(
+            getattr(
+                response,
+                "id",
+                "",
+            )
+            or ""
+        ),
+    }
+
+
+def _require_completed_response(
+    response: Any,
+    *,
+    purpose: str,
+) -> dict[str, Any]:
+    metadata = (
+        _response_completion_metadata(
+            response
+        )
+    )
+
+    if (
+        metadata[
+            "response_status"
+        ]
+        != "completed"
+    ):
+        raise WorkerError(
+            f"{purpose} response was not completed: "
+            f"status={metadata['response_status'] or 'unknown'} "
+            f"incomplete_reason="
+            f"{metadata['incomplete_reason'] or 'unknown'} "
+            f"output_tokens={metadata['output_tokens']} "
+            f"reasoning_tokens={metadata['reasoning_tokens']} "
+            f"response_id={metadata['response_id'] or 'unknown'}"
+        )
+
+    return metadata
 
 
 def request_patch(
@@ -535,6 +690,9 @@ Requirements:
 - Add or update a focused pytest regression test.
 - Keep the patch under {config.max_patch_lines} changed lines and {config.max_changed_files} files.
 - Return a standard unified Git diff rooted at the repository, using paths such as a/bridge/app/file.py and b/bridge/app/file.py.
+- The patch must be COMPLETE. Never submit a partial diff, truncated function, unfinished expression, or unbalanced parenthesis/bracket.
+- Before calling submit_patch, re-check that every added Python file is syntactically complete from its first line through its final line.
+- Prefer a smaller, simpler complete patch over a larger patch that risks truncation.
 - Do not include prose inside the patch.
 """.strip()
     if previous_error:
@@ -586,19 +744,25 @@ Act as a conservative senior Python engineer and safety reviewer. You may only s
         "tool_choice": {"type": "function", "name": "submit_patch"},
         "parallel_tool_calls": False,
         "store": False,
-        "max_output_tokens": 16000,
+        "max_output_tokens": 32000,
     }
     if config.model.lower().startswith("gpt-5"):
-        kwargs["reasoning"] = {"effort": "high"}
+        kwargs["reasoning"] = {"effort": "medium"}
         kwargs["text"] = {"verbosity": "medium"}
-    response = client.responses.create(**kwargs)
-    payload = parse_patch_arguments(response)
-    usage_obj = getattr(response, "usage", None)
-    usage = {
-        "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
-        "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
-        "response_id": str(getattr(response, "id", "") or ""),
-    }
+
+    response = client.responses.create(
+        **kwargs
+    )
+
+    usage = _require_completed_response(
+        response,
+        purpose="Patch generation",
+    )
+
+    payload = parse_patch_arguments(
+        response
+    )
+
     return payload, usage
 
 

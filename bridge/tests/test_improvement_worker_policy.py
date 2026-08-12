@@ -859,3 +859,100 @@ def test_docker_smoke_preserves_startup_logs_for_exited_container(
         "unable to open database file"
         in result["output"]
     )
+
+def test_response_completion_metadata_includes_reasoning_tokens() -> None:
+    class OutputDetails:
+        reasoning_tokens = 321
+
+    class Usage:
+        input_tokens = 100
+        output_tokens = 500
+        output_tokens_details = OutputDetails()
+
+    class Response:
+        status = "completed"
+        incomplete_details = None
+        usage = Usage()
+        id = "resp_test_completed"
+
+    metadata = worker._response_completion_metadata(
+        Response()
+    )
+
+    assert metadata == {
+        "response_status": "completed",
+        "incomplete_reason": "",
+        "input_tokens": 100,
+        "output_tokens": 500,
+        "reasoning_tokens": 321,
+        "response_id": "resp_test_completed",
+    }
+
+
+def test_require_completed_response_rejects_token_incomplete() -> None:
+    class Incomplete:
+        reason = "max_tokens"
+
+    class OutputDetails:
+        reasoning_tokens = 15900
+
+    class Usage:
+        input_tokens = 1000
+        output_tokens = 16000
+        output_tokens_details = OutputDetails()
+
+    class Response:
+        status = "incomplete"
+        incomplete_details = Incomplete()
+        usage = Usage()
+        id = "resp_test_incomplete"
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="max_tokens",
+    ):
+        worker._require_completed_response(
+            Response(),
+            purpose="Patch generation",
+        )
+
+
+def test_generation_and_review_have_completion_guards() -> None:
+    import inspect
+
+    request_source = inspect.getsource(
+        worker.request_patch
+    )
+
+    review_source = inspect.getsource(
+        worker.request_independent_review
+    )
+
+    assert '"max_output_tokens": 32000' in request_source
+
+    assert (
+        'kwargs["reasoning"] = {"effort": "medium"}'
+        in request_source
+    )
+
+    assert (
+        'purpose="Patch generation"'
+        in request_source
+    )
+
+    assert (
+        "_require_completed_response("
+        in request_source
+    )
+
+    assert '"max_output_tokens": 16000' in review_source
+
+    assert (
+        'purpose="Independent review"'
+        in review_source
+    )
+
+    assert (
+        "_require_completed_response("
+        in review_source
+    )
