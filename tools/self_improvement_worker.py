@@ -18,6 +18,7 @@ import tempfile
 import textwrap
 import time
 import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1065,18 +1066,588 @@ def bandit_baseline_result(
     }
 
 
+def _pytest_failure_identity(
+    testcase: ET.Element,
+) -> str:
+    file_name = (
+        testcase.get(
+            "file"
+        )
+        or ""
+    )
+
+    class_name = (
+        testcase.get(
+            "classname"
+        )
+        or ""
+    )
+
+    test_name = (
+        testcase.get(
+            "name"
+        )
+        or ""
+    )
+
+    return "::".join(
+        value
+        for value in (
+            file_name,
+            class_name,
+            test_name,
+        )
+        if value
+    )
+
+
+def _load_pytest_junit(
+    path: Path,
+) -> tuple[
+    Counter[str],
+    int,
+]:
+    if not path.is_file():
+        raise WorkerError(
+            f"Missing pytest JUnit report: {path}"
+        )
+
+    try:
+        root = ET.parse(
+            path
+        ).getroot()
+    except (
+        ET.ParseError,
+        OSError,
+    ) as exc:
+        raise WorkerError(
+            f"Invalid pytest JUnit report: {path}: {exc}"
+        ) from exc
+
+    failures: Counter[str] = Counter()
+    total = 0
+
+    for testcase in root.findall(
+        ".//testcase"
+    ):
+        total += 1
+
+        if (
+            testcase.find(
+                "failure"
+            )
+            is None
+            and testcase.find(
+                "error"
+            )
+            is None
+        ):
+            continue
+
+        failures[
+            _pytest_failure_identity(
+                testcase
+            )
+        ] += 1
+
+    return (
+        failures,
+        total,
+    )
+
+
+def _pytest_runtime_dockerfile() -> str:
+    return """FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/workspace/bridge
+
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends git \\
+    && rm -rf /var/lib/apt/lists/*
+
+COPY bridge/requirements.txt /tmp/app-requirements.txt
+
+RUN pip install --no-cache-dir \\
+    -r /tmp/app-requirements.txt \\
+    "pytest>=8,<10" \\
+    "pytest-asyncio>=0.24,<2"
+
+WORKDIR /workspace
+
+COPY bridge /workspace/bridge
+COPY config /workspace/config
+COPY tools /workspace/tools
+COPY requirements-improver.txt /workspace/requirements-improver.txt
+
+RUN mkdir -p \\
+    /workspace/data \\
+    /workspace/logs \\
+    /workspace/.jarvis-improver
+
+CMD ["python", "-m", "pytest", "-q", "bridge/tests", "-p", "no:cacheprovider"]
+"""
+
+
+def _docker_pytest_scan(
+    workspace: Path,
+    *,
+    label: str,
+    timeout: int,
+) -> dict[str, Any]:
+    safe_label = re.sub(
+        r"[^A-Za-z0-9_.-]+",
+        "-",
+        label,
+    ).strip(
+        "-"
+    )
+
+    if not safe_label:
+        safe_label = "scan"
+
+    temp_root = Path(
+        tempfile.mkdtemp(
+            prefix=(
+                f"jarvis-pytest-{safe_label}-"
+            ),
+            dir=WORK_ROOT,
+        )
+    )
+
+    results_dir = (
+        temp_root
+        / "results"
+    )
+
+    results_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    # This directory exists only for the duration of the
+    # locked-down container and is deleted in finally.
+    results_dir.chmod(
+        0o777
+    )
+
+    dockerfile = (
+        temp_root
+        / "Dockerfile.pytest"
+    )
+
+    dockerfile.write_text(
+        _pytest_runtime_dockerfile(),
+        encoding="utf-8",
+    )
+
+    image = (
+        "jarvis-pytest-"
+        f"{safe_label}:"
+        f"{os.getpid()}-"
+        f"{time.time_ns()}"
+    )
+
+    report = (
+        results_dir
+        / "report.xml"
+    )
+
+    try:
+        build = run(
+            [
+                "docker",
+                "build",
+                "-f",
+                str(
+                    dockerfile
+                ),
+                "-t",
+                image,
+                ".",
+            ],
+            cwd=workspace,
+            timeout=timeout,
+            check=False,
+        )
+
+        if build.returncode != 0:
+            return {
+                "ok": False,
+                "stage": "build",
+                "returncode": (
+                    build.returncode
+                ),
+                "total_tests": None,
+                "failures": Counter(),
+                "output": build.stdout[
+                    -12000:
+                ],
+            }
+
+        completed = run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--read-only",
+                "--security-opt",
+                "no-new-privileges:true",
+                "--cap-drop",
+                "ALL",
+                "--memory",
+                "1g",
+                "--cpus",
+                "2",
+                "--pids-limit",
+                "256",
+                "--tmpfs",
+                (
+                    "/tmp:rw,noexec,"
+                    "nosuid,size=128m"
+                ),
+                "--tmpfs",
+                (
+                    "/workspace/data:"
+                    "rw,noexec,nosuid,"
+                    "size=128m"
+                ),
+                "--tmpfs",
+                (
+                    "/workspace/logs:"
+                    "rw,noexec,nosuid,"
+                    "size=64m"
+                ),
+                "--tmpfs",
+                (
+                    "/workspace/"
+                    ".jarvis-improver:"
+                    "rw,noexec,nosuid,"
+                    "size=64m"
+                ),
+                "-v",
+                (
+                    f"{results_dir}:"
+                    "/results:rw"
+                ),
+                image,
+                "python",
+                "-m",
+                "pytest",
+                "-q",
+                "bridge/tests",
+                "-p",
+                "no:cacheprovider",
+                (
+                    "--junitxml="
+                    "/results/report.xml"
+                ),
+            ],
+            cwd=workspace,
+            timeout=timeout,
+            check=False,
+        )
+
+        if (
+            completed.returncode
+            not in {
+                0,
+                1,
+            }
+        ):
+            return {
+                "ok": False,
+                "stage": "pytest",
+                "returncode": (
+                    completed.returncode
+                ),
+                "total_tests": None,
+                "failures": Counter(),
+                "output": completed.stdout[
+                    -12000:
+                ],
+            }
+
+        if not report.is_file():
+            return {
+                "ok": False,
+                "stage": "report",
+                "returncode": (
+                    completed.returncode
+                ),
+                "total_tests": None,
+                "failures": Counter(),
+                "output": (
+                    "Pytest finished but "
+                    "did not create its "
+                    "JUnit report.\n"
+                    + completed.stdout[
+                        -12000:
+                    ]
+                ),
+            }
+
+        try:
+            failures, total = (
+                _load_pytest_junit(
+                    report
+                )
+            )
+        except WorkerError as exc:
+            return {
+                "ok": False,
+                "stage": "report",
+                "returncode": (
+                    completed.returncode
+                ),
+                "total_tests": None,
+                "failures": Counter(),
+                "output": str(
+                    exc
+                ),
+            }
+
+        return {
+            "ok": True,
+            "stage": "complete",
+            "returncode": (
+                completed.returncode
+            ),
+            "total_tests": total,
+            "failures": failures,
+            "output": completed.stdout[
+                -12000:
+            ],
+        }
+
+    finally:
+        run(
+            [
+                "docker",
+                "image",
+                "rm",
+                "-f",
+                image,
+            ],
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
+
+        shutil.rmtree(
+            temp_root,
+            ignore_errors=True,
+        )
+
+
+def pytest_baseline_result(
+    workspace: Path,
+    timeout: int,
+) -> dict[str, Any]:
+    baseline = _docker_pytest_scan(
+        ROOT,
+        label="baseline",
+        timeout=timeout,
+    )
+
+    if not baseline.get(
+        "ok"
+    ):
+        return {
+            "name": "pytest_baseline",
+            "passed": False,
+            "blocking": True,
+            "returncode": (
+                baseline.get(
+                    "returncode"
+                )
+            ),
+            "baseline_total_tests": None,
+            "candidate_total_tests": None,
+            "baseline_failures": None,
+            "candidate_failures": None,
+            "new_failures_count": None,
+            "new_failures": [],
+            "resolved_failures_count": None,
+            "output": (
+                "Unable to establish "
+                "the production pytest "
+                "baseline.\n"
+                + str(
+                    baseline.get(
+                        "output"
+                    )
+                    or ""
+                )[
+                    -12000:
+                ]
+            ),
+        }
+
+    candidate = _docker_pytest_scan(
+        workspace,
+        label="candidate",
+        timeout=timeout,
+    )
+
+    if not candidate.get(
+        "ok"
+    ):
+        return {
+            "name": "pytest_baseline",
+            "passed": False,
+            "blocking": True,
+            "returncode": (
+                candidate.get(
+                    "returncode"
+                )
+            ),
+            "baseline_total_tests": (
+                baseline.get(
+                    "total_tests"
+                )
+            ),
+            "candidate_total_tests": None,
+            "baseline_failures": sum(
+                baseline[
+                    "failures"
+                ].values()
+            ),
+            "candidate_failures": None,
+            "new_failures_count": None,
+            "new_failures": [],
+            "resolved_failures_count": None,
+            "output": (
+                "Unable to execute "
+                "candidate pytest "
+                "validation.\n"
+                + str(
+                    candidate.get(
+                        "output"
+                    )
+                    or ""
+                )[
+                    -12000:
+                ]
+            ),
+        }
+
+    baseline_failures: Counter[
+        str
+    ] = baseline[
+        "failures"
+    ]
+
+    candidate_failures: Counter[
+        str
+    ] = candidate[
+        "failures"
+    ]
+
+    new_counts = (
+        candidate_failures
+        - baseline_failures
+    )
+
+    resolved_counts = (
+        baseline_failures
+        - candidate_failures
+    )
+
+    new_failures = [
+        {
+            "test": identity,
+            "count": count,
+        }
+        for identity, count in sorted(
+            new_counts.items()
+        )
+    ]
+
+    new_count = sum(
+        new_counts.values()
+    )
+
+    resolved_count = sum(
+        resolved_counts.values()
+    )
+
+    passed = (
+        new_count == 0
+    )
+
+    return {
+        "name": "pytest_baseline",
+        "passed": passed,
+        "blocking": True,
+        "returncode": (
+            0
+            if passed
+            else 1
+        ),
+        "runtime": "python:3.12-slim",
+        "baseline_total_tests": (
+            baseline[
+                "total_tests"
+            ]
+        ),
+        "candidate_total_tests": (
+            candidate[
+                "total_tests"
+            ]
+        ),
+        "baseline_failures": sum(
+            baseline_failures.values()
+        ),
+        "candidate_failures": sum(
+            candidate_failures.values()
+        ),
+        "new_failures_count": (
+            new_count
+        ),
+        "new_failures": (
+            new_failures
+        ),
+        "resolved_failures_count": (
+            resolved_count
+        ),
+        "output": (
+            "Pytest baseline comparison: "
+            f"baseline_total="
+            f"{baseline['total_tests']}, "
+            f"candidate_total="
+            f"{candidate['total_tests']}, "
+            f"baseline_failures="
+            f"{sum(baseline_failures.values())}, "
+            f"candidate_failures="
+            f"{sum(candidate_failures.values())}, "
+            f"new={new_count}, "
+            f"resolved={resolved_count}."
+        ),
+    }
+
+
 def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
     commands: list[tuple[str, list[str], bool, int]] = [
         ("git_diff_check", ["git", "diff", "--check"], True, 60),
         ("compileall", [str(VENV_PYTHON), "-m", "compileall", "-q", "bridge/app"], True, 180),
-        ("pytest", [str(VENV_PYTHON), "-m", "pytest", "-q", "bridge/tests"], True, config.candidate_timeout_seconds),
         ("ruff", [str(VENV_PYTHON), "-m", "ruff", "check", "bridge/app", "bridge/tests"], True, 240),
     ]
     for name, command, blocking, timeout in commands:
         completed = run(command, cwd=workspace, timeout=timeout, check=False)
         results.append(command_result(name, completed, blocking))
+
+    results.append(
+        pytest_baseline_result(
+            workspace,
+            config.candidate_timeout_seconds,
+        )
+    )
 
     results.append(
         bandit_baseline_result(

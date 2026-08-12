@@ -363,3 +363,239 @@ def test_bandit_baseline_blocks_unparseable_scan(
 
     assert result["passed"] is False
     assert result["blocking"] is True
+
+def _pytest_scan(
+    failures: dict[str, int],
+    *,
+    total: int,
+    ok: bool = True,
+    returncode: int = 1,
+) -> dict[str, object]:
+    return {
+        "ok": ok,
+        "stage": "complete",
+        "returncode": returncode,
+        "total_tests": total,
+        "failures": worker.Counter(
+            failures
+        ),
+        "output": "",
+    }
+
+
+def test_pytest_baseline_allows_existing_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_scan(
+        workspace: Path,
+        *,
+        label: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        del workspace
+        del timeout
+
+        assert label in {
+            "baseline",
+            "candidate",
+        }
+
+        return _pytest_scan(
+            {
+                "bridge.tests.test_old::test_known": 1,
+            },
+            total=255,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "_docker_pytest_scan",
+        fake_scan,
+    )
+
+    result = worker.pytest_baseline_result(
+        tmp_path,
+        60,
+    )
+
+    assert result["passed"] is True
+    assert result["blocking"] is True
+    assert result["baseline_failures"] == 1
+    assert result["candidate_failures"] == 1
+    assert result["new_failures_count"] == 0
+
+
+def test_pytest_baseline_blocks_new_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_scan(
+        workspace: Path,
+        *,
+        label: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        del workspace
+        del timeout
+
+        if label == "baseline":
+            return _pytest_scan(
+                {
+                    "bridge.tests.test_old::test_known": 1,
+                },
+                total=255,
+            )
+
+        return _pytest_scan(
+            {
+                "bridge.tests.test_old::test_known": 1,
+                "bridge.tests.test_new::test_regression": 1,
+            },
+            total=256,
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "_docker_pytest_scan",
+        fake_scan,
+    )
+
+    result = worker.pytest_baseline_result(
+        tmp_path,
+        60,
+    )
+
+    assert result["passed"] is False
+    assert result["blocking"] is True
+    assert result["baseline_failures"] == 1
+    assert result["candidate_failures"] == 2
+    assert result["new_failures_count"] == 1
+    assert result["new_failures"] == [
+        {
+            "test": "bridge.tests.test_new::test_regression",
+            "count": 1,
+        }
+    ]
+
+
+def test_pytest_baseline_fails_closed_on_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_scan(
+        workspace: Path,
+        *,
+        label: str,
+        timeout: int,
+    ) -> dict[str, object]:
+        del workspace
+        del label
+        del timeout
+
+        return {
+            "ok": False,
+            "stage": "build",
+            "returncode": 2,
+            "total_tests": None,
+            "failures": worker.Counter(),
+            "output": "container failure",
+        }
+
+    monkeypatch.setattr(
+        worker,
+        "_docker_pytest_scan",
+        fake_scan,
+    )
+
+    result = worker.pytest_baseline_result(
+        tmp_path,
+        60,
+    )
+
+    assert result["passed"] is False
+    assert result["blocking"] is True
+    assert result["new_failures_count"] is None
+
+
+def test_run_validation_uses_baseline_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fake_run(
+        command: list[str],
+        *,
+        cwd: Path = worker.ROOT,
+        timeout: int = 300,
+        check: bool = True,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd
+        del timeout
+        del check
+        del env
+
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "run",
+        fake_run,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "pytest_baseline_result",
+        lambda workspace, timeout: {
+            "name": "pytest_baseline",
+            "passed": True,
+            "blocking": True,
+            "returncode": 0,
+            "new_failures_count": 0,
+            "output": "",
+        },
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "bandit_baseline_result",
+        lambda workspace: {
+            "name": "bandit_baseline",
+            "passed": True,
+            "blocking": True,
+            "returncode": 0,
+            "new_findings_count": 0,
+            "output": "",
+        },
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "security_diff_scan",
+        lambda workspace, policy: {
+            "passed": True,
+            "findings": [],
+        },
+    )
+
+    results, security = worker.run_validation(
+        tmp_path,
+        policy(),
+        config(),
+    )
+
+    names = [
+        item["name"]
+        for item in results[
+            "checks"
+        ]
+    ]
+
+    assert "pytest_baseline" in names
+    assert "pytest" not in names
+    assert results["passed"] is True
+    assert security["passed"] is True
