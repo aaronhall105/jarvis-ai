@@ -417,6 +417,40 @@ def fetch_candidate_by_id(
     )
 
 
+PREMERGE_DEPLOY_PHASES = frozenset(
+    {
+        "claimed",
+        "premerge_verified",
+        "merging",
+    }
+)
+
+POSTMERGE_DEPLOY_PHASES = frozenset(
+    {
+        "merged",
+        "rebuilding",
+        "verifying",
+    }
+)
+
+ROLLBACK_DEPLOY_PHASES = frozenset(
+    {
+        "rollback_started",
+        "rollback_rebuilding",
+        "rollback_verifying",
+        "recovery_rolling_back",
+        "recovery_rebuilding",
+        "recovery_verifying",
+    }
+)
+
+KNOWN_DEPLOY_PHASES = (
+    PREMERGE_DEPLOY_PHASES
+    | POSTMERGE_DEPLOY_PHASES
+    | ROLLBACK_DEPLOY_PHASES
+)
+
+
 def deployment_lease_is_expired(
     candidate: dict[str, Any],
 ) -> bool:
@@ -575,6 +609,119 @@ def update_deployment_phase(
             )
 
 
+def deployment_lease_owned(
+    candidate_id: int,
+    lease_id: str,
+) -> bool:
+    if not lease_id:
+        return False
+
+    with connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                status,
+                deploy_lease_id
+            FROM improvement_candidates
+            WHERE candidate_id = ?
+            """,
+            (
+                candidate_id,
+            ),
+        ).fetchone()
+
+    if row is None:
+        return False
+
+    stored = str(
+        row[
+            "deploy_lease_id"
+        ]
+        or ""
+    )
+
+    return (
+        str(
+            row[
+                "status"
+            ]
+            or ""
+        )
+        == "deploying"
+        and bool(
+            stored
+        )
+        and secrets.compare_digest(
+            stored,
+            lease_id,
+        )
+    )
+
+
+def transition_deployment_state(
+    candidate_id: int,
+    lease_id: str,
+    *,
+    status: str,
+    phase: str,
+    error: str | None = None,
+    deployed_at: str | None = None,
+    rolled_back_at: str | None = None,
+) -> None:
+    if not lease_id:
+        raise WorkerError(
+            "Deployment lease ID is missing."
+        )
+
+    now = utc_now()
+
+    with connect() as connection:
+        connection.execute(
+            "BEGIN IMMEDIATE"
+        )
+
+        cursor = connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET
+                status = ?,
+                updated_at = ?,
+                deploy_phase = ?,
+                deploy_lease_id = NULL,
+                deploy_lease_started_at = NULL,
+                deploy_lease_expires_at = NULL,
+                error = ?,
+                deployed_at = COALESCE(
+                    ?,
+                    deployed_at
+                ),
+                rolled_back_at = COALESCE(
+                    ?,
+                    rolled_back_at
+                )
+            WHERE candidate_id = ?
+              AND status = 'deploying'
+              AND deploy_lease_id = ?
+            """,
+            (
+                status,
+                now,
+                phase,
+                error,
+                deployed_at,
+                rolled_back_at,
+                candidate_id,
+                lease_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            raise WorkerError(
+                "Deployment lease was lost before "
+                "the state transition completed."
+            )
+
+
 def claim_stale_deployment_recovery(
     candidate_id: int,
     *,
@@ -633,8 +780,7 @@ def claim_stale_deployment_recovery(
                 updated_at = ?,
                 deploy_lease_id = ?,
                 deploy_lease_started_at = ?,
-                deploy_lease_expires_at = ?,
-                deploy_phase = 'recovery_claimed'
+                deploy_lease_expires_at = ?
             WHERE candidate_id = ?
               AND status = 'deploying'
             """,
@@ -3673,14 +3819,12 @@ def deploy_candidate(
                 + logs
             )
 
-        update_candidate(
+        transition_deployment_state(
             candidate_id,
+            lease_id,
             status="deployed",
+            phase="deployed",
             deployed_at=utc_now(),
-            deploy_phase="deployed",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
             error=None,
         )
 
@@ -3718,13 +3862,11 @@ def deploy_candidate(
         )[-12000:]
 
         if not merged:
-            update_candidate(
+            transition_deployment_state(
                 candidate_id,
+                lease_id,
                 status="deployment_blocked",
-                deploy_phase="premerge_failed",
-                deploy_lease_id=None,
-                deploy_lease_started_at=None,
-                deploy_lease_expires_at=None,
+                phase="premerge_failed",
                 error=error,
             )
 
@@ -3747,9 +3889,24 @@ def deploy_candidate(
         )
 
         try:
+            # This phase transition is also an ownership check.
+            # A stale worker that lost its lease must never reset
+            # the repository after another worker has taken over.
+            update_deployment_phase(
+                candidate_id,
+                lease_id,
+                "rollback_started",
+            )
+
             reset_repository_to_ref(
                 rollback_ref,
                 repo_root=ROOT,
+            )
+
+            update_deployment_phase(
+                candidate_id,
+                lease_id,
+                "rollback_rebuilding",
             )
 
             run(
@@ -3763,26 +3920,36 @@ def deploy_candidate(
                 timeout=600,
             )
 
+            update_deployment_phase(
+                candidate_id,
+                lease_id,
+                "rollback_verifying",
+            )
+
             healthy, rollback_health = (
                 health_check(
                     config.deploy_health_timeout_seconds
                 )
             )
 
-            if not healthy:
+            logs_ok, rollback_logs = monitor_logs(
+                30
+            )
+
+            if not healthy or not logs_ok:
                 raise WorkerError(
-                    "Automatic rollback health check failed: "
+                    "Automatic rollback verification failed.\n"
                     + rollback_health
+                    + "\n"
+                    + rollback_logs
                 )
 
-            update_candidate(
+            transition_deployment_state(
                 candidate_id,
+                lease_id,
                 status="rolled_back",
+                phase="rolled_back",
                 rolled_back_at=utc_now(),
-                deploy_phase="rolled_back",
-                deploy_lease_id=None,
-                deploy_lease_started_at=None,
-                deploy_lease_expires_at=None,
                 error=error,
             )
 
@@ -3810,6 +3977,16 @@ def deploy_candidate(
             )
 
         except Exception as rollback_exc:
+            if not deployment_lease_owned(
+                candidate_id,
+                lease_id,
+            ):
+                raise WorkerError(
+                    "Deployment worker lost its lease during "
+                    "rollback and refused further repository "
+                    "or database mutation."
+                ) from rollback_exc
+
             rollback_error = (
                 "Deployment failed and automatic rollback "
                 "could not be verified. "
@@ -3818,13 +3995,11 @@ def deploy_candidate(
                 )
             )[-12000:]
 
-            update_candidate(
+            transition_deployment_state(
                 candidate_id,
+                lease_id,
                 status="recovery_required",
-                deploy_phase="rollback_failed",
-                deploy_lease_id=None,
-                deploy_lease_started_at=None,
-                deploy_lease_expires_at=None,
+                phase="rollback_failed",
                 error=rollback_error,
             )
 
@@ -3885,6 +4060,18 @@ def recover_interrupted_deployment(
         or ""
     )
 
+    if not lease_id:
+        raise WorkerError(
+            "Recovery claim did not produce a lease."
+        )
+
+    phase = str(
+        claimed.get(
+            "deploy_phase"
+        )
+        or ""
+    ).strip()
+
     base_commit = _normalise_commit_sha(
         claimed.get(
             "base_commit"
@@ -3922,13 +4109,11 @@ def recover_interrupted_deployment(
             )
         )[-12000:]
 
-        update_candidate(
+        transition_deployment_state(
             candidate_id,
+            lease_id,
             status="recovery_required",
-            deploy_phase="inspection_failed",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
+            phase="inspection_failed",
             error=error,
         )
 
@@ -3943,30 +4128,179 @@ def recover_interrupted_deployment(
 
         return "recovery_required"
 
-    if current_ref == base_commit:
-        update_candidate(
+    if phase not in KNOWN_DEPLOY_PHASES:
+        error = (
+            "Interrupted deployment has an unknown or "
+            f"ambiguous phase: {phase or '[missing]'}. "
+            "Automatic deployment or rollback was refused."
+        )
+
+        transition_deployment_state(
             candidate_id,
-            status="deploy_requested",
-            deploy_phase="recovered_requeued",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
-            error=(
-                "Recovered interrupted deployment "
-                "before the candidate commit was merged."
-            ),
+            lease_id,
+            status="recovery_required",
+            phase="ambiguous_phase",
+            error=error,
         )
 
         audit(
-            "candidate_deployment_requeued",
+            "candidate_recovery_required",
             failure_id=failure_id,
             candidate_id=candidate_id,
             details={
-                "base_commit": base_commit,
+                "reason": "ambiguous_phase",
+                "stored_phase": phase,
+                "actual_head": current_ref,
             },
         )
 
-        return "requeued"
+        return "recovery_required"
+
+    if current_ref == base_commit:
+        if phase in PREMERGE_DEPLOY_PHASES:
+            transition_deployment_state(
+                candidate_id,
+                lease_id,
+                status="deploy_requested",
+                phase="recovered_requeued",
+                error=(
+                    "Recovered interrupted deployment "
+                    "before the candidate commit was merged."
+                ),
+            )
+
+            audit(
+                "candidate_deployment_requeued",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "base_commit": base_commit,
+                    "interrupted_phase": phase,
+                },
+            )
+
+            return "requeued"
+
+        # HEAD is already back at the exact validated base while
+        # the durable phase proves the candidate had progressed
+        # beyond the pre-merge boundary or was already rolling
+        # back. Never redeploy it. Rebuild/verify the base and
+        # finish the rollback transaction instead.
+        try:
+            update_deployment_phase(
+                candidate_id,
+                lease_id,
+                "recovery_rebuilding",
+            )
+
+            run(
+                [
+                    "docker",
+                    "compose",
+                    "up",
+                    "-d",
+                    "--build",
+                ],
+                timeout=600,
+            )
+
+            update_deployment_phase(
+                candidate_id,
+                lease_id,
+                "recovery_verifying",
+            )
+
+            healthy, output = health_check(
+                config.deploy_health_timeout_seconds
+            )
+
+            logs_ok, logs = monitor_logs(
+                30
+            )
+
+            if not healthy or not logs_ok:
+                raise WorkerError(
+                    "Recovered base did not pass runtime "
+                    "verification.\n"
+                    + output
+                    + "\n"
+                    + logs
+                )
+
+            transition_deployment_state(
+                candidate_id,
+                lease_id,
+                status="rolled_back",
+                phase="interrupted_rolled_back",
+                rolled_back_at=utc_now(),
+                error=(
+                    "Interrupted deployment was already at "
+                    "its validated base and rollback was "
+                    "verified."
+                ),
+            )
+
+            update_failure(
+                failure_id,
+                status="recorded",
+            )
+
+            audit(
+                "candidate_interrupted_rolled_back",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "rollback_ref": base_commit,
+                    "interrupted_phase": phase,
+                },
+            )
+
+            notify_aaron(
+                f"Interrupted improvement {candidate_id} was "
+                "confirmed safely rolled back.",
+                title="Jarvis deployment recovered",
+                config=config,
+                env_values=env_values,
+            )
+
+            return "rolled_back"
+
+        except Exception as exc:
+            if not deployment_lease_owned(
+                candidate_id,
+                lease_id,
+            ):
+                raise WorkerError(
+                    "Recovery worker lost its lease and "
+                    "refused further mutation."
+                ) from exc
+
+            error = (
+                "Interrupted base recovery verification "
+                "failed: "
+                + str(
+                    exc
+                )
+            )[-12000:]
+
+            transition_deployment_state(
+                candidate_id,
+                lease_id,
+                status="recovery_required",
+                phase="recovery_failed",
+                error=error,
+            )
+
+            audit(
+                "candidate_recovery_required",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={
+                    "error": error[-4000:],
+                },
+            )
+
+            return "recovery_required"
 
     if current_ref != candidate_commit:
         error = (
@@ -3977,13 +4311,11 @@ def recover_interrupted_deployment(
             f"actual={current_ref}"
         )
 
-        update_candidate(
+        transition_deployment_state(
             candidate_id,
+            lease_id,
             status="recovery_required",
-            deploy_phase="unexpected_head",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
+            phase="unexpected_head",
             error=error,
         )
 
@@ -3994,6 +4326,7 @@ def recover_interrupted_deployment(
             details={
                 "reason": "unexpected_head",
                 "actual_head": current_ref,
+                "interrupted_phase": phase,
             },
         )
 
@@ -4007,6 +4340,10 @@ def recover_interrupted_deployment(
 
         return "recovery_required"
 
+    # The exact validated candidate is still live. It is safe to
+    # roll back only to its exact stored base. This path is also
+    # valid for a crash after git merge but before the phase could
+    # be advanced from "merging" to "merged".
     try:
         update_deployment_phase(
             candidate_id,
@@ -4059,14 +4396,12 @@ def recover_interrupted_deployment(
                 + logs
             )
 
-        update_candidate(
+        transition_deployment_state(
             candidate_id,
+            lease_id,
             status="rolled_back",
+            phase="interrupted_rolled_back",
             rolled_back_at=utc_now(),
-            deploy_phase="interrupted_rolled_back",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
             error=(
                 "Interrupted deployment was automatically "
                 "rolled back to its validated base."
@@ -4085,6 +4420,7 @@ def recover_interrupted_deployment(
             details={
                 "rollback_ref": base_commit,
                 "candidate_commit": candidate_commit,
+                "interrupted_phase": phase,
             },
         )
 
@@ -4099,6 +4435,15 @@ def recover_interrupted_deployment(
         return "rolled_back"
 
     except Exception as exc:
+        if not deployment_lease_owned(
+            candidate_id,
+            lease_id,
+        ):
+            raise WorkerError(
+                "Recovery worker lost its lease and "
+                "refused further mutation."
+            ) from exc
+
         error = (
             "Interrupted deployment recovery failed: "
             + str(
@@ -4106,13 +4451,11 @@ def recover_interrupted_deployment(
             )
         )[-12000:]
 
-        update_candidate(
+        transition_deployment_state(
             candidate_id,
+            lease_id,
             status="recovery_required",
-            deploy_phase="recovery_failed",
-            deploy_lease_id=None,
-            deploy_lease_started_at=None,
-            deploy_lease_expires_at=None,
+            phase="recovery_failed",
             error=error,
         )
 
