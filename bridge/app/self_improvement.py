@@ -8,7 +8,7 @@ import re
 import secrets
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -146,6 +146,92 @@ class SelfImprovementEngine:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
+    @staticmethod
+    def _ensure_candidate_transaction_columns(
+        connection: sqlite3.Connection,
+    ) -> None:
+        existing = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(improvement_candidates)"
+            ).fetchall()
+        }
+
+        columns = {
+            "approval_code_expires_at": "TEXT",
+            "deploy_ticket_hash": "TEXT",
+            "deploy_ticket_salt": "TEXT",
+            "deploy_ticket_expires_at": "TEXT",
+            "deploy_ticket_consumed_at": "TEXT",
+            "base_commit": "TEXT",
+            "candidate_commit": "TEXT",
+            "validated_patch_sha256": "TEXT",
+        }
+
+        for name, data_type in columns.items():
+            if name in existing:
+                continue
+
+            connection.execute(
+                "ALTER TABLE improvement_candidates "
+                f"ADD COLUMN {name} {data_type}"
+            )
+
+    @staticmethod
+    def _utc_after(
+        seconds: int,
+    ) -> str:
+        return (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=seconds)
+        ).isoformat()
+
+    @staticmethod
+    def _timestamp_expired(
+        value: str | None,
+        *,
+        missing_is_expired: bool,
+    ) -> bool:
+        raw = str(
+            value or ""
+        ).strip()
+
+        if not raw:
+            return missing_is_expired
+
+        try:
+            parsed = datetime.fromisoformat(
+                raw
+            )
+        except ValueError:
+            return True
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(
+                tzinfo=timezone.utc
+            )
+
+        return (
+            parsed.astimezone(timezone.utc)
+            <= datetime.now(timezone.utc)
+        )
+
+    @staticmethod
+    def _ticket_digest(
+        candidate_id: int,
+        salt: str,
+        code: str,
+    ) -> str:
+        return hashlib.sha256(
+            (
+                f"{candidate_id}:"
+                f"{salt}:"
+                f"{code}"
+            ).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+
     def _initialise_database(self) -> None:
         now = self._utc_now()
         with self._connect() as connection:
@@ -250,6 +336,10 @@ class SelfImprovementEngine:
                 );
                 """
             )
+            self._ensure_candidate_transaction_columns(
+                connection
+            )
+
             connection.execute(
                 """
                 INSERT OR IGNORE INTO improvement_settings (key, value, updated_at)
@@ -902,62 +992,476 @@ class SelfImprovementEngine:
             return cursor.rowcount > 0
 
     @staticmethod
-    def _code_matches(candidate: dict[str, Any], supplied: str) -> bool:
-        expected = str(candidate.get("approval_code") or "")
-        return bool(expected and secrets.compare_digest(expected, supplied))
+    def _code_matches(
+        candidate: dict[str, Any],
+        supplied: str,
+    ) -> bool:
+        expected = str(
+            candidate.get(
+                "approval_code"
+            )
+            or ""
+        )
 
-    async def approve_candidate(self, candidate_id: int, code: str, actor: str) -> ImprovementCommandResult:
-        candidate = await self.get_candidate(candidate_id)
-        if not candidate:
-            return ImprovementCommandResult(True, False, f"I can’t find improvement {candidate_id}.", "improvement_approve_missing")
-        if str(candidate.get("status")) not in {"awaiting_approval", "candidate_ready"}:
+        return bool(
+            expected
+            and secrets.compare_digest(
+                expected,
+                supplied,
+            )
+        )
+
+    def _approve_candidate_sync(
+        self,
+        candidate_id: int,
+        code: str,
+    ) -> tuple[
+        bool,
+        str,
+        str | None,
+        str | None,
+    ]:
+        now = self._utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM improvement_candidates
+                WHERE candidate_id = ?
+                """,
+                (
+                    candidate_id,
+                ),
+            ).fetchone()
+
+            if row is None:
+                return (
+                    False,
+                    "missing",
+                    None,
+                    None,
+                )
+
+            candidate = dict(
+                row
+            )
+
+            if str(
+                candidate.get(
+                    "status"
+                )
+            ) not in {
+                "awaiting_approval",
+                "candidate_ready",
+            }:
+                return (
+                    False,
+                    "invalid_state",
+                    None,
+                    None,
+                )
+
+            if not self._code_matches(
+                candidate,
+                code,
+            ):
+                return (
+                    False,
+                    "bad_code",
+                    None,
+                    None,
+                )
+
+            if self._timestamp_expired(
+                candidate.get(
+                    "approval_code_expires_at"
+                ),
+                missing_is_expired=False,
+            ):
+                return (
+                    False,
+                    "review_code_expired",
+                    None,
+                    None,
+                )
+
+            deploy_code = (
+                f"{secrets.randbelow(900000) + 100000:06d}"
+            )
+
+            salt = secrets.token_hex(
+                16
+            )
+
+            digest = self._ticket_digest(
+                candidate_id,
+                salt,
+                deploy_code,
+            )
+
+            expires_at = self._utc_after(
+                15 * 60
+            )
+
+            cursor = connection.execute(
+                """
+                UPDATE improvement_candidates
+                SET
+                    status = 'approved',
+                    updated_at = ?,
+                    approved_at = ?,
+                    approval_code = NULL,
+                    approval_code_expires_at = NULL,
+                    deploy_ticket_hash = ?,
+                    deploy_ticket_salt = ?,
+                    deploy_ticket_expires_at = ?,
+                    deploy_ticket_consumed_at = NULL
+                WHERE candidate_id = ?
+                  AND status IN (
+                      'awaiting_approval',
+                      'candidate_ready'
+                  )
+                  AND approval_code = ?
+                """,
+                (
+                    now,
+                    now,
+                    digest,
+                    salt,
+                    expires_at,
+                    candidate_id,
+                    code,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                return (
+                    False,
+                    "race",
+                    None,
+                    None,
+                )
+
+            return (
+                True,
+                "approved",
+                deploy_code,
+                expires_at,
+            )
+
+    def _request_deploy_sync(
+        self,
+        candidate_id: int,
+        code: str,
+    ) -> tuple[
+        bool,
+        str,
+    ]:
+        now = self._utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                "BEGIN IMMEDIATE"
+            )
+
+            row = connection.execute(
+                """
+                SELECT *
+                FROM improvement_candidates
+                WHERE candidate_id = ?
+                """,
+                (
+                    candidate_id,
+                ),
+            ).fetchone()
+
+            if row is None:
+                return (
+                    False,
+                    "missing",
+                )
+
+            candidate = dict(
+                row
+            )
+
+            if str(
+                candidate.get(
+                    "status"
+                )
+            ) != "approved":
+                return (
+                    False,
+                    "invalid_state",
+                )
+
+            if candidate.get(
+                "deploy_ticket_consumed_at"
+            ):
+                return (
+                    False,
+                    "ticket_used",
+                )
+
+            if self._timestamp_expired(
+                candidate.get(
+                    "deploy_ticket_expires_at"
+                ),
+                missing_is_expired=True,
+            ):
+                return (
+                    False,
+                    "ticket_expired",
+                )
+
+            salt = str(
+                candidate.get(
+                    "deploy_ticket_salt"
+                )
+                or ""
+            )
+
+            expected = str(
+                candidate.get(
+                    "deploy_ticket_hash"
+                )
+                or ""
+            )
+
+            if not salt or not expected:
+                return (
+                    False,
+                    "ticket_missing",
+                )
+
+            supplied = self._ticket_digest(
+                candidate_id,
+                salt,
+                code,
+            )
+
+            if not secrets.compare_digest(
+                expected,
+                supplied,
+            ):
+                return (
+                    False,
+                    "bad_code",
+                )
+
+            if not (
+                str(
+                    candidate.get(
+                        "base_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "candidate_commit"
+                    )
+                    or ""
+                ).strip()
+                and str(
+                    candidate.get(
+                        "validated_patch_sha256"
+                    )
+                    or ""
+                ).strip()
+            ):
+                return (
+                    False,
+                    "binding_missing",
+                )
+
+            cursor = connection.execute(
+                """
+                UPDATE improvement_candidates
+                SET
+                    status = 'deploy_requested',
+                    updated_at = ?,
+                    deploy_requested_at = ?,
+                    deploy_ticket_consumed_at = ?,
+                    deploy_ticket_hash = NULL,
+                    deploy_ticket_salt = NULL
+                WHERE candidate_id = ?
+                  AND status = 'approved'
+                  AND deploy_ticket_consumed_at IS NULL
+                """,
+                (
+                    now,
+                    now,
+                    now,
+                    candidate_id,
+                ),
+            )
+
+            if cursor.rowcount != 1:
+                return (
+                    False,
+                    "race",
+                )
+
+            return (
+                True,
+                "deploy_requested",
+            )
+
+    async def approve_candidate(
+        self,
+        candidate_id: int,
+        code: str,
+        actor: str,
+    ) -> ImprovementCommandResult:
+        (
+            success,
+            reason,
+            deploy_code,
+            expires_at,
+        ) = await asyncio.to_thread(
+            self._approve_candidate_sync,
+            candidate_id,
+            code,
+        )
+
+        if not success:
+            messages = {
+                "missing": (
+                    f"I can’t find improvement {candidate_id}."
+                ),
+                "invalid_state": (
+                    f"Improvement {candidate_id} cannot "
+                    "be approved in its current state."
+                ),
+                "bad_code": (
+                    "That approval code is incorrect."
+                ),
+                "review_code_expired": (
+                    "That approval code has expired. "
+                    "The candidate must be reviewed again."
+                ),
+                "race": (
+                    "The candidate changed while approval "
+                    "was being recorded. Nothing was deployed."
+                ),
+            }
+
             return ImprovementCommandResult(
                 True,
                 False,
-                f"Improvement {candidate_id} is currently {candidate.get('status')}, so it cannot be approved yet.",
-                "improvement_approve_invalid_state",
+                messages.get(
+                    reason,
+                    "Approval failed safely.",
+                ),
+                f"improvement_approve_{reason}",
             )
-        if not self._code_matches(candidate, code):
-            return ImprovementCommandResult(True, False, "That approval code is incorrect.", "improvement_approve_bad_code")
-        await asyncio.to_thread(
-            self._set_candidate_status_sync,
-            candidate_id,
-            "approved",
-            approved=True,
+
+        await self.audit(
+            "candidate_approved",
+            actor=actor,
+            candidate_id=candidate_id,
+            details={
+                "deploy_ticket_expires_at": (
+                    expires_at
+                ),
+            },
         )
-        await self.audit("candidate_approved", actor=actor, candidate_id=candidate_id)
+
         return ImprovementCommandResult(
             True,
             True,
-            f"Improvement {candidate_id} is approved. It has not been deployed yet.",
+            (
+                f"Improvement {candidate_id} is approved. "
+                f"Deployment code {deploy_code} is valid "
+                "for 15 minutes. It has not been deployed."
+            ),
             "improvement_approved",
+            {
+                "candidate_id": candidate_id,
+                "deploy_code": deploy_code,
+                "deploy_ticket_expires_at": expires_at,
+            },
         )
 
-    async def request_deploy(self, candidate_id: int, code: str, actor: str) -> ImprovementCommandResult:
-        candidate = await self.get_candidate(candidate_id)
-        if not candidate:
-            return ImprovementCommandResult(True, False, f"I can’t find improvement {candidate_id}.", "improvement_deploy_missing")
-        if str(candidate.get("status")) not in {"approved", "awaiting_approval", "candidate_ready"}:
+    async def request_deploy(
+        self,
+        candidate_id: int,
+        code: str,
+        actor: str,
+    ) -> ImprovementCommandResult:
+        (
+            success,
+            reason,
+        ) = await asyncio.to_thread(
+            self._request_deploy_sync,
+            candidate_id,
+            code,
+        )
+
+        if not success:
+            messages = {
+                "missing": (
+                    f"I can’t find improvement {candidate_id}."
+                ),
+                "invalid_state": (
+                    f"Improvement {candidate_id} must be "
+                    "approved before deployment can be requested."
+                ),
+                "ticket_used": (
+                    "That deployment ticket has already been used."
+                ),
+                "ticket_expired": (
+                    "That deployment ticket has expired. "
+                    "Approve the candidate again after review."
+                ),
+                "ticket_missing": (
+                    "This candidate has no valid deployment ticket."
+                ),
+                "bad_code": (
+                    "That deployment code is incorrect."
+                ),
+                "binding_missing": (
+                    "The candidate is not bound to an exact "
+                    "validated commit, so deployment was refused."
+                ),
+                "race": (
+                    "The candidate changed while the deployment "
+                    "request was being recorded."
+                ),
+            }
+
             return ImprovementCommandResult(
                 True,
                 False,
-                f"Improvement {candidate_id} is currently {candidate.get('status')}, so it cannot be deployed.",
-                "improvement_deploy_invalid_state",
+                messages.get(
+                    reason,
+                    "Deployment request failed safely.",
+                ),
+                f"improvement_deploy_{reason}",
             )
-        if not self._code_matches(candidate, code):
-            return ImprovementCommandResult(True, False, "That deployment code is incorrect.", "improvement_deploy_bad_code")
-        await asyncio.to_thread(
-            self._set_candidate_status_sync,
-            candidate_id,
-            "deploy_requested",
-            approved=True,
-            deploy_requested=True,
+
+        await self.audit(
+            "candidate_deploy_requested",
+            actor=actor,
+            candidate_id=candidate_id,
+            details={
+                "ticket_consumed": True,
+            },
         )
-        await self.audit("candidate_deploy_requested", actor=actor, candidate_id=candidate_id)
+
         return ImprovementCommandResult(
             True,
             True,
-            f"Deployment requested for improvement {candidate_id}. I’ll health-check it and roll back automatically if it fails.",
+            (
+                f"Deployment requested for improvement "
+                f"{candidate_id}. The one-time deployment "
+                "ticket has been consumed."
+            ),
             "improvement_deploy_requested",
         )
 

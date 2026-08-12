@@ -198,3 +198,314 @@ async def test_approval_code_is_required(
     candidate = await engine.get_candidate(candidate_id)
     assert candidate is not None
     assert candidate["status"] == "approved"
+
+
+def _insert_transaction_candidate(
+    engine: SelfImprovementEngine,
+    *,
+    code: str = "123456",
+    with_binding: bool = True,
+) -> int:
+    now = engine._utc_now()  # noqa: SLF001
+
+    with engine._connect() as connection:  # noqa: SLF001
+        failure = connection.execute(
+            """
+            INSERT INTO improvement_failures (
+                created_at,
+                updated_at,
+                last_seen_at,
+                conversation_id,
+                user_key,
+                signature,
+                category,
+                severity,
+                summary,
+                evidence_json,
+                occurrences,
+                explicit,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                now,
+                now,
+                now,
+                "usr:aaron:transaction",
+                "aaron",
+                "transaction-test-signature",
+                "general",
+                "low",
+                "Transaction test",
+                "{}",
+                1,
+                1,
+                "candidate_ready",
+            ),
+        )
+
+        failure_id = int(
+            failure.lastrowid
+        )
+
+        candidate = connection.execute(
+            """
+            INSERT INTO improvement_candidates (
+                failure_id,
+                created_at,
+                updated_at,
+                status,
+                approval_code,
+                approval_code_expires_at,
+                base_commit,
+                candidate_commit,
+                validated_patch_sha256
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                failure_id,
+                now,
+                now,
+                "awaiting_approval",
+                code,
+                engine._utc_after(3600),  # noqa: SLF001
+                (
+                    "base-commit"
+                    if with_binding
+                    else None
+                ),
+                (
+                    "candidate-commit"
+                    if with_binding
+                    else None
+                ),
+                (
+                    "patch-sha"
+                    if with_binding
+                    else None
+                ),
+            ),
+        )
+
+        return int(
+            candidate.lastrowid
+        )
+
+
+@pytest.mark.asyncio
+async def test_approval_transaction_cannot_skip_approval(
+    engine: SelfImprovementEngine,
+) -> None:
+    candidate_id = (
+        _insert_transaction_candidate(
+            engine
+        )
+    )
+
+    result = await engine.request_deploy(
+        candidate_id,
+        "123456",
+        "Aaron",
+    )
+
+    assert result.success is False
+    assert (
+        result.intent
+        == "improvement_deploy_invalid_state"
+    )
+
+    candidate = await engine.get_candidate(
+        candidate_id
+    )
+
+    assert candidate is not None
+    assert (
+        candidate["status"]
+        == "awaiting_approval"
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
+    engine: SelfImprovementEngine,
+) -> None:
+    candidate_id = (
+        _insert_transaction_candidate(
+            engine
+        )
+    )
+
+    approved = await engine.approve_candidate(
+        candidate_id,
+        "123456",
+        "Aaron",
+    )
+
+    assert approved.success is True
+    assert approved.details is not None
+
+    deploy_code = str(
+        approved.details[
+            "deploy_code"
+        ]
+    )
+
+    assert (
+        len(deploy_code) == 6
+        and deploy_code.isdigit()
+    )
+
+    candidate = await engine.get_candidate(
+        candidate_id
+    )
+
+    assert candidate is not None
+    assert candidate["status"] == "approved"
+    assert candidate["approval_code"] is None
+    assert candidate["deploy_ticket_hash"]
+    assert candidate["deploy_ticket_salt"]
+    assert candidate["deploy_ticket_expires_at"]
+    assert (
+        candidate["deploy_ticket_consumed_at"]
+        is None
+    )
+
+    old_code = await engine.request_deploy(
+        candidate_id,
+        "123456",
+        "Aaron",
+    )
+
+    assert old_code.success is False
+    assert (
+        old_code.intent
+        == "improvement_deploy_bad_code"
+    )
+
+    requested = await engine.request_deploy(
+        candidate_id,
+        deploy_code,
+        "Aaron",
+    )
+
+    assert requested.success is True
+
+    candidate = await engine.get_candidate(
+        candidate_id
+    )
+
+    assert candidate is not None
+    assert (
+        candidate["status"]
+        == "deploy_requested"
+    )
+    assert (
+        candidate["deploy_ticket_consumed_at"]
+        is not None
+    )
+    assert candidate["deploy_ticket_hash"] is None
+    assert candidate["deploy_ticket_salt"] is None
+
+
+@pytest.mark.asyncio
+async def test_approval_transaction_expired_ticket_fails_closed(
+    engine: SelfImprovementEngine,
+) -> None:
+    candidate_id = (
+        _insert_transaction_candidate(
+            engine
+        )
+    )
+
+    approved = await engine.approve_candidate(
+        candidate_id,
+        "123456",
+        "Aaron",
+    )
+
+    assert approved.success is True
+    assert approved.details is not None
+
+    deploy_code = str(
+        approved.details[
+            "deploy_code"
+        ]
+    )
+
+    with engine._connect() as connection:  # noqa: SLF001
+        connection.execute(
+            """
+            UPDATE improvement_candidates
+            SET deploy_ticket_expires_at = ?
+            WHERE candidate_id = ?
+            """,
+            (
+                engine._utc_after(-1),  # noqa: SLF001
+                candidate_id,
+            ),
+        )
+
+    result = await engine.request_deploy(
+        candidate_id,
+        deploy_code,
+        "Aaron",
+    )
+
+    assert result.success is False
+    assert (
+        result.intent
+        == "improvement_deploy_ticket_expired"
+    )
+
+    candidate = await engine.get_candidate(
+        candidate_id
+    )
+
+    assert candidate is not None
+    assert candidate["status"] == "approved"
+
+
+@pytest.mark.asyncio
+async def test_approval_transaction_requires_validated_commit_binding(
+    engine: SelfImprovementEngine,
+) -> None:
+    candidate_id = (
+        _insert_transaction_candidate(
+            engine,
+            with_binding=False,
+        )
+    )
+
+    approved = await engine.approve_candidate(
+        candidate_id,
+        "123456",
+        "Aaron",
+    )
+
+    assert approved.success is True
+    assert approved.details is not None
+
+    result = await engine.request_deploy(
+        candidate_id,
+        str(
+            approved.details[
+                "deploy_code"
+            ]
+        ),
+        "Aaron",
+    )
+
+    assert result.success is False
+    assert (
+        result.intent
+        == "improvement_deploy_binding_missing"
+    )
+
+    candidate = await engine.get_candidate(
+        candidate_id
+    )
+
+    assert candidate is not None
+    assert candidate["status"] == "approved"
