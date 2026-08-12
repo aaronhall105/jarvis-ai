@@ -1,4 +1,9 @@
 services:
+  jarvis-core:
+    volumes:
+      - ./:/host-code/jarvis:ro
+      - ../jarvis-voice-direct-alpha1:/host-code/jarvis-voice-direct-alpha1:ro
+
   jarvis-speaker-verifier:
     image: jarvis-speaker-lab:v1
     container_name: jarvis-speaker-verifier

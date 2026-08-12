@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from app.admin_engine import AdminEngine
 from app.ai_engine import AIEngine, AIEngineError
+from app.code_awareness import CodeAwarenessEngine
 from app.config import get_settings
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
@@ -56,6 +57,7 @@ home_assistant = HomeAssistantClient(
 
 registry = RegistryEngine(home_assistant)
 tools = ToolEngine(home_assistant, registry)
+code_awareness = CodeAwarenessEngine.from_environment()
 tone_engine = ToneEngine()
 memory = MemoryEngine(
     database_path="/app/data/jarvis_memory.db",
@@ -103,6 +105,7 @@ ai = AIEngine(
     admin=admin,
     dialogue=dialogue,
     awareness=awareness,
+    code_awareness=code_awareness,
 )
 
 
