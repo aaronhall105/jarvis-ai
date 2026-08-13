@@ -3399,3 +3399,223 @@ def test_build_context_balances_large_files(
     assert "failed_tool = any([])" in context
     assert "failure_like = (failed_tool)" in context
     assert "await self.record_failure" in context
+
+
+
+def test_run_once_resumes_interrupted_manual_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config()
+    cfg.proposal_only = False
+
+    candidate = {
+        "candidate_id": 41,
+        "failure_id": 9,
+        "status": "rolling_back",
+        "deploy_phase": "manual_rollback_claimed",
+    }
+
+    processed: list[int] = []
+
+    monkeypatch.setattr(
+        worker,
+        "update_setting",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "improvement_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "fetch_candidate",
+        lambda statuses: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "fetch_manual_rollback_candidate",
+        lambda: candidate,
+    )
+    monkeypatch.setattr(
+        worker,
+        "rollback_candidate",
+        lambda item, *args: processed.append(
+            int(item["candidate_id"])
+        ),
+    )
+
+    assert worker.run_once(cfg, {}) is True
+    assert processed == [41]
+
+
+def test_manual_rollback_resumes_after_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config()
+    cfg.proposal_only = False
+
+    base = "a" * 40
+    candidate_ref = "b" * 40
+
+    candidate = {
+        "candidate_id": 42,
+        "failure_id": 10,
+        "status": "rolling_back",
+        "deploy_phase": "manual_rollback_claimed",
+        "base_commit": base,
+        "candidate_commit": candidate_ref,
+        "rollback_ref": base,
+    }
+
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        worker,
+        "fetch_candidate_by_id",
+        lambda candidate_id: dict(candidate),
+    )
+    monkeypatch.setattr(
+        worker,
+        "verify_manual_rollback_binding",
+        lambda item: {
+            "base_commit": base,
+            "candidate_commit": candidate_ref,
+            "rollback_ref": base,
+            "current_ref": base,
+            "action": "already_base",
+        },
+    )
+    monkeypatch.setattr(
+        worker,
+        "update_candidate",
+        lambda candidate_id, **kwargs: updates.append(kwargs),
+    )
+    monkeypatch.setattr(
+        worker,
+        "update_failure",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "notify_aaron",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        worker,
+        "health_check",
+        lambda timeout: (True, "healthy"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "reset_repository_to_ref",
+        lambda *args, **kwargs: pytest.fail(
+            "already-base recovery must not reset Git"
+        ),
+    )
+
+    def fake_run(command, **kwargs):
+        del kwargs
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=base + "\n"
+            )
+        if command[:3] == ["docker", "compose", "up"]:
+            return subprocess.CompletedProcess(
+                command, 0, stdout=""
+            )
+        pytest.fail(f"unexpected command: {command}")
+
+    monkeypatch.setattr(worker, "run", fake_run)
+
+    worker.rollback_candidate(candidate, cfg, {})
+
+    assert any(
+        item.get("status") == "rolled_back"
+        for item in updates
+    )
+
+
+def test_manual_rollback_unexpected_head_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = config()
+    cfg.proposal_only = False
+
+    base = "a" * 40
+    candidate_ref = "b" * 40
+    unexpected = "c" * 40
+
+    candidate = {
+        "candidate_id": 43,
+        "failure_id": 11,
+        "status": "rolling_back",
+        "deploy_phase": "manual_rollback_claimed",
+        "base_commit": base,
+        "candidate_commit": candidate_ref,
+        "rollback_ref": base,
+    }
+
+    updates: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        worker,
+        "fetch_candidate_by_id",
+        lambda candidate_id: dict(candidate),
+    )
+    monkeypatch.setattr(
+        worker,
+        "ensure_repo",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "update_candidate",
+        lambda candidate_id, **kwargs: updates.append(kwargs),
+    )
+    monkeypatch.setattr(
+        worker,
+        "audit",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker,
+        "notify_aaron",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        worker,
+        "reset_repository_to_ref",
+        lambda *args, **kwargs: pytest.fail(
+            "unexpected HEAD must never be reset"
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=unexpected + "\n",
+        ),
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="unexpected live HEAD",
+    ):
+        worker.rollback_candidate(
+            candidate,
+            cfg,
+            {},
+        )
+
+    assert any(
+        item.get("status") == "recovery_required"
+        for item in updates
+    )

@@ -455,6 +455,53 @@ KNOWN_DEPLOY_PHASES = (
 )
 
 
+MANUAL_ROLLBACK_ACTIVE_PHASES = frozenset(
+    {
+        "manual_rollback_claimed",
+        "manual_rollback_rebuilding",
+        "manual_rollback_verifying",
+    }
+)
+
+
+def fetch_manual_rollback_candidate() -> dict[str, Any] | None:
+    """
+    Return interrupted manual rollback work before accepting
+    a new rollback request.
+
+    A claimed rollback is durable work: process restart must
+    resume it instead of leaving status='rolling_back' orphaned.
+    """
+
+    placeholders = ",".join(
+        "?"
+        for _ in MANUAL_ROLLBACK_ACTIVE_PHASES
+    )
+
+    with connect() as connection:
+        row = connection.execute(
+            f"""
+            SELECT *
+            FROM improvement_candidates
+            WHERE status = 'rollback_requested'
+               OR (
+                    status = 'rolling_back'
+                    AND deploy_phase IN ({placeholders})
+               )
+            ORDER BY
+                CASE
+                    WHEN status = 'rolling_back' THEN 0
+                    ELSE 1
+                END,
+                candidate_id ASC
+            LIMIT 1
+            """,
+            tuple(MANUAL_ROLLBACK_ACTIVE_PHASES),
+        ).fetchone()
+
+    return dict(row) if row else None
+
+
 def deployment_lease_is_expired(
     candidate: dict[str, Any],
 ) -> bool:
@@ -4998,9 +5045,47 @@ def rollback_candidate(
         ]
     )
 
-    claimed = claim_manual_rollback(
-        candidate_id
+    candidate_status = str(
+        candidate.get("status") or ""
     )
+    candidate_phase = str(
+        candidate.get("deploy_phase") or ""
+    )
+
+    if candidate_status == "rollback_requested":
+        claimed = claim_manual_rollback(
+            candidate_id
+        )
+
+    elif (
+        candidate_status == "rolling_back"
+        and candidate_phase
+        in MANUAL_ROLLBACK_ACTIVE_PHASES
+    ):
+        claimed = fetch_candidate_by_id(
+            candidate_id
+        )
+
+        if claimed is None:
+            raise WorkerError(
+                "Interrupted manual rollback candidate disappeared."
+            )
+
+        if (
+            str(claimed.get("status") or "")
+            != "rolling_back"
+            or str(claimed.get("deploy_phase") or "")
+            not in MANUAL_ROLLBACK_ACTIVE_PHASES
+        ):
+            raise WorkerError(
+                "Interrupted manual rollback changed state "
+                "before recovery could resume."
+            )
+
+    else:
+        raise WorkerError(
+            "Candidate is not available for manual rollback."
+        )
 
     try:
         binding = verify_manual_rollback_binding(
@@ -5307,11 +5392,7 @@ def run_once(
             # or the lease expires.
             return False
 
-        rollback = fetch_candidate(
-            (
-                "rollback_requested",
-            )
-        )
+        rollback = fetch_manual_rollback_candidate()
 
         if rollback:
             rollback_candidate(
