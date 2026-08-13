@@ -46,6 +46,9 @@ public final class ImprovementsActivity extends Activity {
     private TextView refreshStatus;
 
     private boolean loading = false;
+    private boolean archiveMode = false;
+    private Button activeTab;
+    private Button archiveTab;
 
     private final Runnable autoRefresh =
         new Runnable() {
@@ -161,6 +164,16 @@ public final class ImprovementsActivity extends Activity {
             matchWrap(0, dp(16))
         );
 
+        page.addView(
+            buildRequestCard(),
+            matchWrap(0, dp(14))
+        );
+
+        page.addView(
+            buildTabs(),
+            matchWrap(0, dp(18))
+        );
+
         candidateList = new LinearLayout(this);
         candidateList.setOrientation(
             LinearLayout.VERTICAL
@@ -204,6 +217,242 @@ public final class ImprovementsActivity extends Activity {
         scroll.requestApplyInsets();
 
         return scroll;
+    }
+
+    private View buildRequestCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.setBackground(rounded(SOFT, 18, 1, LINE));
+
+        TextView title = text(
+            "Improve Jarvis",
+            17,
+            BLACK
+        );
+        title.setTypeface(
+            Typeface.create(
+                "sans-serif-medium",
+                Typeface.NORMAL
+            )
+        );
+
+        TextView note = text(
+            "Request a change or capability. Jarvis will prepare it "
+                + "through the existing supervised self-improvement system.",
+            13,
+            MID
+        );
+        note.setLineSpacing(0, 1.1f);
+        note.setPadding(0, dp(5), 0, dp(14));
+
+        Button request = primaryButton(
+            "Request improvement"
+        );
+        request.setOnClickListener(
+            view -> showRequestDialog()
+        );
+
+        card.addView(title, matchWrap());
+        card.addView(note, matchWrap());
+        card.addView(request, matchWrap());
+
+        return card;
+    }
+
+    private View buildTabs() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+
+        activeTab = secondaryButton("Active");
+        archiveTab = secondaryButton("Archive");
+
+        activeTab.setOnClickListener(
+            view -> setArchiveMode(false)
+        );
+
+        archiveTab.setOnClickListener(
+            view -> setArchiveMode(true)
+        );
+
+        LinearLayout.LayoutParams left =
+            new LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            );
+
+        left.rightMargin = dp(5);
+
+        LinearLayout.LayoutParams right =
+            new LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            );
+
+        right.leftMargin = dp(5);
+
+        row.addView(activeTab, left);
+        row.addView(archiveTab, right);
+
+        updateTabs();
+
+        return row;
+    }
+
+    private void setArchiveMode(boolean archived) {
+        if (archiveMode == archived) return;
+
+        archiveMode = archived;
+        updateTabs();
+        loadCandidates(true);
+    }
+
+    private void updateTabs() {
+        if (activeTab == null || archiveTab == null) {
+            return;
+        }
+
+        activeTab.setTextColor(
+            archiveMode ? BLACK : WHITE
+        );
+        activeTab.setBackground(
+            rounded(
+                archiveMode ? SOFT : BLACK,
+                14,
+                1,
+                archiveMode ? LINE : BLACK
+            )
+        );
+
+        archiveTab.setTextColor(
+            archiveMode ? WHITE : BLACK
+        );
+        archiveTab.setBackground(
+            rounded(
+                archiveMode ? BLACK : SOFT,
+                14,
+                1,
+                archiveMode ? BLACK : LINE
+            )
+        );
+    }
+
+    private void showRequestDialog() {
+        EditText input = new EditText(this);
+
+        input.setHint(
+            "What would you like Jarvis to improve?"
+        );
+        input.setMinLines(4);
+        input.setMaxLines(8);
+        input.setGravity(Gravity.TOP);
+        input.setInputType(
+            InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        );
+
+        LinearLayout wrapper =
+            new LinearLayout(this);
+
+        wrapper.setPadding(
+            dp(20),
+            dp(8),
+            dp(20),
+            0
+        );
+
+        wrapper.addView(
+            input,
+            matchWrap()
+        );
+
+        AlertDialog dialog =
+            new AlertDialog.Builder(this)
+                .setTitle("Request improvement")
+                .setMessage(
+                    "This creates a supervised improvement candidate. "
+                        + "Nothing is deployed automatically."
+                )
+                .setView(wrapper)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Request", null)
+                .create();
+
+        dialog.setOnShowListener(
+            ignored -> dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener(view -> {
+                    String request =
+                        input.getText()
+                            .toString()
+                            .trim();
+
+                    if (request.length() < 3) {
+                        input.setError(
+                            "Describe the improvement first."
+                        );
+                        return;
+                    }
+
+                    dialog
+                        .getButton(
+                            AlertDialog.BUTTON_POSITIVE
+                        )
+                        .setEnabled(false);
+
+                    api.requestImprovement(
+                        request,
+                        new ImprovementApiClient
+                            .JsonCallback() {
+                            @Override
+                            public void onSuccess(
+                                JSONObject result
+                            ) {
+                                runOnUiThread(() -> {
+                                    dialog.dismiss();
+                                    archiveMode = false;
+                                    updateTabs();
+
+                                    Toast.makeText(
+                                        ImprovementsActivity.this,
+                                        "Improvement requested",
+                                        Toast.LENGTH_SHORT
+                                    ).show();
+
+                                    loadCandidates(true);
+                                });
+                            }
+
+                            @Override
+                            public void onError(
+                                String message
+                            ) {
+                                runOnUiThread(() -> {
+                                    dialog
+                                        .getButton(
+                                            AlertDialog
+                                                .BUTTON_POSITIVE
+                                        )
+                                        .setEnabled(true);
+
+                                    Toast.makeText(
+                                        ImprovementsActivity.this,
+                                        message,
+                                        Toast.LENGTH_LONG
+                                    ).show();
+                                });
+                            }
+                        }
+                    );
+                })
+        );
+
+        dialog.show();
     }
 
     private View buildHeader() {
@@ -334,14 +583,14 @@ public final class ImprovementsActivity extends Activity {
 
         if (visibleRefresh) {
             refreshStatus.setText(
-                "Refreshing…"
+                archiveMode
+                    ? "Refreshing archive…"
+                    : "Refreshing…"
             );
         }
 
-        api.loadCandidates(
-            30,
-            new ImprovementApiClient
-                .CandidatesCallback() {
+        ImprovementApiClient.CandidatesCallback callback =
+            new ImprovementApiClient.CandidatesCallback() {
                 @Override
                 public void onSuccess(
                     JSONArray items
@@ -361,8 +610,13 @@ public final class ImprovementsActivity extends Activity {
                         showLoadError(message);
                     });
                 }
-            }
-        );
+            };
+
+        if (archiveMode) {
+            api.loadArchive(50, callback);
+        } else {
+            api.loadCandidates(50, callback);
+        }
     }
 
     private void renderCandidates(
@@ -371,17 +625,23 @@ public final class ImprovementsActivity extends Activity {
         candidateList.removeAllViews();
 
         systemStatus.setText(
-            "Self-improvement active"
+            archiveMode
+                ? "Improvement archive"
+                : "Self-improvement active"
         );
 
         refreshStatus.setText(
-            "Live · refreshes automatically"
+            archiveMode
+                ? "Completed and dismissed improvements"
+                : "Live · refreshes automatically"
         );
 
         if (items.length() == 0) {
             TextView empty =
                 text(
-                    "No improvement candidates yet.",
+                    archiveMode
+                        ? "Archive is empty."
+                        : "No active improvements.",
                     15,
                     MID
                 );
@@ -458,34 +718,19 @@ public final class ImprovementsActivity extends Activity {
             );
 
         String status =
-            item.optString(
-                "status",
-                "unknown"
-            );
+            clean(item, "status", "unknown");
 
         String summary =
-            item.optString(
-                "summary",
-                "No summary available."
-            );
+            clean(item, "summary", "—");
 
         String risk =
-            item.optString(
-                "risk",
-                "unknown"
-            );
+            clean(item, "risk", "—");
 
         String model =
-            item.optString(
-                "model",
-                "unknown"
-            );
+            clean(item, "model", "—");
 
         String updated =
-            item.optString(
-                "updated_at",
-                ""
-            );
+            clean(item, "updated_at", "");
 
         TextView number =
             text(
@@ -569,7 +814,1025 @@ public final class ImprovementsActivity extends Activity {
             matchWrap()
         );
 
+        LinearLayout actions =
+            new LinearLayout(this);
+
+        actions.setOrientation(
+            LinearLayout.HORIZONTAL
+        );
+
+        Button review =
+            primaryButton("Review");
+
+        review.setOnClickListener(
+            view -> showCandidateReview(candidateId)
+        );
+
+        LinearLayout.LayoutParams reviewParams =
+            new LinearLayout.LayoutParams(
+                0,
+                dp(42),
+                1f
+            );
+
+        reviewParams.rightMargin = dp(5);
+
+        actions.addView(
+            review,
+            reviewParams
+        );
+
+        if (archiveMode) {
+            Button restore =
+                secondaryButton("Restore");
+
+            restore.setOnClickListener(
+                view -> restoreCandidate(candidateId)
+            );
+
+            LinearLayout.LayoutParams restoreParams =
+                new LinearLayout.LayoutParams(
+                    0,
+                    dp(42),
+                    1f
+                );
+
+            restoreParams.leftMargin = dp(5);
+
+            actions.addView(
+                restore,
+                restoreParams
+            );
+        } else if (isArchivable(status)) {
+            Button archive =
+                secondaryButton("Archive");
+
+            archive.setOnClickListener(
+                view -> archiveCandidate(candidateId)
+            );
+
+            LinearLayout.LayoutParams archiveParams =
+                new LinearLayout.LayoutParams(
+                    0,
+                    dp(42),
+                    1f
+                );
+
+            archiveParams.leftMargin = dp(5);
+
+            actions.addView(
+                archive,
+                archiveParams
+            );
+        }
+
+        card.addView(
+            actions,
+            matchWrap(dp(16), 0)
+        );
+
         return card;
+    }
+
+    private void showCandidateReview(
+        int candidateId
+    ) {
+        api.loadCandidate(
+            candidateId,
+            new ImprovementApiClient.JsonCallback() {
+                @Override
+                public void onSuccess(
+                    JSONObject item
+                ) {
+                    runOnUiThread(() ->
+                        showCandidateDialog(item)
+                    );
+                }
+
+                @Override
+                public void onError(
+                    String message
+                ) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private void showCandidateDialog(
+        JSONObject item
+    ) {
+        int candidateId =
+            item.optInt("candidate_id", 0);
+
+        String status =
+            clean(item, "status", "unknown");
+
+        StringBuilder body =
+            new StringBuilder();
+
+        appendReview(
+            body,
+            "Status",
+            displayStatus(status)
+        );
+
+        appendReview(
+            body,
+            "Summary",
+            clean(item, "summary", "—")
+        );
+
+        appendReview(
+            body,
+            "Root cause",
+            clean(item, "root_cause", "—")
+        );
+
+        appendReview(
+            body,
+            "Risk",
+            capitalise(
+                clean(item, "risk", "—")
+            )
+        );
+
+        appendReview(
+            body,
+            "Model",
+            clean(item, "model", "—")
+        );
+
+        appendReview(
+            body,
+            "Changed files",
+            jsonValue(item, "changed_files")
+        );
+
+        appendReview(
+            body,
+            "Diff",
+            jsonValue(item, "diff_stats")
+        );
+
+        appendReview(
+            body,
+            "Tests",
+            jsonValue(item, "test_results")
+        );
+
+        appendReview(
+            body,
+            "Security",
+            jsonValue(item, "security_results")
+        );
+
+        if (
+            "candidate_ready".equals(status)
+                || "awaiting_approval".equals(status)
+        ) {
+            appendReview(
+                body,
+                "Approval code",
+                clean(
+                    item,
+                    "approval_code",
+                    "—"
+                )
+            );
+        }
+
+        appendReview(
+            body,
+            "Error",
+            clean(item, "error", "—")
+        );
+
+        appendReview(
+            body,
+            "Updated",
+            shortTime(
+                clean(item, "updated_at", "")
+            )
+        );
+
+        AlertDialog.Builder builder =
+            new AlertDialog.Builder(this)
+                .setTitle(
+                    "Improvement #" + candidateId
+                )
+                .setMessage(body.toString())
+                .setNegativeButton(
+                    "Close",
+                    null
+                );
+
+        if (
+            "candidate_ready".equals(status)
+                || "awaiting_approval".equals(status)
+        ) {
+            builder.setPositiveButton(
+                "Approve",
+                (dialog, which) ->
+                    showApprovalDialog(item)
+            );
+
+            builder.setNeutralButton(
+                "Reject",
+                (dialog, which) ->
+                    confirmReject(candidateId)
+            );
+        } else if (
+            "approved".equals(status)
+        ) {
+            builder.setPositiveButton(
+                "Deploy",
+                (dialog, which) ->
+                    showManualDeployDialog(
+                        candidateId
+                    )
+            );
+
+            builder.setNeutralButton(
+                "Reject",
+                (dialog, which) ->
+                    confirmReject(candidateId)
+            );
+        } else if (
+            "deployed".equals(status)
+        ) {
+            builder.setPositiveButton(
+                "Rollback",
+                (dialog, which) ->
+                    beginRollback(candidateId)
+            );
+        }
+
+        builder.show();
+    }
+
+    private void showApprovalDialog(
+        JSONObject item
+    ) {
+        int candidateId =
+            item.optInt("candidate_id", 0);
+
+        String approvalCode =
+            clean(
+                item,
+                "approval_code",
+                "—"
+            );
+
+        EditText input =
+            codeInput("Approval code");
+
+        LinearLayout wrapper =
+            codeWrapper(input);
+
+        AlertDialog dialog =
+            new AlertDialog.Builder(this)
+                .setTitle(
+                    "Approve improvement #"
+                        + candidateId
+                )
+                .setMessage(
+                    "Approval code: "
+                        + approvalCode
+                        + "\n\nEnter the code to confirm approval. "
+                        + "Approval does not deploy the change."
+                )
+                .setView(wrapper)
+                .setNegativeButton(
+                    "Cancel",
+                    null
+                )
+                .setPositiveButton(
+                    "Approve",
+                    null
+                )
+                .create();
+
+        dialog.setOnShowListener(
+            ignored -> dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener(view -> {
+                    String code =
+                        input.getText()
+                            .toString()
+                            .trim();
+
+                    if (code.length() < 6) {
+                        input.setError(
+                            "Enter the approval code."
+                        );
+                        return;
+                    }
+
+                    dialog
+                        .getButton(
+                            AlertDialog.BUTTON_POSITIVE
+                        )
+                        .setEnabled(false);
+
+                    api.approve(
+                        candidateId,
+                        code,
+                        new ImprovementApiClient
+                            .JsonCallback() {
+                            @Override
+                            public void onSuccess(
+                                JSONObject result
+                            ) {
+                                runOnUiThread(() -> {
+                                    if (
+                                        !commandSucceeded(
+                                            result
+                                        )
+                                    ) {
+                                        dialog
+                                            .getButton(
+                                                AlertDialog
+                                                    .BUTTON_POSITIVE
+                                            )
+                                            .setEnabled(true);
+
+                                        Toast.makeText(
+                                            ImprovementsActivity.this,
+                                            commandMessage(
+                                                result,
+                                                "Approval failed"
+                                            ),
+                                            Toast.LENGTH_LONG
+                                        ).show();
+
+                                        return;
+                                    }
+
+                                    dialog.dismiss();
+
+                                    JSONObject details =
+                                        result.optJSONObject(
+                                            "details"
+                                        );
+
+                                    String deployCode =
+                                        details == null
+                                            ? ""
+                                            : clean(
+                                                details,
+                                                "deploy_code",
+                                                ""
+                                            );
+
+                                    if (
+                                        deployCode.isBlank()
+                                    ) {
+                                        Toast.makeText(
+                                            ImprovementsActivity.this,
+                                            "Approved. No deployment code was returned.",
+                                            Toast.LENGTH_LONG
+                                        ).show();
+
+                                        loadCandidates(true);
+                                        return;
+                                    }
+
+                                    showDeployReadyDialog(
+                                        candidateId,
+                                        deployCode
+                                    );
+
+                                    loadCandidates(true);
+                                });
+                            }
+
+                            @Override
+                            public void onError(
+                                String message
+                            ) {
+                                runOnUiThread(() -> {
+                                    dialog
+                                        .getButton(
+                                            AlertDialog
+                                                .BUTTON_POSITIVE
+                                        )
+                                        .setEnabled(true);
+
+                                    Toast.makeText(
+                                        ImprovementsActivity.this,
+                                        message,
+                                        Toast.LENGTH_LONG
+                                    ).show();
+                                });
+                            }
+                        }
+                    );
+                })
+        );
+
+        dialog.show();
+    }
+
+    private void showDeployReadyDialog(
+        int candidateId,
+        String deployCode
+    ) {
+        new AlertDialog.Builder(this)
+            .setTitle(
+                "Improvement approved"
+            )
+            .setMessage(
+                "Deployment code\n\n"
+                    + deployCode
+                    + "\n\nThis is a separate one-time deployment code. "
+                    + "It is not stored by the app."
+            )
+            .setNegativeButton(
+                "Not now",
+                null
+            )
+            .setPositiveButton(
+                "Deploy now",
+                (dialog, which) ->
+                    deployCandidate(
+                        candidateId,
+                        deployCode
+                    )
+            )
+            .show();
+    }
+
+    private void showManualDeployDialog(
+        int candidateId
+    ) {
+        EditText input =
+            codeInput("Deployment code");
+
+        AlertDialog dialog =
+            new AlertDialog.Builder(this)
+                .setTitle(
+                    "Deploy improvement #"
+                        + candidateId
+                )
+                .setMessage(
+                    "Enter the one-time deployment code generated when this improvement was approved."
+                )
+                .setView(
+                    codeWrapper(input)
+                )
+                .setNegativeButton(
+                    "Cancel",
+                    null
+                )
+                .setPositiveButton(
+                    "Deploy",
+                    null
+                )
+                .create();
+
+        dialog.setOnShowListener(
+            ignored -> dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener(view -> {
+                    String code =
+                        input.getText()
+                            .toString()
+                            .trim();
+
+                    if (code.length() < 6) {
+                        input.setError(
+                            "Enter the deployment code."
+                        );
+                        return;
+                    }
+
+                    dialog.dismiss();
+
+                    deployCandidate(
+                        candidateId,
+                        code
+                    );
+                })
+        );
+
+        dialog.show();
+    }
+
+    private void deployCandidate(
+        int candidateId,
+        String deployCode
+    ) {
+        api.deploy(
+            candidateId,
+            deployCode,
+            new ImprovementApiClient
+                .JsonCallback() {
+                @Override
+                public void onSuccess(
+                    JSONObject result
+                ) {
+                    runOnUiThread(() -> {
+                        if (
+                            !commandSucceeded(result)
+                        ) {
+                            Toast.makeText(
+                                ImprovementsActivity.this,
+                                commandMessage(
+                                    result,
+                                    "Deployment request failed"
+                                ),
+                                Toast.LENGTH_LONG
+                            ).show();
+
+                            return;
+                        }
+
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            "Deployment requested",
+                            Toast.LENGTH_SHORT
+                        ).show();
+
+                        loadCandidates(true);
+                    });
+                }
+
+                @Override
+                public void onError(
+                    String message
+                ) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private void confirmReject(
+        int candidateId
+    ) {
+        new AlertDialog.Builder(this)
+            .setTitle(
+                "Reject improvement #"
+                    + candidateId
+            )
+            .setMessage(
+                "Reject this candidate? It will remain in the improvement history and can then be archived."
+            )
+            .setNegativeButton(
+                "Cancel",
+                null
+            )
+            .setPositiveButton(
+                "Reject",
+                (dialog, which) ->
+                    rejectCandidate(candidateId)
+            )
+            .show();
+    }
+
+    private void rejectCandidate(
+        int candidateId
+    ) {
+        api.reject(
+            candidateId,
+            new ImprovementApiClient
+                .JsonCallback() {
+                @Override
+                public void onSuccess(
+                    JSONObject result
+                ) {
+                    runOnUiThread(() -> {
+                        if (
+                            !commandSucceeded(result)
+                        ) {
+                            Toast.makeText(
+                                ImprovementsActivity.this,
+                                commandMessage(
+                                    result,
+                                    "Reject failed"
+                                ),
+                                Toast.LENGTH_LONG
+                            ).show();
+
+                            return;
+                        }
+
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            "Improvement rejected",
+                            Toast.LENGTH_SHORT
+                        ).show();
+
+                        loadCandidates(true);
+                    });
+                }
+
+                @Override
+                public void onError(
+                    String message
+                ) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private void beginRollback(
+        int candidateId
+    ) {
+        api.issueRollbackTicket(
+            candidateId,
+            new ImprovementApiClient
+                .JsonCallback() {
+                @Override
+                public void onSuccess(
+                    JSONObject result
+                ) {
+                    runOnUiThread(() -> {
+                        if (
+                            !commandSucceeded(result)
+                        ) {
+                            Toast.makeText(
+                                ImprovementsActivity.this,
+                                commandMessage(
+                                    result,
+                                    "Could not issue rollback code"
+                                ),
+                                Toast.LENGTH_LONG
+                            ).show();
+
+                            return;
+                        }
+
+                        JSONObject details =
+                            result.optJSONObject(
+                                "details"
+                            );
+
+                        String rollbackCode =
+                            details == null
+                                ? ""
+                                : clean(
+                                    details,
+                                    "rollback_code",
+                                    ""
+                                );
+
+                        if (
+                            rollbackCode.isBlank()
+                        ) {
+                            Toast.makeText(
+                                ImprovementsActivity.this,
+                                "No rollback code was returned.",
+                                Toast.LENGTH_LONG
+                            ).show();
+
+                            return;
+                        }
+
+                        showRollbackDialog(
+                            candidateId,
+                            rollbackCode
+                        );
+                    });
+                }
+
+                @Override
+                public void onError(
+                    String message
+                ) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private void showRollbackDialog(
+        int candidateId,
+        String rollbackCode
+    ) {
+        EditText input =
+            codeInput("Rollback code");
+
+        AlertDialog dialog =
+            new AlertDialog.Builder(this)
+                .setTitle(
+                    "Rollback improvement #"
+                        + candidateId
+                )
+                .setMessage(
+                    "Rollback code: "
+                        + rollbackCode
+                        + "\n\nEnter the code below to confirm rollback. "
+                        + "This is a separate one-time authorization."
+                )
+                .setView(
+                    codeWrapper(input)
+                )
+                .setNegativeButton(
+                    "Cancel",
+                    null
+                )
+                .setPositiveButton(
+                    "Rollback",
+                    null
+                )
+                .create();
+
+        dialog.setOnShowListener(
+            ignored -> dialog
+                .getButton(
+                    AlertDialog.BUTTON_POSITIVE
+                )
+                .setOnClickListener(view -> {
+                    String entered =
+                        input.getText()
+                            .toString()
+                            .trim();
+
+                    if (entered.length() < 6) {
+                        input.setError(
+                            "Enter the rollback code."
+                        );
+                        return;
+                    }
+
+                    dialog.dismiss();
+
+                    rollbackCandidate(
+                        candidateId,
+                        entered
+                    );
+                })
+        );
+
+        dialog.show();
+    }
+
+    private void rollbackCandidate(
+        int candidateId,
+        String code
+    ) {
+        api.rollback(
+            candidateId,
+            code,
+            new ImprovementApiClient
+                .JsonCallback() {
+                @Override
+                public void onSuccess(
+                    JSONObject result
+                ) {
+                    runOnUiThread(() -> {
+                        if (
+                            !commandSucceeded(result)
+                        ) {
+                            Toast.makeText(
+                                ImprovementsActivity.this,
+                                commandMessage(
+                                    result,
+                                    "Rollback request failed"
+                                ),
+                                Toast.LENGTH_LONG
+                            ).show();
+
+                            return;
+                        }
+
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            "Rollback requested",
+                            Toast.LENGTH_SHORT
+                        ).show();
+
+                        loadCandidates(true);
+                    });
+                }
+
+                @Override
+                public void onError(
+                    String message
+                ) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private EditText codeInput(
+        String hint
+    ) {
+        EditText input =
+            new EditText(this);
+
+        input.setHint(hint);
+        input.setSingleLine(true);
+
+        input.setInputType(
+            InputType.TYPE_CLASS_NUMBER
+        );
+
+        return input;
+    }
+
+    private LinearLayout codeWrapper(
+        EditText input
+    ) {
+        LinearLayout wrapper =
+            new LinearLayout(this);
+
+        wrapper.setPadding(
+            dp(20),
+            dp(8),
+            dp(20),
+            0
+        );
+
+        wrapper.addView(
+            input,
+            matchWrap()
+        );
+
+        return wrapper;
+    }
+
+    private static boolean commandSucceeded(
+        JSONObject result
+    ) {
+        return result.optBoolean(
+            "success",
+            false
+        );
+    }
+
+    private static String commandMessage(
+        JSONObject result,
+        String fallback
+    ) {
+        return clean(
+            result,
+            "response",
+            fallback
+        );
+    }
+
+    private static void appendReview(
+        StringBuilder body,
+        String title,
+        String value
+    ) {
+        if (body.length() > 0) {
+            body.append("\n\n");
+        }
+
+        body.append(title)
+            .append("\n")
+            .append(value);
+    }
+
+    private static String jsonValue(
+        JSONObject item,
+        String key
+    ) {
+        if (!item.has(key) || item.isNull(key)) {
+            return "—";
+        }
+
+        Object value = item.opt(key);
+
+        if (value == null) {
+            return "—";
+        }
+
+        String clean = String.valueOf(value).trim();
+
+        return clean.isBlank()
+                || "null".equalsIgnoreCase(clean)
+            ? "—"
+            : clean;
+    }
+
+    private void archiveCandidate(
+        int candidateId
+    ) {
+        api.archive(
+            candidateId,
+            simpleActionCallback(
+                "Archived"
+            )
+        );
+    }
+
+    private void restoreCandidate(
+        int candidateId
+    ) {
+        api.restore(
+            candidateId,
+            simpleActionCallback(
+                "Restored"
+            )
+        );
+    }
+
+    private ImprovementApiClient.JsonCallback
+    simpleActionCallback(
+        String successMessage
+    ) {
+        return new ImprovementApiClient
+            .JsonCallback() {
+            @Override
+            public void onSuccess(
+                JSONObject result
+            ) {
+                runOnUiThread(() -> {
+                    Toast.makeText(
+                        ImprovementsActivity.this,
+                        successMessage,
+                        Toast.LENGTH_SHORT
+                    ).show();
+
+                    loadCandidates(true);
+                });
+            }
+
+            @Override
+            public void onError(
+                String message
+            ) {
+                runOnUiThread(() ->
+                    Toast.makeText(
+                        ImprovementsActivity.this,
+                        message,
+                        Toast.LENGTH_LONG
+                    ).show()
+                );
+            }
+        };
+    }
+
+    private static boolean isArchivable(
+        String status
+    ) {
+        return "rejected".equals(status)
+            || "failed".equals(status)
+            || "rolled_back".equals(status)
+            || "deployed".equals(status);
+    }
+
+    private static String clean(
+        JSONObject item,
+        String key,
+        String fallback
+    ) {
+        if (!item.has(key) || item.isNull(key)) {
+            return fallback;
+        }
+
+        String value =
+            item.optString(key, "").trim();
+
+        if (
+            value.isBlank()
+                || "null".equalsIgnoreCase(value)
+        ) {
+            return fallback;
+        }
+
+        return value;
     }
 
     private View detail(
@@ -883,6 +2146,36 @@ public final class ImprovementsActivity extends Activity {
         return clean.length() > 19
             ? clean.substring(0, 19)
             : clean;
+    }
+
+    private Button primaryButton(
+        String label
+    ) {
+        Button button =
+            new Button(this);
+
+        button.setText(label);
+        button.setTextColor(WHITE);
+        button.setTextSize(14);
+        button.setAllCaps(false);
+
+        button.setTypeface(
+            Typeface.create(
+                "sans-serif-medium",
+                Typeface.NORMAL
+            )
+        );
+
+        button.setBackground(
+            rounded(
+                BLACK,
+                14,
+                1,
+                BLACK
+            )
+        );
+
+        return button;
     }
 
     private Button secondaryButton(

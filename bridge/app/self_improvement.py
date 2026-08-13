@@ -183,6 +183,7 @@ class SelfImprovementEngine:
             "deploy_lease_started_at": "TEXT",
             "deploy_lease_expires_at": "TEXT",
             "deploy_phase": "TEXT",
+            "archived_at": "TEXT",
         }
 
         for name, data_type in columns.items():
@@ -437,6 +438,8 @@ class SelfImprovementEngine:
             if isinstance(call, dict)
         ).casefold()
 
+        if intent == "improvement_request":
+            return "requested_improvement"
         if "notification" in text or "notification" in intent or "notify" in tool_names:
             return "notification"
         if any(word in text for word in ("wrong device", "light", "switch", "tv", "speaker")):
@@ -878,6 +881,23 @@ class SelfImprovementEngine:
             )
             return True, candidate_id, "queued"
 
+    async def request_improvement(self, text: str, actor: str):
+        clean = self.redact_text(text).strip()
+        if len(clean) < 3:
+            return False, None, "Improvement request is too short."
+        source = {"raw_text": clean, "interpreted_text": clean,
+                  "intent": "improvement_request", "success": True,
+                  "response": "Requested from Improvement Center.",
+                  "tool_calls": [], "understanding": {"requested_improvement": clean},
+                  "timings": {}, "user_key": actor}
+        failure_id = await self.record_failure(
+            source=source, correction=clean, explicit=True,
+            summary=f"Requested improvement: {clean}")
+        if await self.enabled() and self.auto_prepare:
+            return await asyncio.to_thread(
+                self._queue_failure_sync, failure_id
+            )
+        return await self.queue_failure(failure_id, actor)
     async def queue_failure(self, failure_id: int, actor: str) -> tuple[bool, int | None, str]:
         if not await self.enabled():
             return False, None, "Self-improvement is disabled."
@@ -938,10 +958,10 @@ class SelfImprovementEngine:
         return await asyncio.to_thread(self._get_failure_sync, failure_id)
 
     def _list_candidates_sync(self, limit: int, status: str | None) -> list[dict[str, Any]]:
-        query = "SELECT * FROM improvement_candidates"
+        query = "SELECT * FROM improvement_candidates WHERE archived_at IS NULL"
         params: list[Any] = []
         if status:
-            query += " WHERE status = ?"
+            query += " AND status = ?"
             params.append(status)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(max(1, min(limit, 200)))
@@ -951,6 +971,47 @@ class SelfImprovementEngine:
 
     async def list_candidates(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_candidates_sync, limit, status)
+
+    async def list_archived_candidates(self, limit: int = 50):
+        def load():
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM improvement_candidates "
+                    "WHERE archived_at IS NOT NULL "
+                    "ORDER BY archived_at DESC LIMIT ?",
+                    (max(1, min(limit, 200)),),
+                ).fetchall()
+            return [self._candidate_from_row(row) for row in rows]
+
+        return await asyncio.to_thread(load)
+
+    def _set_candidate_archived_sync(self, candidate_id: int, archived: bool):
+        now = self._utc_now()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM improvement_candidates WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                return False, "missing"
+            if archived and str(row["status"]) not in {"rejected","failed","rolled_back","deployed"}:
+                return False, "invalid_state"
+            connection.execute(
+                "UPDATE improvement_candidates SET archived_at = ?, updated_at = ? WHERE candidate_id = ?",
+                (now if archived else None, now, candidate_id),
+            )
+        return True, "archived" if archived else "restored"
+
+    async def set_candidate_archived(self, candidate_id: int, archived: bool, actor: str):
+        result = await asyncio.to_thread(
+            self._set_candidate_archived_sync, candidate_id, archived
+        )
+        if result[0]:
+            await self.audit(
+                "candidate_archived" if archived else "candidate_restored",
+                actor=actor, candidate_id=candidate_id,
+            )
+        return result
 
     def _get_candidate_sync(self, candidate_id: int) -> dict[str, Any] | None:
         with self._connect() as connection:

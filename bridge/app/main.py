@@ -134,6 +134,10 @@ class ImprovementActionRequest(BaseModel):
     code: str | None = Field(default=None, min_length=6, max_length=12)
 
 
+class ImprovementCreateRequest(BaseModel):
+    request: str = Field(min_length=3, max_length=2000)
+
+
 def _conversation_scope(
     conversation_id: str | None,
     user_key: str,
@@ -437,6 +441,25 @@ async def improvement_audit(
     return {"count": len(items), "items": items}
 
 
+@app.post("/api/improvement/request")
+async def improvement_request(request: ImprovementCreateRequest, x_jarvis_admin_token: str | None = Header(default=None)):
+    _require_improvement_token(x_jarvis_admin_token)
+    ok, candidate_id, status = await improvement.request_improvement(request.request, actor="api")
+    if not ok:
+        raise HTTPException(status_code=400, detail=status)
+    return {"success": True, "candidate_id": candidate_id, "status": status}
+
+
+@app.get("/api/improvement/archive")
+async def improvement_archive(
+    limit: int = 50,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+    items = await improvement.list_archived_candidates(limit=limit)
+    return {"count": len(items), "items": items}
+
+
 @app.get("/api/improvement/candidates/{candidate_id}")
 async def improvement_candidate(
     candidate_id: int,
@@ -462,6 +485,29 @@ async def improvement_prepare(
     if not ok:
         raise HTTPException(status_code=400, detail=state)
     return {"success": True, "candidate_id": candidate_id, "status": state}
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/archive")
+async def improvement_archive_candidate(
+    candidate_id: int,
+    x_jarvis_admin_token: str | None = Header(default=None),
+):
+    _require_improvement_token(x_jarvis_admin_token)
+    ok, state = await improvement.set_candidate_archived(
+        candidate_id, True, actor="api"
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=state)
+    return {"success": True, "status": state}
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/restore")
+async def improvement_restore_candidate(candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)):
+    _require_improvement_token(x_jarvis_admin_token)
+    ok, state = await improvement.set_candidate_archived(candidate_id, False, actor="api")
+    if not ok:
+        raise HTTPException(status_code=400, detail=state)
+    return {"success": True, "status": state}
 
 
 @app.post("/api/improvement/candidates/{candidate_id}/approve")
@@ -501,6 +547,13 @@ async def improvement_reject(
 ) -> dict[str, object]:
     _require_improvement_token(x_jarvis_admin_token)
     result = await improvement.reject_candidate(candidate_id, actor="api")
+    return asdict(result)
+
+
+@app.post("/api/improvement/candidates/{candidate_id}/rollback-ticket")
+async def improvement_rollback_ticket(candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)):
+    _require_improvement_token(x_jarvis_admin_token)
+    result = await improvement.issue_rollback_ticket(candidate_id, actor="api")
     return asdict(result)
 
 
