@@ -340,12 +340,19 @@ public final class MainActivity extends Activity {
     private void showTopMenu(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
         menu.getMenu().add(0, 1, 0, "Chat history");
-        menu.getMenu().add(0, 2, 1, "Delete current chat");
-        menu.getMenu().add(0, 3, 2, "Settings");
+        menu.getMenu().add(0, 4, 1, "Improvements");
+        menu.getMenu().add(0, 2, 2, "Delete current chat");
+        menu.getMenu().add(0, 3, 3, "Settings");
         menu.setOnMenuItemClickListener(item -> {
             return switch (item.getItemId()) {
                 case 1 -> {
                     openHistory();
+                    yield true;
+                }
+                case 4 -> {
+                    startActivity(
+                        new Intent(this, ImprovementsActivity.class)
+                    );
                     yield true;
                 }
                 case 2 -> {

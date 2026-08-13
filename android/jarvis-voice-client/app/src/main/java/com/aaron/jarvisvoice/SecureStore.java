@@ -23,6 +23,8 @@ public final class SecureStore {
     private static final String KEY_ALIAS = "jarvis_voice_token_v1710";
     private static final String MOBILE_TOKEN = "mobile_voice_token";
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
+    private static final String IMPROVEMENT_ADMIN_TOKEN =
+        "improvement_admin_token_v190140";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -442,6 +444,47 @@ public final class SecureStore {
 
     public String homeAssistantToken() {
         return decryptPreference(HOME_ASSISTANT_TOKEN);
+    }
+
+    public boolean hasImprovementAdminToken() {
+        return !preferences.getString(
+            IMPROVEMENT_ADMIN_TOKEN,
+            ""
+        ).isBlank();
+    }
+
+    public String improvementAdminToken() {
+        return decryptPreference(
+            IMPROVEMENT_ADMIN_TOKEN
+        );
+    }
+
+    public void saveImprovementAdminToken(
+        String token
+    ) throws Exception {
+        String value = token == null
+            ? ""
+            : token.trim();
+
+        if (value.isBlank()) {
+            preferences.edit()
+                .remove(IMPROVEMENT_ADMIN_TOKEN)
+                .apply();
+            return;
+        }
+
+        preferences.edit()
+            .putString(
+                IMPROVEMENT_ADMIN_TOKEN,
+                encrypt(value)
+            )
+            .apply();
+    }
+
+    public void clearImprovementAdminToken() {
+        preferences.edit()
+            .remove(IMPROVEMENT_ADMIN_TOKEN)
+            .apply();
     }
 
     public String conversationId() {
