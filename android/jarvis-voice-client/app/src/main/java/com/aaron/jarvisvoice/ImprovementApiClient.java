@@ -55,7 +55,14 @@ public final class ImprovementApiClient {
 
     public void requestImprovement(String text, JsonCallback callback) {
         JSONObject body = new JSONObject();
-        body.put("request", text);
+
+        try {
+            body.put("request", text);
+        } catch (Exception exception) {
+            callback.onError(safeMessage(exception));
+            return;
+        }
+
         post("/api/improvement/request", body, callback);
     }
 
@@ -110,7 +117,13 @@ public final class ImprovementApiClient {
         JsonCallback callback
     ) {
         JSONObject body = new JSONObject();
-        body.put("code", code);
+
+        try {
+            body.put("code", code);
+        } catch (Exception exception) {
+            callback.onError(safeMessage(exception));
+            return;
+        }
 
         post(
             "/api/improvement/candidates/"
@@ -146,11 +159,15 @@ public final class ImprovementApiClient {
     }
 
     private void get(String path, JsonCallback callback) {
-        Request request = baseRequest(path)
-            .get()
-            .build();
+        try {
+            Request request = baseRequest(path)
+                .get()
+                .build();
 
-        execute(request, callback);
+            execute(request, callback);
+        } catch (Exception exception) {
+            callback.onError(safeMessage(exception));
+        }
     }
 
     private void post(
@@ -158,14 +175,18 @@ public final class ImprovementApiClient {
         JSONObject body,
         JsonCallback callback
     ) {
-        RequestBody requestBody =
-            RequestBody.create(body.toString(), JSON);
+        try {
+            RequestBody requestBody =
+                RequestBody.create(body.toString(), JSON);
 
-        Request request = baseRequest(path)
-            .post(requestBody)
-            .build();
+            Request request = baseRequest(path)
+                .post(requestBody)
+                .build();
 
-        execute(request, callback);
+            execute(request, callback);
+        } catch (Exception exception) {
+            callback.onError(safeMessage(exception));
+        }
     }
 
     private Request.Builder baseRequest(String path) {
