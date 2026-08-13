@@ -31,6 +31,7 @@ from app.memory_engine import MemoryEngine
 from app.registry import RegistryEngine
 from app.reply_policy import ReplyBudgetPolicy
 from app.tool_engine import ToolEngine
+from app.tool_outcomes import request_tool_success
 from app.tone_engine import ToneEngine, ToneProfile
 from app.understanding_engine import UnderstandingEngine
 from app.user_context import UserContext
@@ -5598,13 +5599,11 @@ class AIEngine:
             content=final_reply,
         )
 
-        success = (
-            all(
-                call.get("result", {}).get("success") is True
-                for call in completed_calls
-            )
-            if completed_calls
-            else True
+        success = request_tool_success(
+            completed_calls,
+            partial_read_only_allowed=code_awareness_requested,
+            read_only_tools=CodeAwarenessEngine.TOOL_NAMES,
+            final_reply=final_reply,
         )
 
         await self.dialogue.record_result(

@@ -857,3 +857,71 @@ async def test_rollback_transaction_reissue_invalidates_old_code(
         ]
         == "rollback_requested"
     )
+
+
+@pytest.mark.asyncio
+async def test_mixed_read_only_inspection_miss_is_not_recorded_as_failure(
+    engine: SelfImprovementEngine,
+    actor: UserContext,
+) -> None:
+    interaction_id = await engine.observe_interaction(
+        conversation_id="usr:aaron:failure99",
+        actor=actor,
+        raw_text=(
+            "Inspect your own live code and tell me "
+            "your current Git status."
+        ),
+        result={
+            "success": True,
+            "response": (
+                "The Jarvis repository is on conversation-engine "
+                "and clean. The optional Voice PE Git status "
+                "could not be read."
+            ),
+            "intent": "general",
+            "calls": [
+                {
+                    "tool": "code_roots",
+                    "result": {
+                        "success": True,
+                        "mode": "read_only",
+                    },
+                },
+                {
+                    "tool": "git_status",
+                    "arguments": {
+                        "root": "jarvis",
+                    },
+                    "result": {
+                        "success": True,
+                        "branch": "conversation-engine",
+                    },
+                },
+                {
+                    "tool": "git_status",
+                    "arguments": {
+                        "root": "voice_pe",
+                    },
+                    "result": {
+                        "success": False,
+                        "error": "fatal: not a git repository",
+                    },
+                },
+            ],
+            "timings": {
+                "jarvis_request_total_ms": 400,
+            },
+        },
+    )
+
+    interaction = await engine.get_interaction(
+        interaction_id
+    )
+
+    assert interaction is not None
+    assert interaction["success"] is True
+    assert interaction["failure_like"] is False
+
+    failures = await engine.list_failures()
+
+    assert failures == []

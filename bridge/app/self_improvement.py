@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from app.code_awareness import CodeAwarenessEngine
+from app.tool_outcomes import has_blocking_tool_failure
 from app.user_context import UserContext
 
 logger = logging.getLogger("jarvis-core.improvement")
@@ -590,11 +592,10 @@ class SelfImprovementEngine:
         intent = str(result.get("intent") or "unknown")
         response = str(result.get("response") or "")
 
-        failed_tool = any(
-            isinstance(call, dict)
-            and isinstance(call.get("result"), dict)
-            and call["result"].get("success") is False
-            for call in calls
+        blocking_failed_tool = has_blocking_tool_failure(
+            calls,
+            overall_success=success,
+            read_only_tools=CodeAwarenessEngine.TOOL_NAMES,
         )
         latency = int(timings.get("jarvis_request_total_ms") or 0)
         benign_false_intents = {
@@ -605,7 +606,7 @@ class SelfImprovementEngine:
             "clarification",
         }
         failure_like = (
-            failed_tool
+            blocking_failed_tool
             or (not success and intent not in benign_false_intents)
             or latency >= self.latency_failure_ms
         )
@@ -626,7 +627,10 @@ class SelfImprovementEngine:
             failure_like=failure_like,
         )
 
-        if failed_tool or (not success and intent not in benign_false_intents):
+        if blocking_failed_tool or (
+            not success
+            and intent not in benign_false_intents
+        ):
             source = await self.get_interaction(interaction_id)
             if source:
                 await self.record_failure(
