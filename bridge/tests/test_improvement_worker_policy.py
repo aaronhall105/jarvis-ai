@@ -3302,3 +3302,100 @@ def test_v2114b_active_lease_blocks_all_other_worker_work(
             "deploying",
         )
     ]
+
+def test_normalise_unified_diff_repairs_hunk_counts() -> None:
+    patch = """diff --git a/bridge/app/example.py b/bridge/app/example.py
+--- a/bridge/app/example.py
++++ b/bridge/app/example.py
+@@ -1,99 +1,88 @@
+-old = 1
++new = 2
+ context = True
+"""
+
+    fixed = worker.normalise_unified_diff_hunk_counts(
+        patch
+    )
+
+    assert "@@ -1,2 +1,2 @@" in fixed
+    assert "-old = 1" in fixed
+    assert "+new = 2" in fixed
+
+
+def test_build_context_balances_large_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    first = Path("bridge/app/first.py")
+    second = Path("bridge/app/second.py")
+
+    for path in (first, second):
+        target = tmp_path / path
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+    filler = "\n".join(
+        f"filler_{i} = {i}"
+        for i in range(1200)
+    )
+
+    (tmp_path / first).write_text(
+        filler
+        + "\ncompleted_calls = []\n"
+        + "for call in completed_calls:\n"
+        + "    pass\n",
+        encoding="utf-8",
+    )
+
+    (tmp_path / second).write_text(
+        filler
+        + "\nfailed_tool = any([])\n"
+        + "failure_like = (failed_tool)\n"
+        + "await self.record_failure(source=None)\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ROOT",
+        tmp_path,
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "infer_context_files",
+        lambda failure, policy: [
+            str(first),
+            str(second),
+        ],
+    )
+
+    failure = {
+        "summary": "Jarvis request failed",
+        "category": "general",
+        "evidence": {
+            "completed_calls": True,
+            "failed_tool": True,
+        },
+    }
+
+    policy = {
+        "max_context_characters": 12000,
+    }
+
+    context, included = worker.build_context(
+        failure,
+        policy,
+    )
+
+    assert len(context) <= 12000
+    assert included == [
+        str(first),
+        str(second),
+    ]
+    assert "for call in completed_calls" in context
+    assert "failed_tool = any([])" in context
+    assert "failure_like = (failed_tool)" in context
+    assert "await self.record_failure" in context

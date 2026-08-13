@@ -930,22 +930,235 @@ def redact(text: str) -> str:
     return output
 
 
-def build_context(failure: dict[str, Any], policy: dict[str, Any]) -> tuple[str, list[str]]:
-    files = infer_context_files(failure, policy)
-    max_chars = int(policy.get("max_context_characters", 180000))
+def _context_search_terms(
+    failure: dict[str, Any],
+) -> list[str]:
+    evidence = failure.get(
+        "evidence",
+        {},
+    )
+
+    source = " ".join(
+        (
+            str(failure.get("summary") or ""),
+            str(failure.get("category") or ""),
+            json.dumps(
+                evidence,
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+    )
+
+    source = redact(source).casefold()
+
+    stop = {
+        "this", "that", "with", "from",
+        "have", "were", "your", "into",
+        "true", "false", "none",
+    }
+
+    terms: list[str] = []
+
+    for token in re.findall(
+        r"[a-z_][a-z0-9_]{3,}",
+        source,
+    ):
+        if token in stop or token in terms:
+            continue
+
+        terms.append(token)
+
+    if (
+        "failed" in source
+        or '"success": false' in source
+    ):
+        for token in (
+            "failed_tool",
+            "failure_like",
+            "record_failure",
+            "completed_calls",
+            "record_result",
+        ):
+            if token not in terms:
+                terms.append(token)
+
+    return terms[:48]
+
+
+def _relevant_context_excerpt(
+    content: str,
+    terms: list[str],
+    budget: int,
+) -> str:
+    if len(content) <= budget:
+        return content
+
+    lines = content.splitlines()
+    count = len(lines)
+
+    def render(
+        ranges: list[tuple[int, int]],
+    ) -> str:
+        merged: list[list[int]] = []
+
+        for left, right in sorted(ranges):
+            if (
+                merged
+                and left <= merged[-1][1]
+            ):
+                merged[-1][1] = max(
+                    merged[-1][1],
+                    right,
+                )
+            else:
+                merged.append(
+                    [left, right]
+                )
+
+        parts: list[str] = []
+
+        for left, right in merged:
+            parts.append(
+                f"===== SOURCE LINES "
+                f"{left + 1}-{right} "
+                f"OF {count} ====="
+            )
+            parts.extend(
+                lines[left:right]
+            )
+
+        return "\n".join(parts) + "\n"
+
+    ranges = [
+        (0, min(30, count)),
+        (max(0, count - 30), count),
+    ]
+
+    ranked: list[tuple[int, int]] = []
+
+    for index, line in enumerate(lines):
+        folded = line.casefold()
+
+        hits = {
+            term
+            for term in terms
+            if term in folded
+        }
+
+        if not hits:
+            continue
+
+        score = sum(
+            4
+            if "_" in term
+            else 2
+            if len(term) >= 8
+            else 1
+            for term in hits
+        )
+
+        ranked.append(
+            (-score, index)
+        )
+
+    for _, index in sorted(ranked):
+        if any(
+            left <= index < right
+            for left, right in ranges
+        ):
+            continue
+
+        trial = ranges + [
+            (
+                max(0, index - 24),
+                min(count, index + 25),
+            )
+        ]
+
+        candidate = render(trial)
+
+        if len(candidate) > budget:
+            continue
+
+        ranges = trial
+
+    excerpt = render(ranges)
+
+    return excerpt[:budget]
+
+
+def build_context(
+    failure: dict[str, Any],
+    policy: dict[str, Any],
+) -> tuple[str, list[str]]:
+    files = infer_context_files(
+        failure,
+        policy,
+    )
+
+    max_chars = int(
+        policy.get(
+            "max_context_characters",
+            180000,
+        )
+    )
+
+    if not files:
+        return "", []
+
+    terms = _context_search_terms(
+        failure
+    )
+
+    per_file = max(
+        4000,
+        (max_chars // len(files)) - 256,
+    )
+
     sections: list[str] = []
-    used = 0
+    included: list[str] = []
+
     for path in files:
-        content = (ROOT / path).read_text(encoding="utf-8", errors="replace")
+        content = (
+            ROOT / path
+        ).read_text(
+            encoding="utf-8",
+            errors="replace",
+        )
+
         content = redact(content)
-        remaining = max_chars - used
-        if remaining <= 0:
-            break
-        if len(content) > remaining:
-            content = content[:remaining] + "\n# [TRUNCATED BY JARVIS IMPROVER]\n"
-        sections.append(f"\n===== FILE: {path} =====\n{content}")
-        used += len(content)
-    return "".join(sections), files
+
+        excerpt = _relevant_context_excerpt(
+            content,
+            terms,
+            per_file,
+        )
+
+        section = (
+            f"\n===== FILE: {path} =====\n"
+            f"{excerpt}"
+        )
+
+        if (
+            sum(len(item) for item in sections)
+            + len(section)
+            > max_chars
+        ):
+            continue
+
+        sections.append(section)
+        included.append(path)
+
+    context = "".join(sections)
+
+    if len(context) > max_chars:
+        raise WorkerError(
+            "Improvement context exceeded "
+            "the configured character limit."
+        )
+
+    return context, included
 
 
 def parse_tool_arguments(response: Any, tool_name: str) -> dict[str, Any]:
@@ -1421,6 +1634,93 @@ def create_worktree(
     )
 
     return workspace
+
+
+
+def normalise_unified_diff_hunk_counts(
+    patch: str,
+) -> str:
+    """Recalculate unified-diff hunk counts only."""
+    lines = patch.splitlines(
+        keepends=True
+    )
+
+    header = re.compile(
+        r"^@@ -(\d+)(?:,\d+)? "
+        r"\+(\d+)(?:,\d+)? @@(.*)$"
+    )
+
+    index = 0
+
+    while index < len(lines):
+        raw = lines[index]
+        line = raw.rstrip("\r\n")
+        match = header.match(line)
+
+        if match is None:
+            index += 1
+            continue
+
+        old_count = 0
+        new_count = 0
+        end = index + 1
+
+        while end < len(lines):
+            body = lines[end].rstrip(
+                "\r\n"
+            )
+
+            if (
+                body.startswith("@@ ")
+                or body.startswith("diff --git ")
+            ):
+                break
+
+            if body == r"\ No newline at end of file":
+                end += 1
+                continue
+
+            if not body:
+                raise WorkerError(
+                    "Unified diff hunk contains "
+                    "an unprefixed blank line."
+                )
+
+            prefix = body[0]
+
+            if prefix == " ":
+                old_count += 1
+                new_count += 1
+            elif prefix == "-":
+                old_count += 1
+            elif prefix == "+":
+                new_count += 1
+            else:
+                raise WorkerError(
+                    "Unified diff hunk contains "
+                    "an invalid body line."
+                )
+
+            end += 1
+
+        newline = (
+            "\r\n"
+            if raw.endswith("\r\n")
+            else "\n"
+            if raw.endswith("\n")
+            else ""
+        )
+
+        lines[index] = (
+            f"@@ -{match.group(1)},{old_count} "
+            f"+{match.group(2)},{new_count} "
+            f"@@{match.group(3)}"
+            f"{newline}"
+        )
+
+        index = end
+
+    return "".join(lines)
 
 
 def apply_patch(workspace: Path, patch: str, candidate_id: int) -> Path:
@@ -3466,7 +3766,10 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 env_values=env_values,
                 previous_error=generation_error,
             )
-            patch = str(payload.get("patch") or "")
+            patch = normalise_unified_diff_hunk_counts(
+                str(payload.get("patch") or "")
+            )
+            payload["patch"] = patch
             try:
                 paths, patch_hash = validate_patch_policy(patch, policy, config)
                 workspace = create_worktree(
