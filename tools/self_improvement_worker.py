@@ -1708,50 +1708,46 @@ def request_patch(
     forbidden_paths = policy.get("forbidden_paths", [])
     prompt = f"""
 You are repairing Jarvis Core, a production Home Assistant AI assistant.
-Generate the smallest safe patch that fixes the recorded failure and adds a regression test.
-
+Generate the smallest safe set of exact structured source edits that fixes the recorded failure and adds a regression test.
 Failure ID: {failure['failure_id']}
 Category: {failure.get('category')}
 Severity: {failure.get('severity')}
 Occurrences: {failure.get('occurrences')}
 Summary: {failure.get('summary')}
-
 Redacted evidence:
 {failure_json}
-
 Files supplied for context: {context_files}
 Allowed edit path patterns: {allowed_edit_paths}
 Forbidden paths: {forbidden_paths}
-
 Authoritative repository source context:
 The source below was read from the exact Git base commit that the
-candidate patch will be applied to. Generate patch hunks against this
+candidate will be applied to. Generate structured edits against this
 source, not against remembered or assumed versions of Jarvis.
-
 {context}
-
 Requirements:
 - Preserve all existing working Jarvis features.
 - Never add credentials, tokens, network backdoors, shell execution, eval/exec, or Docker socket access.
 - Never edit .env, data, logs, authentication, systemd, Docker daemon settings, or Home Assistant tokens.
 - Never weaken room/device safety, Admin Mode confirmation, user identity separation, or tool verification.
 - Add or update a focused pytest regression test.
-- Keep the patch under {config.max_patch_lines} changed lines and {config.max_changed_files} files.
-- Return a standard unified Git diff rooted at the repository, using paths such as a/bridge/app/file.py and b/bridge/app/file.py.
-- The patch must be COMPLETE. Never submit a partial diff, truncated function, unfinished expression, or unbalanced parenthesis/bracket.
-- Before calling submit_patch, re-check that every added Python file is syntactically complete from its first line through its final line.
-- Prefer a smaller, simpler complete patch over a larger patch that risks truncation.
-- Do not include prose inside the patch.
+- Keep the resulting Git patch under {config.max_patch_lines} changed lines and {config.max_changed_files} files.
+- Return structured edits through submit_patch.
+- Each edit must contain one repository-relative path, exact old_text copied from the authoritative source, and replacement new_text.
+- old_text must be non-empty and must identify exactly one occurrence in the target file.
+- Never invent line numbers, Git hunk coordinates, diff headers, or unchanged diff context. The worker generates the Git diff deterministically.
+- Every structured edit must be COMPLETE. Never submit truncated old_text/new_text, unfinished expressions, or unbalanced parentheses/brackets.
+- Before calling submit_patch, verify every old_text value was copied exactly from the authoritative source, including whitespace and blank lines.
+- Before calling submit_patch, re-check that every Python new_text replacement is syntactically complete.
+- Prefer fewer, smaller exact edits over broad replacements.
 """.strip()
+
     if previous_error or previous_patch:
         prompt += (
-            "\n\nA previous patch attempt failed. "
-            "Treat the failed patch only as diagnostic "
+            "\n\nA previous structured-edit attempt failed. "
+            "Treat any previous generated patch only as diagnostic "
             "evidence, never as authoritative source."
         )
 
-        # Put the stale patch first. More authoritative retry
-        # feedback is intentionally placed after it.
         if previous_patch:
             prompt += (
                 "\n\nPrevious failed patch "
@@ -1762,13 +1758,11 @@ Requirements:
             )
 
         prompt += (
-            "\n\nDiscard any incorrect hunk coordinates or "
-            "remembered source from that patch. Re-read the "
-            "authoritative repository source supplied above and "
-            "generate a fresh complete diff. Every unchanged "
-            "context line and every removed line must be copied "
-            "exactly from that source, including whitespace and "
-            "blank lines."
+            "\n\nDiscard any incorrect remembered source from the "
+            "previous attempt. Re-read the authoritative repository "
+            "source supplied above and generate fresh structured "
+            "edits. Every old_text value must be copied exactly from "
+            "that source, including whitespace and blank lines."
         )
 
         if previous_error:
@@ -1783,26 +1777,24 @@ Requirements:
                 prompt += (
                     "\n\nAPPLY-FAILURE REPAIR RULES:\n"
                     "- EXACT BASE SOURCE is authoritative "
-                    "for every rejected hunk.\n"
+                    "for every rejected edit.\n"
                     "- If it conflicts with the previous "
                     "failed patch or any remembered source, "
                     "EXACT BASE SOURCE wins.\n"
-                    "- Rebuild each rejected hunk from "
-                    "scratch. Do not recycle its stale "
-                    "context lines.\n"
-                    "- Copy unchanged unified-diff context "
-                    "lines character-for-character from "
+                    "- Rebuild each rejected structured edit "
+                    "from scratch. Do not recycle stale "
+                    "source text.\n"
+                    "- Copy each old_text value "
+                    "character-for-character from "
                     "EXACT BASE SOURCE.\n"
                     "- Source line numbers shown in EXACT "
                     "BASE SOURCE are annotations only and "
-                    "must not appear in the patch.\n"
+                    "must not appear in old_text.\n"
                     "- Before submit_patch, verify every "
-                    "unchanged context line around a "
-                    "rejected edit exists exactly in the "
-                    "authoritative source.\n"
-                    "- Prefer a smaller fresh hunk anchored "
-                    "to exact source over preserving a "
-                    "larger failed hunk."
+                    "old_text value exists exactly once in "
+                    "the authoritative source.\n"
+                    "- Prefer a smaller exact old_text "
+                    "anchor over a broad replacement."
                 )
 
             prompt += (
@@ -1812,31 +1804,74 @@ Requirements:
             )
 
     instructions = """
-Act as a conservative senior Python engineer and safety reviewer. You may only submit a patch through the submit_patch tool. Prefer deterministic fixes over prompt-only changes. A candidate must include a regression test and must not modify forbidden paths. Do not claim tests passed; the local worker will verify them.
+Act as a conservative senior Python engineer and safety reviewer. You may only submit bounded structured source edits through the submit_patch tool. Prefer deterministic fixes over prompt-only changes. A candidate must include a regression test and must not modify forbidden paths. Never generate Git diff syntax; the local worker will materialise the edits and generate the Git patch. Do not claim tests passed; the local worker will verify them.
 """.strip()
 
     tool = {
         "type": "function",
         "name": "submit_patch",
-        "description": "Submit one bounded Jarvis code patch for local validation.",
+        "description": (
+            "Submit bounded exact Jarvis source edits for "
+            "deterministic local materialisation and validation."
+        ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
                 "summary": {"type": "string"},
                 "root_cause": {"type": "string"},
-                "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-                "patch": {"type": "string"},
+                "risk": {
+                    "type": "string",
+                    "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                    ],
+                },
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                            },
+                            "old_text": {
+                                "type": "string",
+                            },
+                            "new_text": {
+                                "type": "string",
+                            },
+                        },
+                        "required": [
+                            "path",
+                            "old_text",
+                            "new_text",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
                 "tests_added": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "type": "string",
+                    },
                 },
                 "notes": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "items": {
+                        "type": "string",
+                    },
                 },
             },
-            "required": ["summary", "root_cause", "risk", "patch", "tests_added", "notes"],
+            "required": [
+                "summary",
+                "root_cause",
+                "risk",
+                "edits",
+                "tests_added",
+                "notes",
+            ],
             "additionalProperties": False,
         },
     }
@@ -1993,6 +2028,261 @@ def create_worktree(
 
     return workspace
 
+
+
+
+def _validate_structured_edit_path(
+    path: str,
+    policy: dict[str, Any],
+) -> str:
+    if (
+        not path
+        or path.startswith("/")
+        or ".." in Path(path).parts
+    ):
+        raise WorkerError(
+            f"Unsafe structured edit path: {path}"
+        )
+
+    forbidden = policy.get(
+        "forbidden_paths",
+        [],
+    )
+    allowed = policy.get(
+        "allowed_edit_paths",
+        [],
+    )
+
+    if path_matches(path, forbidden):
+        raise WorkerError(
+            "Structured edit touches forbidden path: "
+            f"{path}"
+        )
+
+    if not path_matches(path, allowed):
+        raise WorkerError(
+            "Structured edit touches path outside "
+            f"the allow-list: {path}"
+        )
+
+    return path
+
+
+def materialise_structured_edits(
+    workspace: Path,
+    payload: dict[str, Any],
+    policy: dict[str, Any],
+    config: WorkerConfig,
+) -> tuple[str, list[str], str]:
+    edits = payload.get("edits")
+
+    if not isinstance(edits, list) or not edits:
+        raise WorkerError(
+            "The model did not return any structured edits."
+        )
+
+    if len(edits) > config.max_patch_lines:
+        raise WorkerError(
+            "Structured edit count exceeds the "
+            "candidate patch limit."
+        )
+
+    grouped: dict[
+        str,
+        list[tuple[str, str]],
+    ] = {}
+
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
+            raise WorkerError(
+                "Structured edit "
+                f"{index} is not an object."
+            )
+
+        path_value = edit.get("path")
+        old_text = edit.get("old_text")
+        new_text = edit.get("new_text")
+
+        if not isinstance(path_value, str):
+            raise WorkerError(
+                "Structured edit "
+                f"{index} has an invalid path."
+            )
+
+        path = _validate_structured_edit_path(
+            path_value,
+            policy,
+        )
+
+        if not isinstance(old_text, str):
+            raise WorkerError(
+                "Structured edit "
+                f"{index} has invalid old_text."
+            )
+
+        if not isinstance(new_text, str):
+            raise WorkerError(
+                "Structured edit "
+                f"{index} has invalid new_text."
+            )
+
+        if not old_text:
+            raise WorkerError(
+                "Structured edit old_text must "
+                "not be empty."
+            )
+
+        if old_text == new_text:
+            raise WorkerError(
+                "Structured edit would make no change."
+            )
+
+        grouped.setdefault(
+            path,
+            [],
+        ).append(
+            (
+                old_text,
+                new_text,
+            )
+        )
+
+    if len(grouped) > config.max_changed_files:
+        raise WorkerError(
+            "Structured edits change "
+            f"{len(grouped)} files; policy allows "
+            f"{config.max_changed_files}."
+        )
+
+    workspace_root = workspace.resolve()
+
+    for path, replacements in grouped.items():
+        target = workspace / path
+
+        if target.is_symlink():
+            raise WorkerError(
+                "Structured edits may not modify "
+                f"symlinks: {path}"
+            )
+
+        if not target.exists() or not target.is_file():
+            raise WorkerError(
+                "Structured edit target is not an "
+                f"existing regular file: {path}"
+            )
+
+        resolved = target.resolve()
+
+        if not resolved.is_relative_to(
+            workspace_root
+        ):
+            raise WorkerError(
+                "Structured edit escaped the "
+                f"candidate workspace: {path}"
+            )
+
+        original = target.read_text(
+            encoding="utf-8",
+        )
+
+        spans: list[
+            tuple[int, int, str]
+        ] = []
+
+        for old_text, new_text in replacements:
+            occurrences = original.count(
+                old_text
+            )
+
+            if occurrences != 1:
+                raise WorkerError(
+                    "Structured edit old_text for "
+                    f"{path} occurs {occurrences} "
+                    "times; exactly one occurrence "
+                    "is required."
+                )
+
+            start = original.index(
+                old_text
+            )
+            end = start + len(
+                old_text
+            )
+
+            for (
+                existing_start,
+                existing_end,
+                _,
+            ) in spans:
+                if (
+                    start < existing_end
+                    and end > existing_start
+                ):
+                    raise WorkerError(
+                        "Structured edits overlap in "
+                        f"{path}."
+                    )
+
+            spans.append(
+                (
+                    start,
+                    end,
+                    new_text,
+                )
+            )
+
+        updated = original
+
+        for start, end, new_text in sorted(
+            spans,
+            key=lambda item: item[0],
+            reverse=True,
+        ):
+            updated = (
+                updated[:start]
+                + new_text
+                + updated[end:]
+            )
+
+        target.write_text(
+            updated,
+            encoding="utf-8",
+        )
+
+    patch = run(
+        [
+            "git",
+            "diff",
+            "--no-ext-diff",
+            "--binary",
+            "HEAD",
+            "--",
+        ],
+        cwd=workspace,
+    ).stdout
+
+    if not patch.strip():
+        raise WorkerError(
+            "Structured edits produced no Git diff."
+        )
+
+    paths, patch_hash = validate_patch_policy(
+        patch,
+        policy,
+        config,
+    )
+
+    expected_paths = sorted(
+        grouped
+    )
+
+    if paths != expected_paths:
+        raise WorkerError(
+            "Generated Git diff paths do not match "
+            "the requested structured edit paths."
+        )
+
+    return patch, paths, patch_hash
 
 
 def normalise_unified_diff_hunk_counts(
@@ -4144,12 +4434,8 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 previous_error=generation_error,
                 previous_patch=previous_patch,
             )
-            patch = normalise_unified_diff_hunk_counts(
-                str(payload.get("patch") or "")
-            )
-            payload["patch"] = patch
+            patch = ""
             try:
-                paths, patch_hash = validate_patch_policy(patch, policy, config)
                 workspace = create_worktree(
                     candidate_id,
                     branch,
@@ -4180,7 +4466,36 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                         "Candidate worktree was not created "
                         "from the captured base commit."
                     )
-                patch_path = apply_patch(workspace, patch, candidate_id)
+
+                (
+                    patch,
+                    paths,
+                    patch_hash,
+                ) = materialise_structured_edits(
+                    workspace,
+                    payload,
+                    policy,
+                    config,
+                )
+                payload["patch"] = patch
+
+                # Prove the Git-generated artifact can be
+                # reapplied cleanly from the captured base.
+                run(
+                    [
+                        "git",
+                        "reset",
+                        "--hard",
+                        "HEAD",
+                    ],
+                    cwd=workspace,
+                )
+
+                patch_path = apply_patch(
+                    workspace,
+                    patch,
+                    candidate_id,
+                )
                 break
             except Exception as exc:
                 generation_error = str(exc)
@@ -4279,17 +4594,6 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 previous_patch=failed_patch,
             )
 
-            patch = normalise_unified_diff_hunk_counts(
-                str(payload.get("patch") or "")
-            )
-            payload["patch"] = patch
-
-            paths, patch_hash = validate_patch_policy(
-                patch,
-                policy,
-                config,
-            )
-
             workspace = create_worktree(
                 candidate_id,
                 branch,
@@ -4312,6 +4616,28 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                     "Candidate repair worktree was not "
                     "created from the captured base commit."
                 )
+
+            (
+                patch,
+                paths,
+                patch_hash,
+            ) = materialise_structured_edits(
+                workspace,
+                payload,
+                policy,
+                config,
+            )
+            payload["patch"] = patch
+
+            run(
+                [
+                    "git",
+                    "reset",
+                    "--hard",
+                    "HEAD",
+                ],
+                cwd=workspace,
+            )
 
             patch_path = apply_patch(
                 workspace,

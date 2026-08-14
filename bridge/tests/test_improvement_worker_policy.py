@@ -4302,3 +4302,264 @@ def test_apply_retry_prioritises_exact_source_over_failed_patch() -> None:
         "annotations only"
         in source
     )
+
+
+def _make_structured_edit_repo(
+    tmp_path,
+    *,
+    content: str = "alpha = 1\nbeta = 2\n",
+):
+    target = (
+        tmp_path
+        / "bridge"
+        / "app"
+        / "example.py"
+    )
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    target.write_text(
+        content,
+        encoding="utf-8",
+    )
+
+    worker.run(
+        ["git", "init", "-q"],
+        cwd=tmp_path,
+    )
+    worker.run(
+        ["git", "add", "."],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "-c",
+            "user.name=Jarvis Test",
+            "-c",
+            "user.email=jarvis@example.invalid",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        cwd=tmp_path,
+    )
+
+    return target
+
+
+def _structured_edit_policy():
+    return {
+        "allowed_edit_paths": [
+            "bridge/**",
+        ],
+        "forbidden_paths": [
+            "bridge/secret/**",
+        ],
+        "forbidden_added_patterns": [],
+    }
+
+
+def test_structured_edit_generates_git_owned_patch(
+    tmp_path,
+) -> None:
+    _make_structured_edit_repo(
+        tmp_path,
+    )
+
+    patch, paths, patch_hash = (
+        worker.materialise_structured_edits(
+            tmp_path,
+            {
+                "edits": [
+                    {
+                        "path": (
+                            "bridge/app/example.py"
+                        ),
+                        "old_text": "alpha = 1",
+                        "new_text": "alpha = 2",
+                    },
+                ],
+            },
+            _structured_edit_policy(),
+            config(),
+        )
+    )
+
+    assert paths == [
+        "bridge/app/example.py"
+    ]
+    assert "-alpha = 1" in patch
+    assert "+alpha = 2" in patch
+    assert patch_hash
+
+    patch_path = (
+        tmp_path
+        / "generated.patch"
+    )
+    patch_path.write_text(
+        patch,
+        encoding="utf-8",
+    )
+
+    worker.run(
+        [
+            "git",
+            "reset",
+            "--hard",
+            "HEAD",
+        ],
+        cwd=tmp_path,
+    )
+
+    worker.run(
+        [
+            "git",
+            "apply",
+            "--check",
+            str(patch_path),
+        ],
+        cwd=tmp_path,
+    )
+
+
+def test_structured_edit_missing_old_text_fails_closed(
+    tmp_path,
+) -> None:
+    _make_structured_edit_repo(
+        tmp_path,
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="occurs 0 times",
+    ):
+        worker.materialise_structured_edits(
+            tmp_path,
+            {
+                "edits": [
+                    {
+                        "path": (
+                            "bridge/app/example.py"
+                        ),
+                        "old_text": "missing = 1",
+                        "new_text": "missing = 2",
+                    },
+                ],
+            },
+            _structured_edit_policy(),
+            config(),
+        )
+
+
+def test_structured_edit_duplicate_old_text_fails_closed(
+    tmp_path,
+) -> None:
+    _make_structured_edit_repo(
+        tmp_path,
+        content=(
+            "alpha = 1\n"
+            "alpha = 1\n"
+        ),
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="occurs 2 times",
+    ):
+        worker.materialise_structured_edits(
+            tmp_path,
+            {
+                "edits": [
+                    {
+                        "path": (
+                            "bridge/app/example.py"
+                        ),
+                        "old_text": "alpha = 1",
+                        "new_text": "alpha = 2",
+                    },
+                ],
+            },
+            _structured_edit_policy(),
+            config(),
+        )
+
+
+def test_structured_edit_forbidden_path_fails_closed(
+    tmp_path,
+) -> None:
+    target = (
+        tmp_path
+        / "bridge"
+        / "secret"
+        / "credentials.py"
+    )
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    target.write_text(
+        "secret = 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="forbidden path",
+    ):
+        worker.materialise_structured_edits(
+            tmp_path,
+            {
+                "edits": [
+                    {
+                        "path": (
+                            "bridge/secret/"
+                            "credentials.py"
+                        ),
+                        "old_text": "secret = 1",
+                        "new_text": "secret = 2",
+                    },
+                ],
+            },
+            _structured_edit_policy(),
+            config(),
+        )
+
+
+def test_candidate_generation_uses_structured_edits() -> None:
+    import inspect
+
+    request_source = inspect.getsource(
+        worker.request_patch
+    )
+    process_source = inspect.getsource(
+        worker.process_queued_candidate
+    )
+
+    assert '"edits": {' in request_source
+    assert (
+        '"patch": {"type": "string"}'
+        not in request_source
+    )
+    assert (
+        "structured edits"
+        in request_source
+    )
+
+    assert (
+        process_source.count(
+            "materialise_structured_edits("
+        )
+        == 2
+    )
+    assert (
+        "normalise_unified_diff_hunk_counts("
+        not in process_source
+    )
+    assert (
+        process_source.count(
+            'payload["patch"] = patch'
+        )
+        == 2
+    )
