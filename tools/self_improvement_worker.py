@@ -1185,6 +1185,8 @@ def _relevant_context_excerpt(
 def build_context(
     failure: dict[str, Any],
     policy: dict[str, Any],
+    *,
+    base_commit: str | None = None,
 ) -> tuple[str, list[str]]:
     files = infer_context_files(
         failure,
@@ -1214,12 +1216,22 @@ def build_context(
     included: list[str] = []
 
     for path in files:
-        content = (
-            ROOT / path
-        ).read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
+        if base_commit:
+            content = run(
+                [
+                    "git",
+                    "show",
+                    f"{base_commit}:{path}",
+                ],
+                cwd=ROOT,
+            ).stdout
+        else:
+            content = (
+                ROOT / path
+            ).read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
 
         content = redact(content)
 
@@ -1530,6 +1542,13 @@ Redacted evidence:
 Files supplied for context: {context_files}
 Allowed edit path patterns: {allowed_edit_paths}
 Forbidden paths: {forbidden_paths}
+
+Authoritative repository source context:
+The source below was read from the exact Git base commit that the
+candidate patch will be applied to. Generate patch hunks against this
+source, not against remembered or assumed versions of Jarvis.
+
+{context}
 
 Requirements:
 - Preserve all existing working Jarvis features.
@@ -3857,7 +3876,11 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         },
     )
 
-    context, context_files = build_context(failure, policy)
+    context, context_files = build_context(
+        failure,
+        policy,
+        base_commit=base_commit,
+    )
     generation_error: str | None = None
     payload: dict[str, Any] | None = None
     usage: dict[str, Any] = {}

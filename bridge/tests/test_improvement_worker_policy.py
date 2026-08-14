@@ -3689,3 +3689,210 @@ def test_attempts_today_excludes_manual_requests(
             )
 
     assert worker.attempts_today() == 1
+
+
+
+def test_request_patch_includes_authoritative_source_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class OutputDetails:
+        reasoning_tokens = 0
+
+    class Usage:
+        input_tokens = 10
+        output_tokens = 20
+        output_tokens_details = OutputDetails()
+
+    class FunctionCall:
+        type = "function_call"
+        name = "submit_patch"
+        arguments = worker.json.dumps(
+            {
+                "summary": "Test patch",
+                "root_cause": "Test",
+                "risk": "low",
+                "patch": "",
+                "tests_added": [],
+                "notes": [],
+            }
+        )
+
+    class Response:
+        status = "completed"
+        incomplete_details = None
+        usage = Usage()
+        id = "resp_context_regression"
+        output = [FunctionCall()]
+        output_text = ""
+
+    class Responses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return Response()
+
+    class FakeOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            self.responses = Responses()
+
+    monkeypatch.setattr(
+        worker,
+        "OpenAI",
+        FakeOpenAI,
+    )
+
+    marker = (
+        "AUTHORITATIVE_CONTEXT_MARKER_"
+        "candidate_source_must_reach_model"
+    )
+
+    failure = {
+        "failure_id": 9001,
+        "category": "requested_improvement",
+        "severity": "medium",
+        "occurrences": 1,
+        "summary": "Regression test",
+        "evidence": {},
+    }
+
+    cfg = config()
+
+    worker.request_patch(
+        failure=failure,
+        context=marker,
+        context_files=["bridge/app/example.py"],
+        policy={
+            "allowed_edit_paths": ["bridge/**"],
+            "forbidden_paths": [],
+        },
+        config=cfg,
+        env_values={
+            "OPENAI_API_KEY": "test-key",
+        },
+    )
+
+    prompt = captured[
+        "input"
+    ][0]["content"][0]["text"]
+
+    assert marker in prompt
+    assert (
+        "Authoritative repository source context:"
+        in prompt
+    )
+    assert (
+        "exact Git base commit"
+        in prompt
+    )
+
+
+def test_build_context_reads_exact_base_commit_not_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    relative = Path(
+        "bridge/app/context_regression_probe.py"
+    )
+    target = tmp_path / relative
+
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    worker.run(
+        ["git", "init"],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "config",
+            "user.email",
+            "jarvis-tests@example.invalid",
+        ],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "config",
+            "user.name",
+            "Jarvis Tests",
+        ],
+        cwd=tmp_path,
+    )
+
+    committed_marker = (
+        "COMMITTED_BASE_CONTEXT_MARKER"
+    )
+    worktree_marker = (
+        "UNCOMMITTED_WORKTREE_CONTEXT_MARKER"
+    )
+
+    target.write_text(
+        (
+            "voice_barge_in_context_marker = "
+            f"{committed_marker!r}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    worker.run(
+        ["git", "add", str(relative)],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            "context regression base",
+        ],
+        cwd=tmp_path,
+    )
+
+    base_commit = worker.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+    ).stdout.strip()
+
+    target.write_text(
+        (
+            "voice_barge_in_context_marker = "
+            f"{worktree_marker!r}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ROOT",
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        worker,
+        "infer_context_files",
+        lambda failure, policy: [
+            str(relative)
+        ],
+    )
+
+    context, included = worker.build_context(
+        {
+            "summary": (
+                "voice_barge_in_context_marker"
+            ),
+            "category": "requested_improvement",
+            "evidence": {},
+        },
+        {
+            "max_context_characters": 12000,
+        },
+        base_commit=base_commit,
+    )
+
+    assert included == [str(relative)]
+    assert committed_marker in context
+    assert worktree_marker not in context

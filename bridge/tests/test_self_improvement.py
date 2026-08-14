@@ -16,6 +16,7 @@ def actor() -> UserContext:
         user_is_admin=True,
         device_id="aaron-phone",
         voice_mode=False,
+        privilege_verified=True,
     )
 
 
