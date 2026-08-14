@@ -1994,7 +1994,11 @@ def test_candidate_generation_requires_transactional_approval() -> None:
     )
 
     assert (
-        "To review and approve"
+        "ready for you to review"
+        in source
+    )
+    assert (
+        "Nothing has been installed yet."
         in source
     )
 
@@ -3619,3 +3623,69 @@ def test_manual_rollback_unexpected_head_fails_closed(
         item.get("status") == "recovery_required"
         for item in updates
     )
+
+
+def test_manual_improvement_does_not_use_autonomous_quota() -> None:
+    assert (
+        worker.uses_autonomous_attempt_quota(
+            {"category": "requested_improvement"}
+        )
+        is False
+    )
+    assert (
+        worker.uses_autonomous_attempt_quota(
+            {"category": "general"}
+        )
+        is True
+    )
+
+
+def test_attempts_today_excludes_manual_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _initialise_attempt_cap_db(
+        monkeypatch,
+        tmp_path,
+    )
+
+    today = (
+        worker.datetime.now(
+            worker.timezone.utc
+        )
+        .date()
+        .isoformat()
+    )
+
+    with worker.connect() as connection:
+        for candidate_id, manual in (
+            (101, False),
+            (102, True),
+        ):
+            connection.execute(
+                """
+                INSERT INTO improvement_audit (
+                    created_at,
+                    event_type,
+                    actor,
+                    failure_id,
+                    candidate_id,
+                    details_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    today + "T12:00:00+00:00",
+                    "candidate_generation_started",
+                    "worker",
+                    candidate_id,
+                    candidate_id,
+                    worker.json_dump(
+                        {
+                            "model": "test",
+                            "manual_request": manual,
+                        }
+                    ),
+                ),
+            )
+
+    assert worker.attempts_today() == 1

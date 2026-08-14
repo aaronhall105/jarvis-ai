@@ -898,6 +898,93 @@ class SelfImprovementEngine:
                 self._queue_failure_sync, failure_id
             )
         return await self.queue_failure(failure_id, actor)
+    async def retry_candidate(
+        self,
+        candidate_id: int,
+        actor: str,
+    ) -> tuple[bool, int | None, str]:
+        if not await self.enabled():
+            return False, None, "Self-improvement is disabled."
+
+        candidate = await self.get_candidate(candidate_id)
+        if candidate is None:
+            return False, None, "Improvement was not found."
+
+        if str(candidate.get("status") or "") != "failed":
+            return False, None, "Only failed improvements can be retried."
+
+        failure = await self.get_failure(
+            int(candidate.get("failure_id") or 0)
+        )
+        if failure is None:
+            return False, None, "Original improvement request was not found."
+
+        evidence = failure.get("evidence") or {}
+        source_evidence = evidence.get("source") or {}
+
+        original = str(
+            source_evidence.get("raw_text")
+            or evidence.get("correction")
+            or failure.get("summary")
+            or ""
+        ).strip()
+
+        for prefix in ("Requested improvement: ", "Retry requested: "):
+            if original.startswith(prefix):
+                original = original[len(prefix):].strip()
+
+        previous_error = self.redact_text(
+            str(candidate.get("error") or "Unknown failure.")
+        )
+
+        source = {
+            "raw_text": original,
+            "interpreted_text": original,
+            "intent": "improvement_request",
+            "success": True,
+            "response": "Fix and retry requested from Improvement Center.",
+            "tool_calls": [],
+            "understanding": {
+                "requested_improvement": original,
+                "retry_of_candidate_id": candidate_id,
+                "previous_failure": previous_error,
+                "instruction": (
+                    "Correct the previous failure and rerun all validation."
+                ),
+            },
+            "timings": {},
+            "user_key": actor,
+        }
+
+        failure_id = await self.record_failure(
+            source=source,
+            correction=original,
+            explicit=True,
+            summary=f"Requested improvement: {original}",
+        )
+
+        if self.auto_prepare:
+            result = await asyncio.to_thread(
+                self._queue_failure_sync,
+                failure_id,
+            )
+        else:
+            result = await self.queue_failure(failure_id, actor)
+
+        if result[0]:
+            await self.audit(
+                "candidate_retry_requested",
+                actor=actor,
+                failure_id=failure_id,
+                candidate_id=result[1],
+                details={
+                    "retry_of_candidate_id": candidate_id,
+                    "previous_failure": previous_error,
+                },
+            )
+
+        return result
+
     async def queue_failure(self, failure_id: int, actor: str) -> tuple[bool, int | None, str]:
         if not await self.enabled():
             return False, None, "Self-improvement is disabled."
@@ -1022,7 +1109,17 @@ class SelfImprovementEngine:
         return self._candidate_from_row(row) if row else None
 
     async def get_candidate(self, candidate_id: int) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_candidate_sync, candidate_id)
+        item = await asyncio.to_thread(
+            self._get_candidate_sync,
+            candidate_id,
+        )
+        if item is None:
+            return None
+
+        failure_id = int(item.get("failure_id") or 0)
+        failure = await self.get_failure(failure_id) if failure_id else None
+        item["failure"] = failure or {}
+        return item
 
     def _last_failure_sync(self) -> dict[str, Any] | None:
         with self._connect() as connection:

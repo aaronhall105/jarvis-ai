@@ -66,6 +66,16 @@ public final class ImprovementApiClient {
         post("/api/improvement/request", body, callback);
     }
 
+    public void retry(int candidateId, JsonCallback callback) {
+        post(
+            "/api/improvement/candidates/"
+                + candidateId
+                + "/retry",
+            new JSONObject(),
+            callback
+        );
+    }
+
     public void approve(int candidateId, String code, JsonCallback callback) {
         actionWithCode(candidateId, "approve", code, callback);
     }

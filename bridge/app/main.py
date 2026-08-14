@@ -450,6 +450,29 @@ async def improvement_request(request: ImprovementCreateRequest, x_jarvis_admin_
     return {"success": True, "candidate_id": candidate_id, "status": status}
 
 
+@app.post("/api/improvement/candidates/{candidate_id}/retry")
+async def improvement_retry_candidate(
+    candidate_id: int,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_improvement_token(x_jarvis_admin_token)
+
+    ok, new_candidate_id, state = await improvement.retry_candidate(
+        candidate_id,
+        actor="api",
+    )
+
+    if not ok:
+        raise HTTPException(status_code=400, detail=state)
+
+    return {
+        "success": True,
+        "candidate_id": new_candidate_id,
+        "status": state,
+        "retry_of_candidate_id": candidate_id,
+    }
+
+
 @app.get("/api/improvement/archive")
 async def improvement_archive(
     limit: int = 50,

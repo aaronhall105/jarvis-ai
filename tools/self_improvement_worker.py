@@ -303,6 +303,58 @@ def audit(
         )
 
 
+
+def plain_failure_explanation(error: str) -> tuple[str, str]:
+    text = str(error or "").casefold()
+
+    if "unified diff" in text or (
+        "patch" in text and ("invalid" in text or "malformed" in text)
+    ):
+        return (
+            "Creating the code change",
+            "Jarvis created the change, but the code patch was formatted "
+            "incorrectly, so it could not be safely applied.",
+        )
+
+    if "pytest" in text or "test failed" in text or "tests failed" in text:
+        return (
+            "Automated testing",
+            "Jarvis created the change, but one or more automated tests "
+            "found a problem.",
+        )
+
+    if "security" in text or "bandit" in text or "pip-audit" in text:
+        return (
+            "Security checks",
+            "Jarvis created the change, but a security check blocked it.",
+        )
+
+    if "forbidden" in text or "policy" in text:
+        return (
+            "Safety checks",
+            "Jarvis created a change that did not meet the safety rules, "
+            "so it was blocked.",
+        )
+
+    if "docker" in text or "build failed" in text:
+        return (
+            "Building the change",
+            "Jarvis created the change, but it could not be built successfully.",
+        )
+
+    if "timeout" in text or "timed out" in text:
+        return (
+            "Processing the improvement",
+            "Jarvis ran out of time while preparing or testing the change.",
+        )
+
+    return (
+        "Automated checks",
+        "Jarvis could not complete this improvement because one of its "
+        "automated checks failed.",
+    )
+
+
 def notify_aaron(
     message: str,
     *,
@@ -909,44 +961,39 @@ def update_failure(failure_id: int, **fields: Any) -> None:
 
 
 def attempts_today() -> int:
-    """
-    Count actual candidate-generation starts for the
-    current UTC day.
-
-    Candidate rows may be queued on one day and generated
-    on another, so candidate.created_at is not a reliable
-    generation-attempt ledger. The audit event is written
-    immediately when generation starts and therefore
-    provides the conservative daily-cap boundary.
-    """
-    today = (
-        datetime.now(
-            timezone.utc
-        )
-        .date()
-        .isoformat()
-    )
+    """Count only autonomous generation attempts started today."""
+    today = datetime.now(timezone.utc).date().isoformat()
 
     with connect() as connection:
-        row = connection.execute(
+        rows = connection.execute(
             """
-            SELECT COUNT(*) AS count
+            SELECT details_json
             FROM improvement_audit
             WHERE event_type = 'candidate_generation_started'
               AND substr(created_at, 1, 10) = ?
             """,
-            (
-                today,
-            ),
-        ).fetchone()
+            (today,),
+        ).fetchall()
 
+    count = 0
+
+    for row in rows:
+        details = json_load(row["details_json"], {})
+        if bool(details.get("manual_request")):
+            continue
+        count += 1
+
+    return count
+
+
+def uses_autonomous_attempt_quota(
+    failure: dict[str, Any],
+) -> bool:
     return (
-        int(
-            row["count"]
-        )
-        if row
-        else 0
+        str(failure.get("category") or "").casefold()
+        != "requested_improvement"
     )
+
 
 def infer_context_files(failure: dict[str, Any], policy: dict[str, Any]) -> list[str]:
     category = str(failure.get("category") or "general")
@@ -3769,8 +3816,15 @@ def reset_repository_to_ref(
 def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
     candidate_id = int(candidate["candidate_id"])
     failure_id = int(candidate["failure_id"])
-    if attempts_today() >= config.max_attempts_per_day:
+    failure = fetch_failure(failure_id)
+    manual_request = not uses_autonomous_attempt_quota(failure)
+
+    if (
+        not manual_request
+        and attempts_today() >= config.max_attempts_per_day
+    ):
         return
+
     if not improvement_enabled():
         return
 
@@ -3791,10 +3845,17 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         label="candidate base",
     )
 
-    failure = fetch_failure(failure_id)
     branch = f"jarvis/improvement-{candidate_id}"
     update_candidate(candidate_id, status="generating", model=config.model, branch_name=branch, error=None)
-    audit("candidate_generation_started", failure_id=failure_id, candidate_id=candidate_id, details={"model": config.model})
+    audit(
+        "candidate_generation_started",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "model": config.model,
+            "manual_request": manual_request,
+        },
+    )
 
     context, context_files = build_context(failure, policy)
     generation_error: str | None = None
@@ -3988,10 +4049,10 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             },
         )
         notify_aaron(
-            f"Improvement {candidate_id} passed isolated testing ({risk} risk). "
-            f"{summary} To review and approve, say: "
-            f"Approve improvement {candidate_id} code {approval_code}.",
-            title="Jarvis improvement ready",
+            f"Jarvis has finished preparing improvement {candidate_id}. "
+            "It passed the automated checks and is ready for you to review. "
+            "Nothing has been installed yet.",
+            title="Improvement ready for review",
             config=config,
             env_values=env_values,
         )
@@ -3999,9 +4060,12 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         update_candidate(candidate_id, status="failed", error=str(exc)[-12000:])
         update_failure(failure_id, status="recorded")
         audit("candidate_failed", failure_id=failure_id, candidate_id=candidate_id, details={"error": str(exc)[-4000:]})
+        failed_where, failed_reason = plain_failure_explanation(str(exc))
         notify_aaron(
-            f"Improvement {candidate_id} failed isolated validation and was not deployed.",
-            title="Jarvis improvement failed",
+            f"{failed_reason} Nothing was installed. "
+            f"It failed during {failed_where.lower()}. "
+            "Open Improvements and tap Fix & Retry to try a corrected version.",
+            title=f"Improvement {candidate_id} needs attention",
             config=config,
             env_values=env_values,
         )

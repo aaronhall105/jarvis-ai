@@ -47,6 +47,7 @@ public final class ImprovementsActivity extends Activity {
 
     private boolean loading = false;
     private boolean archiveMode = false;
+    private boolean detailMode = false;
     private Button activeTab;
     private Button archiveTab;
 
@@ -572,6 +573,7 @@ public final class ImprovementsActivity extends Activity {
     private void loadCandidates(
         boolean visibleRefresh
     ) {
+        if (detailMode) return;
         if (loading) return;
 
         if (!store.hasImprovementAdminToken()) {
@@ -905,7 +907,7 @@ public final class ImprovementsActivity extends Activity {
                     JSONObject item
                 ) {
                     runOnUiThread(() ->
-                        showCandidateDialog(item)
+                        showCandidatePage(item)
                     );
                 }
 
@@ -923,6 +925,492 @@ public final class ImprovementsActivity extends Activity {
                 }
             }
         );
+    }
+
+    private void showCandidatePage(
+        JSONObject item
+    ) {
+        detailMode = true;
+        setContentView(buildCandidatePage(item));
+        applySystemBarAppearance();
+    }
+
+    private View buildCandidatePage(
+        JSONObject item
+    ) {
+        int candidateId =
+            item.optInt("candidate_id", 0);
+
+        String status =
+            clean(item, "status", "unknown");
+
+        String error =
+            clean(item, "error", "");
+
+        LinearLayout content =
+            new LinearLayout(this);
+
+        content.setOrientation(
+            LinearLayout.VERTICAL
+        );
+
+        LinearLayout header =
+            new LinearLayout(this);
+
+        header.setOrientation(
+            LinearLayout.HORIZONTAL
+        );
+        header.setGravity(
+            Gravity.CENTER_VERTICAL
+        );
+
+        ImageButton back =
+            new ImageButton(this);
+
+        back.setImageResource(
+            R.drawable.ic_back
+        );
+        back.setBackgroundColor(
+            Color.TRANSPARENT
+        );
+        back.setContentDescription("Back");
+        back.setOnClickListener(
+            view -> returnToList()
+        );
+
+        header.addView(
+            back,
+            new LinearLayout.LayoutParams(
+                dp(42),
+                dp(42)
+            )
+        );
+
+        TextView title =
+            text(
+                "Improvement #" + candidateId,
+                25,
+                BLACK
+            );
+
+        title.setTypeface(
+            Typeface.create(
+                "sans-serif-medium",
+                Typeface.NORMAL
+            )
+        );
+
+        header.addView(
+            title,
+            new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        );
+
+        content.addView(
+            header,
+            matchWrap(0, dp(18))
+        );
+
+        TextView state =
+            text(
+                displayStatus(status),
+                20,
+                BLACK
+            );
+
+        state.setTypeface(
+            Typeface.create(
+                "sans-serif-medium",
+                Typeface.NORMAL
+            )
+        );
+
+        content.addView(
+            state,
+            matchWrap(0, dp(18))
+        );
+
+        content.addView(
+            plainSection(
+                "What Jarvis is changing",
+                originalImprovementRequest(item)
+            ),
+            matchWrap(0, dp(12))
+        );
+
+        if ("failed".equals(status)) {
+            content.addView(
+                plainSection(
+                    "Why it failed",
+                    plainFailureReason(error)
+                ),
+                matchWrap(0, dp(12))
+            );
+
+            content.addView(
+                plainSection(
+                    "Where it failed",
+                    plainFailureStage(error)
+                ),
+                matchWrap(0, dp(12))
+            );
+        } else {
+            content.addView(
+                plainSection(
+                    "Where it is now",
+                    plainCurrentStage(status)
+                ),
+                matchWrap(0, dp(12))
+            );
+        }
+
+        content.addView(
+            plainSection(
+                "What this means",
+                plainMeaning(status)
+            ),
+            matchWrap(0, dp(12))
+        );
+
+        content.addView(
+            plainSection(
+                "What happens next",
+                plainNextStep(status)
+            ),
+            matchWrap(0, dp(18))
+        );
+
+        if ("failed".equals(status)) {
+            Button retry =
+                primaryButton("Fix & Retry");
+
+            retry.setOnClickListener(
+                view -> retryCandidate(candidateId)
+            );
+
+            content.addView(
+                retry,
+                matchWrap(0, dp(14))
+            );
+        }
+
+        if (
+            "candidate_ready".equals(status)
+                || "awaiting_approval".equals(status)
+        ) {
+            Button approve =
+                primaryButton("Approve");
+
+            approve.setOnClickListener(
+                view -> showApprovalDialog(item)
+            );
+
+            content.addView(
+                approve,
+                matchWrap(0, dp(10))
+            );
+
+            Button reject =
+                secondaryButton("Reject");
+
+            reject.setOnClickListener(
+                view -> confirmReject(candidateId)
+            );
+
+            content.addView(
+                reject,
+                matchWrap(0, dp(14))
+            );
+        }
+
+        if ("approved".equals(status)) {
+            Button deploy =
+                primaryButton("Deploy");
+
+            deploy.setOnClickListener(
+                view -> showManualDeployDialog(
+                    candidateId
+                )
+            );
+
+            content.addView(
+                deploy,
+                matchWrap(0, dp(14))
+            );
+        }
+
+        if ("deployed".equals(status)) {
+            Button rollback =
+                secondaryButton("Rollback");
+
+            rollback.setOnClickListener(
+                view -> beginRollback(candidateId)
+            );
+
+            content.addView(
+                rollback,
+                matchWrap(0, dp(14))
+            );
+        }
+
+        LinearLayout technical =
+            new LinearLayout(this);
+
+        technical.setOrientation(
+            LinearLayout.VERTICAL
+        );
+        technical.setVisibility(
+            View.GONE
+        );
+
+        technical.addView(
+            plainSection(
+                "Model",
+                clean(item, "model", "—")
+            ),
+            matchWrap(0, dp(10))
+        );
+
+        technical.addView(
+            plainSection(
+                "Risk",
+                capitalise(
+                    clean(item, "risk", "—")
+                )
+            ),
+            matchWrap(0, dp(10))
+        );
+
+        technical.addView(
+            plainSection(
+                "Files changed",
+                jsonValue(
+                    item,
+                    "changed_files"
+                )
+            ),
+            matchWrap(0, dp(10))
+        );
+
+        technical.addView(
+            plainSection(
+                "Test results",
+                jsonValue(
+                    item,
+                    "test_results"
+                )
+            ),
+            matchWrap(0, dp(10))
+        );
+
+        technical.addView(
+            plainSection(
+                "Security checks",
+                jsonValue(
+                    item,
+                    "security_results"
+                )
+            ),
+            matchWrap(0, dp(10))
+        );
+
+        technical.addView(
+            plainSection(
+                "Developer error",
+                error.isBlank()
+                    ? "—"
+                    : error
+            ),
+            matchWrap(0, dp(12))
+        );
+
+        Button technicalButton =
+            secondaryButton(
+                "Show technical details"
+            );
+
+        technicalButton.setOnClickListener(
+            view -> {
+                boolean show =
+                    technical.getVisibility()
+                        != View.VISIBLE;
+
+                technical.setVisibility(
+                    show
+                        ? View.VISIBLE
+                        : View.GONE
+                );
+
+                technicalButton.setText(
+                    show
+                        ? "Hide technical details"
+                        : "Show technical details"
+                );
+            }
+        );
+
+        content.addView(
+            technicalButton,
+            matchWrap(0, dp(12))
+        );
+
+        content.addView(
+            technical,
+            matchWrap()
+        );
+
+        ScrollView scroll =
+            new ScrollView(this);
+
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+
+        scroll.addView(
+            content,
+            new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        );
+
+        scroll.setOnApplyWindowInsetsListener(
+            (view, insets) -> {
+                Insets bars =
+                    insets.getInsets(
+                        WindowInsets.Type.systemBars()
+                    );
+
+                content.setPadding(
+                    dp(16) + bars.left,
+                    dp(8) + bars.top,
+                    dp(16) + bars.right,
+                    dp(30) + bars.bottom
+                );
+
+                return insets;
+            }
+        );
+
+        scroll.requestApplyInsets();
+
+        return scroll;
+    }
+
+    private View plainSection(
+        String heading,
+        String body
+    ) {
+        LinearLayout card =
+            new LinearLayout(this);
+
+        card.setOrientation(
+            LinearLayout.VERTICAL
+        );
+        card.setPadding(
+            dp(16),
+            dp(14),
+            dp(16),
+            dp(14)
+        );
+        card.setBackground(
+            rounded(
+                SOFT,
+                16,
+                1,
+                LINE
+            )
+        );
+
+        TextView label =
+            text(
+                heading,
+                13,
+                MID
+            );
+
+        TextView value =
+            text(
+                body == null || body.isBlank()
+                    ? "—"
+                    : body,
+                15,
+                BLACK
+            );
+
+        value.setPadding(
+            0,
+            dp(6),
+            0,
+            0
+        );
+        value.setLineSpacing(
+            0,
+            1.12f
+        );
+
+        card.addView(
+            label,
+            matchWrap()
+        );
+        card.addView(
+            value,
+            matchWrap()
+        );
+
+        return card;
+    }
+
+    private void retryCandidate(
+        int candidateId
+    ) {
+        api.retry(
+            candidateId,
+            new ImprovementApiClient.JsonCallback() {
+                @Override
+                public void onSuccess(JSONObject result) {
+                    runOnUiThread(() -> {
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            "Fix started. Jarvis is trying the improvement again.",
+                            Toast.LENGTH_LONG
+                        ).show();
+
+                        returnToList();
+                    });
+                }
+
+                @Override
+                public void onError(String message) {
+                    runOnUiThread(() ->
+                        Toast.makeText(
+                            ImprovementsActivity.this,
+                            message,
+                            Toast.LENGTH_LONG
+                        ).show()
+                    );
+                }
+            }
+        );
+    }
+
+    private void returnToList() {
+        detailMode = false;
+        setContentView(buildContent());
+        applySystemBarAppearance();
+        loadCandidates(true);
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (detailMode) {
+            returnToList();
+            return;
+        }
+
+        super.onBackPressed();
     }
 
     private void showCandidateDialog(
@@ -1697,6 +2185,291 @@ public final class ImprovementsActivity extends Activity {
             "success",
             false
         );
+    }
+
+    private static String originalImprovementRequest(
+        JSONObject item
+    ) {
+        JSONObject failure =
+            item.optJSONObject("failure");
+
+        if (failure != null) {
+            JSONObject evidence =
+                failure.optJSONObject("evidence");
+
+            if (evidence != null) {
+                JSONObject source =
+                    evidence.optJSONObject("source");
+
+                if (source != null) {
+                    String raw =
+                        clean(
+                            source,
+                            "raw_text",
+                            ""
+                        );
+
+                    if (!raw.isBlank()) {
+                        return stripRequestPrefix(raw);
+                    }
+                }
+
+                String correction =
+                    clean(
+                        evidence,
+                        "correction",
+                        ""
+                    );
+
+                if (!correction.isBlank()) {
+                    return stripRequestPrefix(
+                        correction
+                    );
+                }
+            }
+
+            String summary =
+                clean(
+                    failure,
+                    "summary",
+                    ""
+                );
+
+            if (!summary.isBlank()) {
+                return stripRequestPrefix(
+                    summary
+                );
+            }
+        }
+
+        return stripRequestPrefix(
+            clean(item, "summary", "Improvement details unavailable.")
+        );
+    }
+
+    private static String stripRequestPrefix(
+        String value
+    ) {
+        String text = value == null
+            ? ""
+            : value.trim();
+
+        String prefix =
+            "Requested improvement:";
+
+        if (
+            text.regionMatches(
+                true,
+                0,
+                prefix,
+                0,
+                prefix.length()
+            )
+        ) {
+            text =
+                text.substring(
+                    prefix.length()
+                ).trim();
+        }
+
+        return text.isBlank()
+            ? "Improvement details unavailable."
+            : text;
+    }
+
+    private static String plainFailureStage(
+        String error
+    ) {
+        String text =
+            error == null
+                ? ""
+                : error.toLowerCase();
+
+        if (
+            text.contains("unified diff")
+                || text.contains("malformed patch")
+        ) {
+            return "Creating the code change";
+        }
+
+        if (
+            text.contains("pytest")
+                || text.contains("test failed")
+                || text.contains("tests failed")
+        ) {
+            return "Automated testing";
+        }
+
+        if (
+            text.contains("security")
+                || text.contains("bandit")
+                || text.contains("pip-audit")
+        ) {
+            return "Security checks";
+        }
+
+        if (
+            text.contains("forbidden")
+                || text.contains("policy")
+        ) {
+            return "Safety checks";
+        }
+
+        if (
+            text.contains("docker")
+                || text.contains("build failed")
+        ) {
+            return "Building the change";
+        }
+
+        return "Automated checks";
+    }
+
+    private static String plainFailureReason(
+        String error
+    ) {
+        String text =
+            error == null
+                ? ""
+                : error.toLowerCase();
+
+        if (
+            text.contains("unified diff")
+                || (
+                    text.contains("patch")
+                        && (
+                            text.contains("invalid")
+                                || text.contains("malformed")
+                        )
+                )
+        ) {
+            return "Jarvis created the change, but the code patch was "
+                + "formatted incorrectly, so it could not be safely applied.";
+        }
+
+        if (
+            text.contains("pytest")
+                || text.contains("test failed")
+                || text.contains("tests failed")
+        ) {
+            return "Jarvis created the change, but one or more automated "
+                + "tests found a problem.";
+        }
+
+        if (
+            text.contains("security")
+                || text.contains("bandit")
+                || text.contains("pip-audit")
+        ) {
+            return "A security check found a problem, so Jarvis blocked "
+                + "the change before it could be installed.";
+        }
+
+        if (
+            text.contains("forbidden")
+                || text.contains("policy")
+        ) {
+            return "The proposed change did not meet Jarvis's safety rules, "
+                + "so it was stopped.";
+        }
+
+        if (
+            text.contains("docker")
+                || text.contains("build failed")
+        ) {
+            return "The code was created, but Jarvis could not build it "
+                + "successfully.";
+        }
+
+        if (
+            text.contains("timeout")
+                || text.contains("timed out")
+        ) {
+            return "Jarvis ran out of time while preparing or testing "
+                + "the improvement.";
+        }
+
+        return "Jarvis could not finish this improvement because one of "
+            + "the automated checks failed.";
+    }
+
+    private static String plainCurrentStage(
+        String status
+    ) {
+        return switch (status) {
+            case "queued" ->
+                "Waiting to start";
+            case "generating" ->
+                "Jarvis is creating the code change";
+            case "candidate_ready",
+                 "awaiting_approval" ->
+                "Testing is complete and it is waiting for your approval";
+            case "approved" ->
+                "Approved and waiting for you to deploy it";
+            case "deploy_requested",
+                 "deploying" ->
+                "Installing the approved change";
+            case "deployed" ->
+                "Installed on Jarvis";
+            case "rollback_requested",
+                 "rolling_back" ->
+                "Returning Jarvis to the previous version";
+            case "rolled_back" ->
+                "Returned to the previous version";
+            default ->
+                displayStatus(status);
+        };
+    }
+
+    private static String plainMeaning(
+        String status
+    ) {
+        return switch (status) {
+            case "failed" ->
+                "Nothing was installed. Your current Jarvis is unchanged.";
+            case "queued", "generating" ->
+                "Jarvis is working on the improvement. Nothing has been installed.";
+            case "candidate_ready",
+                 "awaiting_approval" ->
+                "The proposed change passed its checks, but it has not been installed.";
+            case "approved" ->
+                "You approved the change, but it still has not been installed.";
+            case "deploy_requested",
+                 "deploying" ->
+                "Jarvis is installing the change now.";
+            case "deployed" ->
+                "The improvement is installed and active.";
+            case "rolled_back" ->
+                "The improvement was removed and Jarvis returned to the previous version.";
+            default ->
+                "Jarvis is keeping this improvement under supervised control.";
+        };
+    }
+
+    private static String plainNextStep(
+        String status
+    ) {
+        return switch (status) {
+            case "failed" ->
+                "Tap Fix & Retry. Jarvis will use the failure information "
+                    + "to correct the problem and run the checks again.";
+            case "queued", "generating" ->
+                "You do not need to do anything. Jarvis will continue working.";
+            case "candidate_ready",
+                 "awaiting_approval" ->
+                "Review the change and approve it only if you are happy with it.";
+            case "approved" ->
+                "Deploy it when you are ready.";
+            case "deploy_requested",
+                 "deploying" ->
+                "Wait for the installation and health checks to finish.";
+            case "deployed" ->
+                "No action is needed unless you want to roll it back.";
+            case "rolled_back" ->
+                "No action is needed.";
+            default ->
+                "Check the status again shortly.";
+        };
     }
 
     private static String commandMessage(
