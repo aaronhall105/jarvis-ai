@@ -4138,3 +4138,127 @@ def test_candidate_validation_repair_is_bounded_and_uses_feedback() -> None:
         'next_status = "awaiting_approval"'
         in source
     )
+
+
+def test_apply_failure_source_feedback_uses_captured_base(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    relative = Path(
+        "bridge/app/apply_feedback_probe.py"
+    )
+    target = tmp_path / relative
+
+    target.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    worker.run(
+        ["git", "init"],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "config",
+            "user.email",
+            "jarvis-tests@example.invalid",
+        ],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "config",
+            "user.name",
+            "Jarvis Tests",
+        ],
+        cwd=tmp_path,
+    )
+
+    committed = (
+        "\n".join(
+            f"line_{index:02d}"
+            for index in range(1, 81)
+        )
+        + "\n"
+    )
+
+    target.write_text(
+        committed,
+        encoding="utf-8",
+    )
+
+    worker.run(
+        ["git", "add", str(relative)],
+        cwd=tmp_path,
+    )
+    worker.run(
+        [
+            "git",
+            "commit",
+            "-m",
+            "apply feedback base",
+        ],
+        cwd=tmp_path,
+    )
+
+    base_commit = worker.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+    ).stdout.strip()
+
+    target.write_text(
+        committed.replace(
+            "line_40",
+            "WORKTREE_ONLY",
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        worker,
+        "ROOT",
+        tmp_path,
+    )
+
+    feedback = (
+        worker._apply_failure_source_feedback(
+            (
+                "error: patch failed: "
+                "bridge/app/apply_feedback_probe.py:40"
+            ),
+            base_commit,
+            radius=2,
+        )
+    )
+
+    assert "EXACT BASE SOURCE" in feedback
+    assert "line_38" in feedback
+    assert "line_39" in feedback
+    assert "line_40" in feedback
+    assert "line_41" in feedback
+    assert "line_42" in feedback
+    assert "WORKTREE_ONLY" not in feedback
+
+
+def test_apply_retry_uses_exact_base_source_feedback() -> None:
+    import inspect
+
+    source = inspect.getsource(
+        worker.process_queued_candidate
+    )
+
+    assert (
+        "source_feedback = "
+        in source
+    )
+    assert (
+        "_apply_failure_source_feedback("
+        in source
+    )
+    assert (
+        "generation_error += source_feedback"
+        in source
+    )

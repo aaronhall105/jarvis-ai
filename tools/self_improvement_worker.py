@@ -1283,6 +1283,84 @@ def _relevant_context_excerpt(
     return excerpt[:budget]
 
 
+def _apply_failure_source_feedback(
+    error: str,
+    base_commit: str,
+    *,
+    radius: int = 20,
+) -> str:
+    """Return exact base-commit source around rejected patch hunks."""
+    matches = re.findall(
+        r"patch failed: ([^:\n]+):(\d+)",
+        error,
+    )
+
+    if not matches:
+        return ""
+
+    sections: list[str] = []
+    seen: set[tuple[str, int]] = set()
+
+    for path, raw_line in matches:
+        line_no = int(raw_line)
+        key = (path, line_no)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        result = run(
+            [
+                "git",
+                "show",
+                f"{base_commit}:{path}",
+            ],
+            cwd=ROOT,
+            check=False,
+        )
+
+        if result.returncode != 0:
+            continue
+
+        lines = result.stdout.splitlines()
+
+        if not lines:
+            continue
+
+        start = max(
+            1,
+            line_no - radius,
+        )
+        end = min(
+            len(lines),
+            line_no + radius,
+        )
+
+        body = "\n".join(
+            f"{index:6d}  {lines[index - 1]}"
+            for index in range(
+                start,
+                end + 1,
+            )
+        )
+
+        sections.append(
+            "===== EXACT BASE SOURCE: "
+            f"{path}:{start}-{end} =====\n"
+            f"{body}"
+        )
+
+    if not sections:
+        return ""
+
+    return (
+        "\n\nExact source around Git's rejected "
+        "hunk from the captured base commit:\n"
+        + "\n\n".join(sections)
+    )
+
+
 def build_context(
     failure: dict[str, Any],
     policy: dict[str, Any],
@@ -4069,6 +4147,17 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 break
             except Exception as exc:
                 generation_error = str(exc)
+
+                source_feedback = (
+                    _apply_failure_source_feedback(
+                        generation_error,
+                        base_commit,
+                    )
+                )
+
+                if source_feedback:
+                    generation_error += source_feedback
+
                 previous_patch = patch
                 if workspace is not None:
                     run(["git", "worktree", "remove", "--force", str(workspace)], check=False)
