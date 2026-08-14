@@ -1675,7 +1675,7 @@ Requirements:
                 "\n\nValidation error:\n"
                 + redact(
                     previous_error
-                )[-5000:]
+                )[-12000:]
             )
 
         if previous_patch:
@@ -1736,7 +1736,7 @@ Act as a conservative senior Python engineer and safety reviewer. You may only s
         "model": config.model,
         "instructions": instructions,
         "input": [
-            {"role": "user", "content": [{"type": "input_text", "text": prompt + context}]}
+            {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
         ],
         "tools": [tool],
         "tool_choice": {"type": "function", "name": "submit_patch"},
@@ -4078,14 +4078,119 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         if payload is None or workspace is None:
             raise WorkerError("No candidate patch was generated.")
 
-        tests, security = run_validation(workspace, policy, config)
-        smoke = docker_smoke_test(workspace, candidate_id, config.candidate_timeout_seconds)
-        tests["candidate_container"] = smoke
-        tests["passed"] = bool(tests.get("passed")) and bool(smoke.get("passed"))
-        if not tests["passed"] or not security.get("passed"):
-            raise WorkerError(
+        validation_repair_used = False
+
+        while True:
+            tests, security = run_validation(
+                workspace,
+                policy,
+                config,
+            )
+            smoke = docker_smoke_test(
+                workspace,
+                candidate_id,
+                config.candidate_timeout_seconds,
+            )
+            tests["candidate_container"] = smoke
+            tests["passed"] = (
+                bool(tests.get("passed"))
+                and bool(smoke.get("passed"))
+            )
+
+            if (
+                tests["passed"]
+                and security.get("passed")
+            ):
+                break
+
+            validation_error = (
                 "Candidate validation failed.\n"
-                + json.dumps({"tests": tests, "security": security}, ensure_ascii=False, indent=2)[-12000:]
+                + json.dumps(
+                    {
+                        "tests": tests,
+                        "security": security,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )[-12000:]
+            )
+
+            if validation_repair_used:
+                raise WorkerError(validation_error)
+
+            validation_repair_used = True
+            failed_patch = str(
+                payload.get("patch") or ""
+            )
+
+            audit(
+                "candidate_validation_repair_started",
+                failure_id=failure_id,
+                candidate_id=candidate_id,
+                details={"repair_attempt": 1},
+            )
+
+            run(
+                [
+                    "git",
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(workspace),
+                ],
+                check=False,
+            )
+            workspace = None
+
+            payload, usage = request_patch(
+                failure=failure,
+                context=context,
+                context_files=context_files,
+                policy=policy,
+                config=config,
+                env_values=env_values,
+                previous_error=validation_error,
+                previous_patch=failed_patch,
+            )
+
+            patch = normalise_unified_diff_hunk_counts(
+                str(payload.get("patch") or "")
+            )
+            payload["patch"] = patch
+
+            paths, patch_hash = validate_patch_policy(
+                patch,
+                policy,
+                config,
+            )
+
+            workspace = create_worktree(
+                candidate_id,
+                branch,
+                base_commit,
+            )
+
+            workspace_base = run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=workspace,
+            ).stdout.strip()
+
+            if (
+                _normalise_commit_sha(
+                    workspace_base,
+                    label="worktree base",
+                )
+                != base_commit
+            ):
+                raise WorkerError(
+                    "Candidate repair worktree was not "
+                    "created from the captured base commit."
+                )
+
+            patch_path = apply_patch(
+                workspace,
+                patch,
+                candidate_id,
             )
 
         review = request_independent_review(

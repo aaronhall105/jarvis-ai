@@ -3777,6 +3777,7 @@ def test_request_patch_includes_authoritative_source_context(
     ][0]["content"][0]["text"]
 
     assert marker in prompt
+    assert prompt.count(marker) == 1
     assert (
         "Authoritative repository source context:"
         in prompt
@@ -4091,4 +4092,49 @@ def test_request_patch_retry_includes_failed_patch(
     assert (
         "copied exactly from that source"
         in prompt
+    )
+
+
+def test_candidate_validation_repair_is_bounded_and_uses_feedback() -> None:
+    import inspect
+
+    source = inspect.getsource(
+        worker.process_queued_candidate
+    )
+
+    assert source.count(
+        "validation_repair_used = False"
+    ) == 1
+
+    assert source.count(
+        "if validation_repair_used:"
+    ) == 1
+
+    assert (
+        'raise WorkerError(validation_error)'
+        in source
+    )
+
+    assert source.count(
+        '"candidate_validation_repair_started"'
+    ) == 1
+
+    assert (
+        'details={"repair_attempt": 1}'
+        in source
+    )
+
+    assert (
+        "previous_error=validation_error"
+        in source
+    )
+
+    assert (
+        "previous_patch=failed_patch"
+        in source
+    )
+
+    assert (
+        'next_status = "awaiting_approval"'
+        in source
     )
