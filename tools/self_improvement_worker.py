@@ -1745,20 +1745,17 @@ Requirements:
 """.strip()
     if previous_error or previous_patch:
         prompt += (
-            "\n\nA previous patch attempt failed local validation."
+            "\n\nA previous patch attempt failed. "
+            "Treat the failed patch only as diagnostic "
+            "evidence, never as authoritative source."
         )
 
-        if previous_error:
-            prompt += (
-                "\n\nValidation error:\n"
-                + redact(
-                    previous_error
-                )[-12000:]
-            )
-
+        # Put the stale patch first. More authoritative retry
+        # feedback is intentionally placed after it.
         if previous_patch:
             prompt += (
-                "\n\nPrevious failed patch:\n"
+                "\n\nPrevious failed patch "
+                "(REFERENCE ONLY — DO NOT COPY ITS CONTEXT):\n"
                 + redact(
                     previous_patch
                 )[:24000]
@@ -1773,6 +1770,46 @@ Requirements:
             "exactly from that source, including whitespace and "
             "blank lines."
         )
+
+        if previous_error:
+            retry_error = redact(
+                previous_error
+            )[-12000:]
+
+            if (
+                "===== EXACT BASE SOURCE:"
+                in retry_error
+            ):
+                prompt += (
+                    "\n\nAPPLY-FAILURE REPAIR RULES:\n"
+                    "- EXACT BASE SOURCE is authoritative "
+                    "for every rejected hunk.\n"
+                    "- If it conflicts with the previous "
+                    "failed patch or any remembered source, "
+                    "EXACT BASE SOURCE wins.\n"
+                    "- Rebuild each rejected hunk from "
+                    "scratch. Do not recycle its stale "
+                    "context lines.\n"
+                    "- Copy unchanged unified-diff context "
+                    "lines character-for-character from "
+                    "EXACT BASE SOURCE.\n"
+                    "- Source line numbers shown in EXACT "
+                    "BASE SOURCE are annotations only and "
+                    "must not appear in the patch.\n"
+                    "- Before submit_patch, verify every "
+                    "unchanged context line around a "
+                    "rejected edit exists exactly in the "
+                    "authoritative source.\n"
+                    "- Prefer a smaller fresh hunk anchored "
+                    "to exact source over preserving a "
+                    "larger failed hunk."
+                )
+
+            prompt += (
+                "\n\nFailure feedback "
+                "(AUTHORITATIVE FOR THIS RETRY):\n"
+                + retry_error
+            )
 
     instructions = """
 Act as a conservative senior Python engineer and safety reviewer. You may only submit a patch through the submit_patch tool. Prefer deterministic fixes over prompt-only changes. A candidate must include a regression test and must not modify forbidden paths. Do not claim tests passed; the local worker will verify them.

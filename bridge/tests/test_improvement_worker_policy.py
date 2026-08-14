@@ -4080,7 +4080,8 @@ def test_request_patch_retry_includes_failed_patch(
     )
 
     assert (
-        "Previous failed patch:"
+        "Previous failed patch "
+        "(REFERENCE ONLY — DO NOT COPY ITS CONTEXT):"
         in prompt
     )
 
@@ -4260,5 +4261,44 @@ def test_apply_retry_uses_exact_base_source_feedback() -> None:
     )
     assert (
         "generation_error += source_feedback"
+        in source
+    )
+
+
+def test_apply_retry_prioritises_exact_source_over_failed_patch() -> None:
+    import inspect
+
+    source = inspect.getsource(
+        worker.request_patch
+    )
+
+    failed_patch = source.index(
+        "Previous failed patch "
+    )
+    repair_rules = source.index(
+        "APPLY-FAILURE REPAIR RULES:"
+    )
+    authoritative_feedback = source.index(
+        "Failure feedback "
+    )
+
+    assert (
+        failed_patch
+        < repair_rules
+        < authoritative_feedback
+    )
+
+    assert (
+        "EXACT BASE SOURCE wins."
+        in source
+    )
+
+    assert (
+        "character-for-character"
+        in source
+    )
+
+    assert (
+        "annotations only"
         in source
     )
