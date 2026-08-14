@@ -59,6 +59,64 @@
     "requests\\.(?:get|post|put|delete)\\s*\\(",
     "httpx\\.(?:get|post|put|delete)\\s*\\("
   ],
+  "context_files_by_keyword": {
+    "voice": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "barge": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "realtime": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "real-time": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "interruption": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "wake word": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ],
+    "tts": [
+      "bridge/app/realtime_voice.py",
+      "bridge/tests/test_realtime_voice.py",
+      "bridge/app/main.py",
+      "bridge/app/voice_session_engine.py",
+      "bridge/tests/test_voice_session_engine.py",
+      "bridge/app/dialogue_manager.py"
+    ]
+  },
   "context_files_by_category": {
     "device_resolution": [
       "bridge/app/ai_engine.py",

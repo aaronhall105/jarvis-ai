@@ -3896,3 +3896,199 @@ def test_build_context_reads_exact_base_commit_not_worktree(
     assert included == [str(relative)]
     assert committed_marker in context
     assert worktree_marker not in context
+
+
+
+def test_infer_context_files_prioritises_keyword_subsystem(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = [
+        "bridge/app/realtime_voice.py",
+        "bridge/tests/test_realtime_voice.py",
+        "bridge/app/main.py",
+        "bridge/app/dialogue_manager.py",
+    ]
+
+    for value in paths:
+        target = tmp_path / value
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        target.write_text(
+            "# test\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        worker,
+        "ROOT",
+        tmp_path,
+    )
+
+    policy = {
+        "max_context_files": 4,
+        "allowed_context_paths": [
+            "bridge/app/*.py",
+            "bridge/tests/*.py",
+        ],
+        "context_files_by_keyword": {
+            "voice": [
+                "bridge/app/realtime_voice.py",
+                "bridge/tests/test_realtime_voice.py",
+            ],
+        },
+        "context_files_by_category": {
+            "general": [
+                "bridge/app/main.py",
+                "bridge/app/dialogue_manager.py",
+            ],
+        },
+    }
+
+    result = worker.infer_context_files(
+        {
+            "category": "requested_improvement",
+            "summary": (
+                "Add true realtime voice barge-in"
+            ),
+            "evidence": {},
+        },
+        policy,
+    )
+
+    assert result[:2] == [
+        "bridge/app/realtime_voice.py",
+        "bridge/tests/test_realtime_voice.py",
+    ]
+
+    assert result == [
+        "bridge/app/realtime_voice.py",
+        "bridge/tests/test_realtime_voice.py",
+        "bridge/app/main.py",
+        "bridge/app/dialogue_manager.py",
+    ]
+
+
+def test_request_patch_retry_includes_failed_patch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class OutputDetails:
+        reasoning_tokens = 0
+
+    class Usage:
+        input_tokens = 10
+        output_tokens = 20
+        output_tokens_details = OutputDetails()
+
+    class FunctionCall:
+        type = "function_call"
+        name = "submit_patch"
+        arguments = worker.json.dumps(
+            {
+                "summary": "Retry",
+                "root_cause": "Test",
+                "risk": "low",
+                "patch": "",
+                "tests_added": [],
+                "notes": [],
+            }
+        )
+
+    class Response:
+        status = "completed"
+        incomplete_details = None
+        usage = Usage()
+        id = "resp_retry_patch_regression"
+        output = [FunctionCall()]
+        output_text = ""
+
+    class Responses:
+        def create(
+            self,
+            **kwargs,
+        ):
+            captured.update(
+                kwargs
+            )
+            return Response()
+
+    class FakeOpenAI:
+        def __init__(
+            self,
+            *args,
+            **kwargs,
+        ) -> None:
+            self.responses = Responses()
+
+    monkeypatch.setattr(
+        worker,
+        "OpenAI",
+        FakeOpenAI,
+    )
+
+    failed_patch = """diff --git a/bridge/app/example.py b/bridge/app/example.py
+--- a/bridge/app/example.py
++++ b/bridge/app/example.py
+@@ -10,2 +10,2 @@
+-old_value = 1
++new_value = 2
+"""
+
+    worker.request_patch(
+        failure={
+            "failure_id": 9002,
+            "category": "requested_improvement",
+            "severity": "medium",
+            "occurrences": 1,
+            "summary": "Retry regression",
+            "evidence": {},
+        },
+        context=(
+            "old_value = 1\n"
+        ),
+        context_files=[
+            "bridge/app/example.py"
+        ],
+        policy={
+            "allowed_edit_paths": [
+                "bridge/**"
+            ],
+            "forbidden_paths": [],
+        },
+        config=config(),
+        env_values={
+            "OPENAI_API_KEY": "test-key",
+        },
+        previous_error=(
+            "patch does not apply"
+        ),
+        previous_patch=failed_patch,
+    )
+
+    prompt = captured[
+        "input"
+    ][0]["content"][0]["text"]
+
+    assert (
+        "patch does not apply"
+        in prompt
+    )
+
+    assert (
+        "Previous failed patch:"
+        in prompt
+    )
+
+    assert (
+        "-old_value = 1"
+        in prompt
+    )
+
+    assert (
+        "copied exactly from that source"
+        in prompt
+    )

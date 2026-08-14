@@ -995,17 +995,118 @@ def uses_autonomous_attempt_quota(
     )
 
 
-def infer_context_files(failure: dict[str, Any], policy: dict[str, Any]) -> list[str]:
-    category = str(failure.get("category") or "general")
-    category_map = policy.get("context_files_by_category", {})
-    selected = category_map.get(category) or category_map.get("general") or []
-    allowed = policy.get("allowed_context_paths", ["bridge/app/*.py", "bridge/tests/*.py"])
+def infer_context_files(
+    failure: dict[str, Any],
+    policy: dict[str, Any],
+) -> list[str]:
+    category = str(
+        failure.get("category") or "general"
+    )
+
+    category_map = policy.get(
+        "context_files_by_category",
+        {},
+    )
+
+    keyword_map = policy.get(
+        "context_files_by_keyword",
+        {},
+    )
+
+    allowed = policy.get(
+        "allowed_context_paths",
+        [
+            "bridge/app/*.py",
+            "bridge/tests/*.py",
+        ],
+    )
+
+    max_files = int(
+        policy.get(
+            "max_context_files",
+            6,
+        )
+    )
+
+    evidence = failure.get(
+        "evidence",
+        {},
+    )
+
+    source = " ".join(
+        (
+            str(
+                failure.get("summary")
+                or ""
+            ),
+            category,
+            json.dumps(
+                evidence,
+                ensure_ascii=False,
+                default=str,
+            ),
+        )
+    ).casefold()
+
+    selected: list[str] = []
+
+    for raw_keyword, values in keyword_map.items():
+        keyword = str(
+            raw_keyword or ""
+        ).strip().casefold()
+
+        if (
+            not keyword
+            or keyword not in source
+        ):
+            continue
+
+        if isinstance(
+            values,
+            str,
+        ):
+            selected.append(values)
+
+        elif isinstance(
+            values,
+            list,
+        ):
+            selected.extend(
+                str(value)
+                for value in values
+            )
+
+    selected.extend(
+        category_map.get(category)
+        or category_map.get("general")
+        or []
+    )
+
     result: list[str] = []
+    seen: set[str] = set()
+
     for value in selected:
         path = str(value)
-        if path_matches(path, allowed) and (ROOT / path).is_file():
-            result.append(path)
-    return result[: int(policy.get("max_context_files", 6))]
+
+        if (
+            path in seen
+            or not path_matches(
+                path,
+                allowed,
+            )
+            or not (
+                ROOT / path
+            ).is_file()
+        ):
+            continue
+
+        seen.add(path)
+        result.append(path)
+
+        if len(result) >= max_files:
+            break
+
+    return result
 
 
 def redact(text: str) -> str:
@@ -1517,6 +1618,7 @@ def request_patch(
     config: WorkerConfig,
     env_values: dict[str, str],
     previous_error: str | None = None,
+    previous_patch: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     api_key = env_values.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY", "")
     if not api_key:
@@ -1563,8 +1665,36 @@ Requirements:
 - Prefer a smaller, simpler complete patch over a larger patch that risks truncation.
 - Do not include prose inside the patch.
 """.strip()
-    if previous_error:
-        prompt += f"\n\nThe previous patch attempt failed validation:\n{redact(previous_error)[-5000:]}\nRepair it."
+    if previous_error or previous_patch:
+        prompt += (
+            "\n\nA previous patch attempt failed local validation."
+        )
+
+        if previous_error:
+            prompt += (
+                "\n\nValidation error:\n"
+                + redact(
+                    previous_error
+                )[-5000:]
+            )
+
+        if previous_patch:
+            prompt += (
+                "\n\nPrevious failed patch:\n"
+                + redact(
+                    previous_patch
+                )[:24000]
+            )
+
+        prompt += (
+            "\n\nDiscard any incorrect hunk coordinates or "
+            "remembered source from that patch. Re-read the "
+            "authoritative repository source supplied above and "
+            "generate a fresh complete diff. Every unchanged "
+            "context line and every removed line must be copied "
+            "exactly from that source, including whitespace and "
+            "blank lines."
+        )
 
     instructions = """
 Act as a conservative senior Python engineer and safety reviewer. You may only submit a patch through the submit_patch tool. Prefer deterministic fixes over prompt-only changes. A candidate must include a regression test and must not modify forbidden paths. Do not claim tests passed; the local worker will verify them.
@@ -3882,6 +4012,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
         base_commit=base_commit,
     )
     generation_error: str | None = None
+    previous_patch: str | None = None
     payload: dict[str, Any] | None = None
     usage: dict[str, Any] = {}
     workspace: Path | None = None
@@ -3896,6 +4027,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 config=config,
                 env_values=env_values,
                 previous_error=generation_error,
+                previous_patch=previous_patch,
             )
             patch = normalise_unified_diff_hunk_counts(
                 str(payload.get("patch") or "")
@@ -3937,6 +4069,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 break
             except Exception as exc:
                 generation_error = str(exc)
+                previous_patch = patch
                 if workspace is not None:
                     run(["git", "worktree", "remove", "--force", str(workspace)], check=False)
                     workspace = None
