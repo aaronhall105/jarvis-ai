@@ -16,8 +16,32 @@ if str(TOOLS_DIR) not in sys.path:
 
 import self_improvement_worker as base
 
-STATE_VERSION = 1
+STATE_VERSION = 5
 DEFAULT_MAX_REPAIRS = 4
+DEFAULT_MAX_STEP_RETRIES = 3
+DEVELOPMENT_FEEDBACK_LIMIT = 24000
+
+
+class ExternalDependencyBlocked(base.WorkerError):
+    """A development dependency is unavailable; this must not consume repair budget."""
+
+
+def _is_external_credit_block(exc: BaseException | str) -> bool:
+    text = str(exc or "").casefold()
+    markers = (
+        "credit_balance_exhausted",
+        "insufficient_quota",
+        "no credits remaining",
+        "hit your billing quota",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _external_dependency_feedback(exc: BaseException | str) -> str:
+    return _clean_development_feedback(
+        "OpenAI API credit/billing dependency is unavailable. Development is paused; "
+        "no development attempt was consumed.\n" + str(exc or "")
+    )
 
 
 def _env_int(values: dict[str, str], name: str, default: int, low: int, high: int) -> int:
@@ -44,11 +68,44 @@ def _state(candidate: dict[str, Any]) -> dict[str, Any]:
     state.setdefault("attempts", [])
     state.setdefault("acceptance_criteria", [])
     state.setdefault("test_strategy", [])
+    state.setdefault("nonbudget_events", [])
+    state.setdefault("step_retries", [])
     return state
 
 
 def _save_state(candidate_id: int, state: dict[str, Any], **fields: Any) -> None:
     base.update_candidate(candidate_id, usage_json={"development": state}, **fields)
+
+
+def _redact_development_feedback(text: str) -> str:
+    """Redact credential-shaped values without destroying pytest node IDs or symbols.
+
+    The legacy generic scrubber intentionally hides any long identifier-like token.
+    That is appropriate for broad logs, but pytest node IDs and long function names are
+    critical repair evidence. Development feedback therefore uses narrower secret
+    patterns while preserving ordinary source/test identifiers.
+    """
+    patterns = (
+        re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
+        re.compile(
+            r"(?i)((?:api[_ -]?key|x-api-key|token|password|secret|pin)\s*[:=]\s*)\S+"
+        ),
+        re.compile(r"(?i)(https?://[^\s:@/]+:)[^@\s/]+@"),
+        re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
+        re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+        re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    )
+    output = str(text or "")
+    for pattern in patterns:
+        if pattern.groups:
+            output = pattern.sub(lambda match: match.group(1) + "[REDACTED]", output)
+        else:
+            output = pattern.sub("[REDACTED]", output)
+    return output
+
+
+def _clean_development_feedback(text: str) -> str:
+    return _redact_development_feedback(text)[-DEVELOPMENT_FEEDBACK_LIMIT:]
 
 
 def _call_tool(
@@ -67,7 +124,15 @@ def _call_tool(
     if base.OpenAI is None:
         raise base.WorkerError("The OpenAI package is missing from the improvement worker environment.")
 
-    client = base.OpenAI(api_key=api_key, timeout=240, max_retries=2)
+    request_timeout = float(
+        os.getenv("JARVIS_DEVELOPMENT_MODEL_TIMEOUT_SECONDS", "90")
+    )
+    request_timeout = max(15.0, min(request_timeout, 300.0))
+    client = base.OpenAI(
+        api_key=api_key,
+        timeout=request_timeout,
+        max_retries=0,
+    )
     kwargs: dict[str, Any] = {
         "model": config.model,
         "instructions": instructions,
@@ -82,7 +147,35 @@ def _call_tool(
         kwargs["reasoning"] = {"effort": "high"}
         kwargs["text"] = {"verbosity": "medium"}
 
-    response = client.responses.create(**kwargs)
+    try:
+        response = client.responses.create(**kwargs)
+    except Exception as exc:
+        if _is_external_credit_block(exc):
+            raise ExternalDependencyBlocked(
+                _external_dependency_feedback(exc)
+            ) from exc
+
+        timeout_names = {
+            "APITimeoutError",
+            "TimeoutException",
+            "ReadTimeout",
+            "WriteTimeout",
+            "ConnectTimeout",
+            "PoolTimeout",
+        }
+        error_text = str(exc).lower()
+        if (
+            exc.__class__.__name__ in timeout_names
+            or "timed out" in error_text
+            or "timeout" in error_text
+        ):
+            raise ExternalDependencyBlocked(
+                "Development model request timed out. "
+                "Candidate state was preserved and no internal "
+                "development retry was consumed."
+            ) from exc
+
+        raise
     usage = base._require_completed_response(response, purpose=f"Development {name}")
     return base.parse_tool_arguments(response, name), usage
 
@@ -151,7 +244,7 @@ def _workspace_context(
     included: list[str] = []
     for path in paths:
         content = (workspace / path).read_text(encoding="utf-8", errors="replace")
-        excerpt = base._relevant_context_excerpt(base.redact(content), terms, per_file)
+        excerpt = base._relevant_context_excerpt(_redact_development_feedback(content), terms, per_file)
         section = f"\n===== CURRENT WORKSPACE FILE: {path} =====\n{excerpt}"
         if sum(len(item) for item in sections) + len(section) > max_chars:
             continue
@@ -237,6 +330,30 @@ def _development_step(
         cwd=workspace,
         check=False,
     ).stdout
+
+    current_changed_lines = 0
+    numstat = base.run(
+        ["git", "diff", "--numstat", "HEAD", "--"],
+        cwd=workspace,
+        check=False,
+    ).stdout.splitlines()
+    for line in numstat:
+        parts = line.split("\t", 2)
+        if (
+            len(parts) >= 2
+            and parts[0].isdigit()
+            and parts[1].isdigit()
+        ):
+            current_changed_lines += int(parts[0]) + int(parts[1])
+
+    max_patch_lines = int(config.max_patch_lines)
+    remaining_patch_lines = max_patch_lines - current_changed_lines
+    safe_target_lines = max(0, max_patch_lines - 10)
+    reduction_to_target = max(
+        0,
+        current_changed_lines - safe_target_lines,
+    )
+
     prompt = f"""
 You are the implementation agent inside one persistent Jarvis development task.
 Do not start over. Inspect the CURRENT worktree, preserve good changes already
@@ -256,10 +373,34 @@ Test strategy:
 {json.dumps(state.get('test_strategy', []), ensure_ascii=False, indent=2)}
 
 Latest feedback from tests/review:
-{base.redact(feedback)[-16000:] if feedback else 'Initial implementation pass.'}
+{_redact_development_feedback(feedback)[-DEVELOPMENT_FEEDBACK_LIMIT:] if feedback else 'Initial implementation pass.'}
+
+CURRENT PATCH BUDGET:
+- Current complete candidate patch: {current_changed_lines} changed lines.
+- Maximum permitted patch: {max_patch_lines} changed lines.
+- Remaining additive budget: {remaining_patch_lines} changed lines.
+- Safe target: <= {safe_target_lines} changed lines.
+- Reduction required to reach safe target: {reduction_to_target} changed lines.
+
+PATCH-BUDGET RULES:
+- The limit applies to the COMPLETE resulting Git diff, additions plus deletions,
+  not merely to the edits returned in this response.
+- Recalculate your solution around the existing work rather than appending a
+  second implementation.
+- If remaining additive budget is small or negative, reduce or consolidate
+  existing candidate code/tests before adding anything.
+- Any new changed lines must be offset by removing or consolidating at least
+  the same number of existing changed lines when necessary.
+- Prefer modifying existing regression tests over adding duplicate tests.
+- Prefer simplifying existing candidate code over introducing another helper
+  or parallel code path.
+- Aim for the safe target rather than merely landing one line below the hard
+  policy ceiling.
+- Do not delete meaningful coverage or weaken acceptance criteria merely to
+  satisfy the size limit.
 
 Current changed diff (changes already made in this SAME worktree):
-{base.redact(current_diff)[-30000:] if current_diff.strip() else '(no changes yet)'}
+{_redact_development_feedback(current_diff)[-30000:] if current_diff.strip() else '(no changes yet)'}
 
 Authoritative CURRENT source files: {files}
 {context}
@@ -267,9 +408,12 @@ Authoritative CURRENT source files: {files}
 Return exact structured source edits against the CURRENT source above. Each
 old_text must exist exactly once in the current worktree. Do not generate Git
 diff syntax. Add or improve focused regression tests where needed. Do not undo
-working prior changes merely to regenerate a complete solution. Never weaken
-authentication, Admin Mode, identity separation, device/tool safety, security,
-patch policy, independent review, human approval, deployment or rollback.
+working prior changes merely to regenerate a complete solution. When feedback
+requires a repair, you MUST return at least one concrete structured edit that
+addresses that feedback; an empty edits list is invalid and will be retried
+without consuming the development repair budget. Never weaken authentication,
+Admin Mode, identity separation, device/tool safety, security, patch policy,
+independent review, human approval, deployment or rollback.
 """.strip()
     tool = {
         "type": "function",
@@ -284,6 +428,7 @@ patch policy, independent review, human approval, deployment or rollback.
                 "risk": {"type": "string", "enum": ["low", "medium", "high"]},
                 "edits": {
                     "type": "array",
+                    "minItems": 1,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -352,7 +497,7 @@ Test strategy:
 {json.dumps(state.get('test_strategy', []), ensure_ascii=False, indent=2)}
 
 Current diff:
-{base.redact(diff)[-50000:]}
+{_redact_development_feedback(diff)[-50000:]}
 
 Relevant CURRENT production/test source files: {current_files}
 {current_context}
@@ -656,15 +801,17 @@ def _record_attempt(
     feedback: str = "",
 ) -> None:
     attempts = state.setdefault("attempts", [])
+    clean_feedback = _clean_development_feedback(feedback)
     attempts.append(
         {
             "number": number,
             "stage": stage,
             "outcome": outcome,
             "summary": base.redact(summary)[:1200],
+            "feedback": clean_feedback,
         }
     )
-    state["last_feedback"] = base.redact(feedback)[-16000:]
+    state["last_feedback"] = clean_feedback
     state["phase"] = "repairing" if outcome != "passed" else stage
     _save_state(candidate_id, state)
     base.audit(
@@ -677,6 +824,229 @@ def _record_attempt(
             "outcome": outcome,
             "summary": base.redact(summary)[:1200],
         },
+    )
+
+
+def _migrate_legacy_attempt_state(state: dict[str, Any]) -> bool:
+    """Move proposal/edit errors out of the repair budget and normalise numbering."""
+    attempts = state.setdefault("attempts", [])
+    kept: list[dict[str, Any]] = []
+    moved: list[dict[str, Any]] = []
+
+    for raw in attempts:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        if (
+            str(item.get("stage") or "") == "edit"
+            and str(item.get("outcome") or "") != "passed"
+        ):
+            item["migrated_nonbudget"] = True
+            moved.append(item)
+        else:
+            kept.append(item)
+
+    renumbered = False
+    for index, item in enumerate(kept, start=1):
+        previous = item.get("number")
+        if previous != index:
+            item.setdefault("original_number", previous)
+            item["number"] = index
+            renumbered = True
+
+    changed = (
+        bool(moved)
+        or renumbered
+        or int(state.get("version") or 0) < STATE_VERSION
+    )
+    state["attempts"] = kept
+    if moved:
+        state.setdefault("nonbudget_events", []).extend(moved)
+    state["version"] = STATE_VERSION
+    return changed
+
+
+def _development_validation_feedback(validation: dict[str, Any]) -> str:
+    return (
+        "Development validation failed. Inspect the exact failures and repair "
+        "the CURRENT worktree without discarding working changes.\n"
+        + json.dumps(validation, ensure_ascii=False, default=str)[-DEVELOPMENT_FEEDBACK_LIMIT:]
+    )
+
+
+def _restore_missing_feedback(
+    state: dict[str, Any],
+    workspace: Path,
+    config: base.WorkerConfig,
+) -> tuple[str, bool]:
+    """Recover v2.0 validation evidence that was overwritten by an edit error."""
+    attempts = state.get("attempts") or []
+    if not attempts:
+        return str(state.get("last_feedback") or ""), False
+
+    latest = attempts[-1]
+    if not isinstance(latest, dict):
+        return str(state.get("last_feedback") or ""), False
+
+    stored = str(latest.get("feedback") or "").strip()
+    if stored:
+        state["last_feedback"] = stored
+        return stored, False
+
+    if str(latest.get("stage") or "") != "development_validation":
+        return str(state.get("last_feedback") or ""), False
+
+    validation = _development_validation(workspace, config)
+    if bool(validation.get("passed")):
+        return str(state.get("last_feedback") or ""), False
+
+    feedback = _development_validation_feedback(validation)
+    clean = _clean_development_feedback(feedback)
+    latest["feedback"] = clean
+    state["last_feedback"] = clean
+    return clean, True
+
+
+def _apply_development_step_with_retries(
+    *,
+    candidate_id: int,
+    attempt_number: int,
+    failure: dict[str, Any],
+    state: dict[str, Any],
+    workspace: Path,
+    policy: dict[str, Any],
+    config: base.WorkerConfig,
+    env_values: dict[str, str],
+    feedback: str,
+) -> tuple[dict[str, Any], dict[str, Any], str, list[str], str]:
+    """Get and apply one valid edit proposal without spending repair attempts on malformed proposals."""
+    max_step_retries = _env_int(
+        env_values,
+        "JARVIS_DEVELOPMENT_STEP_RETRIES",
+        DEFAULT_MAX_STEP_RETRIES,
+        1,
+        5,
+    )
+    original_feedback = str(feedback or "")
+
+    retry_events = state.setdefault(
+        "step_retries",
+        [],
+    )
+    if not isinstance(retry_events, list):
+        raise base.WorkerError(
+            "Development step retry history is invalid."
+        )
+
+    current_retry_events = [
+        item
+        for item in retry_events
+        if (
+            isinstance(item, dict)
+            and item.get("attempt") == attempt_number
+        )
+    ]
+
+    retries_used = min(
+        len(current_retry_events),
+        max_step_retries,
+    )
+
+    last_error = ""
+
+    if current_retry_events:
+        last_error = _clean_development_feedback(
+            str(
+                current_retry_events[-1].get("error")
+                or ""
+            )
+        )[-12000:]
+
+    proposal_feedback = original_feedback
+
+    if last_error:
+        proposal_feedback = (
+            original_feedback
+            + "\n\nThe previous edit proposal was invalid and was NOT "
+            "counted as a development attempt. Correct the proposal against "
+            "the CURRENT worktree and return at least one concrete exact edit.\n"
+            + last_error
+        )[-20000:]
+
+    if retries_used >= max_step_retries:
+        raise base.WorkerError(
+            "Development step could not produce a valid structured edit after "
+            f"{max_step_retries} internal retries.\n{last_error}"
+        )
+
+    for retry_number in range(
+        retries_used + 1,
+        max_step_retries + 1,
+    ):
+        try:
+            payload, usage = _development_step(
+                failure,
+                state,
+                workspace,
+                policy,
+                config,
+                env_values,
+                proposal_feedback,
+            )
+            edits = payload.get("edits")
+            if not isinstance(edits, list) or not edits:
+                raise base.WorkerError(
+                    "Development step returned no structured edits."
+                )
+            patch, paths, patch_hash = _apply_incremental_edits(
+                workspace,
+                payload,
+                policy,
+                config,
+            )
+            state["last_step_usage"] = usage
+            state.pop("last_step_error", None)
+            return payload, usage, patch, paths, patch_hash
+        except ExternalDependencyBlocked:
+            raise
+        except Exception as exc:
+            if _is_external_credit_block(exc):
+                raise ExternalDependencyBlocked(_external_dependency_feedback(exc)) from exc
+            last_error = _clean_development_feedback(str(exc))[-12000:]
+            event = {
+                "attempt": attempt_number,
+                "retry": retry_number,
+                "error": last_error,
+                "created_at": base.utc_now(),
+            }
+            state.setdefault("step_retries", []).append(event)
+            state["last_step_error"] = last_error
+            _save_state(candidate_id, state, status="developing")
+
+            base.audit(
+                "development_step_retry",
+                candidate_id=candidate_id,
+                details={
+                    "attempt": attempt_number,
+                    "retry": retry_number,
+                    "error": last_error[-2000:],
+                },
+            )
+
+            if retry_number >= max_step_retries:
+                break
+
+            proposal_feedback = (
+                original_feedback
+                + "\n\nThe previous edit proposal was invalid and was NOT "
+                "counted as a development attempt. Correct the proposal against "
+                "the CURRENT worktree and return at least one concrete exact edit.\n"
+                + last_error
+            )[-20000:]
+
+    raise base.WorkerError(
+        "Development step could not produce a valid structured edit after "
+        f"{max_step_retries} internal retries.\n{last_error}"
     )
 
 
@@ -799,6 +1169,44 @@ def _finalise_ready_candidate(
     )
 
 
+def _pause_external_dependency(
+    *,
+    candidate_id: int,
+    failure_id: int,
+    state: dict[str, Any],
+    workspace: Path,
+    exc: BaseException | str,
+) -> None:
+    feedback = _external_dependency_feedback(exc)
+    event = {
+        "created_at": base.utc_now(),
+        "kind": "openai_api_credit",
+        "error": feedback,
+        "attempts_preserved": len(state.get("attempts", [])),
+    }
+    state.setdefault("external_dependency_events", []).append(event)
+    state["phase"] = "blocked_external"
+    state["last_feedback"] = feedback
+    state["blocked_external_at"] = event["created_at"]
+    state["blocked_external_kind"] = event["kind"]
+    _save_state(
+        candidate_id,
+        state,
+        status="blocked_external",
+        error=feedback[-12000:],
+        workspace_path=str(workspace),
+    )
+    base.audit(
+        "development_blocked_external",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "kind": event["kind"],
+            "attempts_preserved": event["attempts_preserved"],
+        },
+    )
+
+
 def process_development_candidate(
     candidate: dict[str, Any],
     config: base.WorkerConfig,
@@ -908,7 +1316,25 @@ def process_development_candidate(
                     "criteria_count": len(state.get("acceptance_criteria", [])),
                 },
             )
+        except ExternalDependencyBlocked as exc:
+            _pause_external_dependency(
+                candidate_id=candidate_id,
+                failure_id=failure_id,
+                state=state,
+                workspace=workspace,
+                exc=exc,
+            )
+            return
         except Exception as exc:
+            if _is_external_credit_block(exc):
+                _pause_external_dependency(
+                    candidate_id=candidate_id,
+                    failure_id=failure_id,
+                    state=state,
+                    workspace=workspace,
+                    exc=exc,
+                )
+                return
             state["phase"] = "failed"
             state["failed_at"] = base.utc_now()
             state["last_feedback"] = base.redact(str(exc))[-16000:]
@@ -928,11 +1354,30 @@ def process_development_candidate(
             )
             raise
 
+    migrated = _migrate_legacy_attempt_state(state)
+    feedback, feedback_restored = _restore_missing_feedback(
+        state,
+        workspace,
+        config,
+    )
+    if migrated or feedback_restored:
+        _save_state(candidate_id, state, status="developing", error=None)
+        base.audit(
+            "development_state_migrated",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={
+                "version": STATE_VERSION,
+                "attempts": len(state.get("attempts", [])),
+                "nonbudget_events": len(state.get("nonbudget_events", [])),
+                "feedback_restored": feedback_restored,
+            },
+        )
+
     max_repairs = _env_int(
         env_values, "JARVIS_DEVELOPMENT_MAX_REPAIRS", DEFAULT_MAX_REPAIRS, 0, 8
     )
     max_attempts = 1 + max_repairs
-    feedback = str(state.get("last_feedback") or "")
     attempts_done = len(state.get("attempts", []))
     last_payload: dict[str, Any] = {}
 
@@ -940,51 +1385,42 @@ def process_development_candidate(
         for number in range(attempts_done + 1, max_attempts + 1):
             state["phase"] = "implementing" if number == 1 else "repairing"
             _save_state(candidate_id, state, status="developing", error=None)
-            payload: dict[str, Any]
-            step_usage: dict[str, Any]
-            try:
-                payload, step_usage = _development_step(
-                    failure, state, workspace, policy, config, env_values, feedback
-                )
-                last_payload = payload
-                state["last_step_usage"] = step_usage
-                patch, paths, patch_hash = _apply_incremental_edits(
-                    workspace, payload, policy, config
-                )
-                patch_path = _write_patch(candidate_id, patch)
-                base.update_candidate(
-                    candidate_id,
-                    workspace_path=str(workspace),
-                    patch_path=str(patch_path),
-                    changed_files_json=paths,
-                    diff_stats_json={
-                        "changed_files": len(paths),
-                        "changed_lines": base.patch_line_count(patch),
-                        "patch_sha256": patch_hash,
-                        "development_attempt": number,
-                    },
-                )
-            except Exception as exc:
-                feedback = "Structured development step failed:\n" + str(exc)[-12000:]
-                _record_attempt(
-                    candidate_id,
-                    failure_id,
-                    state,
-                    number=number,
-                    stage="edit",
-                    outcome="repair_required",
-                    summary=str(exc),
-                    feedback=feedback,
-                )
-                continue
+            (
+                payload,
+                step_usage,
+                patch,
+                paths,
+                patch_hash,
+            ) = _apply_development_step_with_retries(
+                candidate_id=candidate_id,
+                attempt_number=number,
+                failure=failure,
+                state=state,
+                workspace=workspace,
+                policy=policy,
+                config=config,
+                env_values=env_values,
+                feedback=feedback,
+            )
+            last_payload = payload
+            patch_path = _write_patch(candidate_id, patch)
+            base.update_candidate(
+                candidate_id,
+                workspace_path=str(workspace),
+                patch_path=str(patch_path),
+                changed_files_json=paths,
+                diff_stats_json={
+                    "changed_files": len(paths),
+                    "changed_lines": base.patch_line_count(patch),
+                    "patch_sha256": patch_hash,
+                    "development_attempt": number,
+                    "step_retries": len(state.get("step_retries", [])),
+                },
+            )
 
             dev_validation = _development_validation(workspace, config)
             if not bool(dev_validation.get("passed")):
-                feedback = (
-                    "Development validation failed. Inspect the exact failures and repair "
-                    "the CURRENT worktree without discarding working changes.\n"
-                    + json.dumps(dev_validation, ensure_ascii=False, default=str)[-16000:]
-                )
+                feedback = _development_validation_feedback(dev_validation)
                 _record_attempt(
                     candidate_id,
                     failure_id,
@@ -1135,7 +1571,25 @@ def process_development_candidate(
             f"Development repair budget exhausted after {max_attempts} attempts.\n"
             + feedback[-12000:]
         )
+    except ExternalDependencyBlocked as exc:
+        _pause_external_dependency(
+            candidate_id=candidate_id,
+            failure_id=failure_id,
+            state=state,
+            workspace=workspace,
+            exc=exc,
+        )
+        return
     except Exception as exc:
+        if _is_external_credit_block(exc):
+            _pause_external_dependency(
+                candidate_id=candidate_id,
+                failure_id=failure_id,
+                state=state,
+                workspace=workspace,
+                exc=exc,
+            )
+            return
         state["phase"] = "failed"
         state["failed_at"] = base.utc_now()
         state["last_feedback"] = base.redact(str(exc))[-16000:]
@@ -1165,6 +1619,235 @@ def process_development_candidate(
             env_values=env_values,
         )
         raise
+
+
+
+def block_failed_external_candidate(
+    candidate_id: int,
+    config: base.WorkerConfig,
+) -> dict[str, Any]:
+    """Convert a quota-failed preserved task into a non-budget external block."""
+    candidate = base.fetch_candidate_by_id(candidate_id)
+    if candidate is None:
+        raise base.WorkerError(f"Candidate {candidate_id} was not found.")
+    status = str(candidate.get("status") or "")
+    if status != "failed":
+        raise base.WorkerError(
+            f"Candidate {candidate_id} is not failed; external-block migration refused: {status}"
+        )
+    error = str(candidate.get("error") or "")
+    if not _is_external_credit_block(error):
+        raise base.WorkerError(
+            "Candidate failure is not an OpenAI API credit/billing block; migration refused."
+        )
+    failure_id = int(candidate.get("failure_id") or 0)
+    if failure_id <= 0:
+        raise base.WorkerError("Candidate failure binding is missing.")
+    state = _state(candidate)
+    workspace, base_commit, branch = _prepare_workspace(candidate, state)
+    if not base.run(["git", "status", "--porcelain"], cwd=workspace, check=False).stdout.strip():
+        raise base.WorkerError("Candidate worktree is clean; external-block migration requires preserved changes.")
+
+    # Refresh local validation evidence without using the API. This preserves exact pytest node IDs.
+    validation = _development_validation(workspace, config)
+    if not bool(validation.get("passed")):
+        feedback = _clean_development_feedback(_development_validation_feedback(validation))
+        state["last_feedback"] = feedback
+        attempts = state.get("attempts") or []
+        if attempts and isinstance(attempts[-1], dict) and str(attempts[-1].get("stage") or "") == "development_validation":
+            attempts[-1]["feedback"] = feedback
+    else:
+        feedback = _external_dependency_feedback(error)
+
+    event = {
+        "created_at": base.utc_now(),
+        "kind": "openai_api_credit",
+        "source_status": status,
+        "attempts_preserved": len(state.get("attempts", [])),
+        "base_commit": base_commit,
+        "branch": branch,
+    }
+    state.setdefault("external_dependency_events", []).append(event)
+    state.pop("failed_at", None)
+    state["phase"] = "blocked_external"
+    state["blocked_external_at"] = event["created_at"]
+    state["blocked_external_kind"] = event["kind"]
+    state["blocked_external_error"] = _external_dependency_feedback(error)
+    _save_state(
+        candidate_id,
+        state,
+        status="blocked_external",
+        error=state["blocked_external_error"][-12000:],
+        workspace_path=str(workspace),
+        branch_name=branch,
+        base_commit=base_commit,
+    )
+    base.audit(
+        "development_external_block_migrated",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "attempts_preserved": len(state.get("attempts", [])),
+            "base_commit": base_commit,
+        },
+    )
+    return {
+        "candidate_id": candidate_id,
+        "status": "blocked_external",
+        "phase": "blocked_external",
+        "attempts_preserved": len(state.get("attempts", [])),
+        "validation_passed": bool(validation.get("passed")),
+        "changed_files": base.run(["git", "diff", "--name-only", "HEAD", "--"], cwd=workspace, check=False).stdout.splitlines(),
+    }
+
+
+def resume_external_candidate(
+    candidate_id: int,
+    config: base.WorkerConfig,
+) -> dict[str, Any]:
+    """Resume an externally blocked task without changing its repair-attempt count."""
+    candidate = base.fetch_candidate_by_id(candidate_id)
+    if candidate is None:
+        raise base.WorkerError(f"Candidate {candidate_id} was not found.")
+    status = str(candidate.get("status") or "")
+    if status != "blocked_external":
+        raise base.WorkerError(
+            f"Candidate {candidate_id} is not blocked_external; resume refused: {status}"
+        )
+    failure_id = int(candidate.get("failure_id") or 0)
+    if failure_id <= 0:
+        raise base.WorkerError("Candidate failure binding is missing.")
+    state = _state(candidate)
+    workspace, base_commit, branch = _prepare_workspace(candidate, state)
+    _, resume_env_values = base.load_config()
+    max_repairs = _env_int(
+        resume_env_values,
+        "JARVIS_DEVELOPMENT_MAX_REPAIRS",
+        DEFAULT_MAX_REPAIRS,
+        0,
+        8,
+    )
+    max_attempts = 1 + max_repairs
+    if len(state.get("attempts", [])) >= max_attempts:
+        raise base.WorkerError(
+            "Candidate has no genuine development repair budget remaining."
+        )
+    state["phase"] = "repairing"
+    state["resumed_external_at"] = base.utc_now()
+    state.pop("blocked_external_at", None)
+    state.pop("blocked_external_kind", None)
+    state.pop("blocked_external_error", None)
+    _save_state(
+        candidate_id,
+        state,
+        status="developing",
+        error=None,
+        workspace_path=str(workspace),
+        branch_name=branch,
+        base_commit=base_commit,
+    )
+    base.audit(
+        "development_external_block_resumed",
+        failure_id=failure_id,
+        candidate_id=candidate_id,
+        details={
+            "attempts_preserved": len(state.get("attempts", [])),
+            "base_commit": base_commit,
+        },
+    )
+    return {
+        "candidate_id": candidate_id,
+        "status": "developing",
+        "phase": "repairing",
+        "attempts_preserved": len(state.get("attempts", [])),
+        "next_attempt": len(state.get("attempts", [])) + 1,
+        "changed_files": base.run(["git", "diff", "--name-only", "HEAD", "--"], cwd=workspace, check=False).stdout.splitlines(),
+    }
+
+
+def refresh_candidate_validation_feedback(
+    candidate_id: int,
+    config: base.WorkerConfig,
+) -> dict[str, Any]:
+    """Refresh repair evidence for a preserved developing task without spending budget."""
+    candidate = base.fetch_candidate_by_id(candidate_id)
+    if candidate is None:
+        raise base.WorkerError(f"Candidate {candidate_id} was not found.")
+
+    status = str(candidate.get("status") or "")
+    if status != "developing":
+        raise base.WorkerError(
+            f"Candidate {candidate_id} is not developing; feedback refresh refused: {status}"
+        )
+
+    state = _state(candidate)
+    workspace, base_commit, branch = _prepare_workspace(candidate, state)
+    if not base.run(
+        ["git", "status", "--porcelain"], cwd=workspace, check=False
+    ).stdout.strip():
+        raise base.WorkerError(
+            "Candidate worktree is clean; feedback refresh requires preserved changes."
+        )
+
+    validation = _development_validation(workspace, config)
+    if bool(validation.get("passed")):
+        raise base.WorkerError(
+            "Development validation currently passes; refusing to overwrite repair feedback."
+        )
+
+    feedback = _development_validation_feedback(validation)
+    clean = _clean_development_feedback(feedback)
+    state["last_feedback"] = clean
+    state["version"] = STATE_VERSION
+
+    attempts = state.get("attempts") or []
+    if attempts and isinstance(attempts[-1], dict):
+        latest = attempts[-1]
+        if str(latest.get("stage") or "") == "development_validation":
+            latest["feedback"] = clean
+
+    refresh_event = {
+        "created_at": base.utc_now(),
+        "attempts": len(attempts),
+        "base_commit": base_commit,
+        "branch": branch,
+    }
+    state.setdefault("feedback_refreshes", []).append(refresh_event)
+    _save_state(candidate_id, state, status="developing", error=None)
+    base.audit(
+        "development_feedback_refreshed",
+        candidate_id=candidate_id,
+        details={
+            "attempts": len(attempts),
+            "base_commit": base_commit,
+            "feedback_characters": len(clean),
+        },
+    )
+
+    new_failures: list[dict[str, Any]] = []
+    for check in validation.get("checks") or []:
+        if isinstance(check, dict) and check.get("name") == "pytest_baseline":
+            raw = check.get("new_failures") or []
+            if isinstance(raw, list):
+                new_failures = [dict(item) for item in raw if isinstance(item, dict)]
+            break
+
+    return {
+        "candidate_id": candidate_id,
+        "status": "developing",
+        "phase": state.get("phase"),
+        "attempts": len(attempts),
+        "feedback_refreshed": True,
+        "new_failures": new_failures,
+        "feedback_contains_redacted_nodeid": any(
+            str(item.get("test") or "") == "[REDACTED]" for item in new_failures
+        ),
+        "changed_files": base.run(
+            ["git", "diff", "--name-only", "HEAD", "--"],
+            cwd=workspace,
+            check=False,
+        ).stdout.splitlines(),
+    }
 
 
 def run_once(config: base.WorkerConfig, env_values: dict[str, str]) -> bool:
@@ -1203,10 +1886,34 @@ def run_once(config: base.WorkerConfig, env_values: dict[str, str]) -> bool:
     return False
 
 
+
 def main() -> int:
+    commands = {
+        "block-external-candidate": block_failed_external_candidate,
+        "resume-external-candidate": resume_external_candidate,
+        "refresh-feedback": refresh_candidate_validation_feedback,
+    }
+
+    if len(sys.argv) >= 2 and sys.argv[1] in commands:
+        command = sys.argv[1]
+        if len(sys.argv) != 3:
+            print(
+                f"Usage: self_development_worker.py {command} <id>",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            candidate_id = int(sys.argv[2])
+            config, _ = base.load_config()
+            result = commands[command](candidate_id, config)
+            print(json.dumps(result, indent=2))
+            return 0
+        except Exception as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
     base.run_once = run_once
     return base.main()
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

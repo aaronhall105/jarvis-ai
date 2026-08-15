@@ -2807,12 +2807,12 @@ def _load_pytest_junit(
     Counter[str],
     Counter[str],
     int,
+    dict[str, list[str]],
 ]:
     if not path.is_file():
         raise WorkerError(
             f"Missing pytest JUnit report: {path}"
         )
-
     try:
         root = ET.parse(
             path
@@ -2827,49 +2827,87 @@ def _load_pytest_junit(
 
     failures: Counter[str] = Counter()
     tests: Counter[str] = Counter()
+    failure_details: dict[str, list[str]] = {}
     total = 0
 
     for testcase in root.findall(
         ".//testcase"
     ):
         total += 1
-
         identity = (
             _pytest_failure_identity(
                 testcase
             )
         )
-
         if not identity:
             raise WorkerError(
                 "Pytest JUnit report contains "
                 "a testcase with no stable identity."
             )
 
-        tests[
-            identity
-        ] += 1
+        tests[identity] += 1
 
+        failure_node = testcase.find(
+            "failure"
+        )
+        error_node = testcase.find(
+            "error"
+        )
         if (
-            testcase.find(
-                "failure"
-            )
-            is None
-            and testcase.find(
-                "error"
-            )
-            is None
+            failure_node is None
+            and error_node is None
         ):
             continue
 
-        failures[
-            identity
-        ] += 1
+        failures[identity] += 1
+
+        detail_node = (
+            failure_node
+            if failure_node is not None
+            else error_node
+        )
+        if detail_node is None:
+            continue
+
+        detail_parts: list[str] = []
+        message = str(
+            detail_node.get("message")
+            or ""
+        ).strip()
+        body = str(
+            detail_node.text
+            or ""
+        ).strip()
+
+        if message:
+            detail_parts.append(message)
+        if body:
+            detail_parts.append(body)
+
+        detail = "\n".join(
+            detail_parts
+        ).strip()
+        if not detail:
+            continue
+
+        # Evidence is diagnostic only. Keep it bounded and
+        # redact secrets before it can reach candidate feedback.
+        clean_detail = redact(
+            detail
+        )[-6000:]
+
+        failure_details.setdefault(
+            identity,
+            [],
+        ).append(
+            clean_detail
+        )
 
     return (
         failures,
         tests,
         total,
+        failure_details,
     )
 
 
@@ -3306,6 +3344,7 @@ def _docker_pytest_scan(
                 failures,
                 tests,
                 total,
+                failure_details,
             ) = _load_pytest_junit(
                 report
             )
@@ -3333,6 +3372,7 @@ def _docker_pytest_scan(
             "total_tests": total,
             "failures": failures,
             "tests": tests,
+            "failure_details": failure_details,
             "output": completed.stdout[
                 -12000:
             ],
@@ -3501,15 +3541,45 @@ def pytest_baseline_result(
         - baseline_tests
     )
 
-    new_failures = [
-        {
+    candidate_failure_details = (
+        candidate.get(
+            "failure_details"
+        )
+        or {}
+    )
+    new_failures: list[dict[str, Any]] = []
+
+    for identity, count in sorted(
+        new_counts.items()
+    ):
+        item: dict[str, Any] = {
             "test": identity,
             "count": count,
         }
-        for identity, count in sorted(
-            new_counts.items()
+
+        raw_details = (
+            candidate_failure_details.get(
+                identity
+            )
+            or []
         )
-    ]
+        if isinstance(
+            raw_details,
+            list,
+        ):
+            evidence = "\n\n".join(
+                str(value)
+                for value in raw_details[:2]
+                if str(value).strip()
+            )[-8000:]
+            if evidence:
+                item[
+                    "evidence"
+                ] = evidence
+
+        new_failures.append(
+            item
+        )
 
     missing_tests = [
         {
