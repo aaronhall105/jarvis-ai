@@ -19,5 +19,77 @@ class SpeakerIdentityParsingTests(unittest.TestCase):
         actual="tomorrow morning remind me to check weather before i leave"
         self.assertGreater(phrase_match_score(actual, expected), 0.70)
 
+    def test_semantic_enrollment_intent_and_stt_corruption(self):
+        examples = (
+            "Love a new voice",
+            "I want you to learn my voice",
+            "Can you remember my voice?",
+            "Set up voice recognition for me",
+            "Could you add someone so you know who is speaking?",
+            "Create a new speaker profile",
+            "Register somebody new",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertEqual(
+                    parse_speaker_management_command(example),
+                    ("enroll", ""),
+                )
+
+    def test_action_intent_beats_question_words(self):
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Add someone so you know who is speaking"
+            ),
+            ("enroll", ""),
+        )
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Can you register my partner so you recognise who is talking?"
+            ),
+            ("enroll", ""),
+        )
+
+    def test_semantic_management_intents(self):
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Which voice profiles have you saved?"
+            ),
+            ("list", ""),
+        )
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Please update Amber's voice profile"
+            ),
+            ("relearn", "Amber"),
+        )
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Remove Daniel's voice profile"
+            ),
+            ("forget", "Daniel"),
+        )
+        self.assertEqual(
+            parse_speaker_management_command(
+                "Stop this voice enrollment"
+            ),
+            ("cancel", ""),
+        )
+
+    def test_unrelated_voice_sentences_do_not_start_enrollment(self):
+        examples = (
+            "Turn the volume down",
+            "Use a new speaking voice",
+            "Switch to a different voice",
+            "Why does your voice sound different?",
+            "Tell Amber I am on my way home",
+        )
+        for example in examples:
+            with self.subTest(example=example):
+                self.assertIsNone(
+                    parse_speaker_management_command(example)
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

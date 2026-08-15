@@ -62,50 +62,259 @@ def phrase_match_score(actual: Any, expected: Any) -> float:
     return max(sequence, overlap)
 
 
-def parse_speaker_management_command(value: Any) -> tuple[str, str] | None:
-    text = normalise_identity_text(value)
+def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+    words = set(text.split())
+    return any(
+        term in words or f" {term} " in f" {text} "
+        for term in terms
+    )
+
+
+def _strip_assistant_prefix(text: str) -> str:
+    value = normalise_identity_text(text)
+    for prefix in (
+        "hey jarvis ",
+        "okay jarvis ",
+        "ok jarvis ",
+        "jarvis ",
+    ):
+        if value.startswith(prefix):
+            return value[len(prefix):].strip()
+    return value
+
+
+def _extract_named_profile(
+    text: str,
+    *,
+    verbs: tuple[str, ...],
+) -> str:
+    """Best-effort person slot extraction for Voice-ID management."""
+    value = _strip_assistant_prefix(text)
+
+    patterns = (
+        r"^(?:please )?(?:forget|remove|delete|erase) (.+?)(?:'s|s)? (?:voice|voice profile|speaker profile)$",
+        r"^(?:please )?(?:relearn|re learn|retrain|re train|redo|update|refresh|replace) (.+?)(?:'s|s)? (?:voice|voice profile|speaker profile)$",
+        r"^(?:please )?(?:forget|remove|delete|erase) the (?:voice|voice profile|speaker profile) (?:for|of) (.+)$",
+        r"^(?:please )?(?:relearn|re learn|retrain|re train|redo|update|refresh|replace) the (?:voice|voice profile|speaker profile) (?:for|of) (.+)$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, value)
+        if match:
+            return extract_display_name(match.group(1))
+
+    working = value
+    for phrase in (
+        "voice recognition",
+        "speaker recognition",
+        "voice profile",
+        "speaker profile",
+        "the voice",
+        "voice",
+        "profile",
+        "for",
+        "of",
+        "please",
+        "my",
+    ):
+        working = re.sub(
+            rf"\b{re.escape(phrase)}\b",
+            " ",
+            working,
+        )
+
+    for verb in verbs:
+        working = re.sub(
+            rf"\b{re.escape(verb)}\b",
+            " ",
+            working,
+        )
+
+    working = re.sub(r"\s+", " ", working).strip(" -'")
+    return extract_display_name(working)
+
+
+def parse_speaker_management_command(
+    value: Any,
+) -> tuple[str, str] | None:
+    """Route Voice-ID management by conversational intent.
+
+    Classification is action-first, not phrase-first.  A user can naturally
+    ask Jarvis to learn/add/register a person, update a profile, remove one,
+    list known speakers, or cancel.  The router uses preserved concepts rather
+    than requiring one exact sentence.
+    """
+    text = _strip_assistant_prefix(normalise_identity_text(value))
     if not text:
         return None
-    if text in {
-        "cancel voice enrollment", "cancel voice enrolment", "cancel enrollment",
-        "cancel enrolment", "stop voice enrollment", "stop voice enrolment",
-    }:
-        return ("cancel", "")
+
+    words = set(text.split())
+
+    voice_terms = (
+        "voice",
+        "voices",
+        "speaker",
+        "speakers",
+        "speaking",
+        "recognition",
+        "recognise",
+        "recognize",
+        "profile",
+        "profiles",
+    )
+    person_terms = (
+        "user",
+        "person",
+        "someone",
+        "somebody",
+        "me",
+        "my",
+    )
+    voice_context = _contains_any(text, voice_terms)
+    person_context = _contains_any(text, person_terms)
+
+    # Requests to change Jarvis's own TTS voice must never create a person.
+    tts_change_terms = (
+        "use",
+        "switch",
+        "change",
+        "different",
+        "deeper",
+        "higher",
+        "lower",
+        "accent",
+        "sound",
+    )
+    identity_action_terms = (
+        "learn",
+        "add",
+        "register",
+        "enroll",
+        "enrol",
+        "remember",
+        "teach",
+        "create",
+        "setup",
+        "set",
+        "relearn",
+        "retrain",
+        "update",
+        "refresh",
+        "replace",
+        "forget",
+        "remove",
+        "delete",
+    )
     if (
-        "who do you recognise" in text or "who do you recognize" in text
-        or "whose voices do you know" in text or "list voice profiles" in text
-        or "list speaker profiles" in text
+        _contains_any(text, tts_change_terms)
+        and _contains_any(text, ("voice", "speaking"))
+        and not _contains_any(text, identity_action_terms)
+    ):
+        return None
+
+    # Explicit state-control operations have highest precedence.
+    if (
+        _contains_any(text, ("cancel", "stop", "abort"))
+        and (
+            voice_context
+            or _contains_any(
+                text,
+                (
+                    "enrollment",
+                    "enrolment",
+                    "learning",
+                    "setup",
+                    "registration",
+                ),
+            )
+        )
+    ):
+        return ("cancel", "")
+
+    forget_terms = ("forget", "remove", "delete", "erase")
+    if _contains_any(text, forget_terms) and voice_context:
+        return (
+            "forget",
+            _extract_named_profile(text, verbs=forget_terms),
+        )
+
+    relearn_terms = (
+        "relearn",
+        "retrain",
+        "redo",
+        "update",
+        "refresh",
+        "replace",
+    )
+    if (
+        (
+            _contains_any(text, relearn_terms)
+            or ("learn" in words and "again" in words)
+        )
+        and voice_context
+    ):
+        return (
+            "relearn",
+            _extract_named_profile(
+                text,
+                verbs=relearn_terms + ("learn", "again"),
+            ),
+        )
+
+    # Enrollment is checked BEFORE list/query intent.  This matters for
+    # natural requests such as "add someone so you know who is speaking",
+    # which contain the word "who" but are clearly an action request.
+    enroll_terms = (
+        "learn",
+        "add",
+        "register",
+        "enroll",
+        "enrol",
+        "remember",
+        "teach",
+        "create",
+        "setup",
+        "set",
+    )
+    if (
+        _contains_any(text, enroll_terms)
+        and (
+            voice_context
+            or person_context
+            or ("who" in words and "speaking" in words)
+        )
+    ):
+        return ("enroll", "")
+
+    # STT-tolerant conceptual fallback.  If ASR corrupts the action verb but
+    # preserves "new voice/speaker/profile", the user's intent is still to
+    # create an identity.  TTS-change requests were already excluded above.
+    if (
+        "new" in words
+        and _contains_any(text, ("voice", "speaker", "profile"))
+    ):
+        return ("enroll", "")
+
+    # Query/list intent comes after action intents so question words embedded
+    # in an action sentence cannot steal the turn.
+    query_terms = ("who", "whose", "which", "what", "list", "show")
+    knowledge_terms = (
+        "know",
+        "saved",
+        "registered",
+        "recognise",
+        "recognize",
+        "identify",
+        "profiles",
+        "voices",
+        "speakers",
+    )
+    if (
+        _contains_any(text, query_terms)
+        and voice_context
+        and _contains_any(text, knowledge_terms)
     ):
         return ("list", "")
-    stripped = text
-    for prefix in ("hey jarvis ", "jarvis "):
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].strip()
-            break
-    if stripped in {
-        "learn a new voice", "learn new voice", "add a new voice", "add new voice",
-        "add a new user", "add new user", "register a new voice", "register new voice",
-        "learn my voice", "register my voice",
-    }:
-        return ("enroll", "")
-    if text in {"relearn my voice", "re learn my voice", "update my voice profile"}:
-        return ("relearn", "")
-    for pattern in (
-        r"^(?:jarvis )?relearn (.+?)(?:'s)? voice$",
-        r"^(?:jarvis )?re learn (.+?)(?:'s)? voice$",
-        r"^(?:jarvis )?update (.+?)(?:'s)? voice profile$",
-    ):
-        match = re.match(pattern, text)
-        if match:
-            return ("relearn", extract_display_name(match.group(1)))
-    for pattern in (
-        r"^(?:jarvis )?forget (.+?)(?:'s)? voice$",
-        r"^(?:jarvis )?delete (.+?)(?:'s)? voice profile$",
-        r"^(?:jarvis )?remove (.+?)(?:'s)? voice profile$",
-    ):
-        match = re.match(pattern, text)
-        if match:
-            return ("forget", extract_display_name(match.group(1)))
+
     return None
 
 
