@@ -1552,6 +1552,21 @@ class RealtimeVoiceProxy:
                 client,
                 {"type": "speaker.prompt", "text": cleaned},
             )
+
+            # Voice-ID prompts must use the same configured speech renderer
+            # as normal Jarvis replies. Voice PE uses ElevenLabs when
+            # JARVIS_TTS_PROVIDER=elevenlabs; only fall back to OpenAI
+            # Realtime speech when the configured Jarvis renderer fails.
+            if self._use_direct_elevenlabs(metadata):
+                handled = await self._stream_elevenlabs_response(
+                    client,
+                    cleaned,
+                    state,
+                    finalize_turn=False,
+                )
+                if handled:
+                    return
+
             await upstream.send(
                 json.dumps(speak_response_event(cleaned, voice))
             )
