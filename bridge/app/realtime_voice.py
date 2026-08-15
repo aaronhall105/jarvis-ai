@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import quote
 
 from app.speech_render_policy import SpeechRenderPolicy
+from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
 
 VERSION = "19.0.0-alpha13"
 CORE_APPLICATION_VERSION = "3.6.0"
@@ -147,6 +148,10 @@ def trusted_local_context(timezone_name: Any) -> dict[str, Any]:
 SPEAKER_CAPTURE_RATE = INPUT_RATE
 SPEAKER_CAPTURE_SAMPLE_WIDTH = 2
 SPEAKER_CAPTURE_DIR = Path("/tmp/jarvis-speaker-captures")
+SPEAKER_CAPTURE_DIAGNOSTICS = (
+    os.getenv("JARVIS_SPEAKER_CAPTURE_DIAGNOSTICS", "false")
+    .strip().casefold() in {"1", "true", "yes", "on"}
+)
 
 SPEAKER_VERIFY_URL = os.getenv(
     "JARVIS_SPEAKER_VERIFY_URL",
@@ -1216,6 +1221,12 @@ def control_voice_policy(command: str, tool_events: list[dict[str, Any]], *, ena
 class RealtimeVoiceProxy:
     def __init__(self, config: RealtimeVoiceConfig | None = None) -> None:
         self.config = config or RealtimeVoiceConfig.from_environment()
+        self.speaker_identity = SpeakerIdentityClient.from_environment()
+        self.speaker_identity_runtime = SpeakerIdentityRuntime(
+            self.speaker_identity,
+            self.config.user_id,
+            self.config.user_is_admin,
+        )
         self.started_at = time.time()
         self.active_sessions = 0
         self.total_sessions = 0
@@ -1382,6 +1393,16 @@ class RealtimeVoiceProxy:
                     and candidate == self.config.user_id
                 )
 
+        if client_kind == "voice_pe" and self.speaker_identity.enabled:
+            # The Voice PE token authenticates the device, not the human.
+            # Personal identity starts as Guest and is resolved per utterance.
+            metadata["user_id"] = "guest"
+            metadata["user_name"] = "Guest"
+            metadata["user_is_admin"] = False
+            metadata["speaker_id"] = "unknown"
+            metadata["speaker_name"] = "Unknown"
+            metadata["speaker_recognized"] = False
+
         metadata["response_style"] = "natural"
         metadata["reasoning_effort"] = "medium"
         metadata["mobile_fast_response"] = True
@@ -1508,6 +1529,41 @@ class RealtimeVoiceProxy:
                 await asyncio.gather(*turn_tasks, return_exceptions=True)
             self.active_sessions = max(0, self.active_sessions - 1)
             await self._close(client, 1000)
+
+    async def _speaker_identity_process(
+        self,
+        client: Any,
+        upstream: Any,
+        metadata: dict[str, Any],
+        state: dict[str, Any],
+        transcript: str,
+        pcm: bytes,
+        voice: str,
+    ) -> bool:
+        async def send(payload: dict[str, Any]) -> None:
+            await self._send_json(client, payload)
+
+        async def speak(text: str) -> None:
+            cleaned = " ".join(str(text or "").split()).strip()
+            if not cleaned:
+                return
+            state["suppress_audio"] = False
+            await self._send_json(
+                client,
+                {"type": "speaker.prompt", "text": cleaned},
+            )
+            await upstream.send(
+                json.dumps(speak_response_event(cleaned, voice))
+            )
+
+        return await self.speaker_identity_runtime.process(
+            transcript,
+            pcm,
+            metadata,
+            state,
+            send,
+            speak,
+        )
 
     async def _client_to_openai(
         self,
@@ -1784,11 +1840,12 @@ class RealtimeVoiceProxy:
                 speaker_pcm = b""
 
                 if metadata.get("client_kind") == "voice_pe":
-                    _speaker_capture_write_segment(
-                        state,
-                        event,
-                        transcript,
-                    )
+                    if SPEAKER_CAPTURE_DIAGNOSTICS:
+                        _speaker_capture_write_segment(
+                            state,
+                            event,
+                            transcript,
+                        )
                     speaker_pcm = (
                         _speaker_capture_segment_pcm(
                             state,
@@ -1875,6 +1932,22 @@ class RealtimeVoiceProxy:
                                 session_age_ms,
                                 state.get("voice_pe_speech_start_count"),
                             )
+                            continue
+
+                    if (
+                        metadata.get("client_kind") == "voice_pe"
+                        and self.speaker_identity.enabled
+                    ):
+                        speaker_flow_handled = await self._speaker_identity_process(
+                            client,
+                            upstream,
+                            metadata,
+                            state,
+                            transcript,
+                            speaker_pcm,
+                            voice,
+                        )
+                        if speaker_flow_handled:
                             continue
 
                     # Core-side conservative speaker suppression.
