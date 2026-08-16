@@ -1562,7 +1562,7 @@ class RealtimeVoiceProxy:
                     client,
                     cleaned,
                     state,
-                    finalize_turn=False,
+                    finalize_turn=True,
                 )
                 if handled:
                     return
