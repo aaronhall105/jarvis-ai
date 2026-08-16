@@ -450,6 +450,7 @@ class SpeakerIdentityRuntime:
             user_id="guest",
             user_name="Guest",
             user_is_admin=False,
+            speaker_household_admin=False,
             speaker_id="unknown",
             speaker_name="Unknown",
             speaker_recognized=False,
@@ -468,7 +469,7 @@ class SpeakerIdentityRuntime:
         if not speaker_id or not name:
             self.set_unknown(metadata, "invalid_profile")
             return False
-        admin = bool(
+        household_admin = bool(
             profile.get("is_admin")
             and self.configured_user_is_admin
             and speaker_id == self.configured_user_id
@@ -476,7 +477,8 @@ class SpeakerIdentityRuntime:
         metadata.update(
             user_id=speaker_id,
             user_name=name,
-            user_is_admin=admin,
+            user_is_admin=False,
+            speaker_household_admin=household_admin,
             speaker_id=speaker_id,
             speaker_name=name,
             speaker_recognized=True,
@@ -544,7 +546,11 @@ class SpeakerIdentityRuntime:
                 return True
             speaker_id = speaker_id_from_name(name)
             replace = bool(flow.get("replace"))
-            admin = bool(speaker_id == self.configured_user_id and self.configured_user_is_admin)
+            admin = bool(
+                metadata.get("speaker_household_admin")
+                and speaker_id == self.configured_user_id
+                and self.configured_user_is_admin
+            )
             try:
                 started = await asyncio.to_thread(
                     self.client.start_enrollment,
@@ -618,7 +624,7 @@ class SpeakerIdentityRuntime:
             await speak(answer); return True
         if action == "enroll":
             state["speaker_enrollment"]={"phase":"await_name","replace":False}; await speak("Of course. What is the person's name?"); return True
-        current_id=str(metadata.get("speaker_id") or ""); current_name=str(metadata.get("speaker_name") or ""); admin=bool(metadata.get("user_is_admin"))
+        current_id=str(metadata.get("speaker_id") or ""); current_name=str(metadata.get("speaker_name") or ""); admin=bool(metadata.get("speaker_household_admin"))
         if action == "relearn":
             requested=name or (current_name if current_id not in {"","unknown"} else ""); requested_id=speaker_id_from_name(requested)
             if not requested_id: await speak("Tell me whose voice you want me to relearn."); return True

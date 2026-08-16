@@ -75,6 +75,10 @@ public final class JarvisRealtimeClient {
     private long pingStartedAtMs;
     private long turnStartedAtMs;
     private boolean firstAudioMeasured;
+    private long nextClientTurnId = 1L;
+    private long activeClientTurnId;
+    private int highestServerGeneration;
+    private int minimumServerGeneration;
     private String activeCoreUrl;
     private String activeEndpointName = "LAN";
 
@@ -152,6 +156,9 @@ public final class JarvisRealtimeClient {
     public void close() {
         shouldReconnect = false;
         performance.abandonTurn();
+        activeClientTurnId = 0L;
+        highestServerGeneration = 0;
+        minimumServerGeneration = 0;
         authenticated = false;
         ready = false;
         opening = false;
@@ -180,9 +187,15 @@ public final class JarvisRealtimeClient {
 
     public void cancelResponse() {
         WebSocket current = socket;
+        long cancelledTurnId = activeClientTurnId;
+        activeClientTurnId = 0L;
+        minimumServerGeneration = Math.max(
+            minimumServerGeneration,
+            highestServerGeneration + 1
+        );
         if (authenticated && current != null) {
             performance.abandonTurn();
-            current.send(RealtimeProtocol.cancel());
+            current.send(RealtimeProtocol.cancel(cancelledTurnId));
         }
     }
 
@@ -193,7 +206,10 @@ public final class JarvisRealtimeClient {
             turnStartedAtMs = SystemClock.elapsedRealtime();
             firstAudioMeasured = false;
             performance.beginTurn();
-            return current.send(RealtimeProtocol.text(text.trim(), speak));
+            long clientTurnId = nextClientTurnId++;
+            if (nextClientTurnId <= 0L) nextClientTurnId = 1L;
+            activeClientTurnId = clientTurnId;
+            return current.send(RealtimeProtocol.text(text.trim(), speak, clientTurnId));
         } catch (Exception exception) {
             post(() -> listener.onError("Could not send text: " + safeMessage(exception)));
             return false;
@@ -383,6 +399,14 @@ public final class JarvisRealtimeClient {
             return;
         }
 
+        if (isStaleTurnEvent(event)) {
+            diagnostics.recordRecovery(
+                "Discarded stale realtime event " + event.type
+                    + " turn=" + event.clientTurnId
+            );
+            return;
+        }
+
         switch (event.type) {
             case "auth.ok" -> {
                 authenticated = true;
@@ -467,6 +491,15 @@ public final class JarvisRealtimeClient {
             case "original.tts" -> post(() -> listener.onOriginalTts(event.text));
             case "turn.done" -> {
                 performance.finishTurn();
+                if (event.clientTurnId > 0L && event.clientTurnId == activeClientTurnId) {
+                    activeClientTurnId = 0L;
+                }
+                if (event.generation > 0) {
+                    minimumServerGeneration = Math.max(
+                        minimumServerGeneration,
+                        event.generation + 1
+                    );
+                }
                 post(listener::onTurnDone);
             }
             case "session.context",
@@ -503,6 +536,36 @@ public final class JarvisRealtimeClient {
             ));
             default -> { }
         }
+    }
+
+    private boolean isStaleTurnEvent(RealtimeProtocol.Event event) {
+        if (event == null || !isTurnScopedType(event.type)) return false;
+
+        if (event.generation > 0) {
+            if (event.generation < minimumServerGeneration) return true;
+            if (event.generation < highestServerGeneration) return true;
+            if (event.generation > highestServerGeneration) {
+                highestServerGeneration = event.generation;
+                minimumServerGeneration = Math.max(
+                    minimumServerGeneration,
+                    highestServerGeneration
+                );
+            }
+        }
+
+        if (event.clientTurnId <= 0L) return false;
+        return activeClientTurnId <= 0L || event.clientTurnId != activeClientTurnId;
+    }
+
+    private static boolean isTurnScopedType(String type) {
+        return switch (type == null ? "" : type) {
+            case "brain.started", "brain.delta", "brain.response", "brain.discarded",
+                 "tool.started", "tool.completed", "memory.context", "turn.summary",
+                 "assistant.transcript.delta", "assistant.transcript.done",
+                 "original.tts", "audio.done", "turn.done", "session.context", "session.close",
+                 "speech.early.started", "speech.remainder.ready", "speech.continuation" -> true;
+            default -> false;
+        };
     }
 
     private final Runnable authTimeout = () -> {
@@ -594,6 +657,9 @@ public final class JarvisRealtimeClient {
         diagnostics.recordCoreReachability("Unavailable", "No network");
         endpoints.cancel();
         probing = false;
+        activeClientTurnId = 0L;
+        highestServerGeneration = 0;
+        minimumServerGeneration = 0;
         authenticated = false;
         ready = false;
         opening = false;

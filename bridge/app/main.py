@@ -14,7 +14,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.admin_engine import AdminEngine
@@ -45,6 +45,8 @@ from app.realtime_voice import RealtimeVoiceProxy
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext
+from app.runtime_observability import configuration_report, runtime_metrics
+from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
 
 settings = get_settings()
 configure_logging(settings.jarvis_log_level)
@@ -74,7 +76,7 @@ improvement = SelfImprovementEngine(
     auto_prepare=settings.jarvis_self_improvement_auto_prepare,
     repeat_threshold=settings.jarvis_self_improvement_repeat_threshold,
     latency_failure_ms=settings.jarvis_self_improvement_latency_failure_ms,
-    core_version="2.1.0",
+    core_version=CORE_APPLICATION_VERSION,
 )
 awareness = HouseAwarenessEngine(
     client=home_assistant,
@@ -309,18 +311,77 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title=settings.jarvis_name,
-    version="2.1.0",
+    version=CORE_APPLICATION_VERSION,
     lifespan=lifespan,
 )
 
 
-@app.get("/health")
-async def health() -> dict[str, str]:
+def _liveness_payload() -> dict[str, str]:
     return {
         "status": "healthy",
         "service": settings.jarvis_name,
-        "version": "2.1.0",
+        "version": CORE_APPLICATION_VERSION,
+        "release": JARVIS_RELEASE,
         "time": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return _liveness_payload()
+
+
+@app.get("/health/live")
+async def health_live() -> dict[str, str]:
+    return _liveness_payload()
+
+
+@app.get("/health/ready")
+async def health_ready() -> JSONResponse:
+    ha_status = await connection_test_with_timeout(home_assistant)
+    realtime = realtime_voice.status()
+    config = configuration_report(settings, realtime)
+    ready = bool(ha_status.connected and config["valid"])
+    payload = {
+        **_liveness_payload(),
+        "status": "ready" if ready else "degraded",
+        "ready": ready,
+        "home_assistant": {
+            "connected": ha_status.connected,
+            "message": ha_status.message,
+        },
+        "configuration": config,
+        "realtime_voice": {
+            "enabled": realtime.get("enabled"),
+            "configured": realtime.get("configured"),
+            "active_sessions": realtime.get("active_sessions"),
+            "last_error": realtime.get("last_error"),
+        },
+    }
+    return JSONResponse(payload, status_code=200 if ready else 503)
+
+
+@app.get("/api/system/status")
+async def system_status() -> dict[str, object]:
+    ha_status = await connection_test_with_timeout(home_assistant)
+    realtime = realtime_voice.status()
+    try:
+        registry_status: dict[str, object] = await registry.summary()
+    except Exception as exc:
+        logger.exception("Registry status failed")
+        runtime_metrics.record_error("registry", str(exc))
+        registry_status = {"error": "registry status unavailable"}
+    return {
+        "release": JARVIS_RELEASE,
+        "core_application_version": CORE_APPLICATION_VERSION,
+        "home_assistant": {
+            "connected": ha_status.connected,
+            "message": ha_status.message,
+        },
+        "registry": registry_status,
+        "realtime_voice": realtime,
+        "configuration": configuration_report(settings, realtime),
+        "runtime": runtime_metrics.snapshot(),
     }
 
 
@@ -1054,6 +1115,8 @@ async def _execute_ai_request(
         (time.monotonic() - request_started) * 1000
     )
     result["timings"] = timings
+    runtime_metrics.increment("assistant_turns")
+    runtime_metrics.observe_many(timings)
 
     try:
         await improvement.observe_interaction(
@@ -1284,7 +1347,7 @@ async def assistant_ai_stream(
         )
 
         yield json.dumps(
-            {"type": "start", "version": "2.1.0"},
+            {"type": "start", "version": CORE_APPLICATION_VERSION, "release": JARVIS_RELEASE},
             separators=(",", ":"),
         ) + "\n"
 

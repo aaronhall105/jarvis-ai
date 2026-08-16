@@ -23,9 +23,9 @@ from urllib.parse import quote
 
 from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
+from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
-VERSION = "19.0.0-alpha13"
-CORE_APPLICATION_VERSION = "3.6.0"
+VERSION = JARVIS_RELEASE
 DEFAULT_MODEL = "gpt-realtime"
 DEFAULT_VOICE = "marin"
 INPUT_RATE = 24_000
@@ -950,8 +950,19 @@ def audio_append_event(pcm: bytes) -> dict[str, str]:
     }
 
 
-def speak_response_event(text: str, voice: str) -> dict[str, Any]:
+def speak_response_event(
+    text: str,
+    voice: str,
+    *,
+    generation: int = 0,
+    client_turn_id: int = 0,
+) -> dict[str, Any]:
     cleaned = " ".join(str(text or "").split())
+    response_metadata = {"source": "jarvis_core", "release": VERSION}
+    if generation > 0:
+        response_metadata["jarvis_generation"] = str(int(generation))
+    if client_turn_id > 0:
+        response_metadata["jarvis_client_turn_id"] = str(int(client_turn_id))
     return {
         "type": "response.create",
         "response": {
@@ -968,7 +979,7 @@ def speak_response_event(text: str, voice: str) -> dict[str, Any]:
                     "voice": normalise_voice(voice),
                 }
             },
-            "metadata": {"source": "jarvis_core", "release": VERSION},
+            "metadata": response_metadata,
         },
     }
 
@@ -1125,6 +1136,29 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return max(0, default)
+
+
+def _turn_payload(
+    generation: int,
+    client_turn_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    event = dict(payload)
+    event["generation"] = max(0, int(generation))
+    if client_turn_id > 0:
+        event["client_turn_id"] = int(client_turn_id)
+    return event
+
+
+def _active_turn_payload(
+    state: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    return _turn_payload(
+        _safe_int(state.get("active_generation"), _safe_int(state.get("generation"))),
+        _safe_int(state.get("active_client_turn_id")),
+        payload,
+    )
 
 
 def _clean_event_message(value: Any, limit: int = 240) -> str:
@@ -1290,6 +1324,7 @@ class RealtimeVoiceProxy:
             "total_memory_turns": self.total_memory_turns,
             "total_context_syncs": self.total_context_syncs,
             "mobile_context_protocol": "alpha5.1",
+            "realtime_protocol_version": REALTIME_PROTOCOL_VERSION,
             "timezone": self.config.timezone,
             "uptime_seconds": max(0, round(time.time() - self.started_at)),
             "last_error": self.last_error,
@@ -1399,6 +1434,7 @@ class RealtimeVoiceProxy:
             metadata["user_id"] = "guest"
             metadata["user_name"] = "Guest"
             metadata["user_is_admin"] = False
+            metadata["speaker_household_admin"] = False
             metadata["speaker_id"] = "unknown"
             metadata["speaker_name"] = "Unknown"
             metadata["speaker_recognized"] = False
@@ -1450,6 +1486,7 @@ class RealtimeVoiceProxy:
                 "sample_rate": INPUT_RATE,
                 "transport": "websocket_pcm",
                 "unified_brain": True,
+                "protocol_version": REALTIME_PROTOCOL_VERSION,
             },
         )
 
@@ -1557,18 +1594,29 @@ class RealtimeVoiceProxy:
             # as normal Jarvis replies. Voice PE uses ElevenLabs when
             # JARVIS_TTS_PROVIDER=elevenlabs; only fall back to OpenAI
             # Realtime speech when the configured Jarvis renderer fails.
+            turn_generation = _safe_int(state.get("generation"))
+            turn_id = _safe_int(state.get("active_client_turn_id"))
             if self._use_direct_elevenlabs(metadata):
                 handled = await self._stream_elevenlabs_response(
                     client,
                     cleaned,
                     state,
-                    finalize_turn=False,
+                    generation=turn_generation,
+                    client_turn_id=turn_id,
+                    finalize_turn=True,
                 )
                 if handled:
                     return
 
             await upstream.send(
-                json.dumps(speak_response_event(cleaned, voice))
+                json.dumps(
+                    speak_response_event(
+                        cleaned,
+                        voice,
+                        generation=turn_generation,
+                        client_turn_id=turn_id,
+                    )
+                )
             )
 
         return await self.speaker_identity_runtime.process(
@@ -1720,6 +1768,10 @@ class RealtimeVoiceProxy:
             if kind == "ping":
                 await self._send_json(client, {"type": "pong", "time": time.time()})
             elif kind == "cancel":
+                state["cancelled_client_turn_id"] = _safe_int(
+                    payload.get("client_turn_id"),
+                    _safe_int(state.get("active_client_turn_id")),
+                )
                 state["generation"] = int(state.get("generation", 0)) + 1
                 state["suppress_audio"] = True
                 await upstream.send(json.dumps({"type": "response.cancel"}))
@@ -1737,6 +1789,7 @@ class RealtimeVoiceProxy:
                         voice,
                         turn_tasks,
                         state,
+                        client_turn_id=_safe_int(payload.get("client_turn_id")),
                     )
             elif kind == "stop":
                 return
@@ -2140,8 +2193,53 @@ class RealtimeVoiceProxy:
                             state,
                         )
             elif kind == "response.created":
+                response_object = (
+                    event.get("response")
+                    if isinstance(event.get("response"), dict)
+                    else {}
+                )
+                response_id = str(response_object.get("id") or "").strip()
+                response_metadata = (
+                    response_object.get("metadata")
+                    if isinstance(response_object.get("metadata"), dict)
+                    else {}
+                )
+                bound_generation = _safe_int(
+                    response_metadata.get("jarvis_generation"),
+                    _safe_int(
+                        state.get("active_generation"),
+                        _safe_int(state.get("generation")),
+                    ),
+                )
+                bound_client_turn_id = _safe_int(
+                    response_metadata.get("jarvis_client_turn_id"),
+                    _safe_int(state.get("active_client_turn_id")),
+                )
+                if response_id:
+                    contexts = state.setdefault("openai_response_turns", {})
+                    if isinstance(contexts, dict):
+                        contexts[response_id] = {
+                            "generation": bound_generation,
+                            "client_turn_id": bound_client_turn_id,
+                        }
+                if bound_generation != _safe_int(state.get("generation")):
+                    state["suppress_audio"] = True
+                    continue
                 state["suppress_audio"] = False
             elif kind == "response.output_audio.delta":
+                response_id = str(event.get("response_id") or "").strip()
+                contexts = state.get("openai_response_turns")
+                context = (
+                    contexts.get(response_id)
+                    if isinstance(contexts, dict) and response_id
+                    else None
+                )
+                if (
+                    isinstance(context, dict)
+                    and _safe_int(context.get("generation"))
+                    != _safe_int(state.get("generation"))
+                ):
+                    continue
                 if bool(state.get("suppress_audio")) or voice_mode == VOICE_MODE_HOME_ASSISTANT:
                     continue
                 encoded = event.get("delta")
@@ -2154,16 +2252,37 @@ class RealtimeVoiceProxy:
                     await client.send_bytes(audio)
                     await asyncio.sleep(len(audio) / 48000.0)
             elif kind == "response.output_audio_transcript.delta":
+                response_id = str(event.get("response_id") or "").strip()
+                contexts = state.get("openai_response_turns")
+                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                if isinstance(context, dict) and _safe_int(context.get("generation")) != _safe_int(state.get("generation")):
+                    continue
                 delta = str(event.get("delta") or "")
                 if delta and voice_mode == VOICE_MODE_REALTIME:
-                    await self._send_json(client, {"type": "assistant.transcript.delta", "text": delta})
+                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
+                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
+                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "assistant.transcript.delta", "text": delta}))
             elif kind == "response.output_audio_transcript.done":
+                response_id = str(event.get("response_id") or "").strip()
+                contexts = state.get("openai_response_turns")
+                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                if isinstance(context, dict) and _safe_int(context.get("generation")) != _safe_int(state.get("generation")):
+                    continue
                 transcript = str(event.get("transcript") or "").strip()
                 if transcript and voice_mode == VOICE_MODE_REALTIME:
-                    await self._send_json(client, {"type": "assistant.transcript.done", "text": transcript})
+                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
+                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
+                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "assistant.transcript.done", "text": transcript}))
             elif kind == "response.output_audio.done":
+                response_id = str(event.get("response_id") or "").strip()
+                contexts = state.get("openai_response_turns")
+                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                if isinstance(context, dict) and _safe_int(context.get("generation")) != _safe_int(state.get("generation")):
+                    continue
                 if voice_mode == VOICE_MODE_REALTIME:
-                    await self._send_json(client, {"type": "audio.done"})
+                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
+                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
+                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "audio.done"}))
             elif kind == "response.done":
                 response = (
                     event.get("response")
@@ -2183,16 +2302,34 @@ class RealtimeVoiceProxy:
                     else None
                 )
 
+                response_id = str(
+                    response.get("id") or event.get("response_id") or ""
+                ).strip()
+                contexts = state.get("openai_response_turns")
+                context = (
+                    contexts.pop(response_id, None)
+                    if isinstance(contexts, dict) and response_id
+                    else None
+                )
+                completion_generation = (
+                    _safe_int(context.get("generation"))
+                    if isinstance(context, dict)
+                    else _safe_int(state.get("generation"))
+                )
+                completion_turn_id = (
+                    _safe_int(context.get("client_turn_id"))
+                    if isinstance(context, dict)
+                    else _safe_int(state.get("active_client_turn_id"))
+                )
+                if completion_generation != _safe_int(state.get("generation")):
+                    continue
                 await self._complete_audio_response(
                     client,
                     upstream,
                     state,
-                    status=str(
-                        response.get(
-                            "status",
-                            "completed",
-                        )
-                    ),
+                    generation=completion_generation,
+                    client_turn_id=completion_turn_id,
+                    status=str(response.get("status", "completed")),
                     usage=usage,
                 )
 
@@ -2211,6 +2348,8 @@ class RealtimeVoiceProxy:
         upstream: Any,
         state: dict[str, Any],
         *,
+        generation: int | None = None,
+        client_turn_id: int | None = None,
         status: str = "completed",
         usage: Any = None,
     ) -> None:
@@ -2257,16 +2396,23 @@ class RealtimeVoiceProxy:
                                     self.config.voice,
                                 )
                             ),
+                            generation=_safe_int(
+                                generation, _safe_int(state.get("generation"))
+                            ),
+                            client_turn_id=_safe_int(
+                                client_turn_id, _safe_int(state.get("active_client_turn_id"))
+                            ),
                         )
                     )
                 )
 
                 await self._send_json(
                     client,
-                    {
-                        "type": "speech.continuation",
-                        "characters": len(remainder),
-                    },
+                    _turn_payload(
+                        _safe_int(generation, _safe_int(state.get("generation"))),
+                        _safe_int(client_turn_id, _safe_int(state.get("active_client_turn_id"))),
+                        {"type": "speech.continuation", "characters": len(remainder)},
+                    ),
                 )
 
                 return
@@ -2278,11 +2424,11 @@ class RealtimeVoiceProxy:
 
         await self._send_json(
             client,
-            {
-                "type": "turn.done",
-                "status": status,
-                "usage": usage,
-            },
+            _turn_payload(
+                _safe_int(generation, _safe_int(state.get("generation"))),
+                _safe_int(client_turn_id, _safe_int(state.get("active_client_turn_id"))),
+                {"type": "turn.done", "status": status, "usage": usage},
+            ),
         )
 
         closure_kind = state.pop(
@@ -2293,11 +2439,15 @@ class RealtimeVoiceProxy:
         if closure_kind:
             await self._send_json(
                 client,
-                {
-                    "type": "session.close",
-                    "reason": "voice_closure",
-                    "kind": closure_kind,
-                },
+                _turn_payload(
+                    _safe_int(generation, _safe_int(state.get("generation"))),
+                    _safe_int(client_turn_id, _safe_int(state.get("active_client_turn_id"))),
+                    {
+                        "type": "session.close",
+                        "reason": "voice_closure",
+                        "kind": closure_kind,
+                    },
+                ),
             )
 
     def _use_direct_elevenlabs(
@@ -2314,7 +2464,19 @@ class RealtimeVoiceProxy:
         client: Any,
         state: dict[str, Any],
         spoken_text: str,
+        *,
+        generation: int | None = None,
+        client_turn_id: int | None = None,
     ) -> None:
+        resolved_generation = _safe_int(
+            generation, _safe_int(state.get("generation"))
+        )
+        resolved_client_turn_id = _safe_int(
+            client_turn_id, _safe_int(state.get("active_client_turn_id"))
+        )
+        if resolved_generation != _safe_int(state.get("generation")):
+            return
+
         _LOGGER.info(
             "JARVIS DIAG | TURN COMPLETE | generation=%s "
             "spoken_characters=%d text=%r",
@@ -2325,26 +2487,29 @@ class RealtimeVoiceProxy:
 
         await self._send_json(
             client,
-            {
-                "type": "assistant.transcript.done",
-                "text": spoken_text,
-            },
+            _turn_payload(
+                resolved_generation,
+                resolved_client_turn_id,
+                {"type": "assistant.transcript.done", "text": spoken_text},
+            ),
         )
 
         await self._send_json(
             client,
-            {"type": "audio.done"},
+            _turn_payload(
+                resolved_generation, resolved_client_turn_id, {"type": "audio.done"}
+            ),
         )
 
         state["turn_in_progress"] = False
 
         await self._send_json(
             client,
-            {
-                "type": "turn.done",
-                "status": "completed",
-                "usage": None,
-            },
+            _turn_payload(
+                resolved_generation,
+                resolved_client_turn_id,
+                {"type": "turn.done", "status": "completed", "usage": None},
+            ),
         )
 
         closure_kind = state.pop(
@@ -2355,11 +2520,15 @@ class RealtimeVoiceProxy:
         if closure_kind:
             await self._send_json(
                 client,
-                {
-                    "type": "session.close",
-                    "reason": "voice_closure",
-                    "kind": closure_kind,
-                },
+                _turn_payload(
+                    resolved_generation,
+                    resolved_client_turn_id,
+                    {
+                        "type": "session.close",
+                        "reason": "voice_closure",
+                        "kind": closure_kind,
+                    },
+                ),
             )
 
 
@@ -2919,11 +3088,21 @@ class RealtimeVoiceProxy:
         text: str,
         state: dict[str, Any],
         *,
+        generation: int | None = None,
+        client_turn_id: int | None = None,
         finalize_turn: bool = True,
     ) -> bool:
         spoken_text = " ".join(str(text or "").split()).strip()
         if not spoken_text:
             return False
+        resolved_generation = _safe_int(
+            generation, _safe_int(state.get("generation"))
+        )
+        resolved_client_turn_id = _safe_int(
+            client_turn_id, _safe_int(state.get("active_client_turn_id"))
+        )
+        if resolved_generation != _safe_int(state.get("generation")):
+            return True
 
         api_key = self.config.elevenlabs_api_key
         voice_id = self.config.elevenlabs_voice_id
@@ -2991,6 +3170,8 @@ class RealtimeVoiceProxy:
                     frame_size = 4096
 
                     async for data in response.aiter_bytes():
+                        if resolved_generation != _safe_int(state.get("generation")):
+                            return True
                         if not data:
                             continue
 
@@ -3034,10 +3215,14 @@ class RealtimeVoiceProxy:
             return False
 
         if finalize_turn:
+            if resolved_generation != _safe_int(state.get("generation")):
+                return True
             await self._finish_direct_elevenlabs_turn(
                 client,
                 state,
                 spoken_text,
+                generation=resolved_generation,
+                client_turn_id=resolved_client_turn_id,
             )
 
         return True
@@ -3055,6 +3240,7 @@ class RealtimeVoiceProxy:
         voice: str,
         turn_tasks: set[asyncio.Task[Any]],
         state: dict[str, Any],
+        client_turn_id: int | None = None,
     ) -> None:
         command = " ".join(str(transcript or "").split()).strip()
         if not command:
@@ -3074,6 +3260,9 @@ class RealtimeVoiceProxy:
         state["turn_in_progress"] = True
         generation = int(state.get("generation", 0)) + 1
         state["generation"] = generation
+        resolved_client_turn_id = _safe_int(client_turn_id)
+        state["active_generation"] = generation
+        state["active_client_turn_id"] = resolved_client_turn_id
         state.pop("queued_speech_remainder", None)
         state["brain_turn_complete"] = False
         state["early_audio_done"] = False
@@ -3091,6 +3280,7 @@ class RealtimeVoiceProxy:
                 voice_mode,
                 voice,
                 state,
+                client_turn_id=resolved_client_turn_id,
             )
         )
         turn_tasks.add(task)
@@ -3116,6 +3306,7 @@ class RealtimeVoiceProxy:
         voice_mode: str,
         voice: str,
         state: dict[str, Any],
+        client_turn_id: int = 0,
     ) -> None:
         self.total_brain_turns += 1
         state["active_voice"] = voice
@@ -3131,10 +3322,11 @@ class RealtimeVoiceProxy:
 
         await self._send_json(
             client,
-            {
-                "type": "brain.started",
-                "command": command,
-            },
+            _turn_payload(
+                generation,
+                client_turn_id,
+                {"type": "brain.started", "command": command},
+            ),
         )
 
         speech_buffer = ""
@@ -3191,10 +3383,11 @@ class RealtimeVoiceProxy:
 
             await self._send_json(
                 client,
-                {
-                    "type": "brain.delta",
-                    "text": text,
-                },
+                _turn_payload(
+                    generation,
+                    client_turn_id,
+                    {"type": "brain.delta", "text": text},
+                ),
             )
 
             if (
@@ -3242,11 +3435,15 @@ class RealtimeVoiceProxy:
             if voice_mode == VOICE_MODE_HOME_ASSISTANT:
                 await self._send_json(
                     client,
-                    {
-                        "type": "original.tts",
-                        "text": segment,
-                        "streaming_preview": True,
-                    },
+                    _turn_payload(
+                        generation,
+                        client_turn_id,
+                        {
+                            "type": "original.tts",
+                            "text": segment,
+                            "streaming_preview": True,
+                        },
+                    ),
                 )
 
             elif self._use_direct_elevenlabs(metadata):
@@ -3265,16 +3462,18 @@ class RealtimeVoiceProxy:
                         client,
                         segment,
                         state,
+                        generation=generation,
+                        client_turn_id=client_turn_id,
                         finalize_turn=False,
                     )
                 )
 
                 await self._send_json(
                     client,
-                    {
-                        "type": "speech.early.started",
-                        "characters": len(segment),
-                    },
+                    _turn_payload(
+                        generation, client_turn_id,
+                        {"type": "speech.early.started", "characters": len(segment)},
+                    ),
                 )
 
             else:
@@ -3284,6 +3483,8 @@ class RealtimeVoiceProxy:
                         speak_response_event(
                             segment,
                             voice,
+                            generation=generation,
+                            client_turn_id=client_turn_id,
                         )
                     )
                 )
@@ -3394,7 +3595,12 @@ class RealtimeVoiceProxy:
                 )
 
             self.total_discarded_stale_turns += 1
-            await self._send_json(client, {"type": "brain.discarded", "command": command})
+            await self._send_json(
+                client,
+                _turn_payload(
+                    generation, client_turn_id, {"type": "brain.discarded", "command": command}
+                ),
+            )
             return
 
         for tool_event in result.get("tool_events", []):
@@ -3402,6 +3608,8 @@ class RealtimeVoiceProxy:
                 client,
                 {
                     "type": "tool.completed",
+                    "generation": generation,
+                    **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                     "tool": tool_event["tool"],
                     "success": tool_event["success"],
                     "message": tool_event["message"],
@@ -3414,6 +3622,8 @@ class RealtimeVoiceProxy:
             client,
             {
                 "type": "memory.context",
+                "generation": generation,
+                **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                 "memory_used": bool(result.get("memory_used")),
                 "message_count": _safe_int(
                     result.get("message_count"),
@@ -3427,15 +3637,16 @@ class RealtimeVoiceProxy:
 
         await self._send_json(
             client,
-            {
-                "type": "session.context",
-                "conversation_id": result["conversation_id"],
-                "user_name": result.get("user_name"),
-                "message_count": _safe_int(
-                    result.get("message_count"),
-                    0,
-                ),
-            },
+            _turn_payload(
+                generation,
+                client_turn_id,
+                {
+                    "type": "session.context",
+                    "conversation_id": result["conversation_id"],
+                    "user_name": result.get("user_name"),
+                    "message_count": _safe_int(result.get("message_count"), 0),
+                },
+            ),
         )
         self.total_context_syncs += 1
 
@@ -3443,6 +3654,8 @@ class RealtimeVoiceProxy:
             client,
             {
                 "type": "turn.summary",
+                "generation": generation,
+                **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                 "success": result["success"],
                 "tool_called": bool(result.get("tool_called")),
                 "memory_used": bool(result.get("memory_used")),
@@ -3459,6 +3672,8 @@ class RealtimeVoiceProxy:
             client,
             {
                 "type": "brain.response",
+                "generation": generation,
+                **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                 "text": result["response"],
                 "success": result["success"],
                 "intent": result["intent"],
@@ -3473,7 +3688,10 @@ class RealtimeVoiceProxy:
             state["turn_in_progress"] = False
             await self._send_json(
                 client,
-                {"type": "turn.done", "status": "completed", "usage": None},
+                _turn_payload(
+                    generation, client_turn_id,
+                    {"type": "turn.done", "status": "completed", "usage": None},
+                ),
             )
             return
         if (
@@ -3538,6 +3756,8 @@ class RealtimeVoiceProxy:
                     client,
                     state,
                     complete_spoken_response,
+                    generation=generation,
+                    client_turn_id=client_turn_id,
                 )
                 return
 
@@ -3561,6 +3781,8 @@ class RealtimeVoiceProxy:
                     client,
                     state,
                     complete_spoken_response,
+                    generation=generation,
+                    client_turn_id=client_turn_id,
                 )
                 return
 
@@ -3573,6 +3795,8 @@ class RealtimeVoiceProxy:
                 client,
                 complete_spoken_response,
                 state,
+                generation=generation,
+                client_turn_id=client_turn_id,
             )
 
             if handled:
@@ -3585,6 +3809,8 @@ class RealtimeVoiceProxy:
                     speak_response_event(
                         complete_spoken_response,
                         voice,
+                        generation=generation,
+                        client_turn_id=client_turn_id,
                     )
                 )
             )
@@ -3634,6 +3860,8 @@ class RealtimeVoiceProxy:
                             speak_response_event(
                                 complete_spoken_response,
                                 voice,
+                                generation=generation,
+                                client_turn_id=client_turn_id,
                             )
                         )
                     )
@@ -3650,6 +3878,8 @@ class RealtimeVoiceProxy:
                             client,
                             remainder,
                             state,
+                            generation=generation,
+                            client_turn_id=client_turn_id,
                             finalize_turn=False,
                         )
                     )
@@ -3662,6 +3892,8 @@ class RealtimeVoiceProxy:
                                 speak_response_event(
                                     remainder,
                                     voice,
+                                    generation=generation,
+                                    client_turn_id=client_turn_id,
                                 )
                             )
                         )
@@ -3671,6 +3903,8 @@ class RealtimeVoiceProxy:
                     client,
                     state,
                     complete_spoken_response,
+                    generation=generation,
+                    client_turn_id=client_turn_id,
                 )
 
                 return
@@ -3685,10 +3919,10 @@ class RealtimeVoiceProxy:
 
             await self._send_json(
                 client,
-                {
-                    "type": "speech.remainder.ready",
-                    "characters": len(remainder),
-                },
+                _turn_payload(
+                    generation, client_turn_id,
+                    {"type": "speech.remainder.ready", "characters": len(remainder)},
+                ),
             )
 
             if bool(
@@ -3701,6 +3935,8 @@ class RealtimeVoiceProxy:
                     client,
                     upstream,
                     state,
+                    generation=generation,
+                    client_turn_id=client_turn_id,
                     status="completed",
                     usage=None,
                 )
@@ -3712,7 +3948,10 @@ class RealtimeVoiceProxy:
         if voice_mode == VOICE_MODE_HOME_ASSISTANT:
             await self._send_json(
                 client,
-                {"type": "original.tts", "text": spoken_response},
+                _turn_payload(
+                    generation, client_turn_id,
+                    {"type": "original.tts", "text": spoken_response},
+                ),
             )
             state["turn_in_progress"] = False
             return
@@ -3721,6 +3960,8 @@ class RealtimeVoiceProxy:
                 client,
                 spoken_response,
                 state,
+                generation=generation,
+                client_turn_id=client_turn_id,
             )
             if handled:
                 return
@@ -3730,6 +3971,8 @@ class RealtimeVoiceProxy:
                 speak_response_event(
                     spoken_response,
                     voice,
+                    generation=generation,
+                    client_turn_id=client_turn_id,
                 )
             )
         )

@@ -21,13 +21,10 @@ public final class CoreEndpointSelector {
         void onUnavailable(String reason);
     }
 
-    public static final String DEFAULT_TAILSCALE_URL =
-        "http://100.127.215.111:8000";
-
     private final ConnectivityManager connectivity;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final String lanUrl;
-    private final String tailscaleUrl;
+    private final String remoteUrl;
     private final OkHttpClient healthClient = new OkHttpClient.Builder()
         .connectTimeout(2200, TimeUnit.MILLISECONDS)
         .readTimeout(2200, TimeUnit.MILLISECONDS)
@@ -42,11 +39,17 @@ public final class CoreEndpointSelector {
             .getApplicationContext()
             .getSystemService(Context.CONNECTIVITY_SERVICE);
         this.lanUrl = normaliseBaseUrl(lanUrl);
-        tailscaleUrl = DEFAULT_TAILSCALE_URL;
+        this.remoteUrl = normaliseOptionalBaseUrl(
+            new SecureStore(context).remoteCoreUrl()
+        );
     }
 
     public String lanUrl() {
         return lanUrl;
+    }
+
+    public String remoteUrl() {
+        return remoteUrl;
     }
 
     public boolean isLan(String value) {
@@ -55,24 +58,20 @@ public final class CoreEndpointSelector {
 
     public void select(Listener listener) {
         cancel();
+        if (remoteUrl.isBlank()) {
+            probe(lanUrl, "LAN", listenerResult(listener));
+            return;
+        }
         if (hasLocalTransport()) {
-            probeThen(lanUrl, "LAN", tailscaleUrl, "Tailscale", listener);
+            probeThen(lanUrl, "LAN", remoteUrl, "Remote", listener);
         } else {
-            probeThen(tailscaleUrl, "Tailscale", lanUrl, "LAN", listener);
+            probeThen(remoteUrl, "Remote", lanUrl, "LAN", listener);
         }
     }
 
     public void probeLan(Listener listener) {
         cancel();
-        probe(lanUrl, "LAN", new ProbeResult() {
-            @Override public void reachable(String url, String name) {
-                listener.onSelected(url, name);
-            }
-
-            @Override public void unreachable(String reason) {
-                listener.onUnavailable(reason);
-            }
-        });
+        probe(lanUrl, "LAN", listenerResult(listener));
     }
 
     public void cancel() {
@@ -91,8 +90,27 @@ public final class CoreEndpointSelector {
             : candidate;
     }
 
+    static String normaliseOptionalBaseUrl(String value) {
+        String candidate = value == null ? "" : value.trim();
+        while (candidate.endsWith("/")) {
+            candidate = candidate.substring(0, candidate.length() - 1);
+        }
+        return candidate;
+    }
+
     static String healthUrl(String value) {
-        return normaliseBaseUrl(value) + "/health";
+        return normaliseBaseUrl(value) + "/health/live";
+    }
+
+    private ProbeResult listenerResult(Listener listener) {
+        return new ProbeResult() {
+            @Override public void reachable(String url, String name) {
+                listener.onSelected(url, name);
+            }
+            @Override public void unreachable(String reason) {
+                listener.onUnavailable(reason);
+            }
+        };
     }
 
     private void probeThen(
@@ -127,8 +145,9 @@ public final class CoreEndpointSelector {
     private void probe(String url, String name, ProbeResult result) {
         final Request request;
         try {
+            String checked = CoreUrl.validateBase(url);
             request = new Request.Builder()
-                .url(healthUrl(url))
+                .url(healthUrl(checked))
                 .get()
                 .build();
         } catch (Exception exception) {
@@ -164,8 +183,7 @@ public final class CoreEndpointSelector {
     private boolean hasLocalTransport() {
         if (connectivity == null) return false;
         Network network = connectivity.getActiveNetwork();
-        NetworkCapabilities capabilities = connectivity
-            .getNetworkCapabilities(network);
+        NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
         return capabilities != null && (
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                 || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
