@@ -15,7 +15,12 @@ public final class CoreUrlTest {
     }
 
     @Test public void endpointIsNotDuplicated() throws Exception {
-        assertEquals("ws://host:8000/api/realtime/voice", CoreUrl.websocket("ws://host:8000/api/realtime/voice"));
+        assertEquals(
+            "ws://192.168.1.40:8000/api/realtime/voice",
+            CoreUrl.websocket(
+                "ws://192.168.1.40:8000/api/realtime/voice"
+            )
+        );
     }
 
     @Test public void unsupportedSchemeFails() {
