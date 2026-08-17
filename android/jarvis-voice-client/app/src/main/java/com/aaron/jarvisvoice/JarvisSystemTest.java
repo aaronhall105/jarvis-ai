@@ -56,9 +56,12 @@ public final class JarvisSystemTest {
                 configuredLanUrl
             );
             Probe lanProbe = probe(lan);
-            Probe tailscaleProbe = probe(
-                CoreEndpointSelector.DEFAULT_TAILSCALE_URL
+            String remote = CoreEndpointSelector.normaliseOptionalBaseUrl(
+                new SecureStore(context).remoteCoreUrl()
             );
+            Probe remoteProbe = remote.isBlank()
+                ? new Probe(false, 0L, "Not configured")
+                : probe(remote);
 
             boolean timezonePass;
             String timezoneDetail;
@@ -92,19 +95,19 @@ public final class JarvisSystemTest {
             boolean continuity = diagnostics.hasConversationContext();
             String selected = lanProbe.passed
                 ? "LAN"
-                : tailscaleProbe.passed ? "Tailscale" : "Unavailable";
+                : remoteProbe.passed ? "Remote" : "Unavailable";
 
             boolean passed = (
-                (lanProbe.passed || tailscaleProbe.passed)
+                (lanProbe.passed || remoteProbe.passed)
                     && timezonePass
                     && microphonePass
                     && audioPass
             );
 
             String report =
-                "Jarvis alpha6 system test\n"
+                "Jarvis alpha14 system test\n"
                     + "LAN health: " + line(lanProbe) + "\n"
-                    + "Tailscale health: " + line(tailscaleProbe) + "\n"
+                    + "Remote health: " + line(remoteProbe) + "\n"
                     + "Selected endpoint: " + selected + "\n"
                     + "Microphone permission: "
                     + passFail(microphonePass) + "\n"

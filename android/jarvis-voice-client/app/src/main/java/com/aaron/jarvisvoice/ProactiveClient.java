@@ -176,7 +176,10 @@ public final class ProactiveClient implements AutoCloseable {
         Set<String> values = new LinkedHashSet<>();
         String configured = CoreEndpointSelector.normaliseBaseUrl(store.coreUrl());
         if (!configured.isBlank()) values.add(configured);
-        values.add(CoreEndpointSelector.DEFAULT_TAILSCALE_URL);
+        String remote = CoreEndpointSelector.normaliseOptionalBaseUrl(
+            store.remoteCoreUrl()
+        );
+        if (!remote.isBlank()) values.add(remote);
         return new ArrayList<>(values);
     }
 
