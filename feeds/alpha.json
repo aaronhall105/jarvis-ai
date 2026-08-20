@@ -1,15 +1,15 @@
 {
-  "apkSize": 47640761,
-  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha16/jarvis-assistant-v19.0.0-alpha16-release.apk",
+  "apkSize": 47640758,
+  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha17/jarvis-assistant-v19.0.0-alpha17-release.apk",
   "channel": "alpha",
-  "commitSha": "97fcd009e67de5a5175658c311af42cbdfe2f1f1",
+  "commitSha": "3279a57ac8593cc2eba70d1678350dea25235a96",
   "minRealtimeProtocol": 2,
   "minSdk": 31,
-  "publishedAt": "2026-08-20T20:06:34Z",
-  "releaseNotes": "Jarvis 19.0.0-alpha16 voice output fix",
+  "publishedAt": "2026-08-20T20:31:22Z",
+  "releaseNotes": "Jarvis 19.0.0-alpha17 restore ElevenLabs voice",
   "schemaVersion": 1,
-  "sha256": "a4ec2392c3e3326a751119b82dd014e53e19be00512107a58f23f487482c15e4",
-  "tag": "v19.0.0-alpha16",
-  "versionCode": 190160,
-  "versionName": "19.0.0-alpha16"
+  "sha256": "fa2a357f3cc21a1154340b0cdccaba566c42d114e1be374eb03a65cbbd252c9e",
+  "tag": "v19.0.0-alpha17",
+  "versionCode": 190170,
+  "versionName": "19.0.0-alpha17"
 }
