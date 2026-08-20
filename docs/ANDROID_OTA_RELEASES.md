@@ -1,6 +1,6 @@
 # Jarvis Android OTA releases
 
-Jarvis 19.0.0-alpha15 is the one-time updater bootstrap. Alpha14 has no updater and cannot acquire OTA support remotely. Install Alpha15 once with `adb install -r` or by manually opening a verified APK. Never uninstall Alpha14 during bootstrap because uninstalling deletes app data.
+Jarvis 19.0.0-alpha15 is the one-time updater bootstrap. Alpha14 has no updater and cannot acquire OTA support remotely. The original Alpha14 signing key was lost, so the test device required one approved, backed-up uninstall/reinstall migration to Alpha15. Other Alpha14 installations likewise cannot update in place to the permanent Alpha15 identity. Preserve recoverable settings before migration and never uninstall casually because uninstalling deletes app data.
 
 ## Trusted distribution
 
@@ -24,7 +24,13 @@ GitHub Actions must contain all five repository secrets:
 - `JARVIS_SIGNING_KEY_PASSWORD`
 - `JARVIS_SIGNING_CERT_SHA256`: lowercase certificate SHA-256 fingerprint without separators
 
-The keystore/private key/passwords must never be committed. Losing this key prevents normal in-place updates. Alpha15 must be signed by the same certificate as the installed Alpha14 APK. Before bootstrap, compare `apksigner verify --print-certs alpha14.apk` and the Alpha15 signing report. The locally available Alpha14 debug APK has certificate SHA-256 `fbde026bc2235c3d226a4f8fb3b971fe563253e979ca25d010ea8cd0bef7207c`; this does not prove which certificate is on an unconnected phone. If that phone uses this identity, preserve that existing keystore securely as the stable OTA key. Do not generate a replacement key.
+The keystore/private key/passwords must never be committed. Losing this key prevents normal in-place updates. The installed Alpha14 certificate was `c7e4a9d80a18c0ae8426b9f2a1befbdbc42d79229ccac936c7504417f11d216e`, but its private key proved unrecoverable. That identity cannot sign Alpha15. The permanent replacement below was therefore introduced through the explicitly approved one-time data-preserving migration; it is authoritative from Alpha15 forward.
+
+The permanent Jarvis Android signing certificate established with Alpha15 is:
+
+`009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac`
+
+All Alpha15 and later alpha, beta, stable, and recovery APKs must use this identity. Build machines and CI receive the keystore and credentials through the five secrets above; no private-key path or password belongs in Git. Maintain a protected primary copy and a separately stored, verified backup. Never regenerate the key merely because a build machine changes. Losing it would force another uninstall/reinstall migration.
 
 ## Publishing Alpha16 and later
 
