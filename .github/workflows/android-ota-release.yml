@@ -80,11 +80,15 @@ jobs:
           code="$(sed -nE 's/.*versionCode = ([0-9]+).*/\1/p' android/jarvis-voice-client/app/build.gradle.kts)"
           source="android/jarvis-voice-client/app/build/outputs/apk/release/app-release.apk"
           apk="jarvis-assistant-v${version}-release.apk"
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+          apksigner="$ANDROID_HOME/build-tools/$build_tools/apksigner"
+          aapt="$ANDROID_HOME/build-tools/$build_tools/aapt"
+          test -x "$apksigner" && test -x "$aapt"
           cp "$source" "$apk"
-          apksigner verify --verbose --print-certs "$apk" > signing-report.txt
+          "$apksigner" verify --verbose --print-certs "$apk" > signing-report.txt
           actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-report.txt | head -1)"
           test -n "$EXPECTED_CERT" && test "${actual,,}" = "${EXPECTED_CERT,,}"
-          aapt dump badging "$apk" | grep -F "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'"
+          "$aapt" dump badging "$apk" | grep -F "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'"
           sha256sum "$apk" > "$apk.sha256"
           git log -1 --format=%B "$GITHUB_SHA" > release-notes.txt
           python tools/generate_ota_manifest.py --apk "$apk" --version "$version" --version-code "$code" \
