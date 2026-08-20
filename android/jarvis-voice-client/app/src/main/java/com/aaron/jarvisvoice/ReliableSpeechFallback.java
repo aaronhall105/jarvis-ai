@@ -7,10 +7,12 @@ import android.os.Handler;
 import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
+import android.util.Log;
 
 import java.util.Locale;
 
 final class ReliableSpeechFallback implements TextToSpeech.OnInitListener {
+    private static final String TAG = "JarvisVoiceOutput";
     interface Listener {
         void onFallbackStarted();
         void onFallbackDone();
@@ -72,6 +74,7 @@ final class ReliableSpeechFallback implements TextToSpeech.OnInitListener {
                 initialisationError =
                     "Android speech engine could not initialise";
             }
+            Log.w(TAG, "VOICE_TTS_INITIALIZED status=error");
             return;
         }
 
@@ -122,12 +125,14 @@ final class ReliableSpeechFallback implements TextToSpeech.OnInitListener {
                 ready = true;
                 initialisationError = "";
             }
+            Log.i(TAG, "VOICE_TTS_INITIALIZED status=ready");
         } catch (Exception exception) {
             synchronized (lock) {
                 initialisationError =
                     "Android speech setup failed: "
                         + safeMessage(exception);
             }
+            Log.w(TAG, "VOICE_TTS_INITIALIZED status=error");
         }
     }
 
@@ -271,6 +276,12 @@ final class ReliableSpeechFallback implements TextToSpeech.OnInitListener {
             TextToSpeech.QUEUE_FLUSH,
             parameters,
             utteranceId
+        );
+
+        Log.i(
+            TAG,
+            "VOICE_TTS_SPEAK_RESULT status="
+                + (result == TextToSpeech.ERROR ? "error" : "accepted")
         );
 
         if (result == TextToSpeech.ERROR) {

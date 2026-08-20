@@ -4,12 +4,14 @@ import android.content.Context;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.util.Log;
 
 import java.net.URI;
 import java.util.HashMap;
 import java.util.Map;
 
 public final class PlaybackController {
+    private static final String TAG = "JarvisVoiceOutput";
     public interface Listener {
         void onPlaybackStarted();
         void onPlaybackCompleted();
@@ -44,6 +46,7 @@ public final class PlaybackController {
             mediaPlayer.setOnPreparedListener(value -> {
                 player = value;
                 value.start();
+                Log.i(TAG, "VOICE_AUDIO_PLAYER_STARTED mechanism=MediaPlayer");
                 listener.onPlaybackStarted();
             });
             mediaPlayer.setOnCompletionListener(value -> {
@@ -52,6 +55,7 @@ public final class PlaybackController {
                 listener.onPlaybackCompleted();
             });
             mediaPlayer.setOnErrorListener((value, what, extra) -> {
+                Log.w(TAG, "VOICE_AUDIO_PLAYER_ERROR what=" + what + " extra=" + extra);
                 release(value);
                 if (player == value) player = null;
                 listener.onPlaybackError("MediaPlayer error " + what + "/" + extra);

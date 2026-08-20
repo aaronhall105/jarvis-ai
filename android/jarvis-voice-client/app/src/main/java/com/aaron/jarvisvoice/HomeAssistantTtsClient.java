@@ -151,10 +151,13 @@ public final class HomeAssistantTtsClient {
                 return;
             }
             if ("result".equals(type) && !root.optBoolean("success", true)) {
+                if (!isFailureForActiveRun(root, activeRunId)) return;
                 JSONObject error = root.optJSONObject("error");
                 String message = error == null
                     ? "Home Assistant TTS request failed"
                     : error.optString("message", "Home Assistant TTS request failed");
+                activeRunId = 0;
+                pendingText = "";
                 post(() -> listener.onHomeAssistantTtsError(message));
                 return;
             }
@@ -175,9 +178,13 @@ public final class HomeAssistantTtsClient {
                 String message = data == null
                     ? "Home Assistant Assist pipeline error"
                     : data.optString("message", data.optString("code", "Home Assistant Assist pipeline error"));
+                activeRunId = 0;
+                pendingText = "";
                 post(() -> listener.onHomeAssistantTtsError(message));
             }
         } catch (Exception exception) {
+            activeRunId = 0;
+            pendingText = "";
             post(() -> listener.onHomeAssistantTtsError("Invalid Home Assistant TTS response: " + safeMessage(exception)));
         }
     }
@@ -214,6 +221,14 @@ public final class HomeAssistantTtsClient {
 
     private void post(Runnable runnable) {
         main.post(runnable);
+    }
+
+    static boolean isFailureForActiveRun(JSONObject result, int activeRunId) {
+        return result != null
+            && activeRunId > 0
+            && result.optInt("id", -1) == activeRunId
+            && "result".equals(result.optString("type"))
+            && !result.optBoolean("success", true);
     }
 
     static String websocketUrl(String baseUrl) throws Exception {

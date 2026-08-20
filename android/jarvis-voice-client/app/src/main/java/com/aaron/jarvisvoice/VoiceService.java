@@ -19,6 +19,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
+import android.util.Log;
 
 public final class VoiceService extends Service implements
     JarvisRealtimeClient.Listener,
@@ -29,6 +30,8 @@ public final class VoiceService extends Service implements
     WakePhraseEngine.Listener,
     StandardSpeechEngine.Listener,
     ReliableSpeechFallback.Listener {
+
+    private static final String TAG = "JarvisVoiceOutput";
 
     private AudioRouteMonitor alpha6AudioRouteMonitor;
 
@@ -94,6 +97,8 @@ public final class VoiceService extends Service implements
     private boolean turnReceivedRealtimeAudio;
     private boolean fallbackPending;
     private boolean fallbackSpeaking;
+    private String pendingOriginalSpeech = "";
+    private boolean originalPlaybackStarted;
     private String pendingText = "";
     private boolean pendingTextSpeak;
     private String lastAssistantResponse = "";
@@ -475,6 +480,8 @@ public final class VoiceService extends Service implements
         fallbackSpeaking = false;
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
         realtimePlayback.interrupt();
         originalPlayback.stop();
         if (homeAssistantTts != null) {
@@ -525,6 +532,8 @@ public final class VoiceService extends Service implements
         turnReceivedRealtimeAudio = false;
         fallbackPending = false;
         fallbackSpeaking = false;
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
         if (speechFallback != null) speechFallback.cancel();
     }
 
@@ -739,6 +748,8 @@ public final class VoiceService extends Service implements
         fallbackSpeaking = false;
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
 
         echoSuppressionUntilMs =
             SystemClock.elapsedRealtime() + 700L;
@@ -875,6 +886,8 @@ public final class VoiceService extends Service implements
         if (speechFallback != null) speechFallback.cancel();
         fallbackPending = false;
         fallbackSpeaking = false;
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
         realtimePlayback.interrupt();
         originalPlayback.stop();
         playbackActive = false;
@@ -1197,6 +1210,13 @@ public final class VoiceService extends Service implements
 
     @Override public void onOriginalTts(String text) {
         if (!voiceActive || text == null || text.isBlank()) return;
+        pendingOriginalSpeech = text.trim();
+        originalPlaybackStarted = false;
+        Log.i(
+            TAG,
+            "VOICE_OUTPUT_REQUESTED mode=home_assistant text_length="
+                + pendingOriginalSpeech.length()
+        );
         if (homeAssistantTts == null) {
             onHomeAssistantTtsError("Original Jarvis assistant is not connected to Home Assistant");
             return;
@@ -1274,6 +1294,9 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onPlaybackStarted() {
+        originalPlaybackStarted = true;
+        pendingOriginalSpeech = "";
+        Log.i(TAG, "VOICE_AUDIO_PLAY_STARTED mechanism=MediaPlayer");
         playbackActive = true;
         voiceFoundation.speaking(
             ConversationMode.STANDARD.equals(
@@ -1288,12 +1311,15 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onPlaybackCompleted() {
+        Log.i(TAG, "VOICE_OUTPUT_COMPLETED mechanism=MediaPlayer");
         playbackActive = false;
         markAssistantAudioEnded();
         afterPlayback();
     }
 
     @Override public void onPlaybackError(String message) {
+        if (scheduleOriginalVoiceFallback(message)) return;
+        Log.w(TAG, "VOICE_OUTPUT_DROPPED reason=media_playback_error");
         playbackActive = false;
         markAssistantAudioEnded();
         status("Audio error: " + safe(message, "playback failed"));
@@ -1305,6 +1331,8 @@ public final class VoiceService extends Service implements
         fallbackSpeaking = false;
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
 
         if (endConversationAfterReply) {
             finishConversation();
@@ -1337,6 +1365,7 @@ public final class VoiceService extends Service implements
 
         fallbackPending = false;
         fallbackSpeaking = true;
+        Log.i(TAG, "VOICE_TTS_ON_START mechanism=AndroidTTS");
         playbackActive = true;
         markAssistantAudioStarted();
         realtimePlayback.interrupt();
@@ -1352,6 +1381,7 @@ public final class VoiceService extends Service implements
         if (!fallbackSpeaking && !playbackActive) return;
         fallbackPending = false;
         fallbackSpeaking = false;
+        Log.i(TAG, "VOICE_TTS_ON_DONE mechanism=AndroidTTS");
         playbackActive = false;
         markAssistantAudioEnded();
         afterPlayback();
@@ -1361,6 +1391,7 @@ public final class VoiceService extends Service implements
         fallbackPending = false;
         fallbackSpeaking = false;
         playbackActive = false;
+        Log.w(TAG, "VOICE_TTS_ON_ERROR mechanism=AndroidTTS");
         markAssistantAudioEnded();
         status(
             "Speech fallback unavailable: "
@@ -1375,15 +1406,49 @@ public final class VoiceService extends Service implements
 
     @Override public void onHomeAssistantTtsUrl(String url) {
         if (!voiceActive) return;
+        Log.i(TAG, "VOICE_AUDIO_URL_RECEIVED mechanism=HomeAssistant");
         originalPlayback.play(store.homeAssistantUrl(), url, store.homeAssistantToken());
     }
 
     @Override public void onHomeAssistantTtsDone() {}
 
     @Override public void onHomeAssistantTtsError(String message) {
+        if (scheduleOriginalVoiceFallback(message)) return;
+        Log.w(TAG, "VOICE_OUTPUT_DROPPED reason=home_assistant_tts_error");
         playbackActive = false;
         status("Original voice error: " + safe(message, "Home Assistant TTS failed"));
         afterPlayback();
+    }
+
+    private boolean scheduleOriginalVoiceFallback(String message) {
+        String text = pendingOriginalSpeech;
+        if (!OriginalVoiceFallbackPolicy.shouldFallback(
+            voiceActive,
+            text,
+            originalPlaybackStarted,
+            fallbackPending,
+            fallbackSpeaking,
+            speechFallback != null
+        )) {
+            return false;
+        }
+
+        pendingOriginalSpeech = "";
+        originalPlaybackStarted = false;
+        playbackActive = false;
+        fallbackPending = true;
+        Log.w(
+            TAG,
+            "VOICE_OUTPUT_MODE home_assistant_failed; using AndroidTTS"
+        );
+        Log.i(
+            TAG,
+            "VOICE_TTS_SPEAK_REQUESTED mechanism=AndroidTTS text_length="
+                + text.length()
+        );
+        status("Home Assistant voice unavailable; using device speech");
+        speechFallback.schedule(text, 0L);
+        return true;
     }
 
     @Override public void onWakePhrase(
