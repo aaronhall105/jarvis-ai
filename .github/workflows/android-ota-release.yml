@@ -86,7 +86,8 @@ jobs:
           test -x "$apksigner" && test -x "$aapt"
           cp "$source" "$apk"
           "$apksigner" verify --verbose --print-certs "$apk" > signing-report.txt
-          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-report.txt | head -1)"
+          actual="$(grep -m1 'certificate SHA-256 digest:' signing-report.txt | sed -E 's/.*digest:[[:space:]]*//' | tr -d '[:space:]:')"
+          [[ "$actual" =~ ^[[:xdigit:]]{64}$ ]]
           test -n "$EXPECTED_CERT" && test -n "$actual"
           echo "Built APK signing certificate: ${actual,,}"
           test "${actual,,}" = "${EXPECTED_CERT,,}" || {
