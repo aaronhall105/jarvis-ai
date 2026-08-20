@@ -2,10 +2,11 @@
 
 Historical release notes are retained for traceability.
 
-The current Android release is [Jarvis v19.0.0-alpha16](CHANGES_V19_0_0_ALPHA16.md).
+The current Android release is [Jarvis v19.0.0-alpha17](CHANGES_V19_0_0_ALPHA17.md).
 
 ## Archived releases
 
+- [Jarvis v19.0.0-alpha16](CHANGES_V19_0_0_ALPHA16.md)
 - [Jarvis v19.0.0-alpha15](CHANGES_V19_0_0_ALPHA15.md)
 - [Jarvis Self-Improvement Engine v14](archive/CHANGES_SELF_IMPROVEMENT_V14.md)
 - [Jarvis Proactive Action Orchestrator v15](archive/CHANGES_V15.md)

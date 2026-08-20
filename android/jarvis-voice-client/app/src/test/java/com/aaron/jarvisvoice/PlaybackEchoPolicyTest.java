@@ -47,4 +47,21 @@ public final class PlaybackEchoPolicyTest {
             false
         ));
     }
+
+    @Test public void blocksObservedCurlyApostropheEcho() {
+        assertTrue(PlaybackEchoPolicy.isLikelyEcho(
+            "concerned about someone's hygiene or a smell in the house",
+            "If you’re concerned about someone’s hygiene or a smell in "
+                + "the house, tell me what you’ve noticed.",
+            true
+        ));
+    }
+
+    @Test public void blocksObservedContractionEcho() {
+        assertTrue(PlaybackEchoPolicy.isLikelyEcho(
+            "chocolate starfish i can't help",
+            "I can’t help with sexual requests or explicit content.",
+            true
+        ));
+    }
 }

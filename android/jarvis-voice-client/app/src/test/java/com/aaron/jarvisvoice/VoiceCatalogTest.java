@@ -7,20 +7,20 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class VoiceCatalogTest {
-    @Test public void originalJarvisUsesHomeAssistantAudio() {
+    @Test public void originalJarvisUsesRealtimeElevenLabsRoute() {
         assertTrue(
             VoiceCatalog.isOriginal(
                 VoiceCatalog.ORIGINAL_ID
             )
         );
         assertEquals(
-            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.MODE_REALTIME,
             VoiceCatalog.serverMode(
                 VoiceCatalog.ORIGINAL_ID
             )
         );
         assertEquals(
-            "marin",
+            VoiceCatalog.ORIGINAL_ID,
             VoiceCatalog.serverVoice(
                 VoiceCatalog.ORIGINAL_ID
             )
@@ -40,7 +40,7 @@ public final class VoiceCatalogTest {
             ).id
         );
         assertEquals(
-            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.MODE_REALTIME,
             VoiceCatalog.serverMode(
                 VoiceCatalog.HOME_ASSISTANT_ID
             )
@@ -67,7 +67,7 @@ public final class VoiceCatalogTest {
             VoiceCatalog.fromId("unknown").id
         );
         assertEquals(
-            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.MODE_REALTIME,
             VoiceCatalog.serverMode("unknown")
         );
     }

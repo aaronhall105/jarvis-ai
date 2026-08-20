@@ -1563,11 +1563,13 @@ class RealtimeVoiceProxy:
         )
         voice_mode = normalise_voice_mode(auth_payload.get("voice_mode"))
         conversation_mode = normalise_conversation_mode(auth_payload.get("conversation_mode"))
-        voice = normalise_voice(auth_payload.get("voice"), self.config.voice)
+        requested_voice = str(auth_payload.get("voice") or "").strip().casefold()
+        voice = normalise_voice(requested_voice, self.config.voice)
         eagerness = normalise_eagerness(auth_payload.get("vad_eagerness"))
         metadata.update(
             voice_mode=voice_mode,
             voice=voice,
+            requested_voice=requested_voice,
             conversation_mode=conversation_mode,
             vad_eagerness=eagerness,
         )
@@ -2784,7 +2786,14 @@ class RealtimeVoiceProxy:
     ) -> bool:
         return (
             self.config.tts_provider == "elevenlabs"
-            and metadata.get("client_kind") == "voice_pe"
+            and (
+                metadata.get("client_kind") == "voice_pe"
+                or (
+                    metadata.get("client_kind") == "mobile"
+                    and metadata.get("requested_voice")
+                    in {"original", "home_assistant_original"}
+                )
+            )
         )
 
     async def _finish_direct_elevenlabs_turn(

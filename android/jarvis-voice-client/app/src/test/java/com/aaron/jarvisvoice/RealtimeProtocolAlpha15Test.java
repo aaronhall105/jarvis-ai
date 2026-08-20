@@ -10,7 +10,7 @@ public final class RealtimeProtocolAlpha15Test {
     @Test public void textCarriesClientTurnIdentity() throws Exception {
         JSONObject payload = new JSONObject(RealtimeProtocol.text("hello", true, 42L));
         assertEquals(42L, payload.getLong("client_turn_id"));
-        assertEquals("19.0.0-alpha16", JarvisVersion.RELEASE);
+        assertEquals("19.0.0-alpha17", JarvisVersion.RELEASE);
     }
 
     @Test public void cancelCarriesCancelledTurnIdentity() throws Exception {

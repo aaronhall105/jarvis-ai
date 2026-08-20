@@ -2,8 +2,8 @@ package com.aaron.jarvisvoice;
 import org.junit.Test;
 import static org.junit.Assert.*;
 public final class UpdateVersionAlpha15Test {
-    @Test public void releaseIdentityIsAlpha16WithoutProtocolBump() {
-        assertEquals("19.0.0-alpha16", JarvisVersion.RELEASE);
+    @Test public void releaseIdentityIsAlpha17WithoutProtocolBump() {
+        assertEquals("19.0.0-alpha17", JarvisVersion.RELEASE);
         assertEquals(2, JarvisVersion.REALTIME_PROTOCOL);
     }
 }

@@ -95,6 +95,31 @@ model="gpt-realtime",
         value = module.normalise_conversation_id(" mobile-chat-1 / unsafe ", "fallback")
         self.assertEqual(value, "mobile-chat-1unsafe")
 
+    def test_original_mobile_voice_uses_configured_elevenlabs(self) -> None:
+        proxy = module.RealtimeVoiceProxy(module.RealtimeVoiceConfig(
+            enabled=True,
+            api_key="secret",
+            mobile_token="mobile",
+            voice_pe_token="voice-pe",
+            model="gpt-realtime",
+            voice="marin",
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            transcription_prompt="Aaron",
+            tts_provider="elevenlabs",
+            elevenlabs_api_key="configured",
+            elevenlabs_voice_id="configured",
+        ))
+        self.assertTrue(proxy._use_direct_elevenlabs({
+            "client_kind": "mobile",
+            "requested_voice": "original",
+        }))
+        self.assertFalse(proxy._use_direct_elevenlabs({
+            "client_kind": "mobile",
+            "requested_voice": "cedar",
+        }))
+
 
     def test_response_create_omits_unsupported_speed_parameter(self) -> None:
         event = module.speak_response_event(

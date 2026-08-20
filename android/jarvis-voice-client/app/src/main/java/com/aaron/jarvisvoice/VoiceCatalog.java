@@ -36,8 +36,8 @@ public final class VoiceCatalog {
 
         values.add(new Entry(
             ORIGINAL_ID,
-            "Jarvis — original Home Assistant voice",
-            MODE_HOME_ASSISTANT
+            "Jarvis — original ElevenLabs voice",
+            MODE_REALTIME
         ));
         values.add(new Entry(
             "cedar",
@@ -138,13 +138,14 @@ public final class VoiceCatalog {
     }
 
     public static boolean isOriginal(String id) {
-        return MODE_HOME_ASSISTANT.equals(
-            fromId(id).mode
-        );
+        return ORIGINAL_ID.equals(fromId(id).id);
     }
 
     public static String serverVoice(String id) {
         Entry entry = fromId(id);
+        if (ORIGINAL_ID.equals(entry.id)) {
+            return ORIGINAL_ID;
+        }
         return MODE_REALTIME.equals(entry.mode)
             ? entry.id
             : "marin";

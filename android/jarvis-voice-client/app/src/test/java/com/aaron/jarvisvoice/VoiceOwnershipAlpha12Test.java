@@ -7,14 +7,14 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class VoiceOwnershipAlpha12Test {
-    @Test public void originalJarvisUsesHomeAssistantMode() {
+    @Test public void originalJarvisUsesRealtimeElevenLabsMode() {
         assertTrue(
             VoiceCatalog.isOriginal(
                 VoiceCatalog.ORIGINAL_ID
             )
         );
         assertEquals(
-            VoiceCatalog.MODE_HOME_ASSISTANT,
+            VoiceCatalog.MODE_REALTIME,
             VoiceCatalog.serverMode(
                 VoiceCatalog.ORIGINAL_ID
             )

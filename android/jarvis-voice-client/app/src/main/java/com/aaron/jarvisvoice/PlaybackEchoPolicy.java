@@ -86,6 +86,8 @@ public final class PlaybackEchoPolicy {
         return raw == null
             ? ""
             : raw.toLowerCase(Locale.ROOT)
+                .replace('\u2018', '\'')
+                .replace('\u2019', '\'')
                 .replaceAll("[^a-z0-9' ]+", " ")
                 .replaceAll("\\s+", " ")
                 .trim();

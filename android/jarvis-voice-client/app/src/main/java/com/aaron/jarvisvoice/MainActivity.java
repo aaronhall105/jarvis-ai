@@ -581,17 +581,6 @@ public final class MainActivity extends Activity {
             startActivity(new Intent(this, SettingsActivity.class));
             return false;
         }
-        if (VoiceCatalog.isOriginal(store.voiceId())
-                && (store.homeAssistantUrl().isBlank()
-                    || store.homeAssistantToken().isBlank())) {
-            Toast.makeText(
-                this,
-                "The original Jarvis voice also needs Home Assistant details",
-                Toast.LENGTH_LONG
-            ).show();
-            startActivity(new Intent(this, SettingsActivity.class));
-            return false;
-        }
         return true;
     }
 
