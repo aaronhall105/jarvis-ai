@@ -1,0 +1,15 @@
+{
+  "apkSize": 47640763,
+  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha15/jarvis-assistant-v19.0.0-alpha15-release.apk",
+  "channel": "alpha",
+  "commitSha": "39c2d71699775e024f11143dbaff1958ec2ddae2",
+  "minRealtimeProtocol": 2,
+  "minSdk": 31,
+  "publishedAt": "2026-08-20T18:43:05Z",
+  "releaseNotes": "Harden OTA certificate report parsing",
+  "schemaVersion": 1,
+  "sha256": "5364143b1e0e89d3874946e954f7a34879469ed1d59c89468e65325b6449502c",
+  "tag": "v19.0.0-alpha15",
+  "versionCode": 190150,
+  "versionName": "19.0.0-alpha15"
+}
