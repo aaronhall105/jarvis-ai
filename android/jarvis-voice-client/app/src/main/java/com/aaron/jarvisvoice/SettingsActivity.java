@@ -64,6 +64,7 @@ public final class SettingsActivity extends Activity {
 
     private EditText wakePhrase;
     private EditText coreUrl;
+    private EditText remoteCoreUrl;
     private EditText mobileToken;
     private EditText userName;
     private EditText homeAssistantUrl;
@@ -370,7 +371,10 @@ public final class SettingsActivity extends Activity {
         String configured = coreUrl == null
             ? ""
             : coreUrl.getText().toString();
-        new JarvisSystemTest(this).run(configured, result -> {
+        String configuredRemote = remoteCoreUrl == null
+            ? ""
+            : remoteCoreUrl.getText().toString();
+        new JarvisSystemTest(this).run(configured, configuredRemote, result -> {
             voiceFoundationStatus.setText(
                 result.report + "\n\n"
                     + new VoiceDiagnosticsStore(this).summary()
@@ -422,9 +426,11 @@ public final class SettingsActivity extends Activity {
     private View buildCoreCard() {
         LinearLayout card = card();
         coreUrl = field("http://192.168.1.40:8000", false);
+        remoteCoreUrl = field("Remote HTTPS or Tailscale URL", false);
         mobileToken = field("Mobile voice token", true);
         userName = field("Aaron", false);
-        card.addView(fieldGroup("Jarvis Core URL", coreUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Jarvis Core LAN URL", coreUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Remote Core URL — optional", remoteCoreUrl), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Mobile voice token", mobileToken), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Your name", userName), matchWrap());
         return card;
@@ -443,6 +449,7 @@ public final class SettingsActivity extends Activity {
 
     private void loadSettings() {
         coreUrl.setText(store.coreUrl());
+        remoteCoreUrl.setText(store.remoteCoreUrl());
         userName.setText(store.userName());
         conversationMode.setSelection(
             ConversationMode.STANDARD.equals(store.conversationMode()) ? 0 : 1
@@ -484,6 +491,10 @@ public final class SettingsActivity extends Activity {
 
     private void saveSettings() {
         try {
+            CoreUrl.validateBase(coreUrl.getText().toString());
+            String remoteUrl = remoteCoreUrl.getText().toString().trim();
+            if (!remoteUrl.isBlank()) CoreUrl.validateBase(remoteUrl);
+
             VoiceCatalog.Entry selectedVoice = VoiceCatalog.at(voice.getSelectedItemPosition());
             String selectedMode = conversationMode.getSelectedItemPosition() == 0
                 ? ConversationMode.STANDARD
@@ -511,6 +522,7 @@ public final class SettingsActivity extends Activity {
                 homeAssistantToken.getText().toString(),
                 pipeline.getText().toString()
             );
+            store.setRemoteCoreUrl(remoteUrl);
             store.setAssistantOptions(
                 assistantWakeAlways.isChecked(),
                 assistantOverlay.isChecked(),

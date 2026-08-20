@@ -50,15 +50,22 @@ public final class JarvisSystemTest {
         this.context = context.getApplicationContext();
     }
 
-    public void run(String configuredLanUrl, Callback callback) {
+    public void run(
+        String configuredLanUrl,
+        String configuredRemoteUrl,
+        Callback callback
+    ) {
         executor.execute(() -> {
             String lan = CoreEndpointSelector.normaliseBaseUrl(
                 configuredLanUrl
             );
-            Probe lanProbe = probe(lan);
-            Probe tailscaleProbe = probe(
-                CoreEndpointSelector.DEFAULT_TAILSCALE_URL
+            String remote = CoreEndpointSelector.normaliseOptionalBaseUrl(
+                configuredRemoteUrl
             );
+            Probe lanProbe = probe(lan);
+            Probe remoteProbe = remote.isBlank()
+                ? new Probe(false, 0L, "Not configured")
+                : probe(remote);
 
             boolean timezonePass;
             String timezoneDetail;
@@ -92,10 +99,10 @@ public final class JarvisSystemTest {
             boolean continuity = diagnostics.hasConversationContext();
             String selected = lanProbe.passed
                 ? "LAN"
-                : tailscaleProbe.passed ? "Tailscale" : "Unavailable";
+                : remoteProbe.passed ? "Remote" : "Unavailable";
 
             boolean passed = (
-                (lanProbe.passed || tailscaleProbe.passed)
+                (lanProbe.passed || remoteProbe.passed)
                     && timezonePass
                     && microphonePass
                     && audioPass
@@ -104,7 +111,7 @@ public final class JarvisSystemTest {
             String report =
                 "Jarvis alpha6 system test\n"
                     + "LAN health: " + line(lanProbe) + "\n"
-                    + "Tailscale health: " + line(tailscaleProbe) + "\n"
+                    + "Remote health: " + line(remoteProbe) + "\n"
                     + "Selected endpoint: " + selected + "\n"
                     + "Microphone permission: "
                     + passFail(microphonePass) + "\n"

@@ -1,6 +1,7 @@
 from app.ai_engine import JARVIS_INSTRUCTIONS
 from app.realtime_voice import VERSION, control_voice_policy, sanitise_tool_events
 from app.tool_engine import ToolEngine
+from app.version import JARVIS_RELEASE
 
 
 def test_verified_failure_is_not_silenced():
@@ -16,8 +17,8 @@ def test_routine_success_is_compact():
     assert response
 
 
-def test_alpha10_contract():
-    assert VERSION == "19.0.0-alpha10"
+def test_natural_control_contract():
+    assert VERSION == JARVIS_RELEASE
     assert ToolEngine.STATE_VERIFY_DELAYS[0] <= 0.12
     assert len(ToolEngine.STATE_RETRY_VERIFY_DELAYS) >= 4
     lowered = JARVIS_INSTRUCTIONS.casefold()

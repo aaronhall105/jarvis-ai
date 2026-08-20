@@ -61,9 +61,11 @@ model="gpt-realtime",
         )
         live = module.build_session_update(config, "cedar", "live", "high")
         live_vad = live["session"]["audio"]["input"]["turn_detection"]
-        self.assertEqual(live_vad["type"], "semantic_vad")
-        self.assertEqual(live_vad["eagerness"], "high")
+        self.assertEqual(live_vad["type"], "server_vad")
+        self.assertEqual(live_vad["threshold"], 0.85)
+        self.assertEqual(live_vad["silence_duration_ms"], 500)
         self.assertFalse(live_vad["create_response"])
+        self.assertTrue(live_vad["interrupt_response"])
 
         standard = module.build_session_update(config, "cedar", "standard", "low")
         self.assertIsNone(standard["session"]["audio"]["input"]["turn_detection"])

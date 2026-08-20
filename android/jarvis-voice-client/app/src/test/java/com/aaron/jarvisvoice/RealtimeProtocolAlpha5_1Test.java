@@ -40,12 +40,15 @@ public final class RealtimeProtocolAlpha5_1Test {
 
     @Test public void endpointHealthUrlsAreStable() {
         assertEquals(
-            "http://192.168.1.40:8000/health",
+            "http://192.168.1.40:8000/health/live",
             CoreEndpointSelector.healthUrl("http://192.168.1.40:8000/")
         );
         assertEquals(
             "http://100.127.215.111:8000",
-            CoreEndpointSelector.DEFAULT_TAILSCALE_URL
+            CoreEndpointSelector.normaliseOptionalBaseUrl(
+                "http://100.127.215.111:8000/"
+            )
         );
+        assertEquals("", CoreEndpointSelector.normaliseOptionalBaseUrl(" "));
     }
 }

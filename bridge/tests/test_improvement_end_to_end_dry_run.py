@@ -703,7 +703,18 @@ def _install_isolated_runtime(
             "The example constant retained its old value."
         ),
         "risk": "low",
-        "patch": PATCH,
+        "edits": [
+            {
+                "path": "bridge/app/example.py",
+                "old_text": "VALUE = 1",
+                "new_text": "VALUE = 2",
+            },
+            {
+                "path": "bridge/tests/test_example.py",
+                "old_text": "    assert VALUE == 1",
+                "new_text": "    assert VALUE == 2",
+            },
+        ],
         "tests_added": [
             "bridge/tests/test_example.py",
         ],

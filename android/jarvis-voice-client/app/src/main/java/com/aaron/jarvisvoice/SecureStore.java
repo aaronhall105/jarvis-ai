@@ -39,6 +39,7 @@ public final class SecureStore {
         migrateReliableVoiceDefaults();
         migrateWakeReliabilityAlpha11();
         migrateVoiceOwnershipAlpha12();
+        migrateRemoteCoreAlpha14();
     }
 
     private void migrateAssistantDefaults() {
@@ -216,6 +217,28 @@ public final class SecureStore {
                 "voice_ownership_migration_v190120",
                 true
             )
+            .apply();
+    }
+
+    private void migrateRemoteCoreAlpha14() {
+        if (preferences.getBoolean("remote_core_migration_v190140", false)) return;
+        SharedPreferences.Editor editor = preferences.edit();
+        if (!preferences.contains("remote_core_url_v190140")) {
+            // One-time compatibility import of the Alpha5.1 Tailscale endpoint.
+            // After migration it is ordinary user configuration, not runtime policy.
+            editor.putString("remote_core_url_v190140", "http://100.127.215.111:8000");
+        }
+        editor.putBoolean("remote_core_migration_v190140", true).apply();
+    }
+
+    public String remoteCoreUrl() {
+        return preferences.getString("remote_core_url_v190140", "").trim();
+    }
+
+    public void setRemoteCoreUrl(String value) {
+        String candidate = value == null ? "" : value.trim();
+        preferences.edit()
+            .putString("remote_core_url_v190140", trimTrailingSlash(candidate))
             .apply();
     }
 

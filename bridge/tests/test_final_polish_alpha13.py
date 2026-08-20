@@ -7,7 +7,7 @@ from app.realtime_voice import VERSION
 
 class FinalPolishAlpha13Test(unittest.TestCase):
     def test_release_identity(self):
-        self.assertEqual(VERSION, "19.0.0-alpha13")
+        self.assertEqual(VERSION, "19.0.0-alpha14")
 
     def test_story_gets_long_voice_budget(self):
         budget = ReplyBudgetPolicy.output_tokens(

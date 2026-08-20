@@ -24,6 +24,8 @@ public final class RealtimeProtocol {
         public final String userName;
         public final int sampleRate;
         public final int messageCount;
+        public final int generation;
+        public final long clientTurnId;
         public final boolean success;
         public final boolean unifiedBrain;
         public final boolean memoryUsed;
@@ -45,6 +47,8 @@ public final class RealtimeProtocol {
             String userName,
             int sampleRate,
             int messageCount,
+            int generation,
+            long clientTurnId,
             boolean success,
             boolean unifiedBrain,
             boolean memoryUsed,
@@ -65,6 +69,8 @@ public final class RealtimeProtocol {
             this.userName = userName;
             this.sampleRate = sampleRate;
             this.messageCount = messageCount;
+            this.generation = generation;
+            this.clientTurnId = clientTurnId;
             this.success = success;
             this.unifiedBrain = unifiedBrain;
             this.memoryUsed = memoryUsed;
@@ -93,14 +99,12 @@ public final class RealtimeProtocol {
             .put("user_name", userName)
             .put("voice", voice)
             .put("voice_mode", voiceMode)
-            .put(
-                "conversation_mode",
-                ConversationMode.normalise(conversationMode)
-            )
+            .put("conversation_mode", ConversationMode.normalise(conversationMode))
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
             .put("transport", "websocket_pcm")
-            .put("client_release", "19.0.0-alpha13"))
+            .put("protocol_version", JarvisVersion.REALTIME_PROTOCOL)
+            .put("client_release", JarvisVersion.RELEASE))
             .toString();
     }
 
@@ -116,9 +120,14 @@ public final class RealtimeProtocol {
     }
 
     public static String cancel() {
+        return cancel(0L);
+    }
+
+    public static String cancel(long clientTurnId) {
         try {
-            return withLocalTime(new JSONObject().put("type", "cancel"))
-                .toString();
+            JSONObject payload = new JSONObject().put("type", "cancel");
+            if (clientTurnId > 0L) payload.put("client_turn_id", clientTurnId);
+            return withLocalTime(payload).toString();
         } catch (Exception ignored) {
             return "{\"type\":\"cancel\"}";
         }
@@ -134,11 +143,16 @@ public final class RealtimeProtocol {
     }
 
     public static String text(String value, boolean speak) throws Exception {
-        return withLocalTime(new JSONObject()
+        return text(value, speak, 0L);
+    }
+
+    public static String text(String value, boolean speak, long clientTurnId) throws Exception {
+        JSONObject payload = new JSONObject()
             .put("type", "text")
             .put("text", value)
-            .put("speak", speak))
-            .toString();
+            .put("speak", speak);
+        if (clientTurnId > 0L) payload.put("client_turn_id", clientTurnId);
+        return withLocalTime(payload).toString();
     }
 
     private static JSONObject withLocalTime(JSONObject payload) throws Exception {
@@ -167,6 +181,8 @@ public final class RealtimeProtocol {
             root.optString("user_name", ""),
             root.optInt("sample_rate", 24_000),
             root.optInt("message_count", 0),
+            root.optInt("generation", 0),
+            root.optLong("client_turn_id", 0L),
             root.optBoolean("success", true),
             root.optBoolean("unified_brain", false),
             root.optBoolean("memory_used", false),
