@@ -4,7 +4,7 @@ from app.realtime_voice import VERSION, speak_response_event
 
 
 def test_authoritative_release_identity() -> None:
-    assert JARVIS_RELEASE == "19.0.0-alpha14"
+    assert JARVIS_RELEASE == "19.0.0-alpha15"
     assert VERSION == JARVIS_RELEASE
     assert VOICE_CORE_VERSION == CORE_APPLICATION_VERSION
     assert REALTIME_PROTOCOL_VERSION >= 2

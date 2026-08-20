@@ -1,7 +1,7 @@
 # Jarvis AI
 
 [![Jarvis CI](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml/badge.svg?branch=conversation-engine)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml)
-[![Android Alpha13](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-jarvis-assistant-v19.0.0-alpha13.yml/badge.svg?branch=conversation-engine)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-jarvis-assistant-v19.0.0-alpha13.yml)
+[![Android OTA release](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml/badge.svg)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml)
 [![Release](https://img.shields.io/badge/release-v19.0.0--alpha13-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13)
 
 A self-hosted realtime AI assistant for Android and Home Assistant.

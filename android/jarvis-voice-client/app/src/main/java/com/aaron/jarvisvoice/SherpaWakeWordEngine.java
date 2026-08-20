@@ -1,6 +1,7 @@
 package com.aaron.jarvisvoice;
 
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
@@ -200,6 +201,10 @@ final class SherpaWakeWordEngine {
                 throw new IllegalStateException(
                     "Android returned an invalid microphone buffer"
                 );
+            }
+            if (context.checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED) {
+                throw new SecurityException("Microphone permission is required for wake detection");
             }
 
             localRecorder =

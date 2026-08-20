@@ -6,11 +6,11 @@ import static org.junit.Assert.assertTrue;
 import org.json.JSONObject;
 import org.junit.Test;
 
-public final class RealtimeProtocolAlpha14Test {
+public final class RealtimeProtocolAlpha15Test {
     @Test public void textCarriesClientTurnIdentity() throws Exception {
         JSONObject payload = new JSONObject(RealtimeProtocol.text("hello", true, 42L));
         assertEquals(42L, payload.getLong("client_turn_id"));
-        assertEquals("19.0.0-alpha14", JarvisVersion.RELEASE);
+        assertEquals("19.0.0-alpha15", JarvisVersion.RELEASE);
     }
 
     @Test public void cancelCarriesCancelledTurnIdentity() throws Exception {

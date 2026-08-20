@@ -145,6 +145,12 @@ public final class SettingsActivity extends Activity {
         page.addView(buildHomeAssistantCard(), matchWrap(0, dp(24)));
 
         page.addView(sectionHeader(
+            "Updates",
+            "Secure Android updates, release channels and rollback information."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildUpdatesCard(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
             "Diagnostics",
             "Connection, microphone, wake and response-performance checks."
         ), matchWrap(0, dp(10)));
@@ -174,6 +180,16 @@ public final class SettingsActivity extends Activity {
         });
         scroll.requestApplyInsets();
         return scroll;
+    }
+
+    private View buildUpdatesCard() {
+        LinearLayout card = card();
+        TextView version = note("Current version: " + JarvisVersion.RELEASE);
+        card.addView(version, matchWrap(0, dp(12)));
+        Button updates = primaryButton("Open Jarvis updates");
+        updates.setOnClickListener(view -> startActivity(new Intent(this, UpdatesActivity.class)));
+        card.addView(updates, matchWrap());
+        return card;
     }
 
     private View buildHeader() {

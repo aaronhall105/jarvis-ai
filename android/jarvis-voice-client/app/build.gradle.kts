@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 190140
-        versionName = "19.0.0-alpha14"
+        versionCode = 190150
+        versionName = "19.0.0-alpha15"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
 
@@ -22,6 +22,19 @@ android {
 
     buildTypes {
         release {
+            val signingStore = providers.environmentVariable("JARVIS_SIGNING_STORE_FILE")
+            if (signingStore.isPresent) {
+                signingConfig = signingConfigs.create("jarvisRelease") {
+                    storeFile = file(signingStore.get())
+                    storePassword = providers.environmentVariable("JARVIS_SIGNING_STORE_PASSWORD").get()
+                    keyAlias = providers.environmentVariable("JARVIS_SIGNING_KEY_ALIAS").get()
+                    keyPassword = providers.environmentVariable("JARVIS_SIGNING_KEY_PASSWORD").get()
+                    enableV1Signing = true
+                    enableV2Signing = true
+                    enableV3Signing = true
+                    enableV4Signing = true
+                }
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -42,6 +55,8 @@ android {
 
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("androidx.work:work-runtime:2.11.0")
+    implementation("androidx.activity:activity:1.12.3")
     implementation(files("libs/sherpa-onnx-1.13.2.aar"))
 
     testImplementation("junit:junit:4.13.2")

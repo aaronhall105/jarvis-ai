@@ -1,6 +1,5 @@
 package com.aaron.jarvisvoice;
 
-import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.graphics.Insets;
@@ -27,7 +26,7 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-public final class ImprovementsActivity extends Activity {
+public final class ImprovementsActivity extends androidx.activity.ComponentActivity {
     private static final int BLACK = Color.rgb(20, 20, 20);
     private static final int MID = Color.rgb(103, 103, 103);
     private static final int LINE = Color.rgb(226, 226, 226);
@@ -63,6 +62,14 @@ public final class ImprovementsActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getOnBackPressedDispatcher().addCallback(
+            this,
+            new androidx.activity.OnBackPressedCallback(true) {
+                @Override public void handleOnBackPressed() {
+                    if (detailMode) returnToList(); else finish();
+                }
+            }
+        );
 
         store = new SecureStore(this);
         api = new ImprovementApiClient(store);
@@ -1401,16 +1408,6 @@ public final class ImprovementsActivity extends Activity {
         setContentView(buildContent());
         applySystemBarAppearance();
         loadCandidates(true);
-    }
-
-    @Override
-    public void onBackPressed() {
-        if (detailMode) {
-            returnToList();
-            return;
-        }
-
-        super.onBackPressed();
     }
 
     private void showCandidateDialog(

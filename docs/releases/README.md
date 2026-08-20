@@ -2,9 +2,7 @@
 
 Historical release notes are retained for traceability.
 
-The current release remains at the repository root:
-
-- [Jarvis v19.0.0-alpha13](../../CHANGES_V19_0_0_ALPHA13.md)
+The current Android release is [Jarvis v19.0.0-alpha15](CHANGES_V19_0_0_ALPHA15.md).
 
 ## Archived releases
 

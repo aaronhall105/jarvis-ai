@@ -59,6 +59,12 @@ data/
 backup/
 *.tar.gz
 *.zip
+*.jks
+*.keystore
+*.p12
+*.pfx
+android/**/build/
+android/**/.gradle/
 
 # Logs
 *.log

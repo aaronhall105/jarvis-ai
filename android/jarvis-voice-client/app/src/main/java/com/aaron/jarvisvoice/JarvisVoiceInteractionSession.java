@@ -108,15 +108,9 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
     @Override public void onCreate() {
         super.onCreate();
         IntentFilter filter = new IntentFilter(VoiceService.ACTION_EVENT);
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(
-                receiver,
-                filter,
-                Context.RECEIVER_NOT_EXPORTED
-            );
-        } else {
-            context.registerReceiver(receiver, filter);
-        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            context, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        );
     }
 
     @Override public View onCreateContentView() {
