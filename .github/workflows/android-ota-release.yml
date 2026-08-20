@@ -87,8 +87,12 @@ jobs:
           cp "$source" "$apk"
           "$apksigner" verify --verbose --print-certs "$apk" > signing-report.txt
           actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' signing-report.txt | head -1)"
-          test -n "$EXPECTED_CERT" && test "${actual,,}" = "${EXPECTED_CERT,,}"
-          "$aapt" dump badging "$apk" | grep -F "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'"
+          test -n "$EXPECTED_CERT" && test -n "$actual"
+          test "${actual,,}" = "${EXPECTED_CERT,,}"
+          echo "Verified APK signing certificate: ${actual,,}"
+          "$aapt" dump badging "$apk" > apk-badging.txt
+          grep -Fq "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'" apk-badging.txt
+          echo "Verified APK package/version: com.aaron.jarvisvoice $version ($code)"
           sha256sum "$apk" > "$apk.sha256"
           git log -1 --format=%B "$GITHUB_SHA" > release-notes.txt
           python tools/generate_ota_manifest.py --apk "$apk" --version "$version" --version-code "$code" \
