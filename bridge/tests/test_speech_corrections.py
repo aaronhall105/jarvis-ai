@@ -37,6 +37,14 @@ class SpeechCorrectionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(learned)
 
+    async def test_oversized_untrusted_correction_is_rejected(self):
+        learned = await self.engine.learn_explicit(
+            "I said " + ("a not a " * 100_000),
+            "aaron",
+            {"tv"},
+        )
+        self.assertIsNone(learned)
+
     async def test_corrections_are_user_scoped(self):
         await self.engine.learn_explicit(
             "When I say telly, I mean TV",

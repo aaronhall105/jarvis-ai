@@ -6,6 +6,9 @@ import sqlite3
 from pathlib import Path
 
 
+_MAX_CORRECTION_UTTERANCE = 256
+
+
 def _clean(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9' -]+", " ", value.casefold()).split())
 
@@ -29,19 +32,38 @@ class SpeechCorrectionEngine:
     async def learn_explicit(
         self, text: str, user_key: str, valid_phrases: set[str]
     ) -> tuple[str, str] | None:
-        match = re.match(
-            r"^\s*(?:no[, ]+)?i said (?P<correct>.+?)[, ]+not (?P<wrong>.+?)[.!]?\s*$",
-            text,
-            re.I,
-        ) or re.match(
-            r"^\s*when i say (?P<wrong>.+?)[, ]+i mean (?P<correct>.+?)[.!]?\s*$",
-            text,
-            re.I,
-        )
-        if match is None:
+        # Parse fixed phrases with bounded string operations. This consumes an
+        # untrusted transcript, so avoid backtracking regexes whose separators
+        # can overlap with the captured text.
+        utterance = text.strip()
+        if not utterance or len(utterance) > _MAX_CORRECTION_UTTERANCE:
             return None
-        wrong = _clean(match.group("wrong"))
-        correct = _clean(match.group("correct"))
+        lowered = utterance.casefold()
+        if lowered.startswith("no,"):
+            utterance = utterance[3:].lstrip()
+            lowered = utterance.casefold()
+
+        wrong_raw: str
+        correct_raw: str
+        if lowered.startswith("i said "):
+            body = utterance[len("i said ") :]
+            separator = body.casefold().find(", not ")
+            if separator < 0:
+                return None
+            correct_raw = body[:separator]
+            wrong_raw = body[separator + len(", not ") :]
+        elif lowered.startswith("when i say "):
+            body = utterance[len("when i say ") :]
+            separator = body.casefold().find(", i mean ")
+            if separator < 0:
+                return None
+            wrong_raw = body[:separator]
+            correct_raw = body[separator + len(", i mean ") :]
+        else:
+            return None
+
+        wrong = _clean(wrong_raw.rstrip(".!"))
+        correct = _clean(correct_raw.rstrip(".!"))
         if not wrong or wrong == correct or len(wrong) > 60 or correct not in valid_phrases:
             return None
 
