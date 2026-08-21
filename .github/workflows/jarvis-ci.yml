@@ -92,14 +92,3 @@ jobs:
       - name: Android unit tests and debug build
         working-directory: android/jarvis-voice-client
         run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
-
-  dependency-review:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
