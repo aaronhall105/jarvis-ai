@@ -5,6 +5,7 @@ import audioop
 import base64
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -23,6 +24,7 @@ from urllib.parse import quote
 
 from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
+from app.runtime_observability import runtime_metrics
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
 VERSION = JARVIS_RELEASE
@@ -49,6 +51,7 @@ SUPPORTED_VOICES = (
     "cedar",
 )
 SUPPORTED_EAGERNESS = ("low", "medium", "high")
+VOICE_PE_WAKE_CONTENTION_SECONDS = 1.25
 
 _LOGGER = logging.getLogger("jarvis-realtime-voice")
 DeltaHandler = Callable[[str], Awaitable[None]]
@@ -77,6 +80,52 @@ class ProviderSessionLease:
         if required:
             self.renewal_pending = True
         return required
+
+
+@dataclass(frozen=True)
+class VoicePeWakeClaim:
+    granted: bool
+    owner_device_id: str
+    owner_session_id: str
+    retry_after_ms: int = 0
+
+
+class VoicePeWakeArbiter:
+    """Select one satellite when several hear the same nearby wake word."""
+
+    def __init__(
+        self,
+        contention_seconds: float = VOICE_PE_WAKE_CONTENTION_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.contention_seconds = max(0.1, float(contention_seconds))
+        self._clock = clock
+        self._owner_device_id = ""
+        self._owner_session_id = ""
+        self._claimed_at = float("-inf")
+
+    def claim(self, device_id: str, session_id: str) -> VoicePeWakeClaim:
+        now = self._clock()
+        elapsed = now - self._claimed_at
+        if elapsed < self.contention_seconds:
+            return VoicePeWakeClaim(
+                granted=False,
+                owner_device_id=self._owner_device_id,
+                owner_session_id=self._owner_session_id,
+                retry_after_ms=max(
+                    1,
+                    round((self.contention_seconds - elapsed) * 1000),
+                ),
+            )
+
+        self._owner_device_id = device_id
+        self._owner_session_id = session_id
+        self._claimed_at = now
+        return VoicePeWakeClaim(
+            granted=True,
+            owner_device_id=device_id,
+            owner_session_id=session_id,
+        )
 
 
 def _load_websocket_connect() -> Any:
@@ -916,6 +965,7 @@ def build_session_update(
     voice: str,
     conversation_mode: str,
     eagerness: str,
+    transcription_prompt: str | None = None,
 ) -> dict[str, Any]:
     turn_detection: dict[str, Any] | None
     if normalise_conversation_mode(conversation_mode) == CONVERSATION_MODE_LIVE:
@@ -934,6 +984,7 @@ def build_session_update(
         "type": "session.update",
         "session": {
             "type": "realtime",
+            "include": ["item.input_audio_transcription.logprobs"],
             "instructions": (
                 "You are only the speech renderer for Aaron's private Jarvis Core. "
                 "Never independently answer user requests and never call tools. "
@@ -949,7 +1000,11 @@ def build_session_update(
                     "transcription": {
                         "model": "gpt-4o-transcribe",
                         "language": "en",
-                        "prompt": config.transcription_prompt,
+                        "prompt": (
+                            transcription_prompt[:1024]
+                            if transcription_prompt is not None
+                            else config.transcription_prompt[:1024]
+                        ),
                     },
                     "turn_detection": turn_detection,
                 },
@@ -963,6 +1018,23 @@ def build_session_update(
             "tool_choice": "none",
         },
     }
+
+
+def input_transcription_confidence(event: dict[str, Any]) -> float | None:
+    """Return geometric mean token probability from optional Realtime logprobs."""
+    raw = event.get("logprobs")
+    if not isinstance(raw, list):
+        return None
+    values: list[float] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("logprob")
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            values.append(max(-20.0, min(0.0, float(value))))
+    if not values:
+        return None
+    return round(math.exp(sum(values) / len(values)), 4)
 
 
 def openai_websocket_url(model: str) -> str:
@@ -1186,10 +1258,19 @@ def _mark_turn_started(state: dict[str, Any]) -> None:
         terminal.clear()
 
 
-def _mark_turn_terminal(state: dict[str, Any]) -> None:
+def _mark_turn_terminal(
+    state: dict[str, Any],
+    generation: int | None = None,
+) -> None:
     """Mark the safe renewal boundary after all legitimate turn audio ends."""
 
+    if (
+        generation is not None
+        and _safe_int(state.get("turn_in_progress_generation")) != generation
+    ):
+        return
     state["turn_in_progress"] = False
+    state.pop("turn_in_progress_generation", None)
     terminal = state.get("turn_terminal_event")
     if isinstance(terminal, asyncio.Event):
         terminal.set()
@@ -1331,8 +1412,15 @@ class RealtimeVoiceProxy:
         self.total_context_syncs = 0
         self.total_provider_renewals = 0
         self.total_provider_recoveries = 0
+        self.total_voice_pe_wake_claims = 0
+        self.total_voice_pe_wake_rejections = 0
+        self.last_voice_pe_wake_owner: str | None = None
         self.last_error: str | None = None
         self._provider_epoch_counter = 0
+        self.voice_pe_wake_arbiter = VoicePeWakeArbiter()
+        self.voice_pe_session_started: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self.voice_pe_session_ended: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
 
     def _next_provider_epoch(self) -> int:
         self._provider_epoch_counter += 1
@@ -1430,6 +1518,12 @@ class RealtimeVoiceProxy:
             "total_context_syncs": self.total_context_syncs,
             "total_provider_renewals": self.total_provider_renewals,
             "total_provider_recoveries": self.total_provider_recoveries,
+            "total_voice_pe_wake_claims": self.total_voice_pe_wake_claims,
+            "total_voice_pe_wake_rejections": self.total_voice_pe_wake_rejections,
+            "last_voice_pe_wake_owner": self.last_voice_pe_wake_owner,
+            "voice_pe_wake_contention_ms": round(
+                self.voice_pe_wake_arbiter.contention_seconds * 1000
+            ),
             "mobile_context_protocol": "alpha5.1",
             "realtime_protocol_version": REALTIME_PROTOCOL_VERSION,
             "timezone": self.config.timezone,
@@ -1512,13 +1606,15 @@ class RealtimeVoiceProxy:
             return
 
         metadata["client_kind"] = client_kind
+        session_id = f"{client_kind}-{uuid.uuid4()}"
+        metadata["session_id"] = session_id
         metadata["voice_endpoint_kind"] = (
             "voice_pe"
             if client_kind == "voice_pe"
             else "android"
         )
 
-        for key in ("device_id", "user_name"):
+        for key in ("device_id", "area_id", "user_name"):
             value = auth_payload.get(key)
             if isinstance(value, str) and value.strip():
                 metadata[key] = value.strip()[:200]
@@ -1583,6 +1679,56 @@ class RealtimeVoiceProxy:
             await self._close(client, 4411)
             return
 
+        if client_kind == "voice_pe":
+            device_id = str(metadata.get("device_id") or "").strip()
+            if not device_id or device_id == "jarvis_android":
+                await self._send_json(
+                    client,
+                    {
+                        "type": "auth.error",
+                        "message": "Voice satellite requires a stable device_id",
+                    },
+                )
+                await self._close(client, 4400)
+                return
+
+            claim = self.voice_pe_wake_arbiter.claim(device_id, session_id)
+            if not claim.granted:
+                self.total_voice_pe_wake_rejections += 1
+                runtime_metrics.increment("voice_wake_contention_rejected")
+                _LOGGER.info(
+                    "VOICE_PE_WAKE_REJECTED device=%s session=%s owner_device=%s owner_session=%s retry_after_ms=%s",
+                    device_id,
+                    session_id,
+                    claim.owner_device_id,
+                    claim.owner_session_id,
+                    claim.retry_after_ms,
+                )
+                await self._send_json(
+                    client,
+                    {
+                        "type": "session.close",
+                        "reason": "wake_contention",
+                        "owner_device_id": claim.owner_device_id,
+                        "retry_after_ms": claim.retry_after_ms,
+                    },
+                )
+                await self._close(client, 4429)
+                return
+
+            self.total_voice_pe_wake_claims += 1
+            runtime_metrics.increment("voice_wake_claimed")
+            self.last_voice_pe_wake_owner = device_id
+            _LOGGER.info(
+                "VOICE_PE_WAKE_CLAIMED device=%s session=%s",
+                device_id,
+                session_id,
+            )
+
+        duck_task: asyncio.Task[Any] | None = None
+        if client_kind == "voice_pe" and self.voice_pe_session_started is not None:
+            duck_task = asyncio.create_task(self.voice_pe_session_started(metadata))
+
         await self._send_json(
             client,
             {
@@ -1617,6 +1763,12 @@ class RealtimeVoiceProxy:
         self.active_sessions += 1
         self.total_sessions += 1
         try:
+            session_transcription_prompt = self.config.transcription_prompt
+            if self.transcription_prompt_provider is not None:
+                try:
+                    session_transcription_prompt = await self.transcription_prompt_provider(metadata)
+                except Exception:
+                    _LOGGER.exception("Dynamic transcription vocabulary failed")
             websocket_connect = _load_websocket_connect()
             provider_connection_index = 0
             while True:
@@ -1644,7 +1796,13 @@ class RealtimeVoiceProxy:
                     state["provider_transitioning"] = False
                     state["openai_response_turns"] = {}
                     await upstream.send(
-                        json.dumps(build_session_update(self.config, voice, conversation_mode, eagerness))
+                        json.dumps(build_session_update(
+                            self.config,
+                            voice,
+                            conversation_mode,
+                            eagerness,
+                            transcription_prompt=session_transcription_prompt,
+                        ))
                     )
                     await self._send_json(
                         client,
@@ -1778,6 +1936,13 @@ class RealtimeVoiceProxy:
             if turn_tasks:
                 await asyncio.gather(*turn_tasks, return_exceptions=True)
             self.active_sessions = max(0, self.active_sessions - 1)
+            if duck_task is not None:
+                await asyncio.gather(duck_task, return_exceptions=True)
+            if client_kind == "voice_pe" and self.voice_pe_session_ended is not None:
+                try:
+                    await self.voice_pe_session_ended(metadata)
+                except Exception:
+                    _LOGGER.exception("Voice PE media restoration failed")
             await self._close(client, 1000)
 
     async def _speaker_identity_process(
@@ -1996,13 +2161,57 @@ class RealtimeVoiceProxy:
             if kind == "ping":
                 await self._send_json(client, {"type": "pong", "time": time.time()})
             elif kind == "cancel":
-                state["cancelled_client_turn_id"] = _safe_int(
+                cancelled_client_turn_id = _safe_int(
                     payload.get("client_turn_id"),
                     _safe_int(state.get("active_client_turn_id")),
                 )
-                state["generation"] = int(state.get("generation", 0)) + 1
+                cancelled_generation = _safe_int(
+                    state.get("active_generation"),
+                    _safe_int(state.get("generation")),
+                )
+                state["cancelled_client_turn_id"] = cancelled_client_turn_id
+                state["cancelled_generation"] = cancelled_generation
+                state["generation"] = max(
+                    _safe_int(state.get("generation")),
+                    cancelled_generation,
+                ) + 1
                 state["suppress_audio"] = True
+                state.pop("active_generation", None)
+                state.pop("active_client_turn_id", None)
+                state.pop("queued_speech_remainder", None)
+                state["early_audio_done"] = False
+                state["early_speech_active"] = False
+                state["continuation_speech_active"] = False
+                _LOGGER.info(
+                    "JARVIS DIAG | CANCEL ACCEPTED | generation=%s "
+                    "client_turn_id=%s fence_generation=%s tasks=%s",
+                    cancelled_generation,
+                    cancelled_client_turn_id,
+                    state["generation"],
+                    len(turn_tasks),
+                )
                 await upstream.send(json.dumps({"type": "response.cancel"}))
+                tasks_to_cancel = tuple(turn_tasks)
+                for task in tasks_to_cancel:
+                    task.cancel()
+                if tasks_to_cancel:
+                    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                _mark_turn_terminal(state, cancelled_generation)
+                await self._send_json(
+                    client,
+                    _turn_payload(
+                        cancelled_generation,
+                        cancelled_client_turn_id,
+                        {"type": "turn.cancelled", "status": "cancelled"},
+                    ),
+                )
+                _LOGGER.info(
+                    "JARVIS DIAG | CANCEL COMPLETE | generation=%s "
+                    "client_turn_id=%s remaining_tasks=%s",
+                    cancelled_generation,
+                    cancelled_client_turn_id,
+                    len(turn_tasks),
+                )
             elif kind == "text":
                 text = str(payload.get("text") or "").strip()
                 if text:
@@ -2106,6 +2315,7 @@ class RealtimeVoiceProxy:
                 )
                 self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
+                runtime_metrics.increment("voice_speech_started")
                 if metadata.get("client_kind") == "voice_pe":
                     _speaker_capture_mark_start(
                         state,
@@ -2164,6 +2374,22 @@ class RealtimeVoiceProxy:
                 transcript = str(
                     event.get("transcript") or ""
                 ).strip()
+                transcription_confidence = input_transcription_confidence(event)
+                if transcription_confidence is not None:
+                    metadata["transcription_confidence"] = transcription_confidence
+                    runtime_metrics.set_gauge(
+                        "voice_transcription_confidence",
+                        transcription_confidence,
+                    )
+                    if transcription_confidence < 0.20:
+                        runtime_metrics.increment("voice_low_confidence_transcripts")
+                runtime_metrics.increment("voice_transcripts_completed")
+                speech_started_at = state.get("voice_pe_speech_started_at")
+                if isinstance(speech_started_at, (int, float)):
+                    runtime_metrics.observe(
+                        "speech_start_to_transcript_ms",
+                        (time.monotonic() - float(speech_started_at)) * 1000,
+                    )
 
                 _LOGGER.info(
                     "JARVIS DIAG | STT FINAL | JARVIS HEARD: %r",
@@ -2258,6 +2484,7 @@ class RealtimeVoiceProxy:
                         )
 
                         if drop_wake_residue:
+                            runtime_metrics.increment("voice_wake_residue_dropped")
                             state["voice_pe_wake_guard_used"] = True
                             _LOGGER.info(
                                 "JARVIS DIAG | VOICE PE WAKE RESIDUE DROPPED | "
@@ -2371,13 +2598,13 @@ class RealtimeVoiceProxy:
                                 _mark_turn_terminal(state)
                                 continue
 
-                    await self._send_json(
-                        client,
-                        {
-                            "type": "user.transcript",
-                            "text": transcript,
-                        },
-                    )
+                    transcript_payload: dict[str, Any] = {
+                        "type": "user.transcript",
+                        "text": transcript,
+                    }
+                    if transcription_confidence is not None:
+                        transcript_payload["confidence"] = transcription_confidence
+                    await self._send_json(client, transcript_payload)
 
                     closure = _match_voice_closure(
                         transcript,
@@ -3606,6 +3833,7 @@ class RealtimeVoiceProxy:
         resolved_client_turn_id = _safe_int(client_turn_id)
         state["active_generation"] = generation
         state["active_client_turn_id"] = resolved_client_turn_id
+        state["turn_in_progress_generation"] = generation
         state.pop("queued_speech_remainder", None)
         state["brain_turn_complete"] = False
         state["early_audio_done"] = False
@@ -3633,10 +3861,10 @@ class RealtimeVoiceProxy:
             turn_tasks.discard(completed)
             if completed.cancelled():
                 if _provider_epoch_is_current(state, provider_epoch):
-                    _mark_turn_terminal(state)
+                    _mark_turn_terminal(state, generation)
             elif completed.exception() is not None:
                 if _provider_epoch_is_current(state, provider_epoch):
-                    _mark_turn_terminal(state)
+                    _mark_turn_terminal(state, generation)
 
         task.add_done_callback(finish_turn_task)
 

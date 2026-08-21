@@ -245,8 +245,8 @@ async def test_migration_is_idempotent(tmp_path: Path) -> None:
     second = MemoryEngine(str(database))
     second_status = await second.status("aaron")
 
-    assert first_status["schema_version"] == 3
-    assert second_status["schema_version"] == 3
+    assert first_status["schema_version"] == 4
+    assert second_status["schema_version"] == 4
     assert second_status["total_count"] == 1
 
 @pytest.mark.asyncio

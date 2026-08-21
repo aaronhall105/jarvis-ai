@@ -63,6 +63,11 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
         result = await self.engine.interpret("where is amebr", [], self.actor)
         self.assertEqual(result.interpreted_text.casefold(), "where is amber")
 
+    def test_write_action_detection_is_public_and_conservative(self):
+        self.assertTrue(self.engine.is_write_action("turn off the television"))
+        self.assertTrue(self.engine.is_write_action("send Amber a notification"))
+        self.assertFalse(self.engine.is_write_action("what time is it"))
+
 
 if __name__ == "__main__":
     unittest.main()

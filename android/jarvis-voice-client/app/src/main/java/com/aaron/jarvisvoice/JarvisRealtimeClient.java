@@ -79,6 +79,7 @@ public final class JarvisRealtimeClient {
     private long activeClientTurnId;
     private int highestServerGeneration;
     private int minimumServerGeneration;
+    private int audioServerGeneration;
     private String activeCoreUrl;
     private String activeEndpointName = "LAN";
 
@@ -159,6 +160,7 @@ public final class JarvisRealtimeClient {
         activeClientTurnId = 0L;
         highestServerGeneration = 0;
         minimumServerGeneration = 0;
+        audioServerGeneration = 0;
         authenticated = false;
         ready = false;
         opening = false;
@@ -189,6 +191,7 @@ public final class JarvisRealtimeClient {
         WebSocket current = socket;
         long cancelledTurnId = activeClientTurnId;
         activeClientTurnId = 0L;
+        audioServerGeneration = 0;
         minimumServerGeneration = Math.max(
             minimumServerGeneration,
             highestServerGeneration + 1
@@ -209,6 +212,7 @@ public final class JarvisRealtimeClient {
             long clientTurnId = nextClientTurnId++;
             if (nextClientTurnId <= 0L) nextClientTurnId = 1L;
             activeClientTurnId = clientTurnId;
+            audioServerGeneration = 0;
             return current.send(RealtimeProtocol.text(text.trim(), speak, clientTurnId));
         } catch (Exception exception) {
             post(() -> listener.onError("Could not send text: " + safeMessage(exception)));
@@ -340,6 +344,15 @@ public final class JarvisRealtimeClient {
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
                 if (currentGeneration != generation) return;
+                if (
+                    activeClientTurnId <= 0L
+                        || audioServerGeneration < minimumServerGeneration
+                ) {
+                    diagnostics.recordRecovery(
+                        "Discarded unowned realtime audio after cancellation"
+                    );
+                    return;
+                }
                 performance.markFirstAudio();
                 if (!firstAudioMeasured && turnStartedAtMs > 0L) {
                     firstAudioMeasured = true;
@@ -421,6 +434,7 @@ public final class JarvisRealtimeClient {
                 // the new session's first legitimate turn is accepted.
                 highestServerGeneration = 0;
                 minimumServerGeneration = 0;
+                audioServerGeneration = 0;
                 activeClientTurnId = 0L;
                 main.removeCallbacks(authTimeout);
                 scheduleReadyTimeout(currentGeneration);
@@ -485,6 +499,7 @@ public final class JarvisRealtimeClient {
             case "assistant.transcript.done" -> post(() -> listener.onAssistantTranscriptDone(event.text));
             case "audio.done" -> post(listener::onAudioDone);
             case "brain.started" -> {
+                audioServerGeneration = event.generation;
                 performance.markBrainStarted();
                 if (turnStartedAtMs <= 0L) {
                     turnStartedAtMs = SystemClock.elapsedRealtime();
@@ -573,7 +588,7 @@ public final class JarvisRealtimeClient {
             case "brain.started", "brain.delta", "brain.response", "brain.discarded",
                  "tool.started", "tool.completed", "memory.context", "turn.summary",
                  "assistant.transcript.delta", "assistant.transcript.done",
-                 "original.tts", "audio.done", "turn.done", "session.context", "session.close",
+                 "original.tts", "audio.done", "turn.done", "turn.cancelled", "session.context", "session.close",
                  "speech.early.started", "speech.remainder.ready", "speech.continuation" -> true;
             default -> false;
         };

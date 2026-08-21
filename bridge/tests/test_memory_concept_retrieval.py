@@ -166,3 +166,36 @@ async def test_context_for_contains_semantically_retrieved_health_fact(tmp_path:
 
     assert "lactose intolerant" in context.lower()
     assert "about the current user" in context.lower()
+
+
+@pytest.mark.asyncio
+async def test_short_query_does_not_match_inside_unrelated_word(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path)
+    await engine.save(
+        "home",
+        "Holiday location",
+        "The holiday location is Cornwall.",
+        owner_key="aaron",
+    )
+
+    assert await engine.search("cat", owner_key="aaron") == []
+
+
+@pytest.mark.asyncio
+async def test_exact_subject_outranks_partial_content_match(tmp_path: Path) -> None:
+    engine = make_engine(tmp_path)
+    exact = await engine.save(
+        "preference",
+        "Favourite tea",
+        "Aaron prefers Earl Grey.",
+        owner_key="aaron",
+    )
+    await engine.save(
+        "general",
+        "Shopping note",
+        "Buy biscuits to have with favourite tea.",
+        owner_key="aaron",
+    )
+
+    matches = await engine.search("favourite tea", owner_key="aaron")
+    assert matches[0]["id"] == exact["id"]

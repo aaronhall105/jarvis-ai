@@ -5,6 +5,7 @@ import threading
 import traceback
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -45,7 +46,9 @@ from app.realtime_voice import RealtimeVoiceProxy
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext
+from app.speech_corrections import SpeechCorrectionEngine
 from app.runtime_observability import configuration_report, runtime_metrics
+from app.system_diagnostics import build_voice_reliability_report
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
 
 settings = get_settings()
@@ -97,6 +100,9 @@ admin = AdminEngine(
     confirmation_ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
 )
 intents = IntentEngine(registry, tools)
+speech_corrections = SpeechCorrectionEngine(
+    "/app/data/jarvis_speech_corrections.db"
+)
 ai = AIEngine(
     api_key=settings.openai_api_key,
     model=settings.openai_model,
@@ -108,10 +114,153 @@ ai = AIEngine(
     dialogue=dialogue,
     awareness=awareness,
     code_awareness=code_awareness,
+    speech_corrections=speech_corrections,
 )
 
 
 realtime_voice = RealtimeVoiceProxy.from_environment()
+
+_voice_pe_ducked_media: dict[str, dict[str, float]] = {}
+_voice_pe_duck_lock = asyncio.Lock()
+
+
+async def _duck_media_for_voice_pe(metadata: dict[str, object]) -> None:
+    session_id = str(metadata.get("session_id") or "")
+    area_id = str(metadata.get("area_id") or "")
+    if not session_id or not area_id:
+        return
+    async with _voice_pe_duck_lock:
+        entities = await tools.readable_entity_states(refresh=True)
+        restored: dict[str, float] = {}
+        for entity in entities:
+            entity_id = str(entity.get("entity_id") or "")
+            if (
+                entity.get("domain") != "media_player"
+                or entity.get("area_id") != area_id
+                or entity.get("state") not in {"playing", "on", "buffering"}
+                or "home_assistant_voice" in entity_id
+                or entity_id.endswith(".everywhere")
+            ):
+                continue
+            attributes = entity.get("attributes") or {}
+            volume = attributes.get("volume_level") if isinstance(attributes, dict) else None
+            if not isinstance(volume, (int, float)) or volume <= 0.08:
+                continue
+            restored[entity_id] = float(volume)
+            await home_assistant.call_service(
+                "media_player",
+                "volume_set",
+                entity_ids=[entity_id],
+                service_data={"volume_level": max(0.05, float(volume) * 0.35)},
+            )
+        _voice_pe_ducked_media[session_id] = restored
+        logger.info(
+            "VOICE_PE_MEDIA_DUCK session=%s area=%s entities=%s",
+            session_id,
+            area_id,
+            sorted(restored),
+        )
+
+
+async def _restore_media_after_voice_pe(metadata: dict[str, object]) -> None:
+    session_id = str(metadata.get("session_id") or "")
+    async with _voice_pe_duck_lock:
+        restored = _voice_pe_ducked_media.pop(session_id, {})
+        for entity_id, volume in restored.items():
+            await home_assistant.call_service(
+                "media_player",
+                "volume_set",
+                entity_ids=[entity_id],
+                service_data={"volume_level": volume},
+            )
+        logger.info(
+            "VOICE_PE_MEDIA_RESTORE session=%s entities=%s",
+            session_id,
+            sorted(restored),
+        )
+
+
+realtime_voice.voice_pe_session_started = _duck_media_for_voice_pe
+realtime_voice.voice_pe_session_ended = _restore_media_after_voice_pe
+
+
+async def _registry_transcription_prompt(metadata: dict[str, object]) -> str:
+    snapshot = await registry.ensure_loaded()
+    area_id = str(metadata.get("area_id") or "")
+    device_areas = {
+        str(device.get("id") or ""): str(device.get("area_id") or "")
+        for device in snapshot.devices
+    }
+    weighted: list[tuple[int, str]] = []
+
+    def add(priority: int, value: object) -> None:
+        text = " ".join(str(value or "").replace("_", " ").split()).strip()
+        if 2 <= len(text) <= 80:
+            weighted.append((priority, text))
+
+    add(100, "Jarvis")
+    add(100, "Aaron")
+    add(100, "Amber")
+    add(100, "TV television")
+    user_key = str(metadata.get("user_id") or "guest").strip().casefold() or "guest"
+    for learned_term in await speech_corrections.prompt_terms(user_key):
+        add(98, learned_term)
+    for area in snapshot.areas:
+        add(95, area.get("name"))
+        for alias in area.get("aliases") or []:
+            add(90, alias)
+    for device in snapshot.devices:
+        priority = 90 if str(device.get("area_id") or "") == area_id else 55
+        add(priority, device.get("name_by_user"))
+        add(priority - 5, device.get("name"))
+    for entity in snapshot.entities:
+        if entity.get("disabled_by") is not None:
+            continue
+        entity_id = str(entity.get("entity_id") or "")
+        domain = entity_id.split(".", 1)[0]
+        if domain not in {"light", "switch", "media_player", "climate", "script", "person"}:
+            continue
+        effective_area = str(
+            entity.get("area_id")
+            or device_areas.get(str(entity.get("device_id") or ""))
+            or ""
+        )
+        priority = 85 if effective_area == area_id else 50
+        add(priority, entity.get("name"))
+        add(priority - 5, entity.get("original_name"))
+        if "." in entity_id:
+            add(priority - 10, entity_id.split(".", 1)[1])
+
+    seen: set[str] = set()
+    terms: list[str] = []
+    base = realtime_voice.config.transcription_prompt.strip()
+    prefix = "Household vocabulary: "
+    for _, term in sorted(weighted, key=lambda item: (-item[0], item[1].casefold())):
+        key = term.casefold()
+        if key in seen:
+            continue
+        candidate_terms = ", ".join([*terms, term])
+        candidate_prompt = ". ".join(
+            part for part in [base, prefix + candidate_terms] if part
+        )
+        if len(candidate_prompt) > 1024:
+            break
+        seen.add(key)
+        terms.append(term)
+    prompt = ". ".join(
+        part for part in [base, prefix + ", ".join(terms)] if part
+    )
+    logger.info(
+        "VOICE_TRANSCRIPTION_VOCAB area=%s user=%s terms=%s characters=%s",
+        area_id or "none",
+        user_key,
+        len(terms),
+        len(prompt),
+    )
+    return prompt
+
+
+realtime_voice.transcription_prompt_provider = _registry_transcription_prompt
 
 
 class TextCommandRequest(BaseModel):
@@ -125,6 +274,7 @@ class TextCommandRequest(BaseModel):
     user_name: str | None = None
     user_is_admin: bool = False
     device_id: str | None = None
+    area_id: str | None = None
     satellite_id: str | None = None
     voice_session_id: str | None = None
     voice_session_turn: int | None = None
@@ -371,6 +521,7 @@ async def system_status() -> dict[str, object]:
         logger.exception("Registry status failed")
         runtime_metrics.record_error("registry", str(exc))
         registry_status = {"error": "registry status unavailable"}
+    runtime = runtime_metrics.snapshot()
     return {
         "release": JARVIS_RELEASE,
         "core_application_version": CORE_APPLICATION_VERSION,
@@ -381,7 +532,12 @@ async def system_status() -> dict[str, object]:
         "registry": registry_status,
         "realtime_voice": realtime,
         "configuration": configuration_report(settings, realtime),
-        "runtime": runtime_metrics.snapshot(),
+        "runtime": runtime,
+        "voice_reliability": build_voice_reliability_report(
+            home_assistant_connected=ha_status.connected,
+            realtime=realtime,
+            runtime=runtime,
+        ),
     }
 
 
@@ -463,6 +619,38 @@ def _require_memory_token(token: str | None) -> None:
     supplied = (token or "").strip()
     if not supplied or not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=403, detail="Invalid memory administration token.")
+
+
+@app.get("/api/voice/privacy/corrections")
+async def voice_privacy_corrections(
+    user_id: str = "aaron",
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_memory_token(x_jarvis_admin_token)
+    user_key = re.sub(r"[^a-z0-9_-]+", "_", user_id.casefold()).strip("_")[:80]
+    if not user_key:
+        raise HTTPException(status_code=400, detail="Invalid user ID.")
+    items = await speech_corrections.list_for_user(user_key)
+    return {
+        "user_id": user_key,
+        "stores_audio": False,
+        "count": len(items),
+        "items": items,
+    }
+
+
+@app.delete("/api/voice/privacy/corrections")
+async def voice_privacy_forget_corrections(
+    user_id: str = "aaron",
+    heard_as: str | None = None,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_memory_token(x_jarvis_admin_token)
+    user_key = re.sub(r"[^a-z0-9_-]+", "_", user_id.casefold()).strip("_")[:80]
+    if not user_key:
+        raise HTTPException(status_code=400, detail="Invalid user ID.")
+    deleted = await speech_corrections.forget(user_key, heard_as)
+    return {"user_id": user_key, "deleted": deleted, "stores_audio": False}
 
 
 @app.get("/api/improvement/status")
@@ -903,6 +1091,7 @@ async def _execute_ai_request(
         device_id=request.device_id,
         voice_mode=request.voice_mode,
         privilege_verified=privilege_verified,
+        area_id=request.area_id,
     )
     external_conversation_id, storage_conversation_id = _conversation_scope(
         request.conversation_id,
@@ -914,6 +1103,32 @@ async def _execute_ai_request(
         source=f"home_assistant:{actor.user_key}",
     )
     storage_conversation_id = str(conversation["conversation_id"])
+
+    proactive_reply = await proactive_engine.handle_reply(
+        request.text, actor.user_key
+    )
+    if proactive_reply is not None:
+        response = str(proactive_reply["response"])
+        await conversations.add_user_message(
+            conversation_id=storage_conversation_id, content=request.text
+        )
+        await conversations.add_assistant_message(
+            conversation_id=storage_conversation_id, content=response
+        )
+        return {
+            "success": True,
+            "response": response,
+            "model": "proactive-initiative",
+            "intent": "proactive_reply",
+            "deterministic": True,
+            "tool_called": False,
+            "tool_rounds": 0,
+            "calls": [],
+            "memory_used": False,
+            "conversation_id": storage_conversation_id,
+            "proactive_event": proactive_reply["event"],
+            "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+        }
 
     history_before = await conversations.get_ai_history(
         conversation_id=storage_conversation_id,
@@ -1116,6 +1331,11 @@ async def _execute_ai_request(
     )
     result["timings"] = timings
     runtime_metrics.increment("assistant_turns")
+    if request.voice_mode:
+        if bool(result.get("deterministic")):
+            runtime_metrics.increment("voice_local_fast_path_turns")
+        else:
+            runtime_metrics.increment("voice_model_reasoning_turns")
     runtime_metrics.observe_many(timings)
 
     try:
@@ -1155,6 +1375,14 @@ async def _realtime_brain_handler(
         metadata.get("device_id") or ""
     ).strip() or None
 
+    area_id = str(
+        metadata.get("area_id") or ""
+    ).strip() or None
+
+    endpoint_kind = str(
+        metadata.get("voice_endpoint_kind") or "android"
+    ).strip() or "android"
+
     session_id = str(
         metadata.get("session_id") or ""
     ).strip() or None
@@ -1168,8 +1396,18 @@ async def _realtime_brain_handler(
             metadata.get("user_is_admin", False)
         ),
         device_id=device_id,
+        area_id=area_id,
+        satellite_id=(
+            device_id
+            if endpoint_kind == "voice_pe"
+            else None
+        ),
         voice_session_id=session_id,
-        voice_endpoint_kind="android_realtime",
+        voice_endpoint_kind=(
+            "voice_pe_realtime"
+            if endpoint_kind == "voice_pe"
+            else "android_realtime"
+        ),
         voice_mode=True,
     )
 
@@ -1179,6 +1417,7 @@ async def _realtime_brain_handler(
         "local_date": metadata.get("local_date"),
         "local_time": metadata.get("local_time"),
         "utc_offset_seconds": metadata.get("utc_offset_seconds"),
+        "transcription_confidence": metadata.get("transcription_confidence"),
     }
 
     # This handler is reachable only after RealtimeVoiceProxy
@@ -1480,6 +1719,9 @@ async def save_memory(
         subject_key=request.subject_key,
         visibility=request.visibility,
         sensitivity=request.sensitivity,
+        source=request.source,
+        confidence=request.confidence,
+        expires_at=request.expires_at,
     )
     return {"success": True, "memory": saved}
 
@@ -1512,6 +1754,32 @@ async def delete_memory(
     if not deleted:
         raise HTTPException(status_code=404, detail="Memory not found or not editable.")
     return {"success": True, "deleted_id": memory_id}
+
+
+@app.get("/api/memory/{memory_id}/history")
+async def memory_history(
+    memory_id: int,
+    requester_key: str = "aaron",
+    x_jarvis_memory_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
+    revisions = await memory.history(memory_id, owner_key=requester_key)
+    return {"memory_id": memory_id, "count": len(revisions), "revisions": revisions}
+
+
+@app.post("/api/memory/{memory_id}/restore")
+async def restore_memory(
+    memory_id: int,
+    requester_key: str = "aaron",
+    x_jarvis_memory_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_memory_token(x_jarvis_memory_token)
+    restored = await memory.restore(memory_id, owner_key=requester_key)
+    if restored is None:
+        raise HTTPException(
+            status_code=404, detail="Retired memory not found or not editable."
+        )
+    return {"success": True, "memory": restored}
 
 
 @app.get("/api/memory/status")

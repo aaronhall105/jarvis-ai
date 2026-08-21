@@ -29,6 +29,8 @@ from app.house_context import HouseContextEngine
 from app.house_awareness import HouseAwarenessEngine
 from app.memory_engine import MemoryEngine
 from app.registry import RegistryEngine
+from app.runtime_observability import runtime_metrics
+from app.speech_corrections import SpeechCorrectionEngine
 from app.reply_policy import ReplyBudgetPolicy
 from app.tool_engine import ToolEngine
 from app.tool_outcomes import request_tool_success
@@ -144,6 +146,10 @@ Scope and accuracy:
   unnecessary follow-up questions.
 - Never invent Home Assistant entities, rooms, states, actions, memories, tool
   results or capabilities.
+- When speech is unclear, never suggest a possible room or device unless that
+  exact room/device appears in the supplied Home Assistant registry or tool
+  results. Never creatively complete a garbled device name; ask the user to
+  repeat the exact device name in one short sentence.
 - A person presence state such as home or away does not reveal their room,
   activity or private behaviour. Never infer those details from presence alone.
   When trusted camera-room evidence is supplied, report only the visible room
@@ -197,6 +203,10 @@ Memory:
   user explicitly asks to keep the memory private.
 - A person may access and remove a subject_and_owner memory about themselves. Never
   disclose another person's private memory.
+- For explicitly temporary facts such as "today", "this weekend" or "tonight", set
+  expires_at to the real ISO-8601 end time. Permanent facts must use null.
+- Reuse a stable subject label when correcting a fact so Jarvis versions the old
+  value instead of storing contradictory current truths.
 - Never save passwords, PINs, API keys, access tokens, payment details or other
   authentication secrets.
 
@@ -1017,6 +1027,7 @@ class AIEngine:
         dialogue: DialogueManager,
         awareness: HouseAwarenessEngine,
         code_awareness: CodeAwarenessEngine | None = None,
+        speech_corrections: SpeechCorrectionEngine | None = None,
     ) -> None:
         if not api_key.strip():
             raise AIEngineError("OPENAI_API_KEY is not configured.")
@@ -1051,6 +1062,7 @@ class AIEngine:
         self.dialogue = dialogue
         self.awareness = awareness
         self.code_awareness = code_awareness
+        self.speech_corrections = speech_corrections
         self.router = RequestRouter()
         self.understanding = UnderstandingEngine(registry)
         self.house_context = HouseContextEngine(registry)
@@ -1218,6 +1230,7 @@ class AIEngine:
         definitions: list[dict[str, Any]] = []
 
         areas = await self._area_options()
+        local_area = actor.area_id or ""
         if areas:
             area_ids = [area["area_id"] for area in areas]
             area_descriptions = ", ".join(
@@ -1231,7 +1244,14 @@ class AIEngine:
                     "description": (
                         "Turn all available lights in one Home Assistant area "
                         "on or off. Use the exact area_id. Available areas: "
-                        f"{area_descriptions}"
+                        f"{area_descriptions}. "
+                        + (
+                            "For this voice turn, unqualified references to "
+                            f"'the lights', 'here' or 'this room' mean area_id "
+                            f"{local_area}. Explicitly named rooms override it."
+                            if local_area in area_ids
+                            else ""
+                        )
                     ),
                     "parameters": {
                         "type": "object",
@@ -1488,7 +1508,7 @@ class AIEngine:
 
         return definitions
 
-    async def _home_read_tools(self) -> list[dict[str, Any]]:
+    async def _home_read_tools(self, actor: UserContext) -> list[dict[str, Any]]:
         areas = await self._area_options()
         area_ids = [area["area_id"] for area in areas]
         area_descriptions = ", ".join(
@@ -1496,6 +1516,7 @@ class AIEngine:
             for area in areas
         )
         domains = sorted(self.tools.READABLE_DOMAINS)
+        local_area = actor.area_id if actor.area_id in area_ids else None
 
         nullable_area_schema: dict[str, Any] = {
             "type": ["string", "null"],
@@ -1512,7 +1533,15 @@ class AIEngine:
                     "sensor or person name. Use this for phone battery, whether a "
                     "named TV is on, where a person is, or which entities match a "
                     "state. Available areas: "
-                    f"{area_descriptions or 'none configured'}"
+                    f"{area_descriptions or 'none configured'}. "
+                    + (
+                        f"The current voice endpoint is in area_id {local_area}; "
+                        "use it for unqualified local references such as 'the "
+                        "window', 'the temperature', 'here' or 'this room'. "
+                        "An explicitly named room always overrides it."
+                        if local_area
+                        else ""
+                    )
                 ),
                 "parameters": {
                     "type": "object",
@@ -1663,10 +1692,16 @@ class AIEngine:
                             "medication or similarly private personal information."
                         ),
                     },
+                    "expires_at": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "ISO-8601 expiry for explicitly temporary facts, otherwise null."
+                        ),
+                    },
                 },
                 "required": [
                     "category", "subject", "content", "subject_key",
-                    "visibility", "sensitivity"
+                    "visibility", "sensitivity", "expires_at"
                 ],
                 "additionalProperties": False,
             },
@@ -1828,7 +1863,7 @@ class AIEngine:
             )
 
         if decision.allow_home_read:
-            definitions.extend(await self._home_read_tools())
+            definitions.extend(await self._home_read_tools(actor))
 
         if decision.allow_save_memory:
             definitions.append(self._save_memory_tool())
@@ -1850,6 +1885,42 @@ class AIEngine:
                 return area["name"]
 
         return area_id.replace("_", " ").title()
+
+    @classmethod
+    def _explicit_area_id(
+        cls,
+        text: str,
+        areas: Sequence[dict[str, str]],
+    ) -> str | None:
+        normalised = cls._normalise_device_phrase(text)
+        for area in areas:
+            area_id = str(area.get("area_id") or "")
+            names = {
+                cls._normalise_device_phrase(area_id),
+                cls._normalise_device_phrase(str(area.get("name") or "")),
+            }
+            if any(
+                name and re.search(
+                    rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])",
+                    normalised,
+                )
+                for name in names
+            ):
+                return area_id
+        return None
+
+    async def _voice_local_area(
+        self,
+        actor: UserContext,
+        user_text: str,
+    ) -> str | None:
+        if not actor.voice_mode or not actor.area_id:
+            return None
+        areas = await self._area_options()
+        if self._explicit_area_id(user_text, areas):
+            return None
+        valid = {area["area_id"] for area in areas}
+        return actor.area_id if actor.area_id in valid else None
 
     @staticmethod
     def _tool_failure(
@@ -2024,6 +2095,10 @@ class AIEngine:
             if name == "control_area_lights":
                 area_id = str(arguments.get("area_id", ""))
                 action = str(arguments.get("action", ""))
+                local_area = await self._voice_local_area(actor, user_text)
+                if local_area:
+                    area_id = local_area
+                    arguments["area_id"] = local_area
                 valid_area_ids = {
                     area["area_id"]
                     for area in await self._area_options()
@@ -2209,6 +2284,16 @@ class AIEngine:
                 domain = str(domain_value) if domain_value is not None else None
                 area_value = arguments.get("area_id")
                 area_id = str(area_value) if area_value is not None else None
+                local_area = await self._voice_local_area(actor, user_text)
+                local_reference = bool(re.search(
+                    r"\b(?:here|this room|in here|the (?:lights?|windows?|"
+                    r"temperature|thermostat|humidity|radiator|heating))\b",
+                    user_text,
+                    re.I,
+                ))
+                if local_area and local_reference:
+                    area_id = local_area
+                    arguments["area_id"] = local_area
                 state_value = arguments.get("state_filter")
                 state_filter = str(state_value) if state_value is not None else None
                 limit = int(arguments.get("limit", 12))
@@ -2248,6 +2333,10 @@ class AIEngine:
 
             if name == "list_area_states":
                 area_id = str(arguments.get("area_id", ""))
+                local_area = await self._voice_local_area(actor, user_text)
+                if local_area:
+                    area_id = local_area
+                    arguments["area_id"] = local_area
                 domain_value = arguments.get("domain")
                 domain = str(domain_value) if domain_value is not None else None
                 state_value = arguments.get("state_filter")
@@ -2396,6 +2485,12 @@ class AIEngine:
                 sensitivity = _normalise_space(
                     str(arguments.get("sensitivity", ""))
                 ).lower()
+                expires_at_value = arguments.get("expires_at")
+                expires_at = (
+                    _normalise_space(str(expires_at_value))
+                    if expires_at_value is not None
+                    else None
+                )
 
                 if category not in _MEMORY_CATEGORIES:
                     return self._tool_failure(
@@ -2479,6 +2574,9 @@ class AIEngine:
                     subject_key=subject_key,
                     visibility=visibility,
                     sensitivity=sensitivity,
+                    source="explicit_user",
+                    confidence=1.0,
+                    expires_at=expires_at,
                 )
                 return {
                     "tool": name,
@@ -4095,6 +4193,21 @@ class AIEngine:
 
         # Leave generic room-wide requests to the area-light tool.
         normalised_target = self._normalise_device_phrase(target_text)
+        if normalised_target in {
+            "tv",
+            "television",
+            "the tv",
+            "the television",
+            "living room tv",
+        }:
+            shortcut = "tv_on" if turn_on else "tv_off"
+            result = await self.tools.run_media_shortcut(shortcut)
+            reply = "Done." if result.get("success") else "I couldn't do that."
+            return reply, [{
+                "tool": "run_media_shortcut",
+                "arguments": {"shortcut": shortcut},
+                "result": result,
+            }]
         if (
             re.search(r"\blights\b", target_text, re.I)
             and "floodlight" not in normalised_target
@@ -4220,6 +4333,44 @@ class AIEngine:
             ),
         )
 
+        if self.speech_corrections is not None:
+            snapshot = await self.registry.ensure_loaded()
+            valid_phrases = {"tv", "television", "jarvis", "aaron", "amber"}
+            for item in [*snapshot.areas, *snapshot.devices, *snapshot.entities]:
+                for key in ("name", "name_by_user", "original_name", "entity_id"):
+                    value = str(item.get(key) or "")
+                    if key == "entity_id" and "." in value:
+                        value = value.split(".", 1)[1].replace("_", " ")
+                    cleaned = " ".join(re.sub(r"[^a-z0-9' -]+", " ", value.casefold()).split())
+                    if cleaned:
+                        valid_phrases.add(cleaned)
+            learned = await self.speech_corrections.learn_explicit(
+                raw_user_text,
+                actor.user_key,
+                valid_phrases,
+            )
+            if learned:
+                runtime_metrics.increment("recognition_corrections_learned")
+                logger.info(
+                    "SPEECH_CORRECTION_LEARNED user=%s wrong=%r correct=%r",
+                    actor.user_key,
+                    learned[0],
+                    learned[1],
+                )
+            elif not re.search(r"\b(?:i said|when i say)\b", raw_user_text, re.I):
+                corrected_text, applied = await self.speech_corrections.apply(
+                    raw_user_text,
+                    actor.user_key,
+                )
+                if applied:
+                    runtime_metrics.increment("recognition_corrections_applied", len(applied))
+                    logger.info(
+                        "SPEECH_CORRECTION_APPLIED user=%s mappings=%s",
+                        actor.user_key,
+                        applied,
+                    )
+                    raw_user_text = corrected_text
+
         tone_profile = self.tone.analyse(raw_user_text, history)
         await self.dialogue.record_tone(
             resolved_conversation_id,
@@ -4344,6 +4495,26 @@ class AIEngine:
             history,
             actor,
         )
+        runtime_metrics.increment("recognition_second_stage_checks")
+        if understanding.changed:
+            runtime_metrics.increment("recognition_second_stage_repairs")
+        if understanding.needs_clarification:
+            runtime_metrics.increment("recognition_clarifications")
+        runtime_metrics.set_gauge(
+            "recognition_understanding_confidence",
+            understanding.confidence,
+        )
+        provider_confidence = trusted_context.get("transcription_confidence")
+        provider_low_confidence_control = (
+            actor.voice_mode
+            and isinstance(provider_confidence, (int, float))
+            and float(provider_confidence) < 0.20
+            and self.understanding.is_write_action(
+                understanding.interpreted_text
+            )
+        )
+        if provider_low_confidence_control:
+            runtime_metrics.increment("voice_low_confidence_controls_blocked")
         user_text = understanding.interpreted_text
         if dialogue_resolution.rewritten_text and dialogue_resolution.clear_goal:
             await self.dialogue.clear_goal(
@@ -4439,11 +4610,11 @@ class AIEngine:
 
         if (
             pronoun_control is None
-            and understanding.needs_clarification
-            and understanding.clarification
+            and (understanding.needs_clarification or provider_low_confidence_control)
+            and (understanding.clarification or provider_low_confidence_control)
         ):
             parsed_control = self._parse_simple_power_command(user_text)
-            if parsed_control is not None:
+            if parsed_control is not None and understanding.needs_clarification:
                 turn_on, requested_target = parsed_control
                 suggested_target = self._suggested_target_from_clarification(
                     understanding.clarification
@@ -4463,7 +4634,12 @@ class AIEngine:
                 conversation_id=resolved_conversation_id,
                 content=raw_user_text,
             )
-            final_reply = _clean_reply(understanding.clarification)
+            clarification_reply = (
+                "I may have misheard that. Please say the command again."
+                if provider_low_confidence_control
+                else understanding.clarification
+            )
+            final_reply = _clean_reply(str(clarification_reply))
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
                 content=final_reply,
@@ -5230,6 +5406,10 @@ class AIEngine:
                     f"- is_home_assistant_admin: {actor.is_admin}\n"
                     f"- admin_mode_authorised: {actor.can_admin}\n"
                     f"- voice_mode: {actor.voice_mode}\n"
+                    f"- local_area_id: {actor.area_id or ''}\n"
+                    "For voice requests, an unqualified room reference means the "
+                    "trusted local_area_id. If the user explicitly names a room, "
+                    "that named room always wins.\n"
                     "Resolve first-person references such as 'my phone', "
                     "'notify me' and 'my battery' to this user. Address the "
                     "user naturally by name only when useful."
@@ -5667,4 +5847,3 @@ class AIEngine:
                 "cached_tokens": total_cached_tokens,
             },
         }
-

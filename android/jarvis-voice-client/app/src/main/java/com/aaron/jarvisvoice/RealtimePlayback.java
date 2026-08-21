@@ -29,6 +29,7 @@ public final class RealtimePlayback {
     private final Object trackLock = new Object();
     private AudioTrack track;
     private volatile boolean playing;
+    private volatile float outputGain = 1.0f;
 
     public RealtimePlayback(Listener listener) {
         this.listener = listener;
@@ -93,6 +94,18 @@ public final class RealtimePlayback {
         return playing;
     }
 
+    public void setOutputGain(float gain) {
+        float bounded = Math.max(0.0f, Math.min(1.0f, gain));
+        outputGain = bounded;
+        AudioTrack current;
+        synchronized (trackLock) {
+            current = track;
+        }
+        if (current != null) {
+            try { current.setVolume(bounded); } catch (Exception ignored) {}
+        }
+    }
+
     public void close() {
         if (!closed.compareAndSet(false, true)) return;
         generation.incrementAndGet();
@@ -114,6 +127,7 @@ public final class RealtimePlayback {
         if (closed.get() || generation.get() != acceptedGeneration) return;
         try {
             AudioTrack current = ensureTrack();
+            try { current.setVolume(outputGain); } catch (Exception ignored) {}
             if (current.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) current.play();
             setPlaying(true);
             int offset = 0;

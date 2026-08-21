@@ -5,6 +5,8 @@ on:
   push:
     branches: [main, conversation-engine, "jarvis/**"]
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
@@ -34,7 +36,7 @@ jobs:
       - name: Core tests
         env:
           PYTHONPATH: bridge
-        run: python -m pytest -q bridge/tests
+        run: python -m pytest -q bridge/tests tools/tests
       - name: Assist integration tests
         run: |
           python home_assistant/tests/test_streaming.py

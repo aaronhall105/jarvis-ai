@@ -8,8 +8,10 @@ def test_metrics_are_bounded_and_summarised() -> None:
     for value in range(30):
         metrics.observe("jarvis_request_total_ms", value)
     metrics.increment("turns", 2)
+    metrics.set_gauge("recognition_confidence", 0.93)
     snapshot = metrics.snapshot()
     assert snapshot["counters"]["turns"] == 2
+    assert snapshot["gauges"]["recognition_confidence"] == 0.93
     assert snapshot["latencies"]["jarvis_request_total_ms"]["count"] == 16
     assert snapshot["latencies"]["jarvis_request_total_ms"]["latest_ms"] == 29.0
 

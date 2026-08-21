@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.runtime_observability import runtime_metrics
+
 
 class MemoryError(RuntimeError):
     """Raised when a memory operation cannot be completed safely."""
@@ -20,7 +22,7 @@ class MemoryEngine:
     - Existing v1/v2 databases are migrated in place on startup.
     """
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
     VALID_CATEGORIES = {
         "personal",
         "preference",
@@ -298,6 +300,39 @@ class MemoryEngine:
                     f"ALTER TABLE memories ADD COLUMN {name} {definition}"
                 )
 
+    def _add_v4_schema(self, connection: sqlite3.Connection) -> None:
+        columns = self._table_columns(connection, "memories")
+        additions = {
+            "source": "TEXT NOT NULL DEFAULT 'legacy_import'",
+            "confidence": "REAL NOT NULL DEFAULT 1.0",
+            "last_confirmed_at": "TEXT",
+            "expires_at": "TEXT",
+            "retired_at": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE memories ADD COLUMN {name} {definition}"
+                )
+        connection.execute(
+            """UPDATE memories SET last_confirmed_at = updated_at
+               WHERE last_confirmed_at IS NULL"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS memory_history (
+                revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                memory_id INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                changed_at TEXT NOT NULL,
+                changed_by TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_memory_history_memory
+               ON memory_history(memory_id, changed_at DESC)"""
+        )
+
     def _migrate_v2_rows(self, connection: sqlite3.Connection) -> int:
         rows = connection.execute("SELECT * FROM memories").fetchall()
         migrated = 0
@@ -360,7 +395,12 @@ class MemoryEngine:
                     self._rebuild_single_user_table(connection)
                 else:
                     self._add_v3_columns(connection)
+                    self._add_v4_schema(connection)
                     self._create_indexes(connection)
+
+            # New databases are created with the compatible core columns first.
+            # Add v4 metadata/history in the same transaction.
+            self._add_v4_schema(connection)
 
             self._create_meta(connection)
             raw_version = self._meta_get(connection, "schema_version")
@@ -539,8 +579,34 @@ class MemoryEngine:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "updated_by": row["updated_by"],
+            "source": row["source"],
+            "confidence": float(row["confidence"]),
+            "last_confirmed_at": row["last_confirmed_at"],
+            "expires_at": row["expires_at"],
+            "retired_at": row["retired_at"],
             "requester_can_edit": cls._can_edit(row, requester),
         }
+
+    @staticmethod
+    def _record_history(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        operation: str,
+        changed_by: str,
+        changed_at: str,
+    ) -> None:
+        connection.execute(
+            """INSERT INTO memory_history(
+                   memory_id, operation, changed_at, changed_by, snapshot_json
+               ) VALUES (?, ?, ?, ?, ?)""",
+            (
+                int(row["id"]),
+                operation,
+                changed_at,
+                changed_by,
+                json.dumps(dict(row), ensure_ascii=False, separators=(",", ":")),
+            ),
+        )
 
     def _find_existing_for_save(
         self,
@@ -593,6 +659,9 @@ class MemoryEngine:
         subject_key: str | None = None,
         visibility: str | None = None,
         sensitivity: str | None = None,
+        source: str = "explicit_user",
+        confidence: float = 1.0,
+        expires_at: str | None = None,
     ) -> dict[str, Any]:
         owner = self._owner(owner_key)
         category = self._normalise(category)
@@ -608,6 +677,24 @@ class MemoryEngine:
             raise MemoryError("Memory subject is too long.")
         if len(content) > 2000:
             raise MemoryError("Memory content is too long.")
+        source = self._normalise(source).replace(" ", "_") or "explicit_user"
+        if source not in {"explicit_user", "inferred", "imported", "system"}:
+            raise MemoryError(f"Unsupported memory source: {source}")
+        try:
+            resolved_confidence = float(confidence)
+        except (TypeError, ValueError) as exc:
+            raise MemoryError("Memory confidence must be a number.") from exc
+        if not 0.0 <= resolved_confidence <= 1.0:
+            raise MemoryError("Memory confidence must be between 0 and 1.")
+        resolved_expiry: str | None = None
+        if expires_at:
+            try:
+                expiry = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                resolved_expiry = expiry.astimezone(timezone.utc).isoformat()
+            except ValueError as exc:
+                raise MemoryError("Memory expiry must be an ISO-8601 date/time.") from exc
 
         resolved_subject = self._subject_key(subject_key)
         if not resolved_subject:
@@ -655,12 +742,14 @@ class MemoryEngine:
                     subject=subject,
                 )
                 if existing is not None and self._can_edit(existing, owner):
+                    self._record_history(connection, existing, "updated", owner, now)
                     connection.execute(
                         """
                         UPDATE memories
                         SET subject_key = ?, visibility = ?, sensitivity = ?,
                             content = ?, search_text = ?, updated_at = ?,
-                            updated_by = ?
+                            updated_by = ?, source = ?, confidence = ?,
+                            last_confirmed_at = ?, expires_at = ?, retired_at = NULL
                         WHERE id = ?
                         """,
                         (
@@ -671,6 +760,10 @@ class MemoryEngine:
                             search_text,
                             now,
                             owner,
+                            source,
+                            resolved_confidence,
+                            now,
+                            resolved_expiry,
                             existing["id"],
                         ),
                     )
@@ -681,8 +774,9 @@ class MemoryEngine:
                         INSERT INTO memories (
                             owner_key, subject_key, visibility, sensitivity,
                             category, subject, content, search_text,
-                            created_at, updated_at, updated_by
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            created_at, updated_at, updated_by, source,
+                            confidence, last_confirmed_at, expires_at, retired_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                         ON CONFLICT(owner_key, category, subject)
                         DO UPDATE SET
                             subject_key = excluded.subject_key,
@@ -691,7 +785,12 @@ class MemoryEngine:
                             content = excluded.content,
                             search_text = excluded.search_text,
                             updated_at = excluded.updated_at,
-                            updated_by = excluded.updated_by
+                            updated_by = excluded.updated_by,
+                            source = excluded.source,
+                            confidence = excluded.confidence,
+                            last_confirmed_at = excluded.last_confirmed_at,
+                            expires_at = excluded.expires_at,
+                            retired_at = NULL
                         """,
                         (
                             owner,
@@ -705,6 +804,10 @@ class MemoryEngine:
                             now,
                             now,
                             owner,
+                            source,
+                            resolved_confidence,
+                            now,
+                            resolved_expiry,
                         ),
                     )
                     if cursor.lastrowid:
@@ -739,8 +842,11 @@ class MemoryEngine:
         safe_limit = max(1, min(int(limit), 2000))
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM memories ORDER BY updated_at DESC LIMIT ?",
-                (safe_limit,),
+                """SELECT * FROM memories
+                   WHERE retired_at IS NULL
+                     AND (expires_at IS NULL OR expires_at > ?)
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (self._utc_now(), safe_limit),
             ).fetchall()
         return [
             row for row in rows
@@ -799,6 +905,31 @@ class MemoryEngine:
         ]
         return terms or query.split()
 
+    @classmethod
+    def _lexical_score(
+        cls,
+        query: str,
+        terms: list[str],
+        row: sqlite3.Row,
+    ) -> tuple[int, int]:
+        """Score whole words and phrases; never count accidental substrings."""
+        subject = cls._normalise(str(row["subject"] or ""))
+        content = cls._normalise(str(row["content"] or ""))
+        category = cls._normalise(str(row["category"] or ""))
+        searchable = f"{category} {subject} {content}"
+        tokens = set(searchable.split())
+        matched = [term for term in terms if term in tokens]
+        score = len(matched) * 10
+        if query == subject:
+            score += 45
+        elif query and re.search(rf"(?<![a-z0-9]){re.escape(query)}(?![a-z0-9])", subject):
+            score += 30
+        elif query and re.search(rf"(?<![a-z0-9]){re.escape(query)}(?![a-z0-9])", content):
+            score += 20
+        if terms and len(matched) == len(set(terms)):
+            score += 12
+        return score, len(matched)
+
     async def search(
         self,
         query: str,
@@ -822,16 +953,15 @@ class MemoryEngine:
 
         ranked: list[tuple[int, str, sqlite3.Row]] = []
         for row in rows:
-            search_text = str(row["search_text"])
-            term_score = sum(1 for term in terms if term in search_text)
+            lexical_score, matched_terms = self._lexical_score(query, terms, row)
             concept_matches = query_concepts & self._memory_concepts(row)
-            if not term_score and not concept_matches:
+            if not matched_terms and not concept_matches:
                 continue
 
             # Literal wording remains strongest. Concept matches provide the
             # semantic bridge for broad profile questions such as health, diet,
             # birthdays and work without introducing an external embedding store.
-            score = (term_score * 10) + (len(concept_matches) * 14)
+            score = lexical_score + (len(concept_matches) * 14)
             if str(row["subject_key"]) == requester:
                 score += 12
             if str(row["owner_key"]) == requester:
@@ -843,10 +973,16 @@ class MemoryEngine:
             ranked.append((score, str(row["updated_at"]), row))
 
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [
+        results = [
             self._row_to_dict(row, requester)
             for _, _, row in ranked[:safe_limit]
         ]
+        runtime_metrics.increment("memory_searches")
+        runtime_metrics.increment(
+            "memory_search_hits" if results else "memory_search_misses"
+        )
+        runtime_metrics.set_gauge("memory_last_result_count", len(results))
+        return results
 
     def _matching_deletable_row(
         self,
@@ -859,6 +995,7 @@ class MemoryEngine:
             """
             SELECT * FROM memories
             WHERE category = ? AND lower(subject) = lower(?)
+              AND retired_at IS NULL
             ORDER BY updated_at DESC
             """,
             (category, subject),
@@ -884,9 +1021,13 @@ class MemoryEngine:
                 )
                 if row is None:
                     return False
+                now = self._utc_now()
+                self._record_history(connection, row, "retired", requester, now)
                 cursor = connection.execute(
-                    "DELETE FROM memories WHERE id = ?",
-                    (row["id"],),
+                    """UPDATE memories
+                       SET retired_at = ?, updated_at = ?, updated_by = ?
+                       WHERE id = ? AND retired_at IS NULL""",
+                    (now, now, requester, row["id"]),
                 )
                 connection.commit()
         return cursor.rowcount > 0
@@ -900,17 +1041,82 @@ class MemoryEngine:
         async with self._lock:
             with self._connect() as connection:
                 row = connection.execute(
-                    "SELECT * FROM memories WHERE id = ?",
+                    "SELECT * FROM memories WHERE id = ? AND retired_at IS NULL",
                     (int(memory_id),),
                 ).fetchone()
                 if row is None or not self._can_edit(row, requester):
                     return False
+                now = self._utc_now()
+                self._record_history(connection, row, "retired", requester, now)
                 cursor = connection.execute(
-                    "DELETE FROM memories WHERE id = ?",
-                    (int(memory_id),),
+                    """UPDATE memories
+                       SET retired_at = ?, updated_at = ?, updated_by = ?
+                       WHERE id = ? AND retired_at IS NULL""",
+                    (now, now, requester, int(memory_id)),
                 )
                 connection.commit()
         return cursor.rowcount > 0
+
+    async def restore(
+        self,
+        memory_id: int,
+        owner_key: str = "aaron",
+    ) -> dict[str, Any] | None:
+        requester = self._owner(owner_key)
+        async with self._lock:
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT * FROM memories WHERE id = ? AND retired_at IS NOT NULL",
+                    (int(memory_id),),
+                ).fetchone()
+                if row is None or not self._can_edit(row, requester):
+                    return None
+                now = self._utc_now()
+                self._record_history(connection, row, "restored", requester, now)
+                connection.execute(
+                    """UPDATE memories
+                       SET retired_at = NULL, updated_at = ?, updated_by = ?
+                       WHERE id = ?""",
+                    (now, requester, int(memory_id)),
+                )
+                restored = connection.execute(
+                    "SELECT * FROM memories WHERE id = ?", (int(memory_id),)
+                ).fetchone()
+                connection.commit()
+        return self._row_to_dict(restored, requester) if restored is not None else None
+
+    async def history(
+        self,
+        memory_id: int,
+        owner_key: str = "aaron",
+    ) -> list[dict[str, Any]]:
+        requester = self._owner(owner_key)
+        async with self._lock:
+            with self._connect() as connection:
+                current = connection.execute(
+                    "SELECT * FROM memories WHERE id = ?", (int(memory_id),)
+                ).fetchone()
+                revisions = connection.execute(
+                    """SELECT * FROM memory_history WHERE memory_id = ?
+                       ORDER BY revision_id DESC""",
+                    (int(memory_id),),
+                ).fetchall()
+        if current is not None and not self._can_view(current, requester):
+            return []
+        visible: list[dict[str, Any]] = []
+        for revision in revisions:
+            snapshot = json.loads(str(revision["snapshot_json"]))
+            if not self._can_view(snapshot, requester):
+                continue
+            visible.append({
+                "revision_id": int(revision["revision_id"]),
+                "memory_id": int(revision["memory_id"]),
+                "operation": str(revision["operation"]),
+                "changed_at": str(revision["changed_at"]),
+                "changed_by": str(revision["changed_by"]),
+                "snapshot": snapshot,
+            })
+        return visible
 
     async def count(self, owner_key: str = "aaron") -> int:
         return len(await self.list_memories(limit=500, owner_key=owner_key))
@@ -972,16 +1178,41 @@ class MemoryEngine:
                         """
                     ).fetchone()[0]
                 )
+                retired = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM memories WHERE retired_at IS NOT NULL"
+                    ).fetchone()[0]
+                )
+                expired = int(
+                    connection.execute(
+                        """SELECT COUNT(*) FROM memories
+                           WHERE retired_at IS NULL AND expires_at IS NOT NULL
+                             AND expires_at <= ?""",
+                        (self._utc_now(),),
+                    ).fetchone()[0]
+                )
+                revisions = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM memory_history"
+                    ).fetchone()[0]
+                )
                 migrated = self._meta_get(
                     connection, "last_migrated_rows"
                 ) or "0"
+                integrity = str(
+                    connection.execute("PRAGMA quick_check").fetchone()[0]
+                )
         return {
-            "status": "ready",
+            "status": "ready" if integrity == "ok" else "degraded",
+            "integrity": integrity,
             "schema_version": self.SCHEMA_VERSION,
             "requester_key": requester,
             "accessible_count": accessible,
             "total_count": total if requester == "aaron" else None,
             "shared_count": shared if requester == "aaron" else None,
+            "retired_count": retired if requester == "aaron" else None,
+            "expired_count": expired if requester == "aaron" else None,
+            "revision_count": revisions if requester == "aaron" else None,
             "last_migrated_rows": int(migrated),
             "visibility_modes": sorted(self.VALID_VISIBILITIES),
             "database": self.database_path.name,

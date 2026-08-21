@@ -38,6 +38,7 @@ class UserContext:
     privilege_verified: bool = False
     device_id: str | None = None
     voice_mode: bool = False
+    area_id: str | None = None
 
     @classmethod
     def from_request(
@@ -49,6 +50,7 @@ class UserContext:
         device_id: str | None,
         voice_mode: bool,
         privilege_verified: bool = False,
+        area_id: str | None = None,
     ) -> "UserContext":
         display_name = (user_name or "").strip() or "Aaron"
         return cls(
@@ -61,6 +63,7 @@ class UserContext:
             ),
             device_id=(device_id or "").strip() or None,
             voice_mode=bool(voice_mode),
+            area_id=(area_id or "").strip() or None,
         )
 
     @property

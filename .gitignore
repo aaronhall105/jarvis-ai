@@ -65,6 +65,13 @@ backup/
 *.pfx
 android/**/build/
 android/**/.gradle/
+android/jarvis-voice-client/app/libs/
+android/jarvis-voice-client/app/src/main/assets/sherpa-kws-v1831/
+
+# Local upgrade workspaces and generated integration bundles
+.jarvis-upgrade-backups/
+.jarvis-upgrade-state/
+jarvis-production-upgrade/
 
 # Logs
 *.log

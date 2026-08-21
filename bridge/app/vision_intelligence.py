@@ -706,6 +706,15 @@ class VisionEngine:
             int(event["importance"]),
             "all",
             ("view_camera", "dismiss", "remind_later"),
+            confidence=max(0.0, min(1.0, float(event["score"]))),
+            evidence=tuple(filter(None, (
+                f"frigate_track:{event['source_id']}",
+                f"camera:{event['camera']}",
+                f"zones:{','.join(event['zones'])}" if event["zones"] else "",
+                "snapshot_available" if event.get("has_snapshot") else "",
+                "everyone_away" if event["everyone_away"] else "someone_home",
+            ))),
+            room=str(event.get("area") or ""),
         )
         try:
             await proactive_engine.record(candidate)

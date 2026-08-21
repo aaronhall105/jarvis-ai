@@ -98,6 +98,9 @@ class Candidate:
     importance: int
     target_user: str = "all"
     actions: tuple[str, ...] = ("dismiss", "remind_later")
+    confidence: float = 1.0
+    evidence: tuple[str, ...] = ()
+    room: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -396,6 +399,16 @@ class ProactiveEngine:
         self.cooldown = max(30, cooldown)
         self.poll_seconds = max(5, poll_seconds)
         self.speaker_entity = speaker_entity.strip()
+        self.reply_window_seconds = max(5, min(60, int(env(
+            "JARVIS_PROACTIVE_REPLY_WINDOW_SECONDS", default="12"
+        ))))
+        self.daily_speech_budget = max(1, min(50, int(env(
+            "JARVIS_PROACTIVE_DAILY_SPEECH_BUDGET", default="8"
+        ))))
+        self.learning_threshold = max(3, min(30, int(env(
+            "JARVIS_PROACTIVE_LEARNING_THRESHOLD", default="5"
+        ))))
+        self.speaker_map = self._speaker_map()
         self.rules = Rules(
             int(env("JARVIS_PROACTIVE_DOOR_OPEN_SECONDS", default="600")),
             int(env("JARVIS_PROACTIVE_OVEN_ON_SECONDS", default="1800")),
@@ -452,6 +465,21 @@ class ProactiveEngine:
         connection.row_factory = sqlite3.Row
         return connection
 
+    def _speaker_map(self) -> dict[str, str]:
+        raw = env("JARVIS_PROACTIVE_ROOM_SPEAKERS", default="")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("Ignoring invalid JARVIS_PROACTIVE_ROOM_SPEAKERS")
+            return {}
+        return {
+            str(key).strip().lower().replace(" ", "_"): str(value).strip()
+            for key, value in parsed.items()
+            if str(key).strip() and str(value).strip()
+        } if isinstance(parsed, dict) else {}
+
     def initialise(self) -> None:
         if self.initialised:
             return
@@ -481,6 +509,37 @@ class ProactiveEngine:
         )
         with self.connection() as connection:
             connection.executescript(schema)
+            existing = {
+                str(row[1])
+                for row in connection.execute(
+                    "PRAGMA table_info(proactive_events)"
+                ).fetchall()
+            }
+            additions = {
+                "confidence": "REAL NOT NULL DEFAULT 1.0",
+                "evidence_json": "TEXT NOT NULL DEFAULT '[]'",
+                "decision_json": "TEXT NOT NULL DEFAULT '{}'",
+                "room": "TEXT NOT NULL DEFAULT ''",
+                "reply_until": "INTEGER",
+            }
+            for column, definition in additions.items():
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE proactive_events ADD COLUMN {column} {definition}"
+                    )
+            connection.executescript(
+                "CREATE TABLE IF NOT EXISTS proactive_feedback ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,"
+                " user_id TEXT NOT NULL, feedback TEXT NOT NULL, created_at INTEGER NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS proactive_proposals ("
+                " id TEXT PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL,"
+                " title TEXT NOT NULL, reason TEXT NOT NULL, evidence_count INTEGER NOT NULL,"
+                " confidence REAL NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL,"
+                " updated_at INTEGER NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS initiative_suppressions ("
+                " fingerprint TEXT PRIMARY KEY, reason TEXT NOT NULL,"
+                " created_at INTEGER NOT NULL);"
+            )
         self.initialised = True
 
     async def start(self) -> None:
@@ -641,12 +700,15 @@ class ProactiveEngine:
             if duplicate and now - int(duplicate["created_at"]) < self.cooldown:
                 return None
             event_id = str(uuid.uuid4())
+            confidence = max(0.0, min(1.0, float(candidate.confidence)))
+            room = candidate.room.strip().lower().replace(" ", "_")
+            decision = self._decision(candidate, confidence, room, now, connection)
             connection.execute(
                 "INSERT INTO proactive_events ("
                 "id, fingerprint, category, kind, entity_id, title, message, "
                 "reason, importance, target_user, actions_json, status, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)",
+                "created_at, updated_at, confidence, evidence_json, decision_json, room) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
                 (
                     event_id,
                     candidate.fingerprint,
@@ -661,11 +723,79 @@ class ProactiveEngine:
                     json.dumps(list(candidate.actions)),
                     now,
                     now,
+                    confidence,
+                    json.dumps(list(candidate.evidence), separators=(",", ":")),
+                    json.dumps(decision, separators=(",", ":")),
+                    room,
                 ),
             )
+            self._consider_learning(connection, candidate, now)
         event = self.get_event(event_id)
         await self.deliver(event)
         return self.get_event(event_id)
+
+    def _decision(
+        self, candidate: Candidate, confidence: float, room: str,
+        now: int, connection: sqlite3.Connection,
+    ) -> dict[str, Any]:
+        critical = candidate.importance >= 95 and candidate.category in {
+            "security", "cameras"
+        }
+        day_start = now - (now % 86400)
+        spoken_today = int(connection.execute(
+            "SELECT COUNT(*) FROM proactive_events WHERE spoken_at >= ?",
+            (day_start,),
+        ).fetchone()[0])
+        suppressed_reason = ""
+        suppressed = connection.execute(
+            "SELECT reason FROM initiative_suppressions WHERE fingerprint = ?",
+            (candidate.fingerprint,),
+        ).fetchone()
+        if suppressed is not None and not critical:
+            suppressed_reason = "disabled_by_user_feedback"
+        elif confidence < 0.65 and not critical:
+            suppressed_reason = "confidence_below_announcement_threshold"
+        elif spoken_today >= self.daily_speech_budget and not critical:
+            suppressed_reason = "daily_attention_budget_exhausted"
+        speaker = self.speaker_map.get(room) or self.speaker_entity
+        return {
+            "critical": critical,
+            "confidence": confidence,
+            "room": room or "unknown",
+            "speaker": speaker,
+            "spoken_today": spoken_today,
+            "daily_budget": self.daily_speech_budget,
+            "suppress_speech": bool(suppressed_reason),
+            "suppressed_reason": suppressed_reason,
+            "why": candidate.reason,
+        }
+
+    def _consider_learning(
+        self, connection: sqlite3.Connection, candidate: Candidate, now: int
+    ) -> None:
+        count = int(connection.execute(
+            "SELECT COUNT(*) FROM proactive_events WHERE fingerprint = ? AND created_at >= ?",
+            (candidate.fingerprint, now - 30 * 86400),
+        ).fetchone()[0]) + 1
+        if count < self.learning_threshold:
+            return
+        confidence = min(0.95, 0.55 + count * 0.05)
+        connection.execute(
+            """INSERT INTO proactive_proposals
+               (id, fingerprint, title, reason, evidence_count, confidence,
+                status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+               ON CONFLICT(fingerprint) DO UPDATE SET
+                 evidence_count=excluded.evidence_count,
+                 confidence=excluded.confidence, updated_at=excluded.updated_at""",
+            (
+                "proposal-" + candidate.fingerprint, candidate.fingerprint,
+                f"Learn a preference for {candidate.title.lower()}",
+                "Repeated verified events suggest a routine or notification preference; "
+                "Jarvis will not automate it until approved.",
+                count, confidence, now, now,
+            ),
+        )
 
     def get_event(self, event_id: str) -> dict[str, Any]:
         self.initialise()
@@ -756,6 +886,7 @@ class ProactiveEngine:
                         logger.exception("Mobile proactive notification failed")
             if (
                 settings["speak_enabled"]
+                and not event["decision"].get("suppress_speech", False)
                 and proactive_speech_allowed(
                     event,
                     quiet=self.quiet(settings),
@@ -764,16 +895,32 @@ class ProactiveEngine:
                 speak = True
 
         spoken = False
-        if speak and self.speaker_entity:
+        speaker = str(event["decision"].get("speaker") or "").strip()
+        if speak and speaker:
             try:
-                await self.ha_service(
-                    "assist_satellite",
-                    "announce",
-                    {
-                        "entity_id": self.speaker_entity,
-                        "message": event["message"],
-                    },
-                )
+                if speaker.startswith("script."):
+                    await self.ha_service(
+                        "script", "turn_on",
+                        {
+                            "entity_id": speaker,
+                            "variables": {"message": event["message"]},
+                        },
+                    )
+                else:
+                    await self.ha_service(
+                        "assist_satellite", "start_conversation",
+                        {
+                            "entity_id": speaker,
+                            "start_message": event["message"],
+                            "preannounce": False,
+                            "extra_system_prompt": (
+                                "This is a Jarvis proactive household event. "
+                                "Accept a short natural reply such as yes, no, "
+                                "thanks, show me, remind me later, or stop telling "
+                                "me that. Do not invent devices or observations."
+                            ),
+                        },
+                    )
                 spoken = True
             except Exception:
                 logger.exception("Proactive announcement failed")
@@ -783,7 +930,84 @@ class ProactiveEngine:
             fields["notified_at"] = int(time.time())
         if spoken:
             fields["spoken_at"] = int(time.time())
+            fields["reply_until"] = int(time.time()) + self.reply_window_seconds
         self.update(event["id"], **fields)
+
+    def active_reply_event(self, user: str, now: int | None = None) -> dict[str, Any] | None:
+        self.initialise()
+        current = int(now or time.time())
+        requester = normalise_user(user)
+        with self.connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM proactive_events
+                   WHERE reply_until >= ? AND status = 'active'
+                     AND target_user IN (?, 'all')
+                   ORDER BY spoken_at DESC LIMIT 1""",
+                (current, requester),
+            ).fetchone()
+        return self.row(row) if row is not None else None
+
+    async def handle_reply(self, text: str, user: str) -> dict[str, Any] | None:
+        event = self.active_reply_event(user)
+        if event is None:
+            return None
+        cleaned = " ".join(text.lower().strip(" .!?'").split())
+        feedback = ""
+        response = ""
+        if cleaned in {"thanks", "thank you", "i know", "okay", "ok", "no"}:
+            self.update(event["id"], status="dismissed", updated_at=int(time.time()))
+            feedback, response = "dismissed", "Understood."
+        elif cleaned in {"yes", "show me", "show it", "open it"} and "view_camera" in event["actions"]:
+            self.update(event["id"], status="viewed", updated_at=int(time.time()))
+            feedback, response = "viewed", "I've opened the camera event in Jarvis."
+        elif cleaned in {"that was useful", "useful", "good alert"}:
+            feedback, response = "useful", "Noted. I'll keep that kind of alert useful and concise."
+        elif cleaned in {"don't announce that again", "dont announce that again", "stop telling me that"}:
+            self.update(event["id"], status="dismissed", updated_at=int(time.time()))
+            with self.connection() as connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO initiative_suppressions(fingerprint,reason,created_at) VALUES(?,?,?)",
+                    (event["fingerprint"], "explicit_user_feedback", int(time.time())),
+                )
+            feedback, response = "suppress_kind", "Understood. I won't announce that kind of event again."
+        elif cleaned.startswith("remind me"):
+            self.update(
+                event["id"], status="snoozed",
+                snoozed_until=int(time.time()) + 15 * 60,
+                updated_at=int(time.time()),
+            )
+            feedback, response = "snoozed_15m", "I'll remind you in fifteen minutes."
+        else:
+            return None
+        with self.connection() as connection:
+            connection.execute(
+                "INSERT INTO proactive_feedback(event_id,user_id,feedback,created_at) VALUES(?,?,?,?)",
+                (event["id"], normalise_user(user), feedback, int(time.time())),
+            )
+        return {"handled": True, "response": response, "event": self.get_event(event["id"])}
+
+    def proposals(self, limit: int = 50) -> list[dict[str, Any]]:
+        self.initialise()
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM proactive_proposals ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(250, int(limit))),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def proposal_action(self, proposal_id: str, action: str) -> dict[str, Any]:
+        resolved = action.strip().lower()
+        if resolved not in {"approve", "reject"}:
+            raise ValueError("Proposal action must be approve or reject")
+        status = "approved" if resolved == "approve" else "rejected"
+        with self.connection() as connection:
+            cursor = connection.execute(
+                "UPDATE proactive_proposals SET status=?, updated_at=? WHERE id=?",
+                (status, int(time.time()), proposal_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(proposal_id)
+        return next(item for item in self.proposals(250) if item["id"] == proposal_id)
 
     async def mobile_notify(self, target: str, event: dict[str, Any]) -> None:
         service = target.split(".", 1)[1]
@@ -963,6 +1187,9 @@ class ProactiveEngine:
             "snoozed_until": (
                 "UPDATE proactive_events SET snoozed_until = ? WHERE id = ?"
             ),
+            "reply_until": (
+                "UPDATE proactive_events SET reply_until = ? WHERE id = ?"
+            ),
         }
         safe = {
             key: value
@@ -998,6 +1225,11 @@ class ProactiveEngine:
             "notified_at": row["notified_at"],
             "spoken_at": row["spoken_at"],
             "snoozed_until": row["snoozed_until"],
+            "reply_until": row["reply_until"],
+            "confidence": float(row["confidence"]),
+            "evidence": json.loads(row["evidence_json"]),
+            "decision": json.loads(row["decision_json"]),
+            "room": row["room"],
         }
 
 
@@ -1048,6 +1280,10 @@ async def status(_: None = Depends(authorise)) -> dict[str, Any]:
         "min_importance": engine.min_importance,
         "cooldown_seconds": engine.cooldown,
         "speaker_configured": bool(engine.speaker_entity),
+        "room_speakers": sorted(engine.speaker_map),
+        "reply_window_seconds": engine.reply_window_seconds,
+        "daily_speech_budget": engine.daily_speech_budget,
+        "learning_threshold": engine.learning_threshold,
     }
 
 
@@ -1061,6 +1297,48 @@ async def feed(
         "events": engine.feed(user_value, limit),
         "settings": engine.settings(user_value),
     }
+
+
+@router.get("/events/{event_id}/explain")
+async def explain_event(
+    event_id: str,
+    _: None = Depends(authorise),
+) -> dict[str, Any]:
+    try:
+        event = engine.get_event(event_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Proactive event not found") from exc
+    return {
+        "event_id": event_id,
+        "why": event["reason"],
+        "confidence": event["confidence"],
+        "evidence": event["evidence"],
+        "decision": event["decision"],
+        "room": event["room"],
+    }
+
+
+@router.get("/proposals")
+async def proposals(
+    limit: int = Query(50, ge=1, le=250),
+    _: None = Depends(authorise),
+) -> dict[str, Any]:
+    values = engine.proposals(limit)
+    return {"count": len(values), "proposals": values}
+
+
+@router.post("/proposals/{proposal_id}/{action}")
+async def proposal_action(
+    proposal_id: str,
+    action: str,
+    _: None = Depends(authorise),
+) -> dict[str, Any]:
+    try:
+        return engine.proposal_action(proposal_id, action)
+    except KeyError as exc:
+        raise HTTPException(404, "Learning proposal not found") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/settings")

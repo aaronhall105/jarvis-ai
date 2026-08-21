@@ -32,6 +32,7 @@ class RuntimeMetrics:
         self._max_samples = max(16, int(max_samples))
         self._lock = threading.Lock()
         self._counters: dict[str, int] = defaultdict(int)
+        self._gauges: dict[str, float] = {}
         self._latencies: dict[str, deque[float]] = defaultdict(
             lambda: deque(maxlen=self._max_samples)
         )
@@ -56,6 +57,19 @@ class RuntimeMetrics:
             return
         with self._lock:
             self._latencies[key].append(value)
+
+    def set_gauge(self, name: str, value: Any) -> None:
+        key = str(name or "").strip()
+        if not key:
+            return
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(numeric):
+            return
+        with self._lock:
+            self._gauges[key] = numeric
 
     def observe_many(self, timings: Any) -> None:
         if not isinstance(timings, dict):
@@ -91,6 +105,7 @@ class RuntimeMetrics:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             counters = dict(self._counters)
+            gauges = dict(self._gauges)
             latencies = {
                 key: self._summary(list(values))
                 for key, values in self._latencies.items()
@@ -99,6 +114,7 @@ class RuntimeMetrics:
         return {
             "uptime_seconds": max(0, round(time.monotonic() - self._started)),
             "counters": counters,
+            "gauges": gauges,
             "latencies": latencies,
             "performance_budgets_ms": dict(PERFORMANCE_BUDGETS_MS),
             "last_error": last_error,

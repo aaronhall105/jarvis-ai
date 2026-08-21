@@ -94,6 +94,10 @@ class UnderstandingEngine:
         self._lexicon_cache: tuple[set[str], set[str], set[str]] | None = None
 
     @staticmethod
+    def is_write_action(text: str) -> bool:
+        return bool(_WRITE_ACTION_RE.search(text or ""))
+
+    @staticmethod
     def _clean(value: str) -> str:
         value = unicodedata.normalize("NFKC", value)
         value = value.replace("’", "'").replace("`", "'")

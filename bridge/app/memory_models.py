@@ -23,6 +23,12 @@ class SaveMemoryRequest(BaseModel):
         default=None,
         pattern=r"^(normal|sensitive)$",
     )
+    source: str = Field(
+        default="explicit_user",
+        pattern=r"^(explicit_user|inferred|imported|system)$",
+    )
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    expires_at: str | None = Field(default=None, max_length=64)
 
 
 class SearchMemoryRequest(BaseModel):

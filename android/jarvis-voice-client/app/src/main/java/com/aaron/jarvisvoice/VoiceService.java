@@ -732,7 +732,17 @@ public final class VoiceService extends Service implements
 
     private void interruptCurrentTurnForBargeIn() {
         voiceFoundation.interrupting("user barge-in");
-        if (!hasInterruptibleTurn()) return;
+        if (!hasInterruptibleTurn()) {
+            Log.i(TAG, "VOICE_BARGE_IN idempotent=no_active_turn");
+            return;
+        }
+
+        Log.i(
+            TAG,
+            "VOICE_BARGE_IN cancel_dispatch brain=" + brainActive
+                + " playback=" + playbackActive
+                + " fallback=" + (fallbackPending || fallbackSpeaking)
+        );
 
         JarvisRealtimeClient current = client;
         if (current != null) current.cancelResponse();
@@ -754,6 +764,28 @@ public final class VoiceService extends Service implements
         clearPendingBargeInPartial();
         status("Interrupted — listening");
         broadcastState(true, true);
+        Log.i(TAG, "VOICE_BARGE_IN local_cleanup_complete listening=true");
+    }
+
+    private void rearmStandardBargeInCapture() {
+        if (
+            !voiceActive
+                || stopping
+                || endConversationAfterReply
+                || !ConversationMode.STANDARD.equals(store.conversationMode())
+        ) {
+            return;
+        }
+        Log.i(
+            TAG,
+            "VOICE_BARGE_IN capture_rearm playback=" + playbackActive
+                + " brain=" + brainActive
+                + " recognizer_running=" + standardSpeechEngine.isRunning()
+        );
+        // A recognizer started for the preceding wake/follow-up can remain
+        // nominally running while no longer delivering callbacks. Replace it
+        // at the playback boundary so barge-in always owns a live capture.
+        standardSpeechEngine.start();
     }
 
     private void keepStandardBargeInArmed() {
@@ -1286,12 +1318,19 @@ public final class VoiceService extends Service implements
         if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
+            float bargeInGain = BargeInAudioPolicy.outputGain(
+                usesPrivateAudioRoute(),
+                ConversationMode.STANDARD.equals(store.conversationMode())
+            );
+            realtimePlayback.setOutputGain(bargeInGain);
+            Log.i(TAG, "VOICE_BARGE_IN output_gain=" + bargeInGain);
             markAssistantAudioStarted();
             status("Jarvis is speaking — interrupt anytime");
             broadcastState(voiceActive, false);
-            main.postDelayed(this::keepStandardBargeInArmed, bargeInArmDelayMs());
+            main.postDelayed(this::rearmStandardBargeInCapture, bargeInArmDelayMs());
             return;
         }
+        realtimePlayback.setOutputGain(1.0f);
         markAssistantAudioEnded();
         afterPlayback();
     }
@@ -1308,7 +1347,7 @@ public final class VoiceService extends Service implements
         markAssistantAudioStarted();
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(voiceActive, false);
-        main.postDelayed(this::keepStandardBargeInArmed, bargeInArmDelayMs());
+        main.postDelayed(this::rearmStandardBargeInCapture, bargeInArmDelayMs());
     }
 
     @Override public void onPlaybackCompleted() {
@@ -1370,7 +1409,7 @@ public final class VoiceService extends Service implements
         status("Jarvis is speaking — interrupt anytime");
         broadcastState(true, false);
         main.postDelayed(
-            this::keepStandardBargeInArmed,
+            this::rearmStandardBargeInCapture,
             bargeInArmDelayMs()
         );
     }
@@ -1474,6 +1513,11 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onStandardReady() {
+        Log.i(
+            TAG,
+            "VOICE_BARGE_IN capture_ready playback=" + playbackActive
+                + " brain=" + brainActive
+        );
         voiceFoundation.listeningStandard(
             "standard recogniser ready"
         );
@@ -1487,6 +1531,8 @@ public final class VoiceService extends Service implements
         if (text == null || text.isBlank()) {
             return;
         }
+
+        Log.i(TAG, "VOICE_BARGE_IN partial_received text=" + text);
 
         if (isLikelyPlaybackEcho(text)) {
             return;
@@ -1556,11 +1602,27 @@ public final class VoiceService extends Service implements
                 heard
             );
 
+        Log.i(
+            TAG,
+            "VOICE_BARGE_IN final_received command=" + command
+                + " playback=" + playbackActive
+                + " brain=" + brainActive
+        );
+
         if (command.isEmpty()) {
             main.postDelayed(
                 this::keepStandardBargeInArmed,
                 250L
             );
+            return;
+        }
+
+        if (InterruptionCommandPolicy.isCancellationOnly(command)) {
+            Log.i(TAG, "VOICE_BARGE_IN cancellation_only command=" + command);
+            followUpOwnerUntilMs = SystemClock.elapsedRealtime() + 30_000L;
+            clearPendingBargeInPartial();
+            interruptCurrentTurnForBargeIn();
+            main.postDelayed(this::rearmStandardBargeInCapture, 120L);
             return;
         }
 
@@ -1636,6 +1698,12 @@ public final class VoiceService extends Service implements
 
 
     @Override public void onStandardError(String message) {
+        Log.w(
+            TAG,
+            "VOICE_BARGE_IN capture_error message=" + message
+                + " playback=" + playbackActive
+                + " brain=" + brainActive
+        );
         status(message);
         broadcastState(voiceActive, false);
 
