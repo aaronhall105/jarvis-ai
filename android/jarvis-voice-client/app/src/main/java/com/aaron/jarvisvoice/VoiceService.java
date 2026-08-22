@@ -263,6 +263,8 @@ public final class VoiceService extends Service implements
             case ACTION_ASSISTANT_DISMISS -> stopVoice(false);
             default -> {
                 ensureConnected();
+                if (ready) status("Ready");
+                else if (client != null) status("Connecting");
                 if (store.startWithVoice() && microphoneForeground) {
                     requestedVoiceActive = true;
                 }
