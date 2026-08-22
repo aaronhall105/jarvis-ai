@@ -454,9 +454,15 @@ async def lifespan(_: FastAPI):
             status.message,
         )
 
-    yield
-    await awareness.stop()
-    logger.info("%s stopping", settings.jarvis_name)
+    try:
+        await proactive_engine.start()
+        await vision_engine.start()
+        yield
+    finally:
+        await vision_engine.stop()
+        await proactive_engine.stop()
+        await awareness.stop()
+        logger.info("%s stopping", settings.jarvis_name)
 
 
 app = FastAPI(

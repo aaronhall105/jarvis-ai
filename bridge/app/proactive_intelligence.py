@@ -1259,16 +1259,6 @@ async def authorise(request: Request) -> None:
         raise HTTPException(403, "Unable to validate client") from exc
 
 
-@router.on_event("startup")
-async def startup() -> None:
-    await engine.start()
-
-
-@router.on_event("shutdown")
-async def shutdown() -> None:
-    await engine.stop()
-
-
 @router.get("/status")
 async def status(_: None = Depends(authorise)) -> dict[str, Any]:
     engine.initialise()

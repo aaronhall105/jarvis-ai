@@ -1536,16 +1536,6 @@ async def authorise(request: Request) -> None:
         ) from exc
 
 
-@router.on_event("startup")
-async def startup() -> None:
-    await engine.start()
-
-
-@router.on_event("shutdown")
-async def shutdown() -> None:
-    await engine.stop()
-
-
 @router.get("/status")
 async def status(
     _: None = Depends(authorise),
