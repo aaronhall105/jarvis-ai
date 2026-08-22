@@ -8,6 +8,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -22,6 +23,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.ImageButton;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -29,6 +31,7 @@ import androidx.core.content.ContextCompat;
 import androidx.wear.input.RemoteInputIntentHelper;
 import com.aaron.jarvisvoice.R;
 import com.aaron.jarvisvoice.protocol.WatchConversationState;
+import com.aaron.jarvisvoice.protocol.WearUiMetrics;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -42,9 +45,11 @@ public final class JarvisWearActivity extends Activity {
 
     private final List<Message> messages = new ArrayList<>();
     private final StringBuilder streamingAssistant = new StringBuilder();
-    private TextView status, transcript, emptyTranscript;
+    private TextView status, emptyTranscript;
+    private LinearLayout transcriptBox;
     private ScrollView transcriptScroll;
     private ImageButton control;
+    private FrameLayout controlTarget;
     private boolean active;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -78,61 +83,74 @@ public final class JarvisWearActivity extends Activity {
     private void buildUi() {
         getWindow().setStatusBarColor(getColor(R.color.jarvis_white));
         getWindow().setNavigationBarColor(getColor(R.color.jarvis_white));
+        boolean round = (getResources().getConfiguration().screenLayout
+            & Configuration.SCREENLAYOUT_ROUND_MASK) == Configuration.SCREENLAYOUT_ROUND_YES;
+        int widthDp = Math.round(getResources().getDisplayMetrics().widthPixels
+            / getResources().getDisplayMetrics().density);
+        int safeSide = WearUiMetrics.safeSideDp(widthDp, round);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL); root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(18), dp(8), dp(18), dp(10));
+        root.setPadding(dp(safeSide), dp(6), dp(safeSide), dp(7));
         root.setBackgroundColor(getColor(R.color.jarvis_white));
         root.setOnApplyWindowInsetsListener((view, insets) -> {
             android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-            int side = Math.max(dp(14), Math.max(bars.left, bars.right));
-            view.setPadding(side, Math.max(dp(6), bars.top), side, Math.max(dp(8), bars.bottom));
+            int side = Math.max(dp(safeSide), Math.max(bars.left, bars.right));
+            view.setPadding(side, Math.max(dp(5), bars.top), side, Math.max(dp(6), bars.bottom));
             return insets;
         });
 
         TextView title = new TextView(this);
         title.setText("J A R V I S"); title.setTextColor(getColor(R.color.jarvis_black));
-        title.setTextSize(15); title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setTextSize(14); title.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
         title.setLetterSpacing(0.12f); title.setGravity(Gravity.CENTER);
-        root.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(26)));
+        root.addView(title, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(22)));
 
-        status = new TextView(this); status.setTextSize(11);
-        status.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        status.setGravity(Gravity.CENTER); status.setAllCaps(true);
-        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(24));
-        statusParams.bottomMargin = dp(2); root.addView(status, statusParams);
+        status = new TextView(this); status.setTextSize(10);
+        status.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        status.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(18));
+        statusParams.bottomMargin = dp(3); root.addView(status, statusParams);
 
         transcriptScroll = new ScrollView(this); transcriptScroll.setFillViewport(true);
         transcriptScroll.setVerticalScrollBarEnabled(false);
-        GradientDrawable panel = new GradientDrawable(); panel.setColor(getColor(R.color.jarvis_panel));
-        panel.setCornerRadius(dp(14)); transcriptScroll.setBackground(panel);
-        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER_VERTICAL); box.setPadding(dp(12), dp(8), dp(12), dp(8));
+        transcriptBox = new LinearLayout(this); transcriptBox.setOrientation(LinearLayout.VERTICAL);
+        transcriptBox.setGravity(Gravity.CENTER_VERTICAL); transcriptBox.setPadding(dp(2), dp(3), dp(2), dp(3));
         emptyTranscript = new TextView(this); emptyTranscript.setText(R.string.ask_anything);
-        emptyTranscript.setTextColor(getColor(R.color.jarvis_muted)); emptyTranscript.setTextSize(12);
-        emptyTranscript.setGravity(Gravity.CENTER); box.addView(emptyTranscript, new LinearLayout.LayoutParams(-1, -2));
-        transcript = new TextView(this); transcript.setTextColor(getColor(R.color.jarvis_black));
-        transcript.setTextSize(12); transcript.setLineSpacing(0f, 1.08f);
-        box.addView(transcript, new LinearLayout.LayoutParams(-1, -2));
-        transcriptScroll.addView(box, new ScrollView.LayoutParams(-1, -1));
+        emptyTranscript.setTextColor(getColor(R.color.jarvis_muted)); emptyTranscript.setTextSize(11);
+        emptyTranscript.setGravity(Gravity.CENTER); transcriptBox.addView(emptyTranscript, new LinearLayout.LayoutParams(-1, -2));
+        transcriptScroll.addView(transcriptBox, new ScrollView.LayoutParams(-1, -1));
         LinearLayout.LayoutParams conversation = new LinearLayout.LayoutParams(-1, 0, 1f);
-        conversation.leftMargin = dp(4); conversation.rightMargin = dp(4); root.addView(transcriptScroll, conversation);
+        root.addView(transcriptScroll, conversation);
 
         LinearLayout actions = new LinearLayout(this); actions.setGravity(Gravity.CENTER);
-        actions.setPadding(0, dp(5), 0, 0);
-        ImageButton type = actionButton(android.R.drawable.ic_menu_edit, "Type to Jarvis");
-        type.setOnClickListener(v -> openTextInput()); actions.addView(type, new LinearLayout.LayoutParams(dp(42), dp(42)));
-        control = actionButton(R.drawable.ic_mic, "Start conversation");
+        actions.setPadding(0, dp(3), 0, 0);
+        ImageButton type = actionButton(android.R.drawable.ic_menu_edit, "Type to Jarvis", false);
+        type.setOnClickListener(v -> openTextInput());
+        actions.addView(touchTarget(type, WearUiMetrics.textActionVisibleDp()),
+            new LinearLayout.LayoutParams(dp(WearUiMetrics.actionTouchTargetDp()), dp(WearUiMetrics.actionTouchTargetDp())));
+        control = actionButton(R.drawable.ic_mic, "Start conversation", false);
         control.setOnClickListener(v -> { if (active) cancelConversation(); else startConversation(); });
-        LinearLayout.LayoutParams controlParams = new LinearLayout.LayoutParams(dp(46), dp(46));
-        controlParams.leftMargin = dp(10); actions.addView(control, controlParams);
-        root.addView(actions, new LinearLayout.LayoutParams(-1, dp(51)));
+        controlTarget = touchTarget(control, WearUiMetrics.primaryActionVisibleDp());
+        LinearLayout.LayoutParams controlParams = new LinearLayout.LayoutParams(dp(46), dp(WearUiMetrics.actionTouchTargetDp()));
+        controlParams.leftMargin = dp(6); actions.addView(controlTarget, controlParams);
+        root.addView(actions, new LinearLayout.LayoutParams(-1, dp(47)));
         setContentView(root); render(false, WatchConversationState.IDLE.name(), "Ready");
     }
 
-    private ImageButton actionButton(int icon, String description) {
+    private ImageButton actionButton(int icon, String description, boolean activeButton) {
         ImageButton button = new ImageButton(this); button.setImageResource(icon);
-        button.setPadding(dp(11), dp(11), dp(11), dp(11)); button.setContentDescription(description);
-        button.setBackground(circle(false)); return button;
+        button.setPadding(dp(7), dp(7), dp(7), dp(7)); button.setContentDescription(description);
+        button.setBackground(circle(activeButton)); return button;
+    }
+
+    private FrameLayout touchTarget(ImageButton button, int visibleSizeDp) {
+        FrameLayout target = new FrameLayout(this);
+        FrameLayout.LayoutParams visible = new FrameLayout.LayoutParams(dp(visibleSizeDp), dp(visibleSizeDp), Gravity.CENTER);
+        target.addView(button, visible);
+        target.setContentDescription(button.getContentDescription());
+        target.setOnClickListener(view -> button.performClick());
+        return target;
     }
 
     private void startConversation() {
@@ -186,20 +204,35 @@ public final class JarvisWearActivity extends Activity {
     }
 
     private void renderTranscript() {
-        SpannableStringBuilder value = new SpannableStringBuilder();
-        for (Message message : messages) appendMessage(value, message.role(), message.text());
-        if (streamingAssistant.length() > 0) appendMessage(value, "assistant", streamingAssistant.toString());
-        transcript.setText(value); emptyTranscript.setVisibility(value.length() == 0 ? View.VISIBLE : View.GONE);
+        transcriptBox.removeAllViews();
+        if (messages.isEmpty() && streamingAssistant.length() == 0) {
+            transcriptBox.addView(emptyTranscript, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            for (Message message : messages) transcriptBox.addView(messageView(message.role(), message.text()));
+            if (streamingAssistant.length() > 0)
+                transcriptBox.addView(messageView("assistant", streamingAssistant.toString()));
+        }
         transcriptScroll.post(() -> transcriptScroll.fullScroll(View.FOCUS_DOWN));
     }
 
-    private void appendMessage(SpannableStringBuilder value, String role, String text) {
-        if (value.length() > 0) value.append("\n\n");
-        String label = "user".equals(role) ? "YOU  " : "JARVIS  ";
+    private TextView messageView(String role, String text) {
+        SpannableStringBuilder value = new SpannableStringBuilder();
+        String label = "user".equals(role) ? "YOU" : "JARVIS";
         int start = value.length(); value.append(label);
         value.setSpan(new StyleSpan(Typeface.BOLD), start, value.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
         value.setSpan(new ForegroundColorSpan(getColor(R.color.jarvis_muted)), start, value.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-        value.append(text);
+        value.append("\n").append(text);
+        TextView row = new TextView(this);
+        row.setText(value); row.setTextColor(getColor(R.color.jarvis_black)); row.setTextSize(11);
+        row.setLineSpacing(0f, 1.05f); row.setPadding(dp(10), dp(6), dp(10), dp(6));
+        GradientDrawable card = new GradientDrawable();
+        card.setColor(getColor("user".equals(role) ? R.color.jarvis_panel : R.color.jarvis_white));
+        card.setCornerRadius(dp(12));
+        if (!"user".equals(role)) card.setStroke(dp(1), 0xffe7e7e7);
+        row.setBackground(card);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(4); row.setLayoutParams(params);
+        return row;
     }
 
     private void render(boolean isActive, String state, String message) {
@@ -209,16 +242,17 @@ public final class JarvisWearActivity extends Activity {
             renderTranscript();
         }
         String label = switch (state) {
-            case "LISTENING", "FOLLOW_UP" -> "LISTENING";
-            case "PROCESSING" -> "PROCESSING";
-            case "SPEAKING" -> "SPEAKING";
-            default -> "READY";
+            case "LISTENING", "FOLLOW_UP" -> "Listening  •";
+            case "PROCESSING" -> "Processing  •";
+            case "SPEAKING" -> "Speaking  •";
+            default -> "Ready";
         };
-        status.setText(message != null && message.toLowerCase(Locale.ROOT).contains("connect") ? "CONNECTING" : label);
+        status.setText(message != null && message.toLowerCase(Locale.ROOT).contains("connect") ? "Connecting  •" : label);
         status.setTextColor(getColor(isActive ? R.color.jarvis_black : R.color.jarvis_muted));
         control.setImageResource(isActive ? R.drawable.ic_close : R.drawable.ic_mic);
         control.setBackground(circle(isActive));
         control.setContentDescription(isActive ? "End conversation" : "Start conversation");
+        controlTarget.setContentDescription(control.getContentDescription());
     }
 
     private GradientDrawable circle(boolean activeButton) {

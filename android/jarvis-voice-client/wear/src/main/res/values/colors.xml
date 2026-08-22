@@ -4,5 +4,5 @@
     <color name="jarvis_black">#141414</color>
     <color name="jarvis_panel">#F6F6F6</color>
     <color name="jarvis_muted">#676767</color>
-    <color name="jarvis_icon_background">#141414</color>
+    <color name="jarvis_icon_background">#FFFFFF</color>
 </resources>
