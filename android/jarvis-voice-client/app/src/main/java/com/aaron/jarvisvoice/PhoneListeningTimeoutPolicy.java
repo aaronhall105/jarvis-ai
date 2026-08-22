@@ -8,6 +8,10 @@ final class PhoneListeningTimeoutPolicy {
 
     private PhoneListeningTimeoutPolicy() {}
 
+    static boolean isMeaningfulTranscript(String text) {
+        return text != null && !text.isBlank();
+    }
+
     static boolean shouldTimeout(
         boolean voiceActive,
         VoiceEndpoint endpoint,

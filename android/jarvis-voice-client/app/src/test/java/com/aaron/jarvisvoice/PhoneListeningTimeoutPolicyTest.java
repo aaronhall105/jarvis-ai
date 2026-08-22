@@ -19,4 +19,10 @@ public class PhoneListeningTimeoutPolicyTest {
         assertFalse(PhoneListeningTimeoutPolicy.shouldTimeout(
             true, VoiceEndpoint.WATCH, false, false));
     }
+
+    @Test public void recognizerNoiseDoesNotCountAsMeaningfulSpeech() {
+        assertFalse(PhoneListeningTimeoutPolicy.isMeaningfulTranscript(null));
+        assertFalse(PhoneListeningTimeoutPolicy.isMeaningfulTranscript("  \n"));
+        assertTrue(PhoneListeningTimeoutPolicy.isMeaningfulTranscript("What time is it?"));
+    }
 }

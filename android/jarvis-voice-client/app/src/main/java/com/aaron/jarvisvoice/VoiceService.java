@@ -126,6 +126,7 @@ public final class VoiceService extends Service implements
     private int wakeUnhealthyChecks;
     private boolean wakeOnlyForeground;
     private int phoneListeningTimeoutGeneration;
+    private boolean phoneListeningTimeoutArmed;
 
     private final Runnable wakeWatchdog =
         new Runnable() {
@@ -809,9 +810,12 @@ public final class VoiceService extends Service implements
     }
 
     private void armPhoneListeningTimeout() {
+        if (phoneListeningTimeoutArmed) return;
+        phoneListeningTimeoutArmed = true;
         int generation = ++phoneListeningTimeoutGeneration;
         main.postDelayed(() -> {
             if (generation != phoneListeningTimeoutGeneration) return;
+            phoneListeningTimeoutArmed = false;
             if (!PhoneListeningTimeoutPolicy.shouldTimeout(
                     voiceActive, voiceEndpoint, brainActive, playbackActive)) return;
             Log.i(TAG, "VOICE_LISTEN_TIMEOUT no_meaningful_speech_ms="
@@ -821,6 +825,7 @@ public final class VoiceService extends Service implements
     }
 
     private void cancelPhoneListeningTimeout() {
+        phoneListeningTimeoutArmed = false;
         phoneListeningTimeoutGeneration++;
     }
 
@@ -1297,8 +1302,8 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onUserTranscript(String text) {
+        if (!PhoneListeningTimeoutPolicy.isMeaningfulTranscript(text)) return;
         cancelPhoneListeningTimeout();
-        if (text == null || text.isBlank()) return;
         if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
         }
@@ -1345,7 +1350,6 @@ public final class VoiceService extends Service implements
 
     @Override public void onSpeechStarted() {
         if (!voiceActive) return;
-        cancelPhoneListeningTimeout();
         if ((playbackActive || fallbackSpeaking) && !usesPrivateAudioRoute()) {
             return;
         }
