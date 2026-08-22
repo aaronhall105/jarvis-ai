@@ -64,6 +64,11 @@ backup/
 *.p12
 *.pfx
 android/**/build/
+
+# Local physical-certification evidence and stable-signed recovery archives.
+# These contain generated diagnostics and binary release outputs, not source.
+/artifacts/
+/signed-pair/
 android/**/.gradle/
 android/jarvis-voice-client/app/libs/
 android/jarvis-voice-client/app/src/main/assets/sherpa-kws-v1831/
