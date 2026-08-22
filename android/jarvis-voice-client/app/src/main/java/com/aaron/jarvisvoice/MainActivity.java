@@ -629,7 +629,7 @@ public final class MainActivity extends Activity {
         name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         copy.addView(name, matchWrap()); copy.addView(text(description, 13, MID), matchWrap());
         row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        if (mode == assistantMode) row.addView(text("✓", 18, BLACK), matchWrap());
+        if (mode == assistantMode) row.addView(text("✓", 18, BLACK), wrapWrap());
         row.setOnClickListener(view -> {
             dialog.dismiss(); assistantMode = mode; store.setAssistantMode(mode); applyAssistantMode(true);
         });
