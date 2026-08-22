@@ -125,6 +125,7 @@ public final class VoiceService extends Service implements
     private int wakeRearmGeneration;
     private int wakeUnhealthyChecks;
     private boolean wakeOnlyForeground;
+    private int phoneListeningTimeoutGeneration;
 
     private final Runnable wakeWatchdog =
         new Runnable() {
@@ -647,6 +648,7 @@ public final class VoiceService extends Service implements
             if (!audio.isRunning()) audio.start();
             status("Live voice — listening continuously");
             broadcastState(true, true);
+            armPhoneListeningTimeout();
         }
     }
 
@@ -792,6 +794,7 @@ public final class VoiceService extends Service implements
         }
 
         if (standardSpeechEngine.isRunning()) {
+            if (!brainActive && !playbackActive) armPhoneListeningTimeout();
             return;
         }
 
@@ -802,6 +805,23 @@ public final class VoiceService extends Service implements
                 : "Listening"
         );
         broadcastState(true, true);
+        if (!brainActive && !playbackActive) armPhoneListeningTimeout();
+    }
+
+    private void armPhoneListeningTimeout() {
+        int generation = ++phoneListeningTimeoutGeneration;
+        main.postDelayed(() -> {
+            if (generation != phoneListeningTimeoutGeneration) return;
+            if (!PhoneListeningTimeoutPolicy.shouldTimeout(
+                    voiceActive, voiceEndpoint, brainActive, playbackActive)) return;
+            Log.i(TAG, "VOICE_LISTEN_TIMEOUT no_meaningful_speech_ms="
+                + PhoneListeningTimeoutPolicy.TIMEOUT_MS);
+            stopVoice(false);
+        }, PhoneListeningTimeoutPolicy.TIMEOUT_MS);
+    }
+
+    private void cancelPhoneListeningTimeout() {
+        phoneListeningTimeoutGeneration++;
     }
 
 
@@ -985,6 +1005,7 @@ public final class VoiceService extends Service implements
     }
 
     private void stopVoice(boolean stopService) {
+        cancelPhoneListeningTimeout();
         VoiceEndpoint endingEndpoint = voiceEndpoint;
         long endingGeneration = endpointGeneration;
         requestedVoiceActive = false;
@@ -1276,6 +1297,7 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onUserTranscript(String text) {
+        cancelPhoneListeningTimeout();
         if (text == null || text.isBlank()) return;
         if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
@@ -1323,6 +1345,7 @@ public final class VoiceService extends Service implements
 
     @Override public void onSpeechStarted() {
         if (!voiceActive) return;
+        cancelPhoneListeningTimeout();
         if ((playbackActive || fallbackSpeaking) && !usesPrivateAudioRoute()) {
             return;
         }
@@ -1579,6 +1602,7 @@ public final class VoiceService extends Service implements
         if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
+            cancelPhoneListeningTimeout();
             float bargeInGain = BargeInAudioPolicy.outputGain(
                 usesPrivateAudioRoute(),
                 ConversationMode.STANDARD.equals(store.conversationMode())
@@ -1656,6 +1680,7 @@ public final class VoiceService extends Service implements
         } else {
             status("Live voice — listening continuously");
             broadcastState(true, true);
+            armPhoneListeningTimeout();
         }
     }
 

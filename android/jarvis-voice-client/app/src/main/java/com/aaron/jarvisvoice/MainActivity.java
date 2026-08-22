@@ -322,15 +322,17 @@ public final class MainActivity extends Activity {
         clearChat.setOnClickListener(view -> confirmDeleteChat());
         bar.addView(clearChat, iconParams(dp(44), dp(6)));
 
-        ImageButton more = iconButton(
-            R.drawable.ic_more,
-            "More options",
+        ImageButton settings = iconButton(
+            R.drawable.ic_settings,
+            "Settings",
             SOFT,
             BLACK
         );
-        more.setOnClickListener(this::showTopMenu);
+        settings.setOnClickListener(view ->
+            startActivity(new Intent(this, SettingsActivity.class))
+        );
         bar.addView(
-            more,
+            settings,
             iconParams(dp(40), 0)
         );
         return bar;
@@ -465,6 +467,10 @@ public final class MainActivity extends Activity {
             openHistory();
             return true;
         });
+        menu.getMenu().add("Improvements").setOnMenuItemClickListener(item -> {
+            startActivity(new Intent(this, ImprovementsActivity.class));
+            return true;
+        });
         menu.show();
     }
 
@@ -526,6 +532,10 @@ public final class MainActivity extends Activity {
         if (value.isEmpty()) return;
         if (!credentialsReady()) return;
         composer.setText("");
+        composer.post(() -> {
+            composer.requestFocus();
+            composer.setSelection(composer.length());
+        });
         startForegroundService(
             new Intent(this, VoiceService.class)
                 .setAction(VoiceService.ACTION_SEND_TEXT)
