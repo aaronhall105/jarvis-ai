@@ -22,7 +22,11 @@ final class WearConversationController implements WearChannelManager.Listener {
     }
     synchronized void start() {
         if (machine.state() != WatchConversationState.IDLE) return;
-        long generation = machine.start(); player.begin(generation); publish("Connecting…"); channel.connect(context, generation);
+        long generation = machine.start();
+        player.begin(generation);
+        publish("Listening…");
+        channel.connect(context, generation);
+        startMic();
     }
     synchronized void cancel() { end("Ready", true); }
     synchronized void sendText(String rawText) {

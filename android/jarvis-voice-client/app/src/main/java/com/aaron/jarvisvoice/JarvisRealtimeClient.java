@@ -71,6 +71,8 @@ public final class JarvisRealtimeClient {
     private boolean probing;
     private boolean shouldReconnect;
     private int reconnectAttempt;
+    private boolean reconnectScheduled;
+    private int reconnectScheduleGeneration;
     private int generation;
     private long openStartedAtMs;
     private long pingStartedAtMs;
@@ -147,6 +149,8 @@ public final class JarvisRealtimeClient {
     public void connect() {
         shouldReconnect = true;
         reconnectAttempt = 0;
+        reconnectScheduled = false;
+        reconnectScheduleGeneration++;
         if (!network.isAvailable()) {
             diagnostics.recordNetworkStatus(false, "Waiting for network");
             diagnostics.recordCoreReachability("Unavailable", "No network");
@@ -159,6 +163,8 @@ public final class JarvisRealtimeClient {
 
     public void close() {
         shouldReconnect = false;
+        reconnectScheduled = false;
+        reconnectScheduleGeneration++;
         performance.abandonTurn();
         activeClientTurnId = 0L;
         highestServerGeneration = 0;
@@ -348,10 +354,10 @@ public final class JarvisRealtimeClient {
 
             @Override public void onMessage(WebSocket webSocket, ByteString bytes) {
                 if (currentGeneration != generation) return;
-                if (
-                    activeClientTurnId <= 0L
-                        || audioServerGeneration < minimumServerGeneration
-                ) {
+                if (!RealtimeAudioOwnership.accepts(
+                        audioServerGeneration,
+                        minimumServerGeneration
+                )) {
                     diagnostics.recordRecovery(
                         "Discarded unowned realtime audio after cancellation"
                     );
@@ -458,6 +464,8 @@ public final class JarvisRealtimeClient {
             case "ready" -> {
                 ready = true;
                 reconnectAttempt = 0;
+                reconnectScheduled = false;
+                reconnectScheduleGeneration++;
                 main.removeCallbacks(readyTimeout);
                 diagnostics.recordNetworkStatus(true, "Online");
                 diagnostics.recordCoreReachability(
@@ -651,7 +659,7 @@ public final class JarvisRealtimeClient {
     }
 
     private void scheduleReconnect(String reason) {
-        if (!shouldReconnect) return;
+        if (!shouldReconnect || reconnectScheduled) return;
         if (!network.isAvailable()) {
             diagnostics.recordNetworkStatus(false, "Reconnect paused");
             diagnostics.recordCoreReachability("Unavailable", "No network");
@@ -662,10 +670,15 @@ public final class JarvisRealtimeClient {
         int attempt = Math.min(7, reconnectAttempt++);
         int seed = (int) (System.nanoTime() ^ generation ^ attempt);
         long delay = ReconnectPolicy.delayMillis(attempt, seed);
+        reconnectScheduled = true;
+        int scheduleGeneration = ++reconnectScheduleGeneration;
         diagnostics.recordReconnect(attempt + 1, delay, reason);
         diagnostics.recordNetworkStatus(true, "Reconnecting");
         diagnostics.recordCoreReachability("Checking", "Retry scheduled");
         main.postDelayed(() -> {
+            if (!reconnectScheduled || scheduleGeneration != reconnectScheduleGeneration) return;
+            reconnectScheduled = false;
+            reconnectScheduleGeneration++;
             if (shouldReconnect && !authenticated && network.isAvailable()) {
                 open();
             }
@@ -677,6 +690,8 @@ public final class JarvisRealtimeClient {
         diagnostics.recordCoreReachability("Checking", "Selecting endpoint");
         post(() -> listener.onStatus("Network restored — reconnecting Jarvis"));
         if (shouldReconnect && !authenticated && !opening) {
+            reconnectScheduled = false;
+            reconnectScheduleGeneration++;
             reconnectAttempt = 0;
             open();
         }
@@ -691,6 +706,8 @@ public final class JarvisRealtimeClient {
         highestServerGeneration = 0;
         minimumServerGeneration = 0;
         authenticated = false;
+        reconnectScheduled = false;
+        reconnectScheduleGeneration++;
         ready = false;
         opening = false;
         cancelTimers();

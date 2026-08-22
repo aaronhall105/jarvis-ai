@@ -38,6 +38,7 @@ public final class VoiceService extends Service implements
     private AudioRouteMonitor alpha6AudioRouteMonitor;
 
     public static final String ACTION_START = "com.aaron.jarvisvoice.START";
+    public static final String ACTION_PREPARE_WATCH = "com.aaron.jarvisvoice.PREPARE_WATCH";
     public static final String ACTION_STOP = "com.aaron.jarvisvoice.STOP";
     public static final String ACTION_START_VOICE = "com.aaron.jarvisvoice.START_VOICE";
     public static final String ACTION_ARM_WAKE = "com.aaron.jarvisvoice.ARM_WAKE";
@@ -80,6 +81,7 @@ public final class VoiceService extends Service implements
     private WearVoiceBridge wearVoiceBridge;
     private AudioEndpointRouter audioEndpointRouter;
     private VoiceEndpoint voiceEndpoint = VoiceEndpoint.PHONE;
+    private VoiceEndpoint clientEndpoint = VoiceEndpoint.PHONE;
     private long endpointGeneration;
     private String clientConversationMode = "";
     private PlaybackController originalPlayback;
@@ -220,6 +222,7 @@ public final class VoiceService extends Service implements
         acquireWakeLock();
 
         switch (action) {
+            case ACTION_PREPARE_WATCH -> prepareWatchTransport();
             case ACTION_ARM_WAKE -> {
                 requestedVoiceActive = false;
                 ensureConnected();
@@ -267,7 +270,8 @@ public final class VoiceService extends Service implements
         }
 
         return (
-            store.backgroundConversations()
+            (!store.coreUrl().isBlank() && !store.mobileToken().isBlank())
+                || store.backgroundConversations()
                 || wakeWordUsesVoiceService()
                 || (
                     store.assistantWakeAlways()
@@ -340,8 +344,9 @@ public final class VoiceService extends Service implements
             return microphoneForegroundActive;
         }
 
-        int dataSyncType =
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+        int dataSyncType = Build.VERSION.SDK_INT >= 34
+            ? ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+            : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
 
         if (wantsMicrophone && microphoneGranted) {
             try {
@@ -405,6 +410,7 @@ public final class VoiceService extends Service implements
         clientConversationMode = voiceEndpoint == VoiceEndpoint.WATCH
             ? ConversationMode.LIVE
             : store.conversationMode();
+        clientEndpoint = voiceEndpoint;
         client = new JarvisRealtimeClient(
             this,
             store.coreUrl(),
@@ -586,7 +592,8 @@ public final class VoiceService extends Service implements
         String configuredMode = ConversationMode.normalise(
             store.conversationMode()
         );
-        if (!configuredMode.equals(clientConversationMode)) {
+        if (!configuredMode.equals(clientConversationMode)
+                || clientEndpoint != VoiceEndpoint.PHONE) {
             requestedVoiceActive = true;
             connect();
             return;
@@ -660,8 +667,24 @@ public final class VoiceService extends Service implements
             return;
         }
         requestedVoiceActive = true;
-        connect();
+        if (client == null || clientEndpoint != VoiceEndpoint.WATCH
+                || !ConversationMode.LIVE.equals(clientConversationMode)) {
+            connect();
+        }
         if (ready) beginWatchVoice();
+    }
+
+    /** Starts the WATCH-authenticated Core handshake as soon as the channel wakes the hub. */
+    private void prepareWatchTransport() {
+        if (voiceActive || stopping || store.coreUrl().isBlank()
+                || store.mobileToken().isBlank()) return;
+        if (clientEndpoint == VoiceEndpoint.WATCH && client != null
+                && ConversationMode.LIVE.equals(clientConversationMode)) return;
+        voiceEndpoint = VoiceEndpoint.WATCH;
+        requestedVoiceActive = false;
+        Log.i(TAG, "WATCH_LATENCY core_prewarm_requested elapsed_ms="
+            + SystemClock.elapsedRealtime());
+        connect();
     }
 
     private void beginWatchVoice() {

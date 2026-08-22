@@ -373,6 +373,15 @@ public final class MainActivity extends Activity {
         row.setPadding(dp(12), dp(6), dp(6), dp(6));
         row.setBackground(rounded(SOFT, 25, 1, LINE));
 
+        ImageButton addButton = iconButton(
+            R.drawable.ic_add,
+            "Jarvis actions",
+            WHITE,
+            BLACK
+        );
+        addButton.setOnClickListener(this::showComposerActions);
+        row.addView(addButton, iconParams(dp(42), dp(8)));
+
         composer = new EditText(this);
         composer.setHint("Message Jarvis");
         composer.setHintTextColor(Color.rgb(132, 132, 132));
@@ -441,6 +450,19 @@ public final class MainActivity extends Activity {
         wrapper.addView(row, matchWrap());
         updateSendButton();
         return wrapper;
+    }
+
+    private void showComposerActions(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add("New chat").setOnMenuItemClickListener(item -> {
+            newChat();
+            return true;
+        });
+        menu.getMenu().add("Chat history").setOnMenuItemClickListener(item -> {
+            openHistory();
+            return true;
+        });
+        menu.show();
     }
 
     private void applySystemInsets() {

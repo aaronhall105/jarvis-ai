@@ -12,8 +12,10 @@ import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.util.Log;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ForegroundColorSpan;
@@ -38,6 +40,7 @@ import java.util.Locale;
 
 /** Compact, inset-aware conversation surface designed for round Wear displays. */
 public final class JarvisWearActivity extends Activity {
+    private static final String TAG = "JarvisWearActivity";
     public static final String EXTRA_AUTO_START = "auto_start";
     private static final int REQUEST_MIC = 7, REQUEST_TEXT = 8;
     private static final String REMOTE_INPUT_KEY = "jarvis_watch_text";
@@ -158,7 +161,9 @@ public final class JarvisWearActivity extends Activity {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQUEST_MIC); return;
         }
-        active = true; render(true, WatchConversationState.LISTENING.name(), "Connecting");
+        long tappedAt = SystemClock.elapsedRealtime();
+        Log.i(TAG, "WATCH_LATENCY ui_tap elapsed_ms=" + tappedAt);
+        active = true; render(true, WatchConversationState.LISTENING.name(), "Listening");
         Vibrator vibrator = getSystemService(Vibrator.class);
         if (vibrator != null) vibrator.vibrate(VibrationEffect.createOneShot(40, VibrationEffect.DEFAULT_AMPLITUDE));
         startForegroundService(new Intent(this, WearVoiceService.class).setAction(WearVoiceService.ACTION_START));
