@@ -91,6 +91,24 @@ public final class RealtimeProtocol {
         String vadEagerness,
         String conversationId
     ) throws Exception {
+        return auth(
+            token, deviceId, userId, userName, voice, voiceMode,
+            conversationMode, vadEagerness, conversationId, "PHONE"
+        );
+    }
+
+    public static String auth(
+        String token,
+        String deviceId,
+        String userId,
+        String userName,
+        String voice,
+        String voiceMode,
+        String conversationMode,
+        String vadEagerness,
+        String conversationId,
+        String endpoint
+    ) throws Exception {
         return withLocalTime(new JSONObject()
             .put("type", "auth")
             .put("token", token)
@@ -102,6 +120,7 @@ public final class RealtimeProtocol {
             .put("conversation_mode", ConversationMode.normalise(conversationMode))
             .put("vad_eagerness", vadEagerness)
             .put("conversation_id", conversationId)
+            .put("endpoint", "WATCH".equalsIgnoreCase(endpoint) ? "WATCH" : "PHONE")
             .put("transport", "websocket_pcm")
             .put("protocol_version", JarvisVersion.REALTIME_PROTOCOL)
             .put("client_release", JarvisVersion.RELEASE))

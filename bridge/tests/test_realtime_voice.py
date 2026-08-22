@@ -70,6 +70,8 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(module.normalise_conversation_mode("standard"), "standard")
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
+        self.assertEqual(module.normalise_voice_endpoint("watch"), "WATCH")
+        self.assertEqual(module.normalise_voice_endpoint("anything"), "PHONE")
         self.assertEqual(module.normalise_eagerness("bad"), "high")
 
     def test_live_and_standard_session_contracts(self) -> None:

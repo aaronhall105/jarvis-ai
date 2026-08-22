@@ -89,6 +89,13 @@
             android:exported="false"
             android:foregroundServiceType="dataSync|microphone" />
 
+        <service android:name=".WearChannelListenerService" android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.CHANNEL_EVENT" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/jarvis/watch/voice/v1" />
+            </intent-filter>
+        </service>
+
         <service
             android:name=".JarvisRecognitionService"
             android:exported="true"

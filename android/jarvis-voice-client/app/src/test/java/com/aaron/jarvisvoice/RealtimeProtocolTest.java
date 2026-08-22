@@ -27,7 +27,16 @@ public final class RealtimeProtocolTest {
         assertEquals("live", auth.getString("conversation_mode"));
         assertEquals("high", auth.getString("vad_eagerness"));
         assertEquals("mobile-chat-123", auth.getString("conversation_id"));
+        assertEquals("PHONE", auth.getString("endpoint"));
         assertFalse(auth.toString().contains("OPENAI_API_KEY"));
+    }
+
+    @Test public void watchEndpointIsExplicitInAuthentication() throws Exception {
+        JSONObject auth = new JSONObject(RealtimeProtocol.auth(
+            "token", "watch-via-phone", "aaron", "Aaron", "cedar",
+            "realtime", "live", "high", "conversation", "WATCH"
+        ));
+        assertEquals("WATCH", auth.getString("endpoint"));
     }
 
     @Test public void brainDeltaAndResponseAreParsed() throws Exception {

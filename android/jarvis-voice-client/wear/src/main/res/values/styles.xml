@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.JarvisWear" parent="android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:fontFamily">sans</item><item name="android:windowBackground">#000000</item>
+        <item name="android:colorAccent">#55D6FF</item>
+    </style>
+</resources>

@@ -51,6 +51,7 @@ public final class JarvisRealtimeClient {
     private final String conversationMode;
     private final String vadEagerness;
     private final String conversationId;
+    private final String endpoint;
     private final Listener listener;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final VoiceDiagnosticsStore diagnostics;
@@ -95,6 +96,7 @@ public final class JarvisRealtimeClient {
         String conversationMode,
         String vadEagerness,
         String conversationId,
+        String endpoint,
         Listener listener
     ) {
         this.lanCoreUrl = coreUrl;
@@ -108,6 +110,7 @@ public final class JarvisRealtimeClient {
         this.conversationMode = ConversationMode.normalise(conversationMode);
         this.vadEagerness = vadEagerness;
         this.conversationId = conversationId;
+        this.endpoint = "WATCH".equalsIgnoreCase(endpoint) ? "WATCH" : "PHONE";
         this.listener = listener;
         diagnostics = new VoiceDiagnosticsStore(context);
         performance = new TurnPerformanceTracker(diagnostics);
@@ -326,7 +329,8 @@ public final class JarvisRealtimeClient {
                         voiceMode,
                         conversationMode,
                         vadEagerness,
-                        conversationId
+                        conversationId,
+                        endpoint
                     ));
                     scheduleAuthTimeout(currentGeneration);
                 } catch (Exception exception) {

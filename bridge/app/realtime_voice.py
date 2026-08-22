@@ -172,6 +172,10 @@ def normalise_conversation_mode(value: Any) -> str:
     return CONVERSATION_MODE_STANDARD if mode == CONVERSATION_MODE_STANDARD else CONVERSATION_MODE_LIVE
 
 
+def normalise_voice_endpoint(value: Any) -> str:
+    return "WATCH" if str(value or "").strip().upper() == "WATCH" else "PHONE"
+
+
 def normalise_eagerness(value: Any) -> str:
     eagerness = str(value or "").strip().casefold()
     return eagerness if eagerness in SUPPORTED_EAGERNESS else "high"
@@ -1659,6 +1663,7 @@ class RealtimeVoiceProxy:
         )
         voice_mode = normalise_voice_mode(auth_payload.get("voice_mode"))
         conversation_mode = normalise_conversation_mode(auth_payload.get("conversation_mode"))
+        voice_endpoint = normalise_voice_endpoint(auth_payload.get("endpoint"))
         requested_voice = str(auth_payload.get("voice") or "").strip().casefold()
         voice = normalise_voice(requested_voice, self.config.voice)
         eagerness = normalise_eagerness(auth_payload.get("vad_eagerness"))
@@ -1668,6 +1673,7 @@ class RealtimeVoiceProxy:
             requested_voice=requested_voice,
             conversation_mode=conversation_mode,
             vad_eagerness=eagerness,
+            voice_endpoint=voice_endpoint,
         )
 
         if not self.config.enabled:
@@ -1740,6 +1746,7 @@ class RealtimeVoiceProxy:
                 "voice_mode": voice_mode,
                 "conversation_mode": conversation_mode,
                 "conversation_id": metadata["conversation_id"],
+                "endpoint": voice_endpoint,
                 "sample_rate": INPUT_RATE,
                 "transport": "websocket_pcm",
                 "unified_brain": True,

@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "JarvisVoiceClient"
-include(":app")
+include(":app", ":wear", ":wearprotocol")

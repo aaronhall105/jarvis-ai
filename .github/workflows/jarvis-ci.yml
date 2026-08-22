@@ -89,6 +89,10 @@ jobs:
           gradle-version: "9.4.1"
       - name: Prepare offline wake assets
         run: ./tools/prepare_android_wake_assets.sh
-      - name: Android unit tests and debug build
+      - name: Android and Wear unit tests and debug builds
         working-directory: android/jarvis-voice-client
-        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+        run: >-
+          ./gradlew --no-daemon
+          :wearprotocol:test
+          :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+          :wear:testDebugUnitTest :wear:lintDebug :wear:assembleDebug

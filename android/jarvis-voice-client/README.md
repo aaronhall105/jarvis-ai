@@ -2,6 +2,8 @@
 
 A private Android chat and voice client for Aaron's Jarvis Core.
 
+The Wear OS endpoint lives in the `wear` module. See [`../../docs/wear-endpoint-v1.md`](../../docs/wear-endpoint-v1.md) for architecture, installation, Tile, assistant-role, and physical validation guidance.
+
 ## Product UI
 
 - Clean white monochrome chat screen with persistent history and streamed replies.
