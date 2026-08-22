@@ -1,33 +1,36 @@
 # Jarvis AI architecture
 
-Jarvis is split into three product surfaces with explicit ownership boundaries.
+Jarvis is a self-hosted household AI platform split into three product surfaces
+with explicit ownership boundaries.
 
 ## Android client
 
 The Android application is the conversational client. It owns:
 
-- Microphone capture and speech recognition.
-- Offline wake phrase detection.
-- Default-assistant and overlay entry points.
-- Typed chat and streamed answer rendering.
-- Audio playback, interruption and conversation closure.
-- Connection failover, diagnostics and user-facing settings.
+- microphone capture and speech recognition;
+- offline wake phrase detection and re-arming;
+- default-assistant and overlay entry points;
+- typed chat and streamed answer rendering;
+- audio playback, interruption and conversation closure;
+- connection failover, diagnostics and user-facing settings.
 
-The Android client does not become a second Home Assistant dashboard and is not
-the authority for memory or smart-home decisions.
+The Android client is not a second Home Assistant dashboard and is not the
+authority for long-term memory or smart-home decisions.
 
 ## Jarvis Core
 
-Jarvis Core is the authoritative AI service. It owns:
+Jarvis Core is the authoritative AI orchestration service. It owns:
 
-- Conversation orchestration.
-- Model-provider access.
-- Persistent conversation and household context.
-- Memory and response policies.
-- Home Assistant tool selection and action execution.
-- Proactive intelligence, smart alerts and vision processing.
-- Realtime voice protocol events.
-- Validation, diagnostics and release identity.
+- conversation orchestration;
+- model-provider access;
+- persistent conversation and household context;
+- memory and response policies;
+- Home Assistant tool selection and action execution;
+- proactive intelligence and alert policy;
+- vision interpretation and room context;
+- realtime voice protocol events;
+- diagnostics, validation and release identity;
+- supervised self-improvement coordination.
 
 The Core runs as the `jarvis-core` Docker service on port `8000`.
 
@@ -35,14 +38,14 @@ The Core runs as the `jarvis-core` Docker service on port `8000`.
 
 Home Assistant remains authoritative for:
 
-- Entities, devices and areas.
-- Automations and scripts.
-- Dashboards and camera views.
-- Integrations, energy data and configuration.
-- Permission checks for smart-home actions.
+- entities, devices and areas;
+- automations and scripts;
+- dashboards and live camera views;
+- integrations, energy data and configuration;
+- smart-home state and permission checks.
 
-Jarvis requests controlled operations through the Home Assistant integration;
-it does not replace Home Assistant's state model.
+Jarvis requests controlled operations through its Home Assistant integration; it
+does not replace Home Assistant's state model.
 
 ## Data flow
 
@@ -50,13 +53,16 @@ it does not replace Home Assistant's state model.
 User voice or text
         │
         ▼
-Android client
-        │  realtime protocol
+Android client / room voice endpoint
+        │
+        │ realtime protocol / HTTP
         ▼
 Jarvis Core
-        ├── conversation context
+        ├── conversation and user context
+        ├── memory and room context
         ├── model request
         ├── policy and safety checks
+        ├── optional vision interpretation
         └── optional Home Assistant tool call
                           │
                           ▼
@@ -66,27 +72,52 @@ Jarvis Core
                  verified tool result
         │
         ▼
-streamed text and bounded speech
+streamed text / voice / proactive outcome
 ```
 
 ## Persistence
 
-Runtime persistence is stored outside the container through Compose bind mounts:
+Runtime persistence is stored outside the Core container through Compose bind
+mounts:
 
-- `config/` for local configuration
-- `data/` for databases, memory and durable state
-- `logs/` for runtime logs
+- `config/` for local configuration;
+- `data/` for databases, memory and durable state;
+- `logs/` for runtime logs.
 
-Secrets belong in `.env`, which must remain outside Git.
+Additional deployment-specific stores, such as speaker identity data, must also
+remain outside source control.
+
+Secrets belong in `.env`, which must never be committed.
+
+## Trust boundaries
+
+- Model providers generate language and reasoning output but are not the
+  authority for household state.
+- Home Assistant remains the source of truth for devices and entities.
+- Voice ID is convenience identity and must not be the sole factor for
+  high-impact actions.
+- The live Core container does not directly rewrite production source.
+- Self-improvement candidates are prepared outside the live container, checked
+  against allow-lists and tests, and require explicit human approval.
 
 ## Release safety
 
-Release scripts use isolated worktrees and validation branches. A candidate must
-pass source checks, Core regressions and Android compilation before the
-production branch is advanced. The deployed Core retains a rollback image until
-the new release is confirmed healthy.
+Release tooling uses validation branches/worktrees and health checks. CI covers
+Core regressions, Home Assistant integration checks, Android unit/build checks,
+correctness linting, security scanning and dependency auditing.
 
-## Current release
+Deployment-specific release workflows retain rollback controls rather than
+treating a successful build as sufficient evidence of production health.
 
-`v19.0.0-alpha13` adds persistent wake recovery, adaptive response budgets,
-earlier bounded speech, a simplified toolbar and reorganised Android settings.
+## Current release boundary
+
+The default `conversation-engine` branch currently identifies itself as:
+
+- Jarvis `19.0.0-alpha17`;
+- Core application API `3.7.0`;
+- realtime protocol `2`.
+
+Alpha19 production-hardening work is currently isolated in draft PR #1 and
+should not be described as shipped behaviour until merged.
+
+See [PROJECT_STATUS.md](PROJECT_STATUS.md) for the current boundary.

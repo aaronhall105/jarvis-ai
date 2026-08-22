@@ -1,41 +1,61 @@
-# Validation performed for v14
+# Validation and quality gates
 
-The package was validated locally against the supplied v13 codebase.
+This file describes the **current repository validation model**. Historical
+release-specific test reports are preserved under `docs/archive/test-reports/`.
 
-## Passed
+## Default-branch identity
 
-- Python compilation for:
-  - `bridge/app/self_improvement.py`
-  - `bridge/app/config.py`
-  - `bridge/app/main.py`
-  - `tools/self_improvement_worker.py`
-- Shell syntax for the installer and worker wrapper.
-- Full `bridge/app` compile pass.
-- FastAPI application import with Core version `2.1.0`.
-- Self-improvement database initialisation.
-- Interaction evidence recording and redaction.
-- Explicit correction detection.
-- Repeated-failure grouping.
-- Candidate queue creation.
-- Six-digit approval-code checks.
-- Aaron-only administration rules.
-- Emergency disable/resume behaviour.
-- Strict path allow-list and forbidden-path policy.
-- Patch size/file-count enforcement.
-- Dangerous-code pattern rejection.
-- Existing Jarvis regression suite.
-- New self-improvement and worker-policy tests.
+At this documentation refresh the `conversation-engine` branch identifies
+itself as:
 
-## Not live-tested in this environment
+- Jarvis `19.0.0-alpha17`;
+- Core application API `3.7.0`;
+- realtime protocol `2`.
 
-The following require Aaron's real Ubuntu/Docker/OpenAI/GitHub environment and
-must be verified after installation:
+## Continuous integration
 
-- A real coding-model patch generation request.
-- A real candidate Docker build using Aaron's Docker daemon.
-- A real GitHub pull request.
-- A real approved production deployment and automatic rollback.
-- Home Assistant mobile notification delivery from the host worker.
+`.github/workflows/jarvis-ci.yml` currently defines the main quality gates.
 
-No unverified candidate was deployed to Aaron's system while this package was
-built.
+### Core and integration
+
+- install Core and improvement-worker dependencies;
+- compile `bridge/app`;
+- run the Core pytest suite;
+- run Home Assistant streaming/closure integration tests;
+- validate the Home Assistant release package.
+
+### Correctness and security
+
+- Ruff correctness checks for critical Python errors;
+- Bandit high-severity scan of Core application code;
+- Python dependency audit;
+- pull-request dependency review.
+
+### Android
+
+- Java 17;
+- Android SDK 36;
+- Gradle 9.4.1;
+- offline wake asset preparation;
+- Android debug unit tests;
+- debug APK assembly.
+
+CodeQL and Android OTA workflows are maintained separately.
+
+## Release claims
+
+A passing CI run shows that the checked commit passed the configured automated
+gates. It does not by itself prove every deployment-specific path, external
+service or physical device has been live-tested.
+
+Open PR validation belongs to that PR until the change is merged.
+
+The Alpha19 production-hardening PR currently reports broader validation, but it
+remains draft work and must not be presented as default-branch certification.
+
+## Historical report
+
+The old root `TESTED.md` described only the Self-Improvement v14 package. It is
+preserved at:
+
+[`docs/archive/test-reports/TESTED_SELF_IMPROVEMENT_V14.md`](docs/archive/test-reports/TESTED_SELF_IMPROVEMENT_V14.md)

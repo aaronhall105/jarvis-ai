@@ -1,16 +1,20 @@
 # Installing Jarvis AI
 
-These instructions install the current `v19.0.0-alpha13` Jarvis Core and
-describe where to obtain the Android client.
+These instructions install the current source from the
+`conversation-engine` branch. At the time of this documentation refresh the
+branch identifies itself as `v19.0.0-alpha17`.
+
+Jarvis is an alpha system. Back up persistent data before upgrades and avoid
+exposing Jarvis Core directly to the public internet.
 
 ## Requirements
 
-- Ubuntu or another Docker-capable Linux host
-- Git
-- Docker Engine with Docker Compose
-- A configured model provider
-- Home Assistant URL and long-lived access token when smart-home control is used
-- Android device for the mobile assistant client
+- Ubuntu or another Docker-capable Linux host;
+- Git;
+- Docker Engine with Docker Compose;
+- a configured model provider;
+- Home Assistant URL and long-lived access token when smart-home control is used;
+- an Android device for the mobile assistant client.
 
 ## 1. Clone the current branch
 
@@ -31,7 +35,7 @@ cp .env.example .env
 chmod 600 .env
 ```
 
-Edit `.env` and provide the settings required by your deployment. Do not commit
+Edit `.env` and provide the settings required by your deployment. Never commit
 this file.
 
 The Compose service bind-mounts:
@@ -69,41 +73,49 @@ access. Do not expose an unauthenticated Core directly to the public internet.
 
 ## 4. Install the Android client
 
-Download the APK from the
-[`v19.0.0-alpha13` GitHub prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13).
+Android source lives under:
+
+```text
+android/jarvis-voice-client/
+```
+
+Published APKs should be obtained from:
+
+https://github.com/aaronhall105/jarvis-ai/releases
+
+Because this project moves quickly, verify that the APK release identity matches
+the intended Core/source release instead of relying on an old hard-coded link.
 
 On Android:
 
-1. Permit installation from the browser or file manager used to open the APK.
-2. Install the APK over the existing Jarvis application when upgrading.
-3. Open Jarvis and configure the local and remote Core endpoints.
-4. Grant microphone and notification permissions.
-5. Select Jarvis as the default digital assistant when assistant-button support
-   is required.
-6. Exclude Jarvis from aggressive battery optimisation for reliable wake-word
-   recovery.
+1. permit installation from the browser or file manager used to open the APK;
+2. install the APK over the existing Jarvis application when upgrading;
+3. open Jarvis and configure the local and remote Core endpoints;
+4. grant microphone and notification permissions;
+5. select Jarvis as the default digital assistant when assistant-button support
+   is required;
+6. exclude Jarvis from aggressive battery optimisation when reliable background
+   wake behaviour is required.
 
 Android requires an ongoing foreground-service disclosure while continuous
-microphone capture is active. The dedicated wake notification channel is
-configured as silent and low priority.
+microphone capture is active.
 
 ## 5. Home Assistant integration
 
-Copy the integration directory into Home Assistant's
-`custom_components` directory:
+Copy:
 
 ```text
 home_assistant/custom_components/jarvis_core_conversation/
 ```
 
-The resulting Home Assistant path should be:
+to:
 
 ```text
 /config/custom_components/jarvis_core_conversation/
 ```
 
 Restart Home Assistant, add the Jarvis Core Conversation integration and provide
-the reachable Core endpoint.
+a Core endpoint reachable from Home Assistant.
 
 ## Updating
 
@@ -116,3 +128,14 @@ curl -fsS http://localhost:8000/health
 ```
 
 Use `--ff-only`; do not force-reset a checkout containing uncommitted work.
+
+## Version check
+
+The authoritative source identity is stored in:
+
+```text
+bridge/app/version.py
+```
+
+See [PROJECT_STATUS.md](PROJECT_STATUS.md) before assuming features from an open
+PR or historical release note are part of the current default branch.
