@@ -1308,6 +1308,14 @@ public final class MainActivity extends Activity {
 
     private void updateMicButton() {
         if (micButton == null) return;
+        if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+            micButton.setImageResource(R.drawable.control_mic);
+            micButton.setBackgroundColor(Color.TRANSPARENT);
+            micButton.clearColorFilter();
+            micButton.setContentDescription("Dictate developer instruction");
+            micButton.setAlpha(1f);
+            return;
+        }
         if (voiceActive) {
             micButton.setImageResource(R.drawable.control_close);
             micButton.setBackgroundColor(Color.TRANSPARENT);
