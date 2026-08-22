@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <group android:pivotX="54" android:pivotY="54" android:scaleX="0.68" android:scaleY="0.68">
-        <path android:fillColor="@android:color/transparent" android:strokeColor="#FF141414" android:strokeWidth="2.7" android:strokeLineCap="square" android:strokeLineJoin="miter" android:pathData="M20,45 L27,45 L27,59 C27,63 25,65 21,65 C19,65 18,64 18,61 M31,65 L36,45 L41,65 M33,58 L39,58 M45,65 L45,45 L51,45 C56,45 57,48 57,50 C57,53 55,55 51,55 L45,55 M51,55 L58,65 M61,45 L65,65 L70,45 M74,45 L74,65 M89,48 C87,46 85,45 82,45 C79,45 78,47 78,49 C78,52 80,53 84,54 C88,56 90,58 90,61 C90,64 88,65 84,65 C81,65 79,64 78,62" />
-    </group>
-</vector>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:width="44dp" android:height="14.67dp" android:gravity="center">
+        <bitmap android:src="@drawable/jarvis_wordmark_master" android:gravity="fill"
+            android:antialias="true" android:filter="true" />
+    </item>
+</layer-list>
