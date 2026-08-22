@@ -72,6 +72,15 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
         self.assertEqual(module.normalise_voice_endpoint("watch"), "WATCH")
         self.assertEqual(module.normalise_voice_endpoint("anything"), "PHONE")
+        self.assertFalse(module.quiet_controls_enabled(True, {
+            "client_kind": "mobile", "voice_endpoint": "WATCH"
+        }))
+        self.assertTrue(module.quiet_controls_enabled(True, {
+            "client_kind": "mobile", "voice_endpoint": "PHONE"
+        }))
+        self.assertFalse(module.quiet_controls_enabled(True, {
+            "client_kind": "voice_pe", "voice_endpoint": "PHONE"
+        }))
         self.assertEqual(module.normalise_eagerness("bad"), "high")
 
     def test_live_and_standard_session_contracts(self) -> None:

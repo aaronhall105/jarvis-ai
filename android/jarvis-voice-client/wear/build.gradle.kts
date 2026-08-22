@@ -7,8 +7,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 30
         targetSdk = 36
-        versionCode = 190191
-        versionName = "19.0.0-alpha19-wear-v1"
+        versionCode = 190193
+        versionName = "19.0.0-alpha19-wear-v1.1"
     }
     buildTypes {
         release {
@@ -41,6 +41,7 @@ dependencies {
     implementation("androidx.activity:activity:1.13.0")
     implementation("androidx.core:core:1.18.0")
     implementation("androidx.wear:wear:1.4.0")
+    implementation("androidx.wear:wear-input:1.2.0")
     implementation("androidx.wear.tiles:tiles:1.6.2")
     implementation("androidx.wear.protolayout:protolayout:1.4.2")
     implementation("androidx.wear.protolayout:protolayout-material:1.4.2")

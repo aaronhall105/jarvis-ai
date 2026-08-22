@@ -9,7 +9,6 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
-import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -103,6 +102,7 @@ public final class VoiceService extends Service implements
     private boolean endConversationAfterReply;
     private boolean turnShouldSpeak;
     private boolean turnReceivedRealtimeAudio;
+    private boolean watchFirstAudioLogged;
     private boolean fallbackPending;
     private boolean fallbackSpeaking;
     private String pendingText = "";
@@ -182,6 +182,7 @@ public final class VoiceService extends Service implements
         wearVoiceBridge = new WearVoiceBridge(this, new WearVoiceBridge.Listener() {
             @Override public void onWatchStart(long generation) { main.post(() -> beginWatchSession(generation)); }
             @Override public void onWatchAudio(long generation, byte[] pcm) { main.post(() -> acceptWatchAudio(generation, pcm)); }
+            @Override public void onWatchText(long generation, String text) { main.post(() -> acceptWatchText(generation, text)); }
             @Override public void onWatchCancel(long generation) { main.post(() -> cancelWatchSession(generation)); }
             @Override public void onWatchDisconnected() { main.post(VoiceService.this::watchDisconnected); }
         });
@@ -633,6 +634,8 @@ public final class VoiceService extends Service implements
     }
 
     private void beginWatchSession(long generation) {
+        Log.i(TAG, "WATCH_LATENCY session_start_received generation=" + generation
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
         if (voiceEndpoint == VoiceEndpoint.WATCH && voiceActive
                 && generation == endpointGeneration) {
             wearVoiceBridge.state("LISTENING", endpointGeneration);
@@ -671,12 +674,25 @@ public final class VoiceService extends Service implements
         standardSpeechEngine.stop();
         voiceFoundation.listeningLive("watch voice session started");
         wearVoiceBridge.state("LISTENING", endpointGeneration);
+        Log.i(TAG, "WATCH_LATENCY listening_ready generation=" + endpointGeneration
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
         status("Watch listening");
     }
 
     private void acceptWatchAudio(long generation, byte[] pcm) {
         if (voiceEndpoint != VoiceEndpoint.WATCH || !voiceActive || generation != endpointGeneration || client == null) return;
         client.sendAudio(pcm);
+    }
+
+    private void acceptWatchText(long generation, String rawText) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || !voiceActive
+                || generation != endpointGeneration) return;
+        String text = rawText == null ? "" : rawText.trim();
+        if (text.isEmpty()) return;
+        wearVoiceBridge.state("PROCESSING", generation);
+        Log.i(TAG, "WATCH_LATENCY typed_turn_received generation=" + generation
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        queueOrSend(text, true);
     }
 
     private void cancelWatchSession(long generation) {
@@ -1199,6 +1215,11 @@ public final class VoiceService extends Service implements
         prepareSpokenTurn(true);
         brainActive = true;
         addMessage(ChatMessage.USER, text);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.userTranscript(text, endpointGeneration);
+            Log.i(TAG, "WATCH_LATENCY transcript_ready generation=" + endpointGeneration
+                + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        }
         status("Thinking");
     }
 
@@ -1223,6 +1244,11 @@ public final class VoiceService extends Service implements
         playbackActive = true;
         if (voiceEndpoint == VoiceEndpoint.WATCH) {
             wearVoiceBridge.state("SPEAKING", endpointGeneration);
+            if (!watchFirstAudioLogged) {
+                watchFirstAudioLogged = true;
+                Log.i(TAG, "WATCH_LATENCY phone_first_audio generation=" + endpointGeneration
+                    + " bytes=" + pcm16.length + " elapsed_ms=" + SystemClock.elapsedRealtime());
+            }
         }
         audioEndpointRouter.enqueue(pcm16, endpointGeneration);
     }
@@ -1264,9 +1290,14 @@ public final class VoiceService extends Service implements
         );
         if (voiceActive) turnShouldSpeak = true;
         turnReceivedRealtimeAudio = false;
+        watchFirstAudioLogged = false;
         fallbackPending = false;
         fallbackSpeaking = false;
         if (speechFallback != null) speechFallback.cancel();
+        // A preceding generation-safe interruption deliberately deactivates
+        // the output router. A newly owned Core turn must explicitly arm it
+        // again or all valid follow-up audio is rejected as stale.
+        audioEndpointRouter.resume(voiceEndpoint, endpointGeneration);
         broadcastEvent(
             "thinking",
             "",
@@ -1277,6 +1308,8 @@ public final class VoiceService extends Service implements
         status("Thinking");
         if (voiceEndpoint == VoiceEndpoint.WATCH) {
             wearVoiceBridge.state("PROCESSING", endpointGeneration);
+            Log.i(TAG, "WATCH_LATENCY turn_started generation=" + endpointGeneration
+                + " elapsed_ms=" + SystemClock.elapsedRealtime());
         }
         if (
             voiceActive
@@ -1297,6 +1330,9 @@ public final class VoiceService extends Service implements
             );
         }
         broadcastEvent("assistant_delta", ChatMessage.ASSISTANT, text, voiceActive, false);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.assistantDelta(text, endpointGeneration);
+        }
     }
 
     @Override public void onBrainResponse(
@@ -1311,6 +1347,9 @@ public final class VoiceService extends Service implements
 
         if (!response.isEmpty()) {
             addMessage(ChatMessage.ASSISTANT, response);
+            if (voiceEndpoint == VoiceEndpoint.WATCH) {
+                wearVoiceBridge.assistantDone(response, endpointGeneration);
+            }
         }
 
         status(
@@ -1961,13 +2000,7 @@ public final class VoiceService extends Service implements
                     : ACTIVE_NOTIFICATION_CHANNEL_ID
             )
                 .setSmallIcon(R.drawable.ic_jarvis_status)
-                .setContentTitle("Jarvis")
-                .setLargeIcon(
-                    BitmapFactory.decodeResource(
-                        getResources(),
-                        R.drawable.jarvis_logo_ui
-                    )
-                )
+                .setContentTitle("J A R V I S")
                 .setContentText(
                     wakeOnly
                         ? "Wake word is active"

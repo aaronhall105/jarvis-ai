@@ -8,6 +8,14 @@ import java.io.IOException;
 import org.junit.Test;
 
 public class WearWireProtocolTest {
+    @Test public void typedAndTranscriptFramesRoundTrip() throws Exception {
+        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+        WearWireProtocol.writeText(stream, WearWireProtocol.TEXT_INPUT, 91L, "What time is it?");
+        WearWireProtocol.Frame typed = WearWireProtocol.read(new ByteArrayInputStream(stream.toByteArray()));
+        assertEquals(WearWireProtocol.TEXT_INPUT, typed.type());
+        assertEquals(91L, typed.generation());
+        assertEquals("What time is it?", WearWireProtocol.text(typed));
+    }
     @Test public void frameRoundTripPreservesTypeGenerationAndAudio() throws Exception {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         WearWireProtocol.write(output, WearWireProtocol.MIC_AUDIO, 91L, new byte[]{1, 2, 3});

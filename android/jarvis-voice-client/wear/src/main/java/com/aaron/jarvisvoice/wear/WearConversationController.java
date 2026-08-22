@@ -9,21 +9,32 @@ import com.aaron.jarvisvoice.protocol.WatchMicrophonePolicy;
 import com.aaron.jarvisvoice.protocol.WearWireProtocol;
 
 final class WearConversationController implements WearChannelManager.Listener {
-    interface Listener { void onState(WatchConversationState state, String message); void onEnded(); }
+    interface Listener { void onState(WatchConversationState state, String message); void onTranscript(String role, String text, boolean complete); void onEnded(); }
     private final Context context; private final Listener listener; private final Handler main = new Handler(Looper.getMainLooper());
     private final WatchConversationMachine machine; private final WearAudioRecorder recorder;
-    private final WearAudioPlayer player = new WearAudioPlayer(); private final WearChannelManager channel;
+    private final WearAudioPlayer player; private final WearChannelManager channel;
     private final Runnable timeout = () -> end("Conversation timed out", true);
+    private String pendingText = "";
 
     WearConversationController(Context context, Listener listener, long timeoutMs) {
         this.context = context.getApplicationContext(); this.listener = listener; machine = new WatchConversationMachine(timeoutMs);
-        recorder = new WearAudioRecorder(context); channel = new WearChannelManager(context, this);
+        recorder = new WearAudioRecorder(context); player = new WearAudioPlayer(context); channel = new WearChannelManager(context, this);
     }
     synchronized void start() {
         if (machine.state() != WatchConversationState.IDLE) return;
         long generation = machine.start(); player.begin(generation); publish("Connecting…"); channel.connect(context, generation);
     }
     synchronized void cancel() { end("Ready", true); }
+    synchronized void sendText(String rawText) {
+        String text = rawText == null ? "" : rawText.trim();
+        if (text.isEmpty() || machine.state() == WatchConversationState.IDLE) return;
+        recorder.stop(); cancelTimeout();
+        machine.processing(machine.generation());
+        listener.onTranscript("user", text, true);
+        publish("Processing");
+        if (channel.isReady()) channel.sendText(WearWireProtocol.TEXT_INPUT, machine.generation(), text);
+        else pendingText = text;
+    }
     boolean microphoneActive() { return recorder.isActive(); }
     WatchConversationState state() { return machine.state(); }
     long generation() { return machine.generation(); }
@@ -37,8 +48,14 @@ final class WearConversationController implements WearChannelManager.Listener {
                 String state = WearWireProtocol.text(frame);
                 if ("LISTENING".equals(state)
                         && machine.state() != WatchConversationState.SPEAKING) {
-                    startMic();
-                    armTimeout();
+                    if (!pendingText.isEmpty()) {
+                        String text = pendingText; pendingText = "";
+                        recorder.stop(); machine.processing(frame.generation());
+                        channel.sendText(WearWireProtocol.TEXT_INPUT, frame.generation(), text);
+                    } else {
+                        startMic();
+                        armTimeout();
+                    }
                 }
                 else if ("PROCESSING".equals(state)) { recorder.stop(); machine.processing(frame.generation()); cancelTimeout(); }
                 else if ("SPEAKING".equals(state)) { recorder.stop(); machine.speaking(frame.generation()); cancelTimeout(); }
@@ -50,6 +67,9 @@ final class WearConversationController implements WearChannelManager.Listener {
                 () -> playbackComplete(frame.generation())
             );
             case WearWireProtocol.OUTPUT_CANCEL -> player.interrupt();
+            case WearWireProtocol.USER_TRANSCRIPT -> listener.onTranscript("user", WearWireProtocol.text(frame), true);
+            case WearWireProtocol.ASSISTANT_DELTA -> listener.onTranscript("assistant", WearWireProtocol.text(frame), false);
+            case WearWireProtocol.ASSISTANT_DONE -> listener.onTranscript("assistant", WearWireProtocol.text(frame), true);
             case WearWireProtocol.CLOSED -> end("Ready", false);
             case WearWireProtocol.ERROR -> end(WearWireProtocol.text(frame), false);
             default -> { }
@@ -73,6 +93,7 @@ final class WearConversationController implements WearChannelManager.Listener {
         if (machine.state() == WatchConversationState.IDLE) return;
         long oldGeneration = machine.generation(); recorder.stop(); player.interrupt(); cancelTimeout();
         machine.end();
+        pendingText = "";
         listener.onState(WatchConversationState.IDLE, message);
         if (notifyPhone) channel.cancelAndClose(oldGeneration, listener::onEnded);
         else { channel.close(); listener.onEnded(); }

@@ -28,7 +28,7 @@ public final class JarvisTileService extends TileService {
             .setWidth(DimensionBuilders.expand()).setHeight(DimensionBuilders.expand())
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER).setModifiers(modifiers)
             .addContent(new LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(42)).build())
-            .addContent(new LayoutElementBuilders.Text.Builder().setText("JARVIS").setFontStyle(new LayoutElementBuilders.FontStyle.Builder().setSize(DimensionBuilders.sp(22)).setColor(ColorBuilders.argb(0xff141414)).setWeight(LayoutElementBuilders.FONT_WEIGHT_BOLD).build()).build())
+            .addContent(new LayoutElementBuilders.Text.Builder().setText("J A R V I S").setFontStyle(new LayoutElementBuilders.FontStyle.Builder().setSize(DimensionBuilders.sp(18)).setColor(ColorBuilders.argb(0xff141414)).setWeight(LayoutElementBuilders.FONT_WEIGHT_BOLD).build()).build())
             .addContent(new LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(18)).build())
             .addContent(new LayoutElementBuilders.Text.Builder().setText("MIC  ·  START").setFontStyle(new LayoutElementBuilders.FontStyle.Builder().setSize(DimensionBuilders.sp(15)).setColor(ColorBuilders.argb(0xffffffff)).build()).setModifiers(startButton).build())
             .addContent(new LayoutElementBuilders.Spacer.Builder().setHeight(DimensionBuilders.dp(12)).build())

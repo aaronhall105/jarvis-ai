@@ -1,10 +1,15 @@
 package com.aaron.jarvisvoice.wear;
 
+import android.content.Context;
 import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
+import android.util.Log;
 import com.aaron.jarvisvoice.protocol.WearWireProtocol;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -13,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Ordered, generation-safe watch playback that never blocks the UI thread. */
 final class WearAudioPlayer {
+    private static final String TAG = "JarvisWearPlayer";
     private final ExecutorService writer = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "jarvis-watch-speaker");
         thread.setDaemon(true);
@@ -22,11 +28,26 @@ final class WearAudioPlayer {
     private final AtomicLong generation = new AtomicLong();
     private final Object trackLock = new Object();
     private AudioTrack track;
+    private final AudioManager audioManager;
+    private final AudioFocusRequest focusRequest;
     private long writtenFrames;
+    private boolean firstWriteLogged;
+
+    WearAudioPlayer(Context context) {
+        audioManager = context.getSystemService(AudioManager.class);
+        focusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            .setOnAudioFocusChangeListener(change -> {
+                if (change == AudioManager.AUDIOFOCUS_LOSS) interrupt();
+            }).build();
+    }
 
     void begin(long value) {
         interrupt();
         generation.set(value);
+        firstWriteLogged = false;
     }
 
     void play(byte[] pcm, long frameGeneration) {
@@ -80,7 +101,11 @@ final class WearAudioPlayer {
         if (generation.get() != acceptedGeneration) return;
         try {
             AudioTrack current = ensureTrack();
-            if (current.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) current.play();
+            if (current.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
+                current.play();
+                Log.i(TAG, "WATCH_LATENCY audiotrack_started generation=" + acceptedGeneration
+                    + " elapsed_ms=" + SystemClock.elapsedRealtime());
+            }
             int offset = 0;
             while (offset < pcm.length && generation.get() == acceptedGeneration) {
                 int count = current.write(
@@ -92,11 +117,17 @@ final class WearAudioPlayer {
                 if (count < 0) throw new IllegalStateException("Watch speaker write failed: " + count);
                 if (count == 0) break;
                 offset += count;
+                if (!firstWriteLogged) {
+                    firstWriteLogged = true;
+                    Log.i(TAG, "WATCH_LATENCY first_audio_written generation=" + acceptedGeneration
+                        + " bytes=" + count + " playState=" + current.getPlayState());
+                }
                 synchronized (trackLock) {
                     if (track == current) writtenFrames += count / 2L;
                 }
             }
-        } catch (Exception ignored) {
+        } catch (Exception error) {
+            Log.e(TAG, "audio_write_failed generation=" + acceptedGeneration, error);
             // Cancellation can legitimately release AudioTrack during a write.
         }
     }
@@ -127,7 +158,15 @@ final class WearAudioPlayer {
                 throw new IllegalStateException("Watch speaker unavailable");
             }
             writtenFrames = 0L;
+            if (audioManager != null) {
+                int focus = audioManager.requestAudioFocus(focusRequest);
+                Log.i(TAG, "audio_focus_result=" + focus);
+            }
+            created.setVolume(1.0f);
             track = created;
+            Log.i(TAG, "audiotrack_initialized sample_rate=" + created.getSampleRate()
+                + " buffer_frames=" + created.getBufferSizeInFrames()
+                + " session=" + created.getAudioSessionId());
             return created;
         }
     }
@@ -143,6 +182,7 @@ final class WearAudioPlayer {
         try { current.pause(); } catch (Exception ignored) {}
         try { current.flush(); } catch (Exception ignored) {}
         try { current.release(); } catch (Exception ignored) {}
+        if (audioManager != null) audioManager.abandonAudioFocusRequest(focusRequest);
     }
 
     private void submit(Runnable action) {

@@ -31,7 +31,6 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
@@ -271,19 +270,11 @@ public final class MainActivity extends Activity {
         bar.setGravity(Gravity.CENTER_VERTICAL);
         bar.setBackgroundColor(WHITE);
 
-        ImageView logo = new ImageView(this);
-        logo.setImageResource(R.drawable.jarvis_logo_ui);
-        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        logo.setAdjustViewBounds(true);
-        LinearLayout.LayoutParams logoParams =
-            new LinearLayout.LayoutParams(dp(32), dp(32));
-        logoParams.rightMargin = dp(10);
-        bar.addView(logo, logoParams);
-
         LinearLayout titleBlock = new LinearLayout(this);
         titleBlock.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text("Jarvis", 22, BLACK);
+        TextView title = text("J A R V I S", 18, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setLetterSpacing(0.12f);
         titleBlock.addView(title, matchWrap());
         statusText = text("Connecting", 12, MID);
         statusText.setMaxLines(1);

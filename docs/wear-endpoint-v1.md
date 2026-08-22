@@ -1,5 +1,11 @@
 # Jarvis Wear Endpoint v1
 
+The v1.1 certification pass adds an inset-aware round-screen conversation UI,
+streamed user/assistant transcripts, native Wear text input, and end-to-end
+latency/audio diagnostics. Voice and typed turns share the active Core
+conversation ID. The monochrome `J A R V I S` wordmark replaces the former
+circular J artwork on phone and watch.
+
 The Wear app is a microphone/speaker endpoint; the paired phone remains the Jarvis Core network and processing hub. Both APKs use `com.aaron.jarvisvoice` and must be signed with the same certificate so Google Play services permits their private Data Layer relationship.
 
 ## Architecture and audio routing

@@ -26,4 +26,17 @@ public class AudioEndpointRouterTest {
         assertEquals(0, phone.frames);
         assertEquals(2, watch.frames);
     }
+
+    @Test public void newlyOwnedTurnRearmsOutputAfterCancellation() {
+        CountingSink phone = new CountingSink(), watch = new CountingSink();
+        AudioEndpointRouter router = new AudioEndpointRouter(phone, watch);
+        router.begin(VoiceEndpoint.WATCH, 42);
+        router.interrupt();
+        router.enqueue(new byte[]{1}, 42);
+        assertEquals(0, watch.frames);
+        router.resume(VoiceEndpoint.WATCH, 42);
+        router.enqueue(new byte[]{2}, 42);
+        assertEquals(1, watch.frames);
+        assertEquals(0, phone.frames);
+    }
 }

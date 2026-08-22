@@ -6,6 +6,11 @@ public final class AudioEndpointRouter {
     private VoiceEndpoint endpoint = VoiceEndpoint.PHONE; private long generation; private boolean active;
     public AudioEndpointRouter(Sink phone, Sink watch) { this.phone = phone; this.watch = watch; }
     public synchronized void begin(VoiceEndpoint value, long valueGeneration) { interrupt(); endpoint = value; generation = valueGeneration; active = true; }
+    /** Re-arms the currently owned turn without flushing the endpoint again. */
+    public synchronized void resume(VoiceEndpoint value, long valueGeneration) {
+        if (endpoint == value && generation == valueGeneration) active = true;
+        else begin(value, valueGeneration);
+    }
     public synchronized void enqueue(byte[] pcm, long frameGeneration) { if (!active || frameGeneration != generation) return; (endpoint == VoiceEndpoint.WATCH ? watch : phone).enqueue(pcm, generation); }
     public synchronized void interrupt() { active = false; phone.interrupt(); watch.interrupt(); }
     public synchronized VoiceEndpoint endpoint() { return endpoint; }

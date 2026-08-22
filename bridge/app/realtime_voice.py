@@ -176,6 +176,13 @@ def normalise_voice_endpoint(value: Any) -> str:
     return "WATCH" if str(value or "").strip().upper() == "WATCH" else "PHONE"
 
 
+def quiet_controls_enabled(configured: bool, metadata: dict[str, Any]) -> bool:
+    """Keep phone controls terse while ensuring remote watch endpoints get audible completion."""
+    return bool(configured) and metadata.get("client_kind") != "voice_pe" and normalise_voice_endpoint(
+        metadata.get("voice_endpoint")
+    ) != "WATCH"
+
+
 def normalise_eagerness(value: Any) -> str:
     eagerness = str(value or "").strip().casefold()
     return eagerness if eagerness in SUPPORTED_EAGERNESS else "high"
@@ -4111,7 +4118,7 @@ class RealtimeVoiceProxy:
             quiet_control, compact_response = control_voice_policy(
                 command,
                 tool_events,
-                enabled=self.config.quiet_controls and metadata.get("client_kind") != "voice_pe",
+                enabled=quiet_controls_enabled(self.config.quiet_controls, metadata),
             )
             if quiet_control:
                 response = compact_response

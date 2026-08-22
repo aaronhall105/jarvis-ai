@@ -1,6 +1,8 @@
 package com.aaron.jarvisvoice.wear;
 
 import android.content.Context;
+import android.os.SystemClock;
+import android.util.Log;
 import com.aaron.jarvisvoice.protocol.WearWireProtocol;
 import com.google.android.gms.tasks.Tasks;
 import com.google.android.gms.wearable.ChannelClient;
@@ -14,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 final class WearChannelManager {
+    private static final String TAG = "JarvisWearChannel";
     interface Listener { void onFrame(WearWireProtocol.Frame frame); void onDisconnected(String reason); }
     private final ChannelClient client; private final Listener listener;
     private final ExecutorService reader = Executors.newSingleThreadExecutor();
@@ -21,10 +24,15 @@ final class WearChannelManager {
     private final AtomicLong connectionGeneration = new AtomicLong();
     private volatile ChannelClient.Channel channel; private volatile OutputStream output; private volatile boolean closed = true;
     private volatile boolean acceptingSends;
+    private volatile long connectStartedAtMs;
+    private volatile boolean firstMicLogged;
+    private volatile boolean firstAudioLogged;
 
     WearChannelManager(Context context, Listener listener) { client = Wearable.getChannelClient(context); this.listener = listener; }
     void connect(Context context, long generation) {
         close(); closed = false; acceptingSends = true;
+        connectStartedAtMs = SystemClock.elapsedRealtime(); firstMicLogged = false; firstAudioLogged = false;
+        Log.i(TAG, "WATCH_LATENCY connect_start generation=" + generation + " elapsed_ms=" + connectStartedAtMs);
         long acceptedConnection = connectionGeneration.incrementAndGet();
         reader.execute(() -> {
             try {
@@ -49,8 +57,14 @@ final class WearChannelManager {
                 output = Tasks.await(client.getOutputStream(opened), 10L, TimeUnit.SECONDS);
                 InputStream input = Tasks.await(client.getInputStream(opened), 10L, TimeUnit.SECONDS);
                 WearWireProtocol.write(output, WearWireProtocol.START, generation, new byte[0]);
+                Log.i(TAG, "WATCH_LATENCY channel_ready generation=" + generation + " duration_ms=" + (SystemClock.elapsedRealtime() - connectStartedAtMs));
                 while (!closed && acceptedConnection == connectionGeneration.get()) {
-                    listener.onFrame(WearWireProtocol.read(input));
+                    WearWireProtocol.Frame frame = WearWireProtocol.read(input);
+                    if (frame.type() == WearWireProtocol.OUTPUT_AUDIO && !firstAudioLogged) {
+                        firstAudioLogged = true;
+                        Log.i(TAG, "WATCH_LATENCY first_audio_received generation=" + frame.generation() + " bytes=" + frame.payload().length + " since_connect_ms=" + (SystemClock.elapsedRealtime() - connectStartedAtMs));
+                    }
+                    listener.onFrame(frame);
                 }
             } catch (Exception error) {
                 if (!closed && acceptedConnection == connectionGeneration.get()) {
@@ -69,6 +83,10 @@ final class WearChannelManager {
                 if (!closed && acceptingSends && currentChannel == channel
                         && acceptedConnection == connectionGeneration.get()) {
                     WearWireProtocol.write(current, type, generation, payload);
+                    if (type == WearWireProtocol.MIC_AUDIO && !firstMicLogged) {
+                        firstMicLogged = true;
+                        Log.i(TAG, "WATCH_LATENCY first_mic_sent generation=" + generation + " bytes=" + payload.length + " since_connect_ms=" + (SystemClock.elapsedRealtime() - connectStartedAtMs));
+                    }
                 }
             } catch (Exception error) {
                 if (!closed && acceptedConnection == connectionGeneration.get()) {
@@ -77,6 +95,10 @@ final class WearChannelManager {
             }
         });
     }
+    void sendText(byte type, long generation, String value) {
+        send(type, generation, value == null ? new byte[0] : value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+    boolean isReady() { return !closed && output != null && channel != null; }
     void cancelAndClose(long generation, Runnable completion) {
         OutputStream current = output;
         ChannelClient.Channel currentChannel = channel;
