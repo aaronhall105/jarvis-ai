@@ -39,7 +39,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -70,6 +72,7 @@ public final class MainActivity extends Activity {
     private boolean generating;
     private AssistantMode assistantMode;
     private DeveloperClient developerClient;
+    private final Map<String, TextView> developerActivityStatuses = new HashMap<>();
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -485,7 +488,8 @@ public final class MainActivity extends Activity {
             menu.getMenu().add("New development session").setOnMenuItemClickListener(item -> {
                 developerClient.newSession();
                 store.setDeveloperThreadId("");
-                finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+                finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+                emptyState.setVisibility(View.VISIBLE);
                 statusText.setText("Connected");
                 return true;
             });
@@ -643,7 +647,8 @@ public final class MainActivity extends Activity {
         composer.setHint(DeveloperRoutingPolicy.placeholder(assistantMode));
         micButton.setVisibility(developer ? View.GONE : View.VISIBLE);
         if (clearView || developer) {
-            finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+            finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+            emptyState.setVisibility(View.VISIBLE);
         }
         if (developer) {
             statusText.setText("Connecting…");
@@ -684,9 +689,7 @@ public final class MainActivity extends Activity {
                     addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
                         item.optString("text"), System.currentTimeMillis()), true);
                 } else if (!"agentMessage".equals(type) && !"reasoning".equals(type)) {
-                    addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
-                        "[ " + type + " ] " + item.optString("status", "Running"),
-                        System.currentTimeMillis()), true);
+                    addDeveloperActivity(item, "item/completed".equals(method));
                 }
             }
         }
@@ -698,7 +701,8 @@ public final class MainActivity extends Activity {
         store.setDeveloperThreadId("");
         developerClient.connect(store.developerUrl(), store.remoteDeveloperUrl(),
             store.developerToken(), workspace, "");
-        finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+        finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+        emptyState.setVisibility(View.VISIBLE);
     }
 
     private void showDeveloperThreads(JSONObject result) {
@@ -779,6 +783,35 @@ public final class MainActivity extends Activity {
             attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
             window.setAttributes(attributes);
         }
+    }
+
+    private void addDeveloperActivity(JSONObject item, boolean completed) {
+        emptyState.setVisibility(View.GONE);
+        String id = item.optString("id", item.optString("type") + System.nanoTime());
+        String rawType = item.optString("type", "activity");
+        TextView existing = developerActivityStatuses.get(id);
+        String state = item.optString("status", completed ? "completed" : "inProgress");
+        String status = DeveloperActivityPolicy.status(state, completed);
+        if (existing != null) {
+            existing.setText(status);
+            scrollToBottom();
+            return;
+        }
+        String title = DeveloperActivityPolicy.title(rawType);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(13), dp(16), dp(13));
+        card.setBackground(rounded(SOFT, 18, 1, LINE));
+        TextView heading = text(title, 14, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        TextView statusView = text(status, 13, MID);
+        card.addView(heading, matchWrap(0, dp(3)));
+        card.addView(statusView, matchWrap());
+        developerActivityStatuses.put(id, statusView);
+        LinearLayout.LayoutParams params = matchWrap(dp(6), dp(7));
+        params.leftMargin = dp(4); params.rightMargin = dp(4);
+        messageList.addView(card, params);
+        scrollToBottom();
     }
 
     private void toggleVoice() {
@@ -941,7 +974,11 @@ public final class MainActivity extends Activity {
         holder.setGravity(user ? Gravity.END : Gravity.START);
 
         if (assistant) {
-            TextView name = text("Jarvis", 12, MID);
+            TextView name = text(
+                DeveloperRoutingPolicy.routesToDeveloper(assistantMode) ? "Developer" : "Jarvis",
+                12,
+                MID
+            );
             name.setTypeface(Typeface.DEFAULT_BOLD);
             holder.addView(name, wrapWrap(0, dp(4)));
         }
