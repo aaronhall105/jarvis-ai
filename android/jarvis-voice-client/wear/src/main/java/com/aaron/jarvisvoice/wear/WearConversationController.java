@@ -66,7 +66,7 @@ final class WearConversationController implements WearChannelManager.Listener {
                 frame.generation(),
                 () -> playbackComplete(frame.generation())
             );
-            case WearWireProtocol.OUTPUT_CANCEL -> player.interrupt();
+            case WearWireProtocol.OUTPUT_CANCEL -> player.cancelTurn(frame.generation());
             case WearWireProtocol.USER_TRANSCRIPT -> listener.onTranscript("user", WearWireProtocol.text(frame), true);
             case WearWireProtocol.ASSISTANT_DELTA -> listener.onTranscript("assistant", WearWireProtocol.text(frame), false);
             case WearWireProtocol.ASSISTANT_DONE -> listener.onTranscript("assistant", WearWireProtocol.text(frame), true);

@@ -11,10 +11,10 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import com.aaron.jarvisvoice.protocol.WearWireProtocol;
+import com.aaron.jarvisvoice.protocol.PlaybackEpochGate;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.atomic.AtomicLong;
 
 /** Ordered, generation-safe watch playback that never blocks the UI thread. */
 final class WearAudioPlayer {
@@ -25,7 +25,7 @@ final class WearAudioPlayer {
         return thread;
     });
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final AtomicLong generation = new AtomicLong();
+    private final PlaybackEpochGate playbackGate = new PlaybackEpochGate();
     private final Object trackLock = new Object();
     private AudioTrack track;
     private final AudioManager audioManager;
@@ -46,19 +46,23 @@ final class WearAudioPlayer {
 
     void begin(long value) {
         interrupt();
-        generation.set(value);
+        playbackGate.begin(value);
         firstWriteLogged = false;
     }
 
     void play(byte[] pcm, long frameGeneration) {
-        if (pcm == null || pcm.length == 0 || generation.get() != frameGeneration) return;
+        if (pcm == null || pcm.length == 0) return;
         byte[] copy = pcm.clone();
-        submit(() -> write(copy, frameGeneration));
+        long acceptedEpoch = playbackGate.snapshot(frameGeneration);
+        if (acceptedEpoch < 0L) return;
+        submit(() -> write(copy, frameGeneration, acceptedEpoch));
     }
 
     void finish(long frameGeneration, Runnable completion) {
+        long acceptedEpoch = playbackGate.snapshot(frameGeneration);
+        if (acceptedEpoch < 0L) return;
         submit(() -> {
-            if (generation.get() != frameGeneration) return;
+            if (!accepts(frameGeneration, acceptedEpoch)) return;
             AudioTrack current;
             long targetFrames;
             synchronized (trackLock) {
@@ -67,7 +71,7 @@ final class WearAudioPlayer {
             }
             if (current != null) {
                 long waitUntil = System.currentTimeMillis() + 15_000L;
-                while (generation.get() == frameGeneration
+                while (accepts(frameGeneration, acceptedEpoch)
                         && Integer.toUnsignedLong(current.getPlaybackHeadPosition()) < targetFrames
                         && System.currentTimeMillis() < waitUntil) {
                     try {
@@ -78,17 +82,25 @@ final class WearAudioPlayer {
                     }
                 }
             }
-            if (generation.get() != frameGeneration) return;
+            if (!accepts(frameGeneration, acceptedEpoch)) return;
             releaseTrack();
             main.post(() -> {
-                if (generation.get() == frameGeneration) completion.run();
+                if (accepts(frameGeneration, acceptedEpoch)) completion.run();
             });
         });
     }
 
+    /** Cancels one turn while retaining the continuous session generation. */
+    void cancelTurn(long frameGeneration) {
+        if (playbackGate.snapshot(frameGeneration) < 0L) return;
+        playbackGate.cancelTurn(frameGeneration);
+        releaseTrack();
+        firstWriteLogged = false;
+    }
+
     /** Flushes the hardware buffer synchronously so X is immediate. */
     void interrupt() {
-        generation.incrementAndGet();
+        playbackGate.close();
         releaseTrack();
     }
 
@@ -97,8 +109,8 @@ final class WearAudioPlayer {
         writer.shutdownNow();
     }
 
-    private void write(byte[] pcm, long acceptedGeneration) {
-        if (generation.get() != acceptedGeneration) return;
+    private void write(byte[] pcm, long acceptedGeneration, long acceptedEpoch) {
+        if (!accepts(acceptedGeneration, acceptedEpoch)) return;
         try {
             AudioTrack current = ensureTrack();
             if (current.getPlayState() != AudioTrack.PLAYSTATE_PLAYING) {
@@ -107,7 +119,7 @@ final class WearAudioPlayer {
                     + " elapsed_ms=" + SystemClock.elapsedRealtime());
             }
             int offset = 0;
-            while (offset < pcm.length && generation.get() == acceptedGeneration) {
+            while (offset < pcm.length && accepts(acceptedGeneration, acceptedEpoch)) {
                 int count = current.write(
                     pcm,
                     offset,
@@ -130,6 +142,10 @@ final class WearAudioPlayer {
             Log.e(TAG, "audio_write_failed generation=" + acceptedGeneration, error);
             // Cancellation can legitimately release AudioTrack during a write.
         }
+    }
+
+    private boolean accepts(long acceptedGeneration, long acceptedEpoch) {
+        return playbackGate.accepts(acceptedGeneration, acceptedEpoch);
     }
 
     private AudioTrack ensureTrack() {

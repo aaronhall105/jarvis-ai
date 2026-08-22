@@ -48,10 +48,8 @@ public final class WearVoiceService extends Service implements WearConversationC
                 getPackageName(),
                 PackageManager.GET_META_DATA
             );
-            long configured = info.metaData.getLong(
-                "com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS",
-                60_000L
-            );
+            Object raw = info.metaData.get("com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS");
+            long configured = raw instanceof Number number ? number.longValue() : 60_000L;
             return Math.max(15_000L, Math.min(configured, 300_000L));
         } catch (Exception ignored) {
             return 60_000L;
