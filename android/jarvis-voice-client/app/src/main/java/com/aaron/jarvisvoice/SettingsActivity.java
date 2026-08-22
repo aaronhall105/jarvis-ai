@@ -1,6 +1,7 @@
 package com.aaron.jarvisvoice;
 
 import android.app.Activity;
+import android.app.Dialog;
 import android.app.role.RoleManager;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -118,43 +119,22 @@ public final class SettingsActivity extends Activity {
 
         page.addView(buildHeader(), matchWrap(0, dp(20)));
 
-        page.addView(sectionHeader(
-            "Voice and conversation",
-            "Choose Jarvis's voice, response mode and follow-up behaviour."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildVoiceCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Wake word and background",
-            "Keep the dedicated offline detector available when the chat is closed."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildWakeCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Assistant and overlay",
-            "Control the Side button, compact overlay and background conversation."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildAssistantCard(), matchWrap(0, dp(12)));
-        page.addView(buildBehaviourCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Connections",
-            "Private Jarvis Core and optional Home Assistant voice credentials."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildCoreCard(), matchWrap(0, dp(12)));
-        page.addView(buildHomeAssistantCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Updates",
-            "Secure Android updates, release channels and rollback information."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildUpdatesCard(), matchWrap(0, dp(24)));
-
-        page.addView(sectionHeader(
-            "Diagnostics",
-            "Connection, microphone, wake and response-performance checks."
-        ), matchWrap(0, dp(10)));
-        page.addView(buildVoiceFoundationCard(), matchWrap(0, dp(24)));
+        page.addView(expandableSection("Voice and conversation",
+            "Voice, response mode and follow-up behaviour.", buildVoiceCard(), true), matchWrap(0, dp(12)));
+        page.addView(expandableSection("Wake word and background",
+            "Offline detector and closed-chat behaviour.", buildWakeCard(), false), matchWrap(0, dp(12)));
+        LinearLayout assistantContent = new LinearLayout(this); assistantContent.setOrientation(LinearLayout.VERTICAL);
+        assistantContent.addView(buildAssistantCard(), matchWrap(0, dp(8))); assistantContent.addView(buildBehaviourCard(), matchWrap());
+        page.addView(expandableSection("Assistant and overlay",
+            "Side button, overlay and background conversation.", assistantContent, false), matchWrap(0, dp(12)));
+        LinearLayout connectionContent = new LinearLayout(this); connectionContent.setOrientation(LinearLayout.VERTICAL);
+        connectionContent.addView(buildCoreCard(), matchWrap(0, dp(8))); connectionContent.addView(buildHomeAssistantCard(), matchWrap());
+        page.addView(expandableSection("Connections",
+            "Local and secure remote Core routes plus Home Assistant.", connectionContent, false), matchWrap(0, dp(12)));
+        page.addView(expandableSection("Updates",
+            "Secure releases and rollback information.", buildUpdatesCard(), false), matchWrap(0, dp(12)));
+        page.addView(expandableSection("Diagnostics",
+            "Connection, microphone, wake and latency checks.", buildVoiceFoundationCard(), false), matchWrap(0, dp(24)));
 
         Button save = primaryButton("Save changes");
         save.setOnClickListener(view -> saveSettings());
@@ -759,6 +739,32 @@ public final class SettingsActivity extends Activity {
         return block;
     }
 
+    private View expandableSection(String titleValue, String noteValue, View content, boolean expanded) {
+        LinearLayout shell = card(); shell.setPadding(dp(16), dp(4), dp(16), dp(12));
+        LinearLayout header = new LinearLayout(this); header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL); header.setPadding(0, dp(10), 0, dp(8));
+        LinearLayout copy = new LinearLayout(this); copy.setOrientation(LinearLayout.VERTICAL);
+        TextView title = text(titleValue, 17, BLACK); title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        TextView note = text(noteValue, 12, MID); note.setPadding(0, dp(3), dp(12), 0);
+        copy.addView(title, matchWrap()); copy.addView(note, matchWrap());
+        header.addView(copy, new LinearLayout.LayoutParams(0, -2, 1f));
+        TextView indicator = text(expanded ? "−" : "+", 22, MID); indicator.setGravity(Gravity.CENTER);
+        header.addView(indicator, new LinearLayout.LayoutParams(dp(36), dp(44)));
+        content.setVisibility(expanded ? View.VISIBLE : View.GONE); shell.addView(header, matchWrap()); shell.addView(content, matchWrap());
+        header.setOnClickListener(view -> {
+            boolean opening = content.getVisibility() != View.VISIBLE;
+            indicator.setText(opening ? "−" : "+");
+            if (opening) {
+                content.setVisibility(View.VISIBLE); content.setAlpha(0f); content.setTranslationY(-dp(8));
+                content.animate().alpha(1f).translationY(0f).setDuration(180L).start();
+            } else {
+                content.animate().alpha(0f).translationY(-dp(6)).setDuration(140L)
+                    .withEndAction(() -> { content.setVisibility(View.GONE); content.setAlpha(1f); content.setTranslationY(0f); }).start();
+            }
+        });
+        return shell;
+    }
+
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -819,18 +825,66 @@ public final class SettingsActivity extends Activity {
     }
 
     private Spinner spinner(List<String> values) {
-        Spinner spinner = new Spinner(this);
+        Spinner spinner = new BubbleSpinner(values);
         ArrayAdapter<String> adapter = new ArrayAdapter<>(
             this,
             android.R.layout.simple_spinner_item,
             values
-        );
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ) {
+            @Override public View getView(int position, View convertView, ViewGroup parent) {
+                TextView row = (TextView) super.getView(position, convertView, parent);
+                row.setText(getItem(position) + "   ▾"); row.setTextSize(15); row.setTextColor(BLACK);
+                row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(14), 0, dp(12), 0);
+                return row;
+            }
+        };
         spinner.setAdapter(adapter);
-        spinner.setPadding(dp(12), dp(6), dp(12), dp(6));
         spinner.setMinimumHeight(dp(50));
-        spinner.setBackground(rounded(WHITE, 14, 1, LINE));
+        spinner.setBackground(rounded(WHITE, 18, 1, LINE));
         return spinner;
+    }
+
+    /** A rounded selector backed by a soft bottom bubble instead of the platform dropdown. */
+    private final class BubbleSpinner extends Spinner {
+        private final List<String> choices;
+        BubbleSpinner(List<String> choices) { super(SettingsActivity.this); this.choices = List.copyOf(choices); }
+        @Override public boolean performClick() {
+            Dialog dialog = new Dialog(SettingsActivity.this);
+            LinearLayout panel = new LinearLayout(SettingsActivity.this);
+            panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(dp(14), dp(14), dp(14), dp(14));
+            panel.setBackground(rounded(WHITE, 26, 1, LINE));
+            TextView heading = text("Choose an option", 16, BLACK);
+            heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            panel.addView(heading, matchWrap(0, dp(8)));
+            ScrollView list = new ScrollView(SettingsActivity.this);
+            LinearLayout rows = new LinearLayout(SettingsActivity.this); rows.setOrientation(LinearLayout.VERTICAL);
+            for (int index = 0; index < choices.size(); index++) {
+                int selection = index;
+                TextView row = text(choices.get(index), 15, BLACK);
+                row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(14), 0, dp(14), 0);
+                row.setMinHeight(dp(48));
+                row.setBackground(rounded(index == getSelectedItemPosition() ? SOFT : WHITE, 16, 0, Color.TRANSPARENT));
+                row.setOnClickListener(view -> { setSelection(selection); dialog.dismiss(); });
+                rows.addView(row, matchWrap(0, dp(3)));
+            }
+            list.addView(rows, new ScrollView.LayoutParams(-1, -2));
+            panel.addView(list, new LinearLayout.LayoutParams(-1, 0, 1f));
+            dialog.setContentView(panel); dialog.show();
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setBackgroundDrawableResource(android.R.color.transparent);
+                window.setGravity(Gravity.BOTTOM); window.setDimAmount(0.18f);
+                window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+                WindowManager.LayoutParams params = window.getAttributes();
+                params.width = WindowManager.LayoutParams.MATCH_PARENT;
+                params.height = Math.min(dp(520), getResources().getDisplayMetrics().heightPixels * 3 / 4);
+                params.horizontalMargin = 0.025f; params.verticalMargin = 0.018f;
+                window.setAttributes(params);
+                panel.setTranslationY(dp(24)); panel.setAlpha(0f);
+                panel.animate().translationY(0f).alpha(1f).setDuration(180L).start();
+            }
+            return true;
+        }
     }
 
     private EditText field(String hint, boolean password) {

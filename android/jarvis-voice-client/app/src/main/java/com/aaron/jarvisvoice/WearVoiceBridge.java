@@ -17,7 +17,7 @@ final class WearVoiceBridge extends ChannelClient.ChannelCallback {
     private static final String TAG = "JarvisWearBridge";
     private static volatile WearVoiceBridge active;
     private static volatile ChannelClient.Channel pending;
-    interface Listener { void onWatchStart(long generation); void onWatchAudio(long generation, byte[] pcm); void onWatchText(long generation, String text); void onWatchCancel(long generation); void onWatchDisconnected(); }
+    interface Listener { void onWatchPrepare(); void onWatchStart(long generation); void onWatchAudio(long generation, byte[] pcm); void onWatchText(long generation, String text); void onWatchClearChat(long generation); void onWatchCancel(long generation); void onWatchSilenceTimeout(long generation); void onWatchDisconnected(); }
     private final ChannelClient client; private final Listener listener; private final ExecutorService reader = Executors.newSingleThreadExecutor(); private final ExecutorService writer = Executors.newSingleThreadExecutor();
     private volatile ChannelClient.Channel channel; private volatile OutputStream output; private volatile long generation;
     private final AtomicLong outputEpoch = new AtomicLong();
@@ -37,10 +37,13 @@ final class WearVoiceBridge extends ChannelClient.ChannelCallback {
                 output = Tasks.await(client.getOutputStream(opened)); InputStream input = Tasks.await(client.getInputStream(opened));
                 while (channel == opened) {
                     WearWireProtocol.Frame frame = WearWireProtocol.read(input);
-                    if (frame.type() == WearWireProtocol.START) { outputEpoch.incrementAndGet(); generation = frame.generation(); Log.i(TAG, "session_start generation=" + generation + " channel_ready_ms=" + (SystemClock.elapsedRealtime() - openedAtMs)); listener.onWatchStart(generation); }
+                    if (frame.type() == WearWireProtocol.PREPARE) listener.onWatchPrepare();
+                    else if (frame.type() == WearWireProtocol.START) { outputEpoch.incrementAndGet(); generation = frame.generation(); Log.i(TAG, "session_start generation=" + generation + " channel_ready_ms=" + (SystemClock.elapsedRealtime() - openedAtMs)); listener.onWatchStart(generation); }
                     else if (frame.generation() == generation && frame.type() == WearWireProtocol.MIC_AUDIO) { if (!firstMicLogged) { firstMicLogged = true; Log.i(TAG, "first_mic_frame generation=" + generation + " bytes=" + frame.payload().length + " since_open_ms=" + (SystemClock.elapsedRealtime() - openedAtMs)); } listener.onWatchAudio(generation, frame.payload()); }
                     else if (frame.generation() == generation && frame.type() == WearWireProtocol.TEXT_INPUT) listener.onWatchText(generation, WearWireProtocol.text(frame));
+                    else if (frame.generation() == generation && frame.type() == WearWireProtocol.CLEAR_CHAT) listener.onWatchClearChat(generation);
                     else if (frame.generation() == generation && frame.type() == WearWireProtocol.CANCEL) listener.onWatchCancel(generation);
+                    else if (frame.generation() == generation && frame.type() == WearWireProtocol.SILENCE_TIMEOUT) listener.onWatchSilenceTimeout(generation);
                 }
             } catch (Exception error) { if (channel == opened) { Log.e(TAG, "channel_read_failed generation=" + generation, error); listener.onWatchDisconnected(); } }
         });
@@ -53,6 +56,7 @@ final class WearVoiceBridge extends ChannelClient.ChannelCallback {
     void userTranscript(String text, long frameGeneration) { sendText(WearWireProtocol.USER_TRANSCRIPT, text, frameGeneration); }
     void assistantDelta(String text, long frameGeneration) { sendText(WearWireProtocol.ASSISTANT_DELTA, text, frameGeneration); }
     void assistantDone(String text, long frameGeneration) { sendText(WearWireProtocol.ASSISTANT_DONE, text, frameGeneration); }
+    void transcriptCleared(long frameGeneration) { send(WearWireProtocol.TRANSCRIPT_CLEARED, new byte[0], frameGeneration); }
     void sessionClosed(long frameGeneration) {
         ChannelClient.Channel target = channel;
         OutputStream targetOutput = output;

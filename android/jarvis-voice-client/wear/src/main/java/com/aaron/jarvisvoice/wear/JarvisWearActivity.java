@@ -2,6 +2,7 @@ package com.aaron.jarvisvoice.wear;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.Dialog;
 import android.app.RemoteInput;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -24,6 +25,9 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -60,6 +64,10 @@ public final class JarvisWearActivity extends Activity {
             String role = intent.getStringExtra(WearVoiceService.EXTRA_ROLE);
             String text = intent.getStringExtra(WearVoiceService.EXTRA_TEXT);
             if (role != null && text != null) {
+                if ("clear".equals(role)) {
+                    messages.clear(); streamingAssistant.setLength(0); renderTranscript();
+                    return;
+                }
                 updateTranscript(role, text, intent.getBooleanExtra(WearVoiceService.EXTRA_COMPLETE, true));
                 return;
             }
@@ -73,6 +81,7 @@ public final class JarvisWearActivity extends Activity {
         super.onCreate(saved); buildUi();
         ContextCompat.registerReceiver(this, receiver,
             new IntentFilter(WearVoiceService.ACTION_STATE), ContextCompat.RECEIVER_NOT_EXPORTED);
+        startService(new Intent(this, WearVoiceService.class).setAction(WearVoiceService.ACTION_PREPARE));
         if (getIntent().getBooleanExtra(EXTRA_AUTO_START, false)
                 || Intent.ACTION_ASSIST.equals(getIntent().getAction())) startConversation();
     }
@@ -128,23 +137,30 @@ public final class JarvisWearActivity extends Activity {
 
         LinearLayout actions = new LinearLayout(this); actions.setGravity(Gravity.CENTER);
         actions.setPadding(0, dp(3), 0, 0);
-        ImageButton type = actionButton(android.R.drawable.ic_menu_edit, "Type to Jarvis", false);
+        ImageButton type = actionButton(R.drawable.control_chat, "Type to Jarvis", false);
         type.setOnClickListener(v -> openTextInput());
         actions.addView(touchTarget(type, WearUiMetrics.textActionVisibleDp()),
             new LinearLayout.LayoutParams(dp(WearUiMetrics.actionTouchTargetDp()), dp(WearUiMetrics.actionTouchTargetDp())));
-        control = actionButton(R.drawable.ic_mic, "Start conversation", false);
+        control = actionButton(R.drawable.control_mic, "Start conversation", false);
         control.setOnClickListener(v -> { if (active) cancelConversation(); else startConversation(); });
         controlTarget = touchTarget(control, WearUiMetrics.primaryActionVisibleDp());
         LinearLayout.LayoutParams controlParams = new LinearLayout.LayoutParams(dp(46), dp(WearUiMetrics.actionTouchTargetDp()));
         controlParams.leftMargin = dp(6); actions.addView(controlTarget, controlParams);
+        ImageButton clear = actionButton(R.drawable.control_delete_red, "Clear current chat", false);
+        clear.setOnClickListener(v -> confirmClearChat());
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+            dp(WearUiMetrics.actionTouchTargetDp()), dp(WearUiMetrics.actionTouchTargetDp()));
+        clearParams.leftMargin = dp(6);
+        actions.addView(touchTarget(clear, WearUiMetrics.textActionVisibleDp()), clearParams);
         root.addView(actions, new LinearLayout.LayoutParams(-1, dp(47)));
         setContentView(root); render(false, WatchConversationState.IDLE.name(), "Ready");
     }
 
     private ImageButton actionButton(int icon, String description, boolean activeButton) {
         ImageButton button = new ImageButton(this); button.setImageResource(icon);
-        button.setPadding(dp(7), dp(7), dp(7), dp(7)); button.setContentDescription(description);
-        button.setBackground(circle(activeButton)); return button;
+        button.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE);
+        button.setPadding(0, 0, 0, 0); button.setContentDescription(description);
+        button.setBackgroundColor(android.graphics.Color.TRANSPARENT); return button;
     }
 
     private FrameLayout touchTarget(ImageButton button, int visibleSizeDp) {
@@ -181,6 +197,43 @@ public final class JarvisWearActivity extends Activity {
         RemoteInputIntentHelper.putRemoteInputsExtra(intent, List.of(input));
         RemoteInputIntentHelper.putTitleExtra(intent, "J A R V I S");
         startActivityForResult(intent, REQUEST_TEXT);
+    }
+
+    private void confirmClearChat() {
+        Dialog dialog = new Dialog(this);
+        LinearLayout bubble = new LinearLayout(this);
+        bubble.setOrientation(LinearLayout.VERTICAL); bubble.setGravity(Gravity.CENTER_HORIZONTAL);
+        bubble.setPadding(dp(18), dp(16), dp(18), dp(14)); bubble.setBackground(roundedCard(0xffffffff, 22, 0xffdedede));
+        TextView title = new TextView(this); title.setText("Clear this chat?"); title.setTextSize(17);
+        title.setTextColor(getColor(R.color.jarvis_black)); title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setGravity(Gravity.CENTER); bubble.addView(title, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout buttons = new LinearLayout(this); buttons.setGravity(Gravity.CENTER); buttons.setPadding(0, dp(12), 0, 0);
+        Button cancel = dialogButton("Cancel", getColor(R.color.jarvis_panel), getColor(R.color.jarvis_black));
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        Button confirm = dialogButton("Clear", 0xffbe242e, 0xffffffff);
+        confirm.setOnClickListener(v -> {
+            dialog.dismiss(); messages.clear(); streamingAssistant.setLength(0); renderTranscript();
+            startService(new Intent(this, WearVoiceService.class).setAction(WearVoiceService.ACTION_CLEAR_CHAT));
+        });
+        buttons.addView(cancel, new LinearLayout.LayoutParams(dp(92), dp(42)));
+        LinearLayout.LayoutParams confirmParams = new LinearLayout.LayoutParams(dp(92), dp(42));
+        confirmParams.leftMargin = dp(7); buttons.addView(confirm, confirmParams); bubble.addView(buttons);
+        dialog.setContentView(bubble); dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent); window.setGravity(Gravity.CENTER);
+            WindowManager.LayoutParams params = window.getAttributes(); params.width = dp(220); window.setAttributes(params);
+        }
+    }
+
+    private Button dialogButton(String label, int background, int foreground) {
+        Button button = new Button(this); button.setText(label); button.setTextSize(13); button.setAllCaps(false);
+        button.setTextColor(foreground); button.setBackground(roundedCard(background, 18, background)); return button;
+    }
+
+    private GradientDrawable roundedCard(int colour, int radiusDp, int stroke) {
+        GradientDrawable shape = new GradientDrawable(); shape.setColor(colour); shape.setCornerRadius(dp(radiusDp));
+        if (stroke != colour) shape.setStroke(dp(1), stroke); return shape;
     }
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -254,16 +307,10 @@ public final class JarvisWearActivity extends Activity {
         };
         status.setText(message != null && message.toLowerCase(Locale.ROOT).contains("connect") ? "Connecting  •" : label);
         status.setTextColor(getColor(isActive ? R.color.jarvis_black : R.color.jarvis_muted));
-        control.setImageResource(isActive ? R.drawable.ic_close : R.drawable.ic_mic);
-        control.setBackground(circle(isActive));
+        control.setImageResource(isActive ? R.drawable.control_close : R.drawable.control_mic);
+        control.setBackgroundColor(android.graphics.Color.TRANSPARENT);
         control.setContentDescription(isActive ? "End conversation" : "Start conversation");
         controlTarget.setContentDescription(control.getContentDescription());
-    }
-
-    private GradientDrawable circle(boolean activeButton) {
-        GradientDrawable shape = new GradientDrawable(); shape.setShape(GradientDrawable.OVAL);
-        shape.setColor(getColor(activeButton ? R.color.jarvis_black : R.color.jarvis_panel));
-        if (!activeButton) shape.setStroke(dp(1), 0xffd8d8d8); return shape;
     }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }

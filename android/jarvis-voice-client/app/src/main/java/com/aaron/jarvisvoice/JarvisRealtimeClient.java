@@ -688,6 +688,24 @@ public final class JarvisRealtimeClient {
     private void networkAvailable() {
         diagnostics.recordNetworkStatus(true, "Network restored");
         diagnostics.recordCoreReachability("Checking", "Selecting endpoint");
+        if (authenticated || ready) {
+            post(() -> listener.onStatus("Network changed — selecting the best Jarvis route"));
+            performance.abandonTurn();
+            activeClientTurnId = 0L;
+            authenticated = false;
+            ready = false;
+            opening = false;
+            probing = false;
+            generation++;
+            endpoints.cancel();
+            cancelTimers();
+            WebSocket current = socket;
+            socket = null;
+            if (current != null) current.cancel();
+            reconnectAttempt = 0;
+            open();
+            return;
+        }
         post(() -> listener.onStatus("Network restored — reconnecting Jarvis"));
         if (shouldReconnect && !authenticated && !opening) {
             reconnectScheduled = false;

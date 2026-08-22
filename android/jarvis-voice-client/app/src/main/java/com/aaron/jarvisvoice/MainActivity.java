@@ -2,7 +2,7 @@ package com.aaron.jarvisvoice;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -29,6 +29,7 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -314,6 +315,13 @@ public final class MainActivity extends Activity {
             iconParams(dp(40), dp(6))
         );
 
+        ImageButton clearChat = assetButton(
+            R.drawable.control_delete_red,
+            "Clear current chat"
+        );
+        clearChat.setOnClickListener(view -> confirmDeleteChat());
+        bar.addView(clearChat, iconParams(dp(44), dp(6)));
+
         ImageButton more = iconButton(
             R.drawable.ic_more,
             "More options",
@@ -373,12 +381,7 @@ public final class MainActivity extends Activity {
         row.setPadding(dp(12), dp(6), dp(6), dp(6));
         row.setBackground(rounded(SOFT, 25, 1, LINE));
 
-        ImageButton addButton = iconButton(
-            R.drawable.ic_add,
-            "Jarvis actions",
-            WHITE,
-            BLACK
-        );
+        ImageButton addButton = assetButton(R.drawable.control_chat, "Chat options");
         addButton.setOnClickListener(this::showComposerActions);
         row.addView(addButton, iconParams(dp(42), dp(8)));
 
@@ -432,7 +435,7 @@ public final class MainActivity extends Activity {
             1f
         ));
 
-        micButton = iconButton(R.drawable.ic_mic, "Start voice", WHITE, BLACK);
+        micButton = assetButton(R.drawable.control_mic, "Start voice");
         micButton.setOnClickListener(view -> toggleVoice());
         row.addView(micButton, iconParams(dp(42), dp(6)));
 
@@ -614,18 +617,39 @@ public final class MainActivity extends Activity {
 
 
     private void confirmDeleteChat() {
-        new AlertDialog.Builder(this)
-            .setTitle("Delete this chat?")
-            .setMessage(
-                "This removes the current chat from the app "
-                    + "and starts a fresh conversation."
-            )
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton(
-                "Delete",
-                (dialog, which) -> deleteCurrentChat()
-            )
-            .show();
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(22), dp(20), dp(22), dp(18));
+        sheet.setBackground(rounded(WHITE, 26, 1, LINE));
+        TextView title = text("Clear this chat?", 20, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(title, matchWrap(0, dp(7)));
+        sheet.addView(text("Only the current conversation will be removed.", 14, MID), matchWrap(0, dp(18)));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        Button cancel = new Button(this); cancel.setText("Cancel"); cancel.setTextColor(BLACK);
+        cancel.setAllCaps(false); cancel.setBackground(rounded(SOFT, 20, 0, Color.TRANSPARENT));
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        Button clear = new Button(this); clear.setText("Clear"); clear.setTextColor(Color.WHITE);
+        clear.setAllCaps(false); clear.setBackground(rounded(Color.rgb(190, 36, 46), 20, 0, Color.TRANSPARENT));
+        clear.setOnClickListener(view -> { dialog.dismiss(); deleteCurrentChat(); });
+        actions.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(44)));
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(dp(96), dp(44));
+        clearParams.leftMargin = dp(8); actions.addView(clear, clearParams);
+        sheet.addView(actions, matchWrap());
+        dialog.setContentView(sheet);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setDimAmount(0.22f); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setGravity(Gravity.BOTTOM);
+            WindowManager.LayoutParams params = window.getAttributes();
+            params.width = WindowManager.LayoutParams.MATCH_PARENT;
+            params.horizontalMargin = 0.03f; params.verticalMargin = 0.02f;
+            window.setAttributes(params);
+        }
+        dialog.show();
     }
 
     private void deleteCurrentChat() {
@@ -882,15 +906,17 @@ public final class MainActivity extends Activity {
     private void updateMicButton() {
         if (micButton == null) return;
         if (voiceActive) {
-            micButton.setBackground(rounded(BLACK, 21, 0, Color.TRANSPARENT));
-            micButton.setColorFilter(WHITE);
+            micButton.setImageResource(R.drawable.control_close);
+            micButton.setBackgroundColor(Color.TRANSPARENT);
+            micButton.clearColorFilter();
             micButton.setContentDescription(
                 listening ? "Listening. Tap to stop voice." : "Stop voice"
             );
             micButton.setAlpha(1f);
         } else {
-            micButton.setBackground(rounded(WHITE, 21, 1, LINE));
-            micButton.setColorFilter(BLACK);
+            micButton.setImageResource(R.drawable.control_mic);
+            micButton.setBackgroundColor(Color.TRANSPARENT);
+            micButton.clearColorFilter();
             micButton.setContentDescription("Start voice");
             micButton.setAlpha(1f);
         }
@@ -932,6 +958,17 @@ public final class MainActivity extends Activity {
         value.setMinimumHeight(0);
         value.setBackground(rounded(background, 21, 0, Color.TRANSPARENT));
         return value;
+    }
+
+    private ImageButton assetButton(int icon, String description) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(icon);
+        button.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE);
+        button.setAdjustViewBounds(true);
+        button.setPadding(dp(2), dp(2), dp(2), dp(2));
+        button.setBackgroundColor(Color.TRANSPARENT);
+        button.setContentDescription(description);
+        return button;
     }
 
     private TextView text(String value, int size, int colour) {

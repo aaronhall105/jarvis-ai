@@ -20,7 +20,7 @@
         <meta-data android:name="com.google.android.wearable.standalone" android:value="false" />
         <meta-data
             android:name="com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS"
-            android:value="60000" />
+            android:value="8000" />
         <activity
             android:name=".wear.JarvisWearActivity"
             android:exported="true"

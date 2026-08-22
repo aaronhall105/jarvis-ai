@@ -11,10 +11,10 @@ public final class WearWireProtocol {
     public static final String CHANNEL_PATH = "/jarvis/watch/voice/v1";
     public static final int SAMPLE_RATE = 24_000;
     public static final byte START = 1, MIC_AUDIO = 2, END_INPUT = 3, CANCEL = 4,
-        TEXT_INPUT = 5;
+        TEXT_INPUT = 5, SILENCE_TIMEOUT = 6, CLEAR_CHAT = 7, PREPARE = 8;
     public static final byte STATE = 11, OUTPUT_AUDIO = 12, OUTPUT_DONE = 13,
         CLOSED = 14, ERROR = 15, OUTPUT_CANCEL = 16, USER_TRANSCRIPT = 17,
-        ASSISTANT_DELTA = 18, ASSISTANT_DONE = 19;
+        ASSISTANT_DELTA = 18, ASSISTANT_DONE = 19, TRANSCRIPT_CLEARED = 20;
     public static final int MAX_FRAME_BYTES = 256 * 1024;
 
     public record Frame(byte type, long generation, byte[] payload) {}

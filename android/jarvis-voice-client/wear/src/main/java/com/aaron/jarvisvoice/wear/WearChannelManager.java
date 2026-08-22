@@ -35,6 +35,20 @@ final class WearChannelManager {
 
     WearChannelManager(Context context, Listener listener) { client = Wearable.getChannelClient(context); this.listener = listener; }
     void connect(Context context, long generation) {
+        open(context, generation, WearWireProtocol.START);
+    }
+    void prepare(Context context) {
+        if (isReady()) return;
+        open(context, 0L, WearWireProtocol.PREPARE);
+    }
+    private void open(Context context, long generation, byte openingFrame) {
+        if (isReady()) {
+            acceptingSends = true;
+            startupAudio.begin(generation);
+            send(openingFrame, generation, new byte[0]);
+            Log.i(TAG, "WATCH_LATENCY warm_channel_reused generation=" + generation);
+            return;
+        }
         close(); closed = false; acceptingSends = true; protocolReady = false;
         startupAudio.begin(generation);
         connectStartedAtMs = SystemClock.elapsedRealtime(); firstMicLogged = false; firstAudioLogged = false;
@@ -74,7 +88,7 @@ final class WearChannelManager {
                 channel = opened;
                 output = Tasks.await(client.getOutputStream(opened), 10L, TimeUnit.SECONDS);
                 InputStream input = Tasks.await(client.getInputStream(opened), 10L, TimeUnit.SECONDS);
-                WearWireProtocol.write(output, WearWireProtocol.START, generation, new byte[0]);
+                WearWireProtocol.write(output, openingFrame, generation, new byte[0]);
                 protocolReady = true;
                 flushStartupAudio(generation, acceptedConnection, opened);
                 Log.i(TAG, "WATCH_LATENCY channel_ready generation=" + generation + " duration_ms=" + (SystemClock.elapsedRealtime() - connectStartedAtMs));
@@ -122,7 +136,25 @@ final class WearChannelManager {
     void sendText(byte type, long generation, String value) {
         send(type, generation, value == null ? new byte[0] : value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
-    boolean isReady() { return !closed && output != null && channel != null; }
+    boolean isReady() { return !closed && protocolReady && output != null && channel != null; }
+    void pauseSession(byte reason, long generation) {
+        OutputStream current = output;
+        ChannelClient.Channel currentChannel = channel;
+        long acceptedConnection = connectionGeneration.get();
+        if (!isReady()) return;
+        acceptingSends = false;
+        startupAudio.reset();
+        writer.execute(() -> {
+            try {
+                if (!closed && currentChannel == channel
+                        && acceptedConnection == connectionGeneration.get()) {
+                    WearWireProtocol.write(current, reason, generation, new byte[0]);
+                }
+            } catch (Exception error) {
+                listener.onDisconnected("Phone link lost");
+            }
+        });
+    }
     void cancelAndClose(long generation, Runnable completion) {
         OutputStream current = output;
         ChannelClient.Channel currentChannel = channel;

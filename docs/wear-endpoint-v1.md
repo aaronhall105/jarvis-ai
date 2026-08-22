@@ -10,13 +10,13 @@ The Wear app is a microphone/speaker endpoint; the paired phone remains the Jarv
 
 ## Architecture and audio routing
 
-`JarvisWearActivity`, the Tile, and the official voice-assistant session all start one `WearVoiceService` conversation. `WearConversationController` owns the `IDLE → LISTENING → PROCESSING → SPEAKING → LISTENING` lifecycle and a configurable 60-second post-playback inactivity timeout. The recorder exists only during an active listening state and is stopped/released in `IDLE`, processing, speaking, cancellation, failure, and disconnect states.
+`JarvisWearActivity`, the Tile, and the official voice-assistant session all start one `WearVoiceService` conversation. `WearConversationController` owns the `IDLE → LISTENING → PROCESSING → SPEAKING → LISTENING` lifecycle and a configurable eight-second no-speech timeout. The recorder exists only during an active listening state and is stopped/released in `IDLE`, processing, speaking, cancellation, failure, and disconnect states.
 
 Audio is PCM16, mono, 24 kHz, matching Alpha19's realtime pipeline. `WearChannelManager` opens `/jarvis/watch/voice/v1` with the official Wear OS `ChannelClient`. The phone's `WearVoiceBridge` feeds watch microphone frames into the existing `JarvisRealtimeClient`. `AudioEndpointRouter` explicitly binds the session to `WATCH`; realtime response frames are then sent to `WearAudioPlayer` and never to phone `AudioTrack`. Phone sessions retain the existing phone sink. Session generations scope every frame, so cancellation flushes output and rejects stale audio.
 
 The phone authenticates Watch sessions to Core with `endpoint=WATCH` and forces the realtime `LIVE` input mode because Core intentionally ignores raw PCM in `STANDARD` mode. It preserves the phone's existing conversation ID, so follow-up turns retain context. Starting a later phone session restores the phone's configured conversation mode and `endpoint=PHONE`.
 
-The watch X sends the existing Core turn cancellation through `VoiceService`, stops capture/playback, closes the voice session and Data Layer channel, and returns to idle. Natural closing phrases use the existing `ConversationEndPolicy` and close the same watch session. Link/Core failures display a short error and safely end the watch session.
+The watch X sends the existing Core turn cancellation through `VoiceService`, stops capture/playback, ends the active interaction, and returns to Ready. The authenticated Core client and healthy Data Layer channel remain warm for the next explicit start; neither microphone is active while Ready. Natural closing phrases use the existing `ConversationEndPolicy`. Link/Core failures display a short error and safely end the watch session.
 
 ## Install and pair
 
@@ -63,12 +63,12 @@ adb -s WATCH_IP:DEBUG_PORT shell cmd role add-role-holder \
   android.app.role.ASSISTANT com.aaron.jarvisvoice
 ```
 
-The inactivity timeout defaults to 60 seconds and is bounded to 15–300 seconds. Product builds can change the `com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS` application metadata value without adding watch settings UI.
+The no-speech timeout defaults to eight seconds and is bounded to 3–60 seconds. Three consecutive speech-level PCM frames disarm it; every new follow-up listening window rearms it. Product builds can change the `com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS` application metadata value without adding watch settings UI.
 
 ## Physical validation checklist
 
 - Verify microphone permission and foreground-service prompts on the target One UI Watch version.
 - Verify Tile installation/launch and round-screen layout.
 - Verify Assistant-role availability, long-press behavior, and Home double-press assignment.
-- Verify watch speaker routing, Bluetooth/Wi-Fi Data Layer handoff, immediate X cancellation, natural closing phrases, and 60-second timeout.
+- Verify watch speaker routing, Bluetooth/Wi-Fi Data Layer handoff, immediate X cancellation, natural closing phrases, and eight-second no-speech timeout.
 - Check basic turn-taking first; enable/assess full-duplex barge-in only if the physical watch audio stack provides reliable echo control.

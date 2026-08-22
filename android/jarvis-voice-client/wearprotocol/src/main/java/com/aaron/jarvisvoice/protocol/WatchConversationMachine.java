@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Platform-neutral session lifecycle. Every callback is scoped to one session generation. */
 public final class WatchConversationMachine {
-    public static final long DEFAULT_INACTIVITY_TIMEOUT_MS = 60_000L;
+    public static final long DEFAULT_INACTIVITY_TIMEOUT_MS = SpeechSilencePolicy.DEFAULT_TIMEOUT_MS;
     private static final AtomicLong NEXT_GENERATION = new AtomicLong(
         Math.max(1L, System.nanoTime())
     );

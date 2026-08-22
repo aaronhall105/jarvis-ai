@@ -8,6 +8,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.util.concurrent.TimeUnit;
+import java.util.List;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -58,15 +59,12 @@ public final class CoreEndpointSelector {
 
     public void select(Listener listener) {
         cancel();
-        if (remoteUrl.isBlank()) {
-            probe(lanUrl, "LAN", listenerResult(listener));
+        List<String> order = preferenceOrder(hasLocalTransport(), lanUrl, remoteUrl);
+        if (order.size() == 1) {
+            probe(order.get(0), endpointName(order.get(0)), listenerResult(listener));
             return;
         }
-        if (hasLocalTransport()) {
-            probeThen(lanUrl, "LAN", remoteUrl, "Remote", listener);
-        } else {
-            probeThen(remoteUrl, "Remote", lanUrl, "LAN", listener);
-        }
+        probeThen(order.get(0), endpointName(order.get(0)), order.get(1), endpointName(order.get(1)), listener);
     }
 
     public void probeLan(Listener listener) {
@@ -101,6 +99,15 @@ public final class CoreEndpointSelector {
     static String healthUrl(String value) {
         return normaliseBaseUrl(value) + "/health/live";
     }
+
+    static List<String> preferenceOrder(boolean localTransport, String lan, String remote) {
+        String local = normaliseBaseUrl(lan);
+        String away = normaliseOptionalBaseUrl(remote);
+        if (away.isBlank() || away.equals(local)) return List.of(local);
+        return localTransport ? List.of(local, away) : List.of(away, local);
+    }
+
+    private String endpointName(String url) { return lanUrl.equals(url) ? "LAN" : "Remote"; }
 
     private ProbeResult listenerResult(Listener listener) {
         return new ProbeResult() {
