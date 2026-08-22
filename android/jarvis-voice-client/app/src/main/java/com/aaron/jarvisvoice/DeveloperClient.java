@@ -7,6 +7,7 @@ import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.net.Network;
 import org.json.JSONObject;
+import org.json.JSONArray;
 import java.util.concurrent.TimeUnit;
 import java.util.List;
 import java.util.HashMap;
@@ -42,6 +43,8 @@ final class DeveloperClient {
     private String localUrl = "";
     private String remoteUrl = "";
     private boolean enabled;
+    private boolean authenticated;
+    private boolean sessionReady;
     private long reconnectDelayMs = 1000;
     private boolean reconnectScheduled;
     private boolean lastLocalNetwork;
@@ -116,28 +119,40 @@ final class DeveloperClient {
             || value.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
     }
 
-    void sendInstruction(String text) {
-        if (socket == null) { postError("Developer is not connected"); return; }
+    void sendInstruction(String text) { sendInstruction(text, new JSONArray()); }
+    void sendInstruction(String text, JSONArray attachments) {
+        if (!authenticated || !sessionReady) {
+            if (!pendingInstruction.isBlank()) { postError("A Developer message is already queued"); return; }
+            pendingInstruction = text;
+            pendingAttachments = attachments == null ? new JSONArray() : attachments;
+            postState("Queued — reconnecting…");
+            return;
+        }
         if (threadId.isBlank()) {
             long id = nextRequest("thread.start");
             send(json("type", "thread.start", "workspace", workspace, "request_id", id));
             pendingInstruction = text;
-        } else sendTurn(text);
+            pendingAttachments = attachments == null ? new JSONArray() : attachments;
+        } else sendTurn(text, attachments);
     }
 
     private String pendingInstruction = "";
-    private void sendTurn(String text) {
+    private JSONArray pendingAttachments = new JSONArray();
+    private void sendTurn(String text, JSONArray attachments) {
         long id = nextRequest("turn.start");
         send(json("type", "turn.start", "workspace", workspace,
-            "thread_id", threadId, "text", text, "request_id", id));
+            "thread_id", threadId, "text", text, "attachments",
+            attachments == null ? new JSONArray() : attachments, "request_id", id));
     }
 
     private void handle(JSONObject message) {
         String type = message.optString("type");
         if ("auth.ok".equals(type)) {
             reconnectDelayMs = 1000;
-            if (threadId.isBlank()) postState("Connected");
+            authenticated = true;
+            if (threadId.isBlank()) { sessionReady = true; postState("Connected"); drainPendingInstruction(); }
             else {
+                sessionReady = false;
                 postState("Restoring session…");
                 long id = nextRequest("thread.resume");
                 send(json("type", "thread.resume", "workspace", workspace,
@@ -155,9 +170,13 @@ final class DeveloperClient {
             JSONObject thread = result == null ? null : result.optJSONObject("thread");
             if (thread != null && threadId.isBlank()) {
                 threadId = thread.optString("id");
-                if (!pendingInstruction.isBlank()) { String text = pendingInstruction; pendingInstruction = ""; sendTurn(text); }
+                if (!pendingInstruction.isBlank()) {
+                    String text = pendingInstruction; JSONArray attachments = pendingAttachments;
+                    pendingInstruction = ""; pendingAttachments = new JSONArray();
+                    sendTurn(text, attachments);
+                }
             }
-            if ("thread.resume".equals(requestKind)) postState("Connected");
+            if ("thread.resume".equals(requestKind)) { sessionReady = true; postState("Connected"); drainPendingInstruction(); }
             postEvent(message);
         } else if ("codex.event".equals(type)) {
             JSONObject event = message.optJSONObject("event");
@@ -190,6 +209,7 @@ final class DeveloperClient {
         threadId = "";
         activeTurnId = "";
         pendingInstruction = "";
+        pendingAttachments = new JSONArray();
         requestKinds.clear();
     }
     void respondToApproval(long codexRequestId, String decision) {
@@ -218,6 +238,8 @@ final class DeveloperClient {
         connectionEpoch++;
         if (socket != null) socket.close(1000, "client closing");
         socket = null;
+        authenticated = false;
+        sessionReady = false;
         activeTurnId = "";
         requestKinds.clear();
     }
@@ -257,6 +279,16 @@ final class DeveloperClient {
         long id = ++requestId;
         requestKinds.put(id, kind);
         return id;
+    }
+    private void drainPendingInstruction() {
+        if (!sessionReady || pendingInstruction.isBlank()) return;
+        String text = pendingInstruction; JSONArray attachments = pendingAttachments;
+        pendingInstruction = ""; pendingAttachments = new JSONArray();
+        if (threadId.isBlank()) {
+            long id = nextRequest("thread.start");
+            send(json("type", "thread.start", "workspace", workspace, "request_id", id));
+            pendingInstruction = text; pendingAttachments = attachments;
+        } else sendTurn(text, attachments);
     }
     private void send(JSONObject value) { WebSocket active = socket; if (active != null) active.send(value.toString()); }
     private static JSONObject json(Object... values) {

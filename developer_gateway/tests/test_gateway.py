@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from developer_gateway.app import app, authorised
+from developer_gateway.app import app, authorised, codex_inputs
 from developer_gateway.codex_client import canonical_workspace
 
 
@@ -74,3 +74,29 @@ def test_turn_rejects_thread_not_owned_by_connection(monkeypatch: pytest.MonkeyP
         rejected = socket.receive_json()
         assert rejected["type"] == "error"
         assert "not owned" in rejected["message"]
+
+
+def test_attachment_content_is_bounded_and_never_accepts_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+    monkeypatch.setattr("developer_gateway.app.ATTACHMENT_DIR", tmp_path)
+    inputs = codex_inputs("inspect this", [{
+        "name": "../../safe.log", "mime": "text/plain",
+        "data": base64.b64encode(b"hello").decode(), "path": "/etc/passwd",
+    }])
+    assert inputs == [
+        {"type": "text", "text": "inspect this"},
+        {"type": "text", "text": "Attached file safe.log:\n\nhello"},
+    ]
+    with pytest.raises(ValueError, match="Unsupported"):
+        codex_inputs("x", [{"name": "x.bin", "mime": "application/octet-stream", "data": "eA=="}])
+
+
+def test_image_attachment_is_copied_to_private_gateway_storage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import base64
+    monkeypatch.setattr("developer_gateway.app.ATTACHMENT_DIR", tmp_path)
+    inputs = codex_inputs("inspect", [{"name": "screen.png", "mime": "image/png", "data": base64.b64encode(b"png").decode()}])
+    copied = Path(inputs[1]["path"])
+    assert inputs[1]["type"] == "localImage"
+    assert copied.parent == tmp_path
+    assert copied.read_bytes() == b"png"
+    assert copied.stat().st_mode & 0o777 == 0o600

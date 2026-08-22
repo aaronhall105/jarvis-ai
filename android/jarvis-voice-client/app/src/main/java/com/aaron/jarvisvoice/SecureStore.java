@@ -41,6 +41,7 @@ public final class SecureStore {
         migrateWakeReliabilityAlpha11();
         migrateVoiceOwnershipAlpha12();
         migrateRemoteCoreAlpha14();
+        migratePrivateDeveloperEndpointV13();
     }
 
     private void migrateAssistantDefaults() {
@@ -245,14 +246,27 @@ public final class SecureStore {
     }
 
     public String developerUrl() {
-        return preferences.getString("developer_url_v190210", "http://192.168.1.40:8765").trim();
+        return preferences.getString("developer_url_v190210", "https://arvis.tail7378d0.ts.net/developer").trim();
+    }
+
+    private void migratePrivateDeveloperEndpointV13() {
+        if (preferences.getBoolean("developer_endpoint_migration_v190216", false)) return;
+        String secure = "https://arvis.tail7378d0.ts.net/developer";
+        String local = preferences.getString("developer_url_v190210", "").trim();
+        String remote = preferences.getString("remote_developer_url_v190210", "").trim();
+        SharedPreferences.Editor editor = preferences.edit();
+        if (local.isBlank() || local.contains("127.0.0.1:8765") || local.contains("192.168.1.40:8765")) {
+            editor.putString("developer_url_v190210", secure);
+        }
+        if (remote.isBlank()) editor.putString("remote_developer_url_v190210", secure);
+        editor.putBoolean("developer_endpoint_migration_v190216", true).apply();
     }
 
     public void setDeveloperUrl(String value) {
         preferences.edit().putString("developer_url_v190210", trimTrailingSlash(value)).apply();
     }
 
-    public String remoteDeveloperUrl() { return preferences.getString("remote_developer_url_v190210", "").trim(); }
+    public String remoteDeveloperUrl() { return preferences.getString("remote_developer_url_v190210", "https://arvis.tail7378d0.ts.net/developer").trim(); }
     public void setRemoteDeveloperUrl(String value) { preferences.edit().putString("remote_developer_url_v190210", trimTrailingSlash(value)).apply(); }
 
     public String developerToken() { return decryptPreference(DEVELOPER_TOKEN); }

@@ -10,11 +10,14 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
+import android.speech.RecognizerIntent;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -38,10 +41,13 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import android.util.Base64;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -52,6 +58,9 @@ public final class MainActivity extends Activity {
     private static final int SOFT = Color.rgb(246, 246, 246);
     private static final int WHITE = Color.WHITE;
     private static final int REQUEST_VOICE_PERMISSIONS = 1800;
+    private static final int REQUEST_DEVELOPER_DICTATION = 1801;
+    private static final int REQUEST_DEVELOPER_ATTACHMENT = 1802;
+    private static final int MAX_DEVELOPER_ATTACHMENT_BYTES = 1_500_000;
 
     private SecureStore store;
     private ChatHistoryStore history;
@@ -73,6 +82,7 @@ public final class MainActivity extends Activity {
     private AssistantMode assistantMode;
     private DeveloperClient developerClient;
     private final Map<String, TextView> developerActivityStatuses = new HashMap<>();
+    private JSONArray pendingDeveloperAttachments = new JSONArray();
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -463,7 +473,10 @@ public final class MainActivity extends Activity {
         ));
 
         micButton = assetButton(R.drawable.control_mic, "Start voice");
-        micButton.setOnClickListener(view -> toggleVoice());
+        micButton.setOnClickListener(view -> {
+            if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) startDeveloperDictation();
+            else toggleVoice();
+        });
         row.addView(micButton, iconParams(dp(42), dp(6)));
 
         sendButton = iconButton(
@@ -485,6 +498,13 @@ public final class MainActivity extends Activity {
     private void showComposerActions(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
         if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+            menu.getMenu().add("Attach image or log").setOnMenuItemClickListener(item -> {
+                Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/png", "image/jpeg", "image/webp", "text/plain", "text/markdown", "application/json"});
+                startActivityForResult(picker, REQUEST_DEVELOPER_ATTACHMENT);
+                return true;
+            });
             menu.getMenu().add("New development session").setOnMenuItemClickListener(item -> {
                 developerClient.newSession();
                 store.setDeveloperThreadId("");
@@ -581,7 +601,9 @@ public final class MainActivity extends Activity {
         if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
             composer.setText("");
             addMessageView(new ChatMessage(ChatMessage.USER, value, System.currentTimeMillis()), true);
-            developerClient.sendInstruction(value);
+            JSONArray attachments = pendingDeveloperAttachments;
+            pendingDeveloperAttachments = new JSONArray();
+            developerClient.sendInstruction(value, attachments);
             composer.post(() -> composer.requestFocus());
             return;
         }
@@ -645,7 +667,8 @@ public final class MainActivity extends Activity {
         boolean developer = DeveloperRoutingPolicy.routesToDeveloper(assistantMode);
         modeText.setText(developer ? "Developer  ⌄" : "Jarvis  ⌄");
         composer.setHint(DeveloperRoutingPolicy.placeholder(assistantMode));
-        micButton.setVisibility(developer ? View.GONE : View.VISIBLE);
+        micButton.setVisibility(View.VISIBLE);
+        micButton.setContentDescription(developer ? "Dictate developer instruction" : "Start voice");
         if (clearView || developer) {
             finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
             emptyState.setVisibility(View.VISIBLE);
@@ -794,6 +817,10 @@ public final class MainActivity extends Activity {
         String status = DeveloperActivityPolicy.status(state, completed);
         if (existing != null) {
             existing.setText(status);
+            View parent = (View) existing.getParent();
+            if (parent != null && ("commandExecution".equals(rawType) || "fileChange".equals(rawType))) {
+                parent.setOnClickListener(view -> showDeveloperActivityDetails(item));
+            }
             scrollToBottom();
             return;
         }
@@ -807,11 +834,94 @@ public final class MainActivity extends Activity {
         TextView statusView = text(status, 13, MID);
         card.addView(heading, matchWrap(0, dp(3)));
         card.addView(statusView, matchWrap());
+        if ("commandExecution".equals(rawType) || "fileChange".equals(rawType)) {
+            TextView affordance = text("Tap for details", 12, MID);
+            affordance.setPadding(0, dp(5), 0, 0);
+            card.addView(affordance, matchWrap());
+            card.setClickable(true);
+            card.setOnClickListener(view -> showDeveloperActivityDetails(item));
+        }
         developerActivityStatuses.put(id, statusView);
         LinearLayout.LayoutParams params = matchWrap(dp(6), dp(7));
         params.leftMargin = dp(4); params.rightMargin = dp(4);
         messageList.addView(card, params);
         scrollToBottom();
+    }
+
+    private void showDeveloperActivityDetails(JSONObject item) {
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(20), dp(18), dp(20), dp(20));
+        sheet.setBackground(rounded(WHITE, 26, 1, LINE));
+        TextView heading = text(DeveloperActivityPolicy.title(item.optString("type")), 19, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(heading, matchWrap(0, dp(10)));
+        ScrollView scroll = new ScrollView(this);
+        TextView detail = text(DeveloperActivityPolicy.details(item), 12, BLACK);
+        detail.setTypeface(Typeface.MONOSPACE);
+        detail.setTextIsSelectable(true);
+        detail.setPadding(dp(12), dp(12), dp(12), dp(12));
+        detail.setBackground(rounded(SOFT, 14, 1, LINE));
+        scroll.addView(detail, matchWrap());
+        sheet.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
+        Button close = new Button(this); close.setText("Close"); close.setAllCaps(false);
+        close.setBackground(rounded(BLACK, 20, 0, Color.TRANSPARENT)); close.setTextColor(WHITE);
+        close.setOnClickListener(view -> dialog.dismiss());
+        sheet.addView(close, matchWrap(dp(12), 0));
+        dialog.setContentView(sheet); dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) { window.setBackgroundDrawableResource(android.R.color.transparent); window.setGravity(Gravity.BOTTOM); window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); }
+    }
+
+    private void startDeveloperDictation() {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Developer instruction")
+            .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1);
+        try { startActivityForResult(intent, REQUEST_DEVELOPER_DICTATION); }
+        catch (Exception exception) { Toast.makeText(this, "Voice dictation is unavailable", Toast.LENGTH_SHORT).show(); }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null) return;
+        if (requestCode == REQUEST_DEVELOPER_DICTATION) {
+            ArrayList<String> results = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+            if (results != null && !results.isEmpty()) {
+                composer.setText(results.get(0)); composer.setSelection(composer.length()); composer.requestFocus();
+            }
+        } else if (requestCode == REQUEST_DEVELOPER_ATTACHMENT && data.getData() != null) {
+            addDeveloperAttachment(data);
+        }
+    }
+
+    private void addDeveloperAttachment(Intent data) {
+        try {
+            String mime = getContentResolver().getType(data.getData());
+            if (mime == null) mime = "application/octet-stream";
+            String name = "attachment";
+            try (Cursor cursor = getContentResolver().query(data.getData(), null, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) {
+                    int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (column >= 0) name = cursor.getString(column);
+                }
+            }
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            try (InputStream input = getContentResolver().openInputStream(data.getData())) {
+                if (input == null) throw new IllegalArgumentException("File could not be opened");
+                byte[] buffer = new byte[16_384]; int read;
+                while ((read = input.read(buffer)) >= 0) {
+                    if (output.size() + read > MAX_DEVELOPER_ATTACHMENT_BYTES) throw new IllegalArgumentException("Attachment is larger than 1.5 MB");
+                    output.write(buffer, 0, read);
+                }
+            }
+            pendingDeveloperAttachments.put(new JSONObject().put("name", name).put("mime", mime)
+                .put("data", Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)));
+            statusText.setText(pendingDeveloperAttachments.length() + " attachment ready");
+        } catch (Exception exception) {
+            Toast.makeText(this, exception.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void toggleVoice() {

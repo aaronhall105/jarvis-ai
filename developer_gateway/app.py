@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import secrets
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -33,6 +36,13 @@ WORKSPACES = {
 codex = CodexAppServer(os.getenv("CODEX_EXECUTABLE", "/usr/local/bin/codex"))
 started = time.monotonic()
 metrics = {"connections": 0, "requests": 0, "events": 0, "reconnects": 0, "active_clients": 0}
+ATTACHMENT_LIMIT = 1_500_000
+ATTACHMENT_DIR = Path(os.getenv(
+    "JARVIS_DEVELOPER_ATTACHMENT_DIR",
+    str(Path.home() / ".local" / "share" / "jarvis-developer" / "attachments"),
+))
+TEXT_MIMES = {"text/plain", "text/markdown", "application/json", "text/x-log"}
+IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp"}
 
 
 def authorised(value: str | None) -> bool:
@@ -80,6 +90,40 @@ def result_or_raise(response: dict[str, Any]) -> Any:
     if "error" in response:
         raise RuntimeError(response["error"].get("message", "Codex request failed"))
     return response.get("result")
+
+
+def codex_inputs(text: str, attachments: Any) -> list[dict[str, str]]:
+    """Convert authenticated client content to App Server inputs without accepting paths."""
+    inputs: list[dict[str, str]] = [{"type": "text", "text": text}]
+    if attachments is None:
+        return inputs
+    if not isinstance(attachments, list) or len(attachments) > 4:
+        raise ValueError("Invalid attachments")
+    ATTACHMENT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            raise ValueError("Invalid attachment")
+        name = Path(str(attachment.get("name", "attachment"))).name[:100]
+        mime = str(attachment.get("mime", "application/octet-stream")).lower()
+        encoded = str(attachment.get("data", ""))
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("Invalid attachment encoding") from None
+        if not content or len(content) > ATTACHMENT_LIMIT:
+            raise ValueError("Attachment is empty or too large")
+        if mime in IMAGE_MIMES:
+            suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime]
+            path = ATTACHMENT_DIR / f"{uuid.uuid4().hex}{suffix}"
+            path.write_bytes(content)
+            path.chmod(0o600)
+            inputs.append({"type": "localImage", "path": str(path)})
+        elif mime in TEXT_MIMES:
+            body = content.decode("utf-8", errors="strict")
+            inputs.append({"type": "text", "text": f"Attached file {name}:\n\n{body}"})
+        else:
+            raise ValueError("Unsupported attachment type")
+    return inputs
 
 
 @app.websocket("/api/developer")
@@ -148,7 +192,8 @@ async def developer_socket(socket: WebSocket) -> None:
                 text = str(message.get("text", "")).strip()
                 if not text or len(text) > 20000:
                     raise ValueError("Invalid instruction")
-                result = result_or_raise(await codex.request("turn/start", {"threadId": str(message["thread_id"]), "cwd": str(path), "input": [{"type": "text", "text": text}]}))
+                inputs = codex_inputs(text, message.get("attachments"))
+                result = result_or_raise(await codex.request("turn/start", {"threadId": str(message["thread_id"]), "cwd": str(path), "input": inputs}))
             elif kind == "turn.interrupt":
                 if str(message["thread_id"]) not in owned_threads:
                     raise ValueError("Thread is not owned by this session")
