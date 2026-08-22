@@ -204,6 +204,10 @@ public final class JarvisWearActivity extends Activity {
 
     private void render(boolean isActive, String state, String message) {
         active = isActive;
+        if (!isActive && streamingAssistant.length() > 0) {
+            streamingAssistant.setLength(0);
+            renderTranscript();
+        }
         String label = switch (state) {
             case "LISTENING", "FOLLOW_UP" -> "LISTENING";
             case "PROCESSING" -> "PROCESSING";
