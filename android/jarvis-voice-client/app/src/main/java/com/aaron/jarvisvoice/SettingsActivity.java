@@ -71,6 +71,10 @@ public final class SettingsActivity extends Activity {
     private EditText homeAssistantUrl;
     private EditText homeAssistantToken;
     private EditText pipeline;
+    private EditText developerUrl;
+    private EditText developerToken;
+    private EditText remoteDeveloperUrl;
+    private Spinner developerWorkspace;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -131,6 +135,8 @@ public final class SettingsActivity extends Activity {
         connectionContent.addView(buildCoreCard(), matchWrap(0, dp(8))); connectionContent.addView(buildHomeAssistantCard(), matchWrap());
         page.addView(expandableSection("Connections",
             "Local and secure remote Core routes plus Home Assistant.", connectionContent, false), matchWrap(0, dp(12)));
+        page.addView(expandableSection("Developer",
+            "Secure Codex sessions on the Jarvis Ubuntu PC.", buildDeveloperCard(), false), matchWrap(0, dp(12)));
         page.addView(expandableSection("Updates",
             "Secure releases and rollback information.", buildUpdatesCard(), false), matchWrap(0, dp(12)));
         page.addView(expandableSection("Diagnostics",
@@ -443,6 +449,20 @@ public final class SettingsActivity extends Activity {
         return card;
     }
 
+    private View buildDeveloperCard() {
+        LinearLayout card = card();
+        developerUrl = field("https://developer.example", false);
+        developerToken = field("Developer access token", true);
+        remoteDeveloperUrl = field("Secure HTTPS or Tailscale URL", false);
+        developerWorkspace = spinner(List.of("Jarvis Wear", "Jarvis"));
+        card.addView(fieldGroup("Developer gateway URL", developerUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Remote Developer URL", remoteDeveloperUrl), matchWrap(0, dp(14)));
+        card.addView(fieldGroup("Developer access token", developerToken), matchWrap(0, dp(14)));
+        card.addView(choiceGroup("Default workspace", developerWorkspace), matchWrap());
+        card.addView(note("Developer access uses a separate encrypted credential. Codex credentials remain on Ubuntu."), matchWrap(dp(14), 0));
+        return card;
+    }
+
     private void loadSettings() {
         coreUrl.setText(store.coreUrl());
         remoteCoreUrl.setText(store.remoteCoreUrl());
@@ -471,6 +491,10 @@ public final class SettingsActivity extends Activity {
 
         homeAssistantUrl.setText(store.homeAssistantUrl());
         pipeline.setText(store.homeAssistantPipeline());
+        developerUrl.setText(store.developerUrl());
+        remoteDeveloperUrl.setText(store.remoteDeveloperUrl());
+        developerWorkspace.setSelection("jarvis".equals(store.developerWorkspace()) ? 1 : 0);
+        if (!store.developerToken().isBlank()) developerToken.setHint("Saved securely — leave blank to keep it");
 
         if (store.hasMobileToken()) {
             mobileToken.setHint("Saved securely — leave blank to keep it");
@@ -519,6 +543,14 @@ public final class SettingsActivity extends Activity {
                 pipeline.getText().toString()
             );
             store.setRemoteCoreUrl(remoteUrl);
+            String developerBase = developerUrl.getText().toString().trim();
+            if (!developerBase.isBlank()) CoreUrl.validateBase(developerBase);
+            store.setDeveloperUrl(developerBase);
+            String remoteDeveloperBase = remoteDeveloperUrl.getText().toString().trim();
+            if (!remoteDeveloperBase.isBlank()) CoreUrl.validateBase(remoteDeveloperBase);
+            store.setRemoteDeveloperUrl(remoteDeveloperBase);
+            if (!developerToken.getText().toString().isBlank()) store.setDeveloperToken(developerToken.getText().toString());
+            store.setDeveloperWorkspace(developerWorkspace.getSelectedItemPosition() == 1 ? "jarvis" : "jarvis-wear");
             store.setAssistantOptions(
                 assistantWakeAlways.isChecked(),
                 assistantOverlay.isChecked(),
@@ -531,6 +563,7 @@ public final class SettingsActivity extends Activity {
 
             mobileToken.setText("");
             homeAssistantToken.setText("");
+            developerToken.setText("");
             loadSettings();
             applySavedRuntimeSettings();
 

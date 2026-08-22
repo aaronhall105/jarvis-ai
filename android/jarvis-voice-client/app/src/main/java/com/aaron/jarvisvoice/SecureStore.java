@@ -25,6 +25,7 @@ public final class SecureStore {
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
     private static final String IMPROVEMENT_ADMIN_TOKEN =
         "improvement_admin_token_v190140";
+    private static final String DEVELOPER_TOKEN = "developer_token_v190210";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -234,6 +235,44 @@ public final class SecureStore {
     public String remoteCoreUrl() {
         return preferences.getString("remote_core_url_v190140", "").trim();
     }
+
+    public AssistantMode assistantMode() {
+        return AssistantMode.from(preferences.getString("assistant_mode_v190210", "JARVIS"));
+    }
+
+    public void setAssistantMode(AssistantMode mode) {
+        preferences.edit().putString("assistant_mode_v190210", mode.name()).apply();
+    }
+
+    public String developerUrl() {
+        return preferences.getString("developer_url_v190210", "http://192.168.1.40:8765").trim();
+    }
+
+    public void setDeveloperUrl(String value) {
+        preferences.edit().putString("developer_url_v190210", trimTrailingSlash(value)).apply();
+    }
+
+    public String remoteDeveloperUrl() { return preferences.getString("remote_developer_url_v190210", "").trim(); }
+    public void setRemoteDeveloperUrl(String value) { preferences.edit().putString("remote_developer_url_v190210", trimTrailingSlash(value)).apply(); }
+
+    public String developerToken() { return decryptPreference(DEVELOPER_TOKEN); }
+
+    public void setDeveloperToken(String value) throws Exception {
+        if (value == null || value.isBlank()) preferences.edit().remove(DEVELOPER_TOKEN).apply();
+        else preferences.edit().putString(DEVELOPER_TOKEN, encrypt(value.trim())).apply();
+    }
+
+    public String developerWorkspace() {
+        String value = preferences.getString("developer_workspace_v190210", "jarvis-wear");
+        return "jarvis".equals(value) ? value : "jarvis-wear";
+    }
+
+    public void setDeveloperWorkspace(String value) {
+        preferences.edit().putString("developer_workspace_v190210", "jarvis".equals(value) ? value : "jarvis-wear").apply();
+    }
+
+    public String developerThreadId() { return preferences.getString("developer_thread_v190210", ""); }
+    public void setDeveloperThreadId(String value) { preferences.edit().putString("developer_thread_v190210", value == null ? "" : value).apply(); }
 
     public void setRemoteCoreUrl(String value) {
         String candidate = value == null ? "" : value.trim();

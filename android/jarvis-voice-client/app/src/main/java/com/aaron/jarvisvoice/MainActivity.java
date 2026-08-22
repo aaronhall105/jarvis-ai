@@ -40,6 +40,8 @@ import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
     private static final int BLACK = Color.rgb(20, 20, 20);
@@ -58,6 +60,7 @@ public final class MainActivity extends Activity {
     private LinearLayout messageList;
     private EditText composer;
     private TextView statusText;
+    private TextView modeText;
     private ImageButton micButton;
     private ImageButton sendButton;
     private View emptyState;
@@ -65,6 +68,8 @@ public final class MainActivity extends Activity {
     private boolean voiceActive;
     private boolean listening;
     private boolean generating;
+    private AssistantMode assistantMode;
+    private DeveloperClient developerClient;
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) {
@@ -145,6 +150,12 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         store = new SecureStore(this);
+        assistantMode = store.assistantMode();
+        developerClient = new DeveloperClient(this, new DeveloperClient.Listener() {
+            @Override public void onState(String state) { statusText.setText(state); }
+            @Override public void onEvent(JSONObject event) { renderDeveloperEvent(event); }
+            @Override public void onError(String message) { Toast.makeText(MainActivity.this, message, Toast.LENGTH_SHORT).show(); }
+        });
         new UpdatePreferences(this).recordLaunch(JarvisVersion.RELEASE);
         UpdateManager.schedule(this);
         history = new ChatHistoryStore(this);
@@ -155,6 +166,7 @@ public final class MainActivity extends Activity {
         renderHistory();
         updateMicButton();
         startJarvisIfConfigured();
+        applyAssistantMode(false);
     }
 
     @Override protected void onStart() {
@@ -177,6 +189,11 @@ public final class MainActivity extends Activity {
         AppVisibility.activityStopped();
         try { unregisterReceiver(receiver); } catch (Exception ignored) {}
         super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        if (developerClient != null) developerClient.destroy();
+        super.onDestroy();
     }
 
     private void configureWindow() {
@@ -277,6 +294,11 @@ public final class MainActivity extends Activity {
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         title.setLetterSpacing(0.12f);
         titleBlock.addView(title, matchWrap());
+        modeText = text("Jarvis  ⌄", 13, BLACK);
+        modeText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        modeText.setPadding(0, dp(3), dp(12), dp(2));
+        modeText.setOnClickListener(view -> showModePicker());
+        titleBlock.addView(modeText, matchWrap());
         statusText = text("Connecting", 12, MID);
         statusText.setMaxLines(1);
         statusText.setPadding(0, dp(2), dp(8), 0);
@@ -459,6 +481,28 @@ public final class MainActivity extends Activity {
 
     private void showComposerActions(View anchor) {
         PopupMenu menu = new PopupMenu(this, anchor);
+        if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+            menu.getMenu().add("New development session").setOnMenuItemClickListener(item -> {
+                developerClient.newSession();
+                store.setDeveloperThreadId("");
+                finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+                statusText.setText("Connected");
+                return true;
+            });
+            menu.getMenu().add("Recent development sessions").setOnMenuItemClickListener(item -> {
+                developerClient.listThreads();
+                statusText.setText("Loading sessions…");
+                return true;
+            });
+            menu.getMenu().add("Use Jarvis Wear workspace").setOnMenuItemClickListener(item -> {
+                switchDeveloperWorkspace("jarvis-wear"); return true;
+            });
+            menu.getMenu().add("Use Jarvis workspace").setOnMenuItemClickListener(item -> {
+                switchDeveloperWorkspace("jarvis"); return true;
+            });
+            menu.show();
+            return;
+        }
         menu.getMenu().add("New chat").setOnMenuItemClickListener(item -> {
             newChat();
             return true;
@@ -530,6 +574,13 @@ public final class MainActivity extends Activity {
     private void sendMessage() {
         String value = composer.getText().toString().trim();
         if (value.isEmpty()) return;
+        if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+            composer.setText("");
+            addMessageView(new ChatMessage(ChatMessage.USER, value, System.currentTimeMillis()), true);
+            developerClient.sendInstruction(value);
+            composer.post(() -> composer.requestFocus());
+            return;
+        }
         if (!credentialsReady()) return;
         composer.setText("");
         composer.post(() -> {
@@ -541,6 +592,193 @@ public final class MainActivity extends Activity {
                 .setAction(VoiceService.ACTION_SEND_TEXT)
                 .putExtra(VoiceService.EXTRA_TEXT, value)
         );
+    }
+
+    private void showModePicker() {
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(22), dp(18), dp(22), dp(20));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView heading = text("Choose mode", 20, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(heading, matchWrap(0, dp(12)));
+        sheet.addView(modeChoice(dialog, AssistantMode.JARVIS, "Jarvis", "Home, voice, memory and chat"), matchWrap(0, dp(7)));
+        sheet.addView(modeChoice(dialog, AssistantMode.DEVELOPER, "Developer", "Build and improve Jarvis"), matchWrap());
+        dialog.setContentView(sheet);
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setDimAmount(0.20f); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setGravity(Gravity.BOTTOM);
+            WindowManager.LayoutParams params = window.getAttributes();
+            params.width = WindowManager.LayoutParams.MATCH_PARENT;
+            params.horizontalMargin = 0.03f; params.verticalMargin = 0.02f;
+            window.setAttributes(params);
+        }
+    }
+
+    private View modeChoice(Dialog dialog, AssistantMode mode, String title, String description) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(15), dp(13), dp(15), dp(13));
+        row.setBackground(rounded(mode == assistantMode ? SOFT : WHITE, 20, 1, LINE));
+        LinearLayout copy = new LinearLayout(this); copy.setOrientation(LinearLayout.VERTICAL);
+        TextView name = text(title, 16, BLACK);
+        name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        copy.addView(name, matchWrap()); copy.addView(text(description, 13, MID), matchWrap());
+        row.addView(copy, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        if (mode == assistantMode) row.addView(text("✓", 18, BLACK), matchWrap());
+        row.setOnClickListener(view -> {
+            dialog.dismiss(); assistantMode = mode; store.setAssistantMode(mode); applyAssistantMode(true);
+        });
+        return row;
+    }
+
+    private void applyAssistantMode(boolean clearView) {
+        if (modeText == null || composer == null) return;
+        boolean developer = DeveloperRoutingPolicy.routesToDeveloper(assistantMode);
+        modeText.setText(developer ? "Developer  ⌄" : "Jarvis  ⌄");
+        composer.setHint(DeveloperRoutingPolicy.placeholder(assistantMode));
+        micButton.setVisibility(developer ? View.GONE : View.VISIBLE);
+        if (clearView || developer) {
+            finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+        }
+        if (developer) {
+            statusText.setText("Connecting…");
+            if (store.developerToken().isBlank()) {
+                statusText.setText("Setup required");
+                Toast.makeText(this, "Add the Developer token in Settings", Toast.LENGTH_LONG).show();
+            } else {
+                developerClient.connect(store.developerUrl(), store.remoteDeveloperUrl(),
+                    store.developerToken(), store.developerWorkspace(), store.developerThreadId());
+            }
+        } else {
+            developerClient.close(); renderHistory(); statusText.setText("Ready");
+        }
+    }
+
+    private void renderDeveloperEvent(JSONObject event) {
+        String method = event.optString("method");
+        JSONObject params = event.optJSONObject("params");
+        if (event.has("id") && method.endsWith("requestApproval")) {
+            showDeveloperApproval(event.optLong("id"), method, params);
+        } else if ("response".equals(event.optString("type"))
+                && "threads.list".equals(event.optString("request_kind"))) {
+            showDeveloperThreads(event.optJSONObject("result"));
+        } else if ("item/agentMessage/delta".equals(method)) {
+            generating = true;
+            appendStreaming(params == null ? "" : params.optString("delta"));
+        } else if ("turn/started".equals(method)) {
+            generating = true; statusText.setText("Working…"); beginStreaming();
+        } else if ("turn/completed".equals(method)) {
+            generating = false; finishStreaming(); statusText.setText("Connected");
+            store.setDeveloperThreadId(developerClient.threadId());
+        } else if ("item/started".equals(method) || "item/completed".equals(method)) {
+            JSONObject item = params == null ? null : params.optJSONObject("item");
+            if (item != null) {
+                String type = item.optString("type", "Activity");
+                if ("agentMessage".equals(type) && "item/completed".equals(method)) {
+                    finishStreaming();
+                    addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
+                        item.optString("text"), System.currentTimeMillis()), true);
+                } else if (!"agentMessage".equals(type) && !"reasoning".equals(type)) {
+                    addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
+                        "[ " + type + " ] " + item.optString("status", "Running"),
+                        System.currentTimeMillis()), true);
+                }
+            }
+        }
+        updateSendButton();
+    }
+
+    private void switchDeveloperWorkspace(String workspace) {
+        store.setDeveloperWorkspace(workspace);
+        store.setDeveloperThreadId("");
+        developerClient.connect(store.developerUrl(), store.remoteDeveloperUrl(),
+            store.developerToken(), workspace, "");
+        finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+    }
+
+    private void showDeveloperThreads(JSONObject result) {
+        JSONArray threads = result == null ? null : result.optJSONArray("data");
+        if (threads == null || threads.length() == 0) {
+            statusText.setText("Connected");
+            Toast.makeText(this, "No recent sessions in this workspace", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(22), dp(18), dp(22), dp(20));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView heading = text("Development sessions", 20, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(heading, matchWrap(0, dp(12)));
+        int count = Math.min(threads.length(), 8);
+        for (int index = 0; index < count; index++) {
+            JSONObject thread = threads.optJSONObject(index);
+            if (thread == null) continue;
+            String id = thread.optString("id");
+            String title = thread.optString("name");
+            if (title.isBlank()) title = thread.optString("preview", "Development session");
+            if (title.length() > 64) title = title.substring(0, 64) + "…";
+            TextView row = text(title, 15, BLACK);
+            row.setPadding(dp(14), dp(13), dp(14), dp(13));
+            row.setBackground(rounded(id.equals(developerClient.threadId()) ? SOFT : WHITE, 18, 1, LINE));
+            row.setOnClickListener(view -> {
+                dialog.dismiss(); developerClient.selectThread(id); store.setDeveloperThreadId(id);
+                finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
+            });
+            sheet.addView(row, matchWrap(0, dp(7)));
+        }
+        dialog.setContentView(sheet); dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setGravity(Gravity.BOTTOM);
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
+            attributes.horizontalMargin = 0.03f; attributes.verticalMargin = 0.02f;
+            window.setAttributes(attributes);
+        }
+    }
+
+    private void showDeveloperApproval(long requestId, String method, JSONObject params) {
+        String operation = method.contains("fileChange") ? "modify files" : "run a command";
+        String detail = params == null ? "" : params.optString("reason");
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(22), dp(18), dp(22), dp(20));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView title = text("Approval required", 20, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(title, matchWrap(0, dp(8)));
+        sheet.addView(text("Developer wants to " + operation + ".", 15, BLACK), matchWrap(0, dp(5)));
+        if (!detail.isBlank()) sheet.addView(text(detail, 13, MID), matchWrap(0, dp(14)));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setGravity(Gravity.END);
+        Button cancel = new Button(this); cancel.setText("Cancel"); cancel.setTextColor(BLACK);
+        cancel.setAllCaps(false); cancel.setBackground(rounded(SOFT, 20, 0, Color.TRANSPARENT));
+        Button approve = new Button(this); approve.setText("Approve"); approve.setTextColor(WHITE);
+        approve.setAllCaps(false); approve.setBackground(rounded(BLACK, 20, 0, Color.TRANSPARENT));
+        cancel.setOnClickListener(view -> { developerClient.respondToApproval(requestId, "decline"); dialog.dismiss(); });
+        approve.setOnClickListener(view -> { developerClient.respondToApproval(requestId, "accept"); dialog.dismiss(); });
+        actions.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(44)));
+        LinearLayout.LayoutParams approveParams = new LinearLayout.LayoutParams(dp(96), dp(44));
+        approveParams.leftMargin = dp(8); actions.addView(approve, approveParams);
+        sheet.addView(actions, matchWrap());
+        dialog.setContentView(sheet); dialog.setCancelable(false); dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawableResource(android.R.color.transparent);
+            window.setGravity(Gravity.BOTTOM);
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
+            window.setAttributes(attributes);
+        }
     }
 
     private void toggleVoice() {
@@ -769,7 +1007,11 @@ public final class MainActivity extends Activity {
         holder.setOrientation(LinearLayout.VERTICAL);
         holder.setGravity(Gravity.START);
 
-        TextView name = text("Jarvis", 12, MID);
+        TextView name = text(
+            DeveloperRoutingPolicy.routesToDeveloper(assistantMode) ? "Developer" : "Jarvis",
+            12,
+            MID
+        );
         name.setTypeface(Typeface.DEFAULT_BOLD);
         holder.addView(name, wrapWrap(0, dp(4)));
 
@@ -811,6 +1053,10 @@ public final class MainActivity extends Activity {
     }
 
     private void cancelGeneration() {
+        if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+            developerClient.interrupt();
+            return;
+        }
         startService(
             new Intent(this, VoiceService.class)
                 .setAction(

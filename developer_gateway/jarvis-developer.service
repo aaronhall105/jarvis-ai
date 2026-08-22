@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis authenticated Codex developer gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aaron/jarvis-wear
+LoadCredential=jarvis-developer-token:%h/.config/jarvis/developer-token
+ExecStart=/home/aaron/.local/share/jarvis-developer/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+LockPersonality=true
+RestrictSUIDSGID=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/home/aaron/jarvis /home/aaron/jarvis-wear /home/aaron/.codex /tmp
+
+[Install]
+WantedBy=default.target
