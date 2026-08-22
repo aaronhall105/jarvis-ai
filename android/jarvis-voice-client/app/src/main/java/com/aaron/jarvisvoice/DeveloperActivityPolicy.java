@@ -50,4 +50,20 @@ final class DeveloperActivityPolicy {
         }
         return item.toString();
     }
+
+    static String messageText(JSONObject item) {
+        if (item == null) return "";
+        String direct = item.optString("text");
+        if (!direct.isBlank()) return direct;
+        JSONArray content = item.optJSONArray("content");
+        if (content == null) return "";
+        StringBuilder value = new StringBuilder();
+        for (int index = 0; index < content.length(); index++) {
+            JSONObject part = content.optJSONObject(index);
+            if (part == null || !"text".equals(part.optString("type"))) continue;
+            if (value.length() > 0) value.append("\n");
+            value.append(part.optString("text"));
+        }
+        return value.toString();
+    }
 }

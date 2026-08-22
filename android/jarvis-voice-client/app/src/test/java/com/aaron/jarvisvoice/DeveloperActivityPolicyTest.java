@@ -29,4 +29,12 @@ public class DeveloperActivityPolicyTest {
         assertTrue(DeveloperActivityPolicy.details(file).contains("VoiceService.java"));
         assertTrue(DeveloperActivityPolicy.details(file).contains("+ready"));
     }
+
+    @Test public void extractsPersistedDeveloperMessages() throws Exception {
+        JSONObject user = new JSONObject().put("type", "userMessage").put("content",
+            new JSONArray().put(new JSONObject().put("type", "text").put("text", "MOBILE OK request")));
+        JSONObject agent = new JSONObject().put("type", "agentMessage").put("text", "MOBILE OK");
+        assertEquals("MOBILE OK request", DeveloperActivityPolicy.messageText(user));
+        assertEquals("MOBILE OK", DeveloperActivityPolicy.messageText(agent));
+    }
 }

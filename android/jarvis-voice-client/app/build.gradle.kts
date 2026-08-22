@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 190218
-        versionName = "19.0.0-alpha19-developer-v1.3.1"
+        versionCode = 190220
+        versionName = "19.0.0-alpha19-developer-v1.4"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
 

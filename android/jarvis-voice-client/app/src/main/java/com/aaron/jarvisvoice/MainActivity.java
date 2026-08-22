@@ -176,7 +176,7 @@ public final class MainActivity extends Activity {
         setContentView(buildContent());
         applySystemBarAppearance();
         applySystemInsets();
-        renderHistory();
+        if (!DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) renderHistory();
         updateMicButton();
         startJarvisIfConfigured();
         applyAssistantMode(false);
@@ -189,7 +189,7 @@ public final class MainActivity extends Activity {
         androidx.core.content.ContextCompat.registerReceiver(
             this, receiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
         );
-        renderHistory();
+        if (!DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) renderHistory();
     }
 
     @Override protected void onResume() {
@@ -695,6 +695,9 @@ public final class MainActivity extends Activity {
         } else if ("response".equals(event.optString("type"))
                 && "threads.list".equals(event.optString("request_kind"))) {
             showDeveloperThreads(event.optJSONObject("result"));
+        } else if ("response".equals(event.optString("type"))
+                && "thread.resume".equals(event.optString("request_kind"))) {
+            showDeveloperThreadHistory(event.optJSONObject("result"));
         } else if ("item/agentMessage/delta".equals(method)) {
             generating = true;
             appendStreaming(params == null ? "" : params.optString("delta"));
@@ -717,6 +720,32 @@ public final class MainActivity extends Activity {
             }
         }
         updateSendButton();
+    }
+
+    private void showDeveloperThreadHistory(JSONObject result) {
+        JSONObject thread = result == null ? null : result.optJSONObject("thread");
+        JSONArray turns = thread == null ? null : thread.optJSONArray("turns");
+        if (turns == null) return;
+        finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+        for (int turnIndex = 0; turnIndex < turns.length(); turnIndex++) {
+            JSONObject turn = turns.optJSONObject(turnIndex);
+            JSONArray items = turn == null ? null : turn.optJSONArray("items");
+            if (items == null) continue;
+            for (int itemIndex = 0; itemIndex < items.length(); itemIndex++) {
+                JSONObject item = items.optJSONObject(itemIndex);
+                if (item == null) continue;
+                String type = item.optString("type");
+                String text = DeveloperActivityPolicy.messageText(item);
+                if (text.isBlank()) continue;
+                if ("userMessage".equals(type)) {
+                    addMessageView(new ChatMessage(ChatMessage.USER, text, System.currentTimeMillis()), false);
+                } else if ("agentMessage".equals(type)) {
+                    addMessageView(new ChatMessage(ChatMessage.ASSISTANT, text, System.currentTimeMillis()), false);
+                }
+            }
+        }
+        emptyState.setVisibility(messageList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
+        scrollToBottom();
     }
 
     private void switchDeveloperWorkspace(String workspace) {
