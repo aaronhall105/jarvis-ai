@@ -43,6 +43,7 @@ from app.memory_models import (
 )
 from app.registry import RegistryEngine
 from app.realtime_voice import RealtimeVoiceProxy
+from app.realtime_turn_ledger import RealtimeTurnLedger
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext
@@ -118,7 +119,13 @@ ai = AIEngine(
 )
 
 
-realtime_voice = RealtimeVoiceProxy.from_environment()
+realtime_turn_ledger = RealtimeTurnLedger(
+    "/app/data/jarvis_realtime_turns.db"
+)
+
+realtime_voice = RealtimeVoiceProxy.from_environment(
+    turn_ledger=realtime_turn_ledger,
+)
 
 _voice_pe_ducked_media: dict[str, dict[str, float]] = {}
 _voice_pe_duck_lock = asyncio.Lock()

@@ -25,6 +25,7 @@ from urllib.parse import quote
 from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
 from app.runtime_observability import runtime_metrics
+from app.realtime_turn_ledger import RealtimeTurnLedger, TurnRecord
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
 VERSION = JARVIS_RELEASE
@@ -1402,8 +1403,14 @@ def control_voice_policy(command: str, tool_events: list[dict[str, Any]], *, ena
 
 
 class RealtimeVoiceProxy:
-    def __init__(self, config: RealtimeVoiceConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RealtimeVoiceConfig | None = None,
+        *,
+        turn_ledger: RealtimeTurnLedger | None = None,
+    ) -> None:
         self.config = config or RealtimeVoiceConfig.from_environment()
+        self.turn_ledger = turn_ledger
         self.speaker_identity = SpeakerIdentityClient.from_environment()
         self.speaker_identity_runtime = SpeakerIdentityRuntime(
             self.speaker_identity,
@@ -1432,6 +1439,126 @@ class RealtimeVoiceProxy:
         self.voice_pe_session_started: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self.voice_pe_session_ended: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
+
+    def _turn_ledger_identity(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> dict[str, Any]:
+        return {
+            "client_kind": str(
+                metadata.get("client_kind")
+                or "mobile"
+            ),
+            "device_id": str(
+                metadata.get("device_id")
+                or "unknown-device"
+            ),
+            "conversation_id": str(
+                metadata.get("conversation_id")
+                or "unknown-conversation"
+            ),
+            "client_turn_id": int(
+                client_turn_id
+            ),
+        }
+
+    def _uses_mobile_turn_ledger(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> bool:
+        return (
+            self.turn_ledger is not None
+            and metadata.get("client_kind") == "mobile"
+            and int(client_turn_id) > 0
+        )
+
+    async def _claim_mobile_turn(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+        command: str,
+    ) -> Any:
+        ledger = self.turn_ledger
+
+        if (
+            ledger is None
+            or not self._uses_mobile_turn_ledger(
+                metadata,
+                client_turn_id,
+            )
+        ):
+            return None
+
+        identity = self._turn_ledger_identity(
+            metadata,
+            client_turn_id,
+        )
+
+        return await asyncio.to_thread(
+            ledger.claim,
+            **identity,
+            command=command,
+        )
+
+    async def _lookup_mobile_turn(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> TurnRecord | None:
+        ledger = self.turn_ledger
+
+        if (
+            ledger is None
+            or not self._uses_mobile_turn_ledger(
+                metadata,
+                client_turn_id,
+            )
+        ):
+            return None
+
+        identity = self._turn_ledger_identity(
+            metadata,
+            client_turn_id,
+        )
+
+        return await asyncio.to_thread(
+            ledger.lookup,
+            **identity,
+        )
+
+    @staticmethod
+    def _turn_status_payload(
+        client_turn_id: int,
+        record: TurnRecord | None,
+    ) -> dict[str, Any]:
+        if record is None:
+            return {
+                "type": "turn.status",
+                "client_turn_id": int(
+                    client_turn_id
+                ),
+                "found": False,
+                "status": "unknown",
+            }
+
+        payload: dict[str, Any] = {
+            "type": "turn.status",
+            "client_turn_id":
+                record.client_turn_id,
+            "conversation_id":
+                record.conversation_id,
+            "found": True,
+            "status": record.status,
+        }
+
+        if record.response is not None:
+            payload["response"] = (
+                record.response
+            )
+
+        return payload
 
     def _next_provider_epoch(self) -> int:
         self._provider_epoch_counter += 1
@@ -1479,8 +1606,15 @@ class RealtimeVoiceProxy:
         return True
 
     @classmethod
-    def from_environment(cls) -> "RealtimeVoiceProxy":
-        return cls(RealtimeVoiceConfig.from_environment())
+    def from_environment(
+        cls,
+        *,
+        turn_ledger: RealtimeTurnLedger | None = None,
+    ) -> "RealtimeVoiceProxy":
+        return cls(
+            RealtimeVoiceConfig.from_environment(),
+            turn_ledger=turn_ledger,
+        )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -2226,12 +2360,112 @@ class RealtimeVoiceProxy:
                     cancelled_client_turn_id,
                     len(turn_tasks),
                 )
+            elif kind == "turn.status":
+                client_turn_id = _safe_int(
+                    payload.get(
+                        "client_turn_id"
+                    )
+                )
+
+                record = (
+                    await self
+                    ._lookup_mobile_turn(
+                        metadata,
+                        client_turn_id,
+                    )
+                )
+
+                await self._send_json(
+                    client,
+                    self._turn_status_payload(
+                        client_turn_id,
+                        record,
+                    ),
+                )
+
             elif kind == "text":
-                text = str(payload.get("text") or "").strip()
+                text = str(
+                    payload.get("text")
+                    or ""
+                ).strip()
+
                 if text:
+                    client_turn_id = _safe_int(
+                        payload.get(
+                            "client_turn_id"
+                        )
+                    )
+
+                    claim = (
+                        await self
+                        ._claim_mobile_turn(
+                            metadata,
+                            client_turn_id,
+                            text,
+                        )
+                    )
+
+                    if claim is not None:
+                        if claim.is_conflict:
+                            await self._send_json(
+                                client,
+                                {
+                                    "type":
+                                        "turn.conflict",
+                                    "client_turn_id":
+                                        client_turn_id,
+                                    "status":
+                                        claim.record.status,
+                                    "message":
+                                        "client_turn_id "
+                                        "already belongs "
+                                        "to a different "
+                                        "command",
+                                },
+                            )
+                            continue
+
+                        if claim.is_duplicate:
+                            await self._send_json(
+                                client,
+                                self
+                                ._turn_status_payload(
+                                    client_turn_id,
+                                    claim.record,
+                                ),
+                            )
+                            continue
+
+                        state[
+                            "active_turn_ledger_key"
+                        ] = (
+                            self
+                            ._turn_ledger_identity(
+                                metadata,
+                                client_turn_id,
+                            )
+                        )
+
+                        await self._send_json(
+                            client,
+                            {
+                                "type":
+                                    "turn.accepted",
+                                "client_turn_id":
+                                    client_turn_id,
+                                "status":
+                                    "accepted",
+                            },
+                        )
+
                     await self._start_brain_turn(
                         text,
-                        bool(payload.get("speak", True)),
+                        bool(
+                            payload.get(
+                                "speak",
+                                True,
+                            )
+                        ),
                         client,
                         upstream,
                         brain_handler,
@@ -2240,9 +2474,12 @@ class RealtimeVoiceProxy:
                         voice,
                         turn_tasks,
                         state,
-                        client_turn_id=_safe_int(payload.get("client_turn_id")),
-                        provider_epoch=provider_epoch,
+                        client_turn_id=
+                            client_turn_id,
+                        provider_epoch=
+                            provider_epoch,
                     )
+
             elif kind == "stop":
                 return
 
