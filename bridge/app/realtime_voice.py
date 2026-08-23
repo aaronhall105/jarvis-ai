@@ -1529,6 +1529,128 @@ class RealtimeVoiceProxy:
         )
 
     @staticmethod
+    def _bound_turn_ledger_key(
+        state: dict[str, Any],
+        generation: int,
+    ) -> dict[str, Any] | None:
+        bindings = state.get(
+            "turn_ledger_bindings"
+        )
+
+        if not isinstance(bindings, dict):
+            return None
+
+        key = bindings.get(
+            int(generation)
+        )
+
+        if not isinstance(key, dict):
+            return None
+
+        return dict(key)
+
+    @classmethod
+    def _remember_turn_ledger_response(
+        cls,
+        state: dict[str, Any],
+        generation: int,
+        response: dict[str, Any],
+    ) -> None:
+        if (
+            cls._bound_turn_ledger_key(
+                state,
+                generation,
+            )
+            is None
+        ):
+            return
+
+        responses = state.setdefault(
+            "turn_ledger_responses",
+            {},
+        )
+
+        if isinstance(responses, dict):
+            responses[int(generation)] = (
+                dict(response)
+            )
+
+    async def _mark_mobile_turn_terminal(
+        self,
+        state: dict[str, Any],
+        generation: int,
+        status: str,
+    ) -> TurnRecord | None:
+        ledger = self.turn_ledger
+
+        if ledger is None:
+            return None
+
+        key = self._bound_turn_ledger_key(
+            state,
+            generation,
+        )
+
+        if key is None:
+            return None
+
+        responses = state.get(
+            "turn_ledger_responses"
+        )
+
+        recovery_response = (
+            responses.get(int(generation))
+            if isinstance(responses, dict)
+            else None
+        )
+
+        if not isinstance(
+            recovery_response,
+            dict,
+        ):
+            recovery_response = None
+
+        if status == "completed":
+            record = await asyncio.to_thread(
+                ledger.mark_completed,
+                **key,
+                response=recovery_response,
+            )
+        elif status == "cancelled":
+            record = await asyncio.to_thread(
+                ledger.mark_cancelled,
+                **key,
+            )
+        elif status == "interrupted":
+            record = await asyncio.to_thread(
+                ledger.mark_interrupted,
+                **key,
+            )
+        else:
+            raise ValueError(
+                "Unsupported durable turn "
+                f"status: {status}"
+            )
+
+        bindings = state.get(
+            "turn_ledger_bindings"
+        )
+
+        if isinstance(bindings, dict):
+            bindings.pop(
+                int(generation),
+                None,
+            )
+
+        if isinstance(responses, dict):
+            responses.pop(
+                int(generation),
+                None,
+            )
+
+        return record
+
+    @staticmethod
     def _turn_status_payload(
         client_turn_id: int,
         record: TurnRecord | None,
@@ -2344,13 +2466,26 @@ class RealtimeVoiceProxy:
                     task.cancel()
                 if tasks_to_cancel:
                     await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-                _mark_turn_terminal(state, cancelled_generation)
+                await self._mark_mobile_turn_terminal(
+                    state,
+                    cancelled_generation,
+                    "cancelled",
+                )
+
+                _mark_turn_terminal(
+                    state,
+                    cancelled_generation,
+                )
+
                 await self._send_json(
                     client,
                     _turn_payload(
                         cancelled_generation,
                         cancelled_client_turn_id,
-                        {"type": "turn.cancelled", "status": "cancelled"},
+                        {
+                            "type": "turn.cancelled",
+                            "status": "cancelled",
+                        },
                     ),
                 )
                 _LOGGER.info(
@@ -2396,6 +2531,8 @@ class RealtimeVoiceProxy:
                         )
                     )
 
+                    turn_ledger_key = None
+
                     claim = (
                         await self
                         ._claim_mobile_turn(
@@ -2436,9 +2573,7 @@ class RealtimeVoiceProxy:
                             )
                             continue
 
-                        state[
-                            "active_turn_ledger_key"
-                        ] = (
+                        turn_ledger_key = (
                             self
                             ._turn_ledger_identity(
                                 metadata,
@@ -2478,6 +2613,8 @@ class RealtimeVoiceProxy:
                             client_turn_id,
                         provider_epoch=
                             provider_epoch,
+                        turn_ledger_key=
+                            turn_ledger_key,
                     )
 
             elif kind == "stop":
@@ -3226,12 +3363,45 @@ class RealtimeVoiceProxy:
             "continuation_speech_active"
         ] = False
 
+        resolved_generation = _safe_int(
+            generation,
+            _safe_int(
+                state.get("generation")
+            ),
+        )
+
+        resolved_client_turn_id = _safe_int(
+            client_turn_id,
+            _safe_int(
+                state.get(
+                    "active_client_turn_id"
+                )
+            ),
+        )
+
+        durable_status = (
+            "completed"
+            if str(status).casefold()
+            == "completed"
+            else "interrupted"
+        )
+
+        await self._mark_mobile_turn_terminal(
+            state,
+            resolved_generation,
+            durable_status,
+        )
+
         await self._send_json(
             client,
             _turn_payload(
-                _safe_int(generation, _safe_int(state.get("generation"))),
-                _safe_int(client_turn_id, _safe_int(state.get("active_client_turn_id"))),
-                {"type": "turn.done", "status": status, "usage": usage},
+                resolved_generation,
+                resolved_client_turn_id,
+                {
+                    "type": "turn.done",
+                    "status": status,
+                    "usage": usage,
+                },
             ),
         )
 
@@ -3312,8 +3482,16 @@ class RealtimeVoiceProxy:
         await self._send_json(
             client,
             _turn_payload(
-                resolved_generation, resolved_client_turn_id, {"type": "audio.done"}
+                resolved_generation,
+                resolved_client_turn_id,
+                {"type": "audio.done"},
             ),
+        )
+
+        await self._mark_mobile_turn_terminal(
+            state,
+            resolved_generation,
+            "completed",
         )
 
         await self._send_json(
@@ -3321,7 +3499,11 @@ class RealtimeVoiceProxy:
             _turn_payload(
                 resolved_generation,
                 resolved_client_turn_id,
-                {"type": "turn.done", "status": "completed", "usage": None},
+                {
+                    "type": "turn.done",
+                    "status": "completed",
+                    "usage": None,
+                },
             ),
         )
 
@@ -4058,6 +4240,7 @@ class RealtimeVoiceProxy:
         client_turn_id: int | None = None,
         provider_epoch: int = 0,
         turn_already_started: bool = False,
+        turn_ledger_key: dict[str, Any] | None = None,
     ) -> None:
         if not _provider_epoch_is_current(state, provider_epoch):
             return
@@ -4084,6 +4267,29 @@ class RealtimeVoiceProxy:
         resolved_client_turn_id = _safe_int(client_turn_id)
         state["active_generation"] = generation
         state["active_client_turn_id"] = resolved_client_turn_id
+
+        if (
+            isinstance(
+                turn_ledger_key,
+                dict,
+            )
+            and _safe_int(
+                turn_ledger_key.get(
+                    "client_turn_id"
+                )
+            )
+            == resolved_client_turn_id
+        ):
+            bindings = state.setdefault(
+                "turn_ledger_bindings",
+                {},
+            )
+
+            if isinstance(bindings, dict):
+                bindings[generation] = (
+                    dict(turn_ledger_key)
+                )
+
         state["turn_in_progress_generation"] = generation
         state.pop("queued_speech_remainder", None)
         state["brain_turn_complete"] = False
@@ -4436,14 +4642,59 @@ class RealtimeVoiceProxy:
                     return_exceptions=True,
                 )
 
+            await self._mark_mobile_turn_terminal(
+                state,
+                generation,
+                "interrupted",
+            )
+
             self.total_discarded_stale_turns += 1
+
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id, {"type": "brain.discarded", "command": command}
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "brain.discarded",
+                        "command": command,
+                    },
                 ),
             )
+
+            await self._send_json(
+                client,
+                _turn_payload(
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "turn.interrupted",
+                        "status": "interrupted",
+                    },
+                ),
+            )
+
             return
+
+        self._remember_turn_ledger_response(
+            state,
+            generation,
+            {
+                "text": str(
+                    result.get("response")
+                    or ""
+                ),
+                "success": bool(
+                    result.get("success")
+                ),
+                "conversation_id": str(
+                    result.get(
+                        "conversation_id"
+                    )
+                    or ""
+                ),
+            },
+        )
 
         for tool_event in result.get("tool_events", []):
             await self._send_json(
@@ -4527,11 +4778,22 @@ class RealtimeVoiceProxy:
         )
 
         if not speak or bool(result.get("quiet_control")):
+            await self._mark_mobile_turn_terminal(
+                state,
+                generation,
+                "completed",
+            )
+
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id,
-                    {"type": "turn.done", "status": "completed", "usage": None},
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "turn.done",
+                        "status": "completed",
+                        "usage": None,
+                    },
                 ),
             )
             _mark_turn_terminal(state)
