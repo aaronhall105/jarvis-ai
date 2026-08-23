@@ -1259,6 +1259,22 @@ public final class VoiceService extends Service implements
 
     @Override public void onDisconnected(String reason) {
         ready = false;
+
+        /*
+         * The old transport no longer owns a provably running
+         * brain turn. JarvisRealtimeClient now reconciles that
+         * logical turn against Core's durable ledger before the
+         * replacement connection is exposed as ready.
+         */
+        brainActive = false;
+
+        /*
+         * A listening deadline belongs to the old capture epoch.
+         * Recovery must receive a fresh full deadline after the
+         * replacement transport/capture is actually ready.
+         */
+        cancelPhoneListeningTimeout();
+
         voiceFoundation.recovering(
             "connection lost: " + safe(reason, "unknown")
         );
