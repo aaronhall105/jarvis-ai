@@ -68,4 +68,134 @@ public final class RealtimeProtocolTest {
         assertEquals("hello", message.getString("text"));
         assertFalse(message.getBoolean("speak"));
     }
+
+    @Test public void turnStatusRequestCarriesOriginalClientTurnId()
+            throws Exception {
+        JSONObject request = new JSONObject(
+            RealtimeProtocol.turnStatus(73L)
+        );
+
+        assertEquals(
+            "turn.status",
+            request.getString("type")
+        );
+
+        assertEquals(
+            73L,
+            request.getLong("client_turn_id")
+        );
+    }
+
+    @Test public void completedTurnStatusParsesRecoveryResponse()
+            throws Exception {
+        RealtimeProtocol.Event event =
+            RealtimeProtocol.parse(
+                "{"
+                    + "\"type\":\"turn.status\","
+                    + "\"client_turn_id\":73,"
+                    + "\"found\":true,"
+                    + "\"status\":\"completed\","
+                    + "\"conversation_id\":\"chat-1\","
+                    + "\"response\":{"
+                    + "\"text\":\"Done.\","
+                    + "\"success\":true,"
+                    + "\"conversation_id\":\"chat-1\""
+                    + "}"
+                    + "}"
+            );
+
+        assertEquals(
+            "turn.status",
+            event.type
+        );
+
+        assertEquals(
+            73L,
+            event.clientTurnId
+        );
+
+        assertTrue(event.found);
+
+        assertEquals(
+            "completed",
+            event.turnStatus
+        );
+
+        assertEquals(
+            "Done.",
+            event.recoveryText
+        );
+
+        assertTrue(
+            event.recoverySuccess
+        );
+
+        assertEquals(
+            "chat-1",
+            event.recoveryConversationId
+        );
+    }
+
+    @Test public void unknownTurnStatusIsExplicit()
+            throws Exception {
+        RealtimeProtocol.Event event =
+            RealtimeProtocol.parse(
+                "{"
+                    + "\"type\":\"turn.status\","
+                    + "\"client_turn_id\":91,"
+                    + "\"found\":false,"
+                    + "\"status\":\"unknown\""
+                    + "}"
+            );
+
+        assertFalse(event.found);
+
+        assertEquals(
+            "unknown",
+            event.turnStatus
+        );
+    }
+
+    @Test public void turnAcceptedAndConflictRemainAddressable()
+            throws Exception {
+        RealtimeProtocol.Event accepted =
+            RealtimeProtocol.parse(
+                "{"
+                    + "\"type\":\"turn.accepted\","
+                    + "\"client_turn_id\":92,"
+                    + "\"status\":\"accepted\""
+                    + "}"
+            );
+
+        assertEquals(
+            92L,
+            accepted.clientTurnId
+        );
+
+        assertEquals(
+            "accepted",
+            accepted.turnStatus
+        );
+
+        RealtimeProtocol.Event conflict =
+            RealtimeProtocol.parse(
+                "{"
+                    + "\"type\":\"turn.conflict\","
+                    + "\"client_turn_id\":92,"
+                    + "\"status\":\"completed\","
+                    + "\"message\":\"conflict\""
+                    + "}"
+            );
+
+        assertEquals(
+            "turn.conflict",
+            conflict.type
+        );
+
+        assertEquals(
+            "conflict",
+            conflict.message
+        );
+    }
+
 }

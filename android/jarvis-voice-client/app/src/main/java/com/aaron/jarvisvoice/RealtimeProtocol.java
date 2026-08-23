@@ -30,6 +30,11 @@ public final class RealtimeProtocol {
         public final boolean unifiedBrain;
         public final boolean memoryUsed;
         public final boolean toolCalled;
+        public final boolean found;
+        public final String turnStatus;
+        public final String recoveryText;
+        public final boolean recoverySuccess;
+        public final String recoveryConversationId;
 
         private Event(
             String type,
@@ -52,7 +57,12 @@ public final class RealtimeProtocol {
             boolean success,
             boolean unifiedBrain,
             boolean memoryUsed,
-            boolean toolCalled
+            boolean toolCalled,
+            boolean found,
+            String turnStatus,
+            String recoveryText,
+            boolean recoverySuccess,
+            String recoveryConversationId
         ) {
             this.type = type;
             this.message = message;
@@ -75,6 +85,12 @@ public final class RealtimeProtocol {
             this.unifiedBrain = unifiedBrain;
             this.memoryUsed = memoryUsed;
             this.toolCalled = toolCalled;
+            this.found = found;
+            this.turnStatus = turnStatus;
+            this.recoveryText = recoveryText;
+            this.recoverySuccess = recoverySuccess;
+            this.recoveryConversationId =
+                recoveryConversationId;
         }
     }
 
@@ -161,6 +177,25 @@ public final class RealtimeProtocol {
         }
     }
 
+    public static String turnStatus(
+        long clientTurnId
+    ) throws Exception {
+        if (clientTurnId <= 0L) {
+            throw new IllegalArgumentException(
+                "clientTurnId must be positive"
+            );
+        }
+
+        return withLocalTime(
+            new JSONObject()
+                .put("type", "turn.status")
+                .put(
+                    "client_turn_id",
+                    clientTurnId
+                )
+        ).toString();
+    }
+
     public static String text(String value, boolean speak) throws Exception {
         return text(value, speak, 0L);
     }
@@ -184,6 +219,29 @@ public final class RealtimeProtocol {
 
     public static Event parse(String raw) throws Exception {
         JSONObject root = new JSONObject(raw);
+
+        JSONObject recovery =
+            root.optJSONObject("response");
+
+        String recoveryText = recovery == null
+            ? ""
+            : recovery.optString("text", "");
+
+        boolean recoverySuccess =
+            recovery != null
+                && recovery.optBoolean(
+                    "success",
+                    false
+                );
+
+        String recoveryConversationId =
+            recovery == null
+                ? ""
+                : recovery.optString(
+                    "conversation_id",
+                    ""
+                );
+
         return new Event(
             root.optString("type", "unknown"),
             root.optString("message", ""),
@@ -205,7 +263,12 @@ public final class RealtimeProtocol {
             root.optBoolean("success", true),
             root.optBoolean("unified_brain", false),
             root.optBoolean("memory_used", false),
-            root.optBoolean("tool_called", false)
+            root.optBoolean("tool_called", false),
+            root.optBoolean("found", false),
+            root.optString("status", ""),
+            recoveryText,
+            recoverySuccess,
+            recoveryConversationId
         );
     }
 }
