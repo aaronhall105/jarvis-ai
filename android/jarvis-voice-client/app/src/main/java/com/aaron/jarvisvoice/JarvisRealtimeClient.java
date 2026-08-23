@@ -78,7 +78,7 @@ public final class JarvisRealtimeClient {
     private long pingStartedAtMs;
     private long turnStartedAtMs;
     private boolean firstAudioMeasured;
-    private long nextClientTurnId = 1L;
+    private final ClientTurnIdStore turnIds;
     private long activeClientTurnId;
     private int highestServerGeneration;
     private int minimumServerGeneration;
@@ -114,6 +114,7 @@ public final class JarvisRealtimeClient {
         this.conversationId = conversationId;
         this.endpoint = "WATCH".equalsIgnoreCase(endpoint) ? "WATCH" : "PHONE";
         this.listener = listener;
+        turnIds = new ClientTurnIdStore(context);
         diagnostics = new VoiceDiagnosticsStore(context);
         performance = new TurnPerformanceTracker(diagnostics);
         endpoints = new CoreEndpointSelector(context, coreUrl);
@@ -218,8 +219,7 @@ public final class JarvisRealtimeClient {
             turnStartedAtMs = SystemClock.elapsedRealtime();
             firstAudioMeasured = false;
             performance.beginTurn();
-            long clientTurnId = nextClientTurnId++;
-            if (nextClientTurnId <= 0L) nextClientTurnId = 1L;
+            long clientTurnId = turnIds.next();
             activeClientTurnId = clientTurnId;
             audioServerGeneration = 0;
             return current.send(RealtimeProtocol.text(text.trim(), speak, clientTurnId));
