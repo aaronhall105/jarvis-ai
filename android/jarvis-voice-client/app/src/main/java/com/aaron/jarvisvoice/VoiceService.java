@@ -796,7 +796,13 @@ public final class VoiceService extends Service implements
         }
 
         if (standardSpeechEngine.isRunning()) {
-            if (!brainActive && !playbackActive) armPhoneListeningTimeout();
+            if (
+                !brainActive
+                    && !playbackActive
+                    && standardSpeechEngine.isCaptureReady()
+            ) {
+                armPhoneListeningTimeout();
+            }
             return;
         }
 
@@ -807,20 +813,76 @@ public final class VoiceService extends Service implements
                 : "Listening"
         );
         broadcastState(true, true);
-        if (!brainActive && !playbackActive) armPhoneListeningTimeout();
+
+        /*
+         * Do not start the eight-second deadline here.
+         * SpeechRecognizer.startListening() only requests capture.
+         * onStandardReady() is the authoritative capture-ready
+         * boundary.
+         */
+    }
+
+    private boolean phoneCaptureReady() {
+        if (
+            ConversationMode.STANDARD.equals(
+                store.conversationMode()
+            )
+        ) {
+            return standardSpeechEngine != null
+                && standardSpeechEngine.isCaptureReady();
+        }
+
+        return audio != null
+            && audio.isCaptureReady();
     }
 
     private void armPhoneListeningTimeout() {
+        boolean captureReady = phoneCaptureReady();
+
+        if (
+            !PhoneListeningTimeoutPolicy.shouldArm(
+                voiceActive,
+                voiceEndpoint,
+                brainActive,
+                playbackActive,
+                captureReady
+            )
+        ) {
+            return;
+        }
+
         if (phoneListeningTimeoutArmed) return;
+
         phoneListeningTimeoutArmed = true;
         int generation = ++phoneListeningTimeoutGeneration;
+
         main.postDelayed(() -> {
-            if (generation != phoneListeningTimeoutGeneration) return;
+            if (
+                generation
+                    != phoneListeningTimeoutGeneration
+            ) {
+                return;
+            }
+
             phoneListeningTimeoutArmed = false;
-            if (!PhoneListeningTimeoutPolicy.shouldTimeout(
-                    voiceActive, voiceEndpoint, brainActive, playbackActive)) return;
-            Log.i(TAG, "VOICE_LISTEN_TIMEOUT no_meaningful_speech_ms="
-                + PhoneListeningTimeoutPolicy.TIMEOUT_MS);
+
+            if (
+                !PhoneListeningTimeoutPolicy.shouldTimeout(
+                    voiceActive,
+                    voiceEndpoint,
+                    brainActive,
+                    playbackActive,
+                    phoneCaptureReady()
+                )
+            ) {
+                return;
+            }
+
+            Log.i(
+                TAG,
+                "VOICE_LISTEN_TIMEOUT no_meaningful_speech_ms="
+                    + PhoneListeningTimeoutPolicy.TIMEOUT_MS
+            );
             stopVoice(false);
         }, PhoneListeningTimeoutPolicy.TIMEOUT_MS);
     }
@@ -1833,11 +1895,42 @@ public final class VoiceService extends Service implements
             "VOICE_BARGE_IN capture_ready playback=" + playbackActive
                 + " brain=" + brainActive
         );
+
         voiceFoundation.listeningStandard(
             "standard recogniser ready"
         );
+
         status("Listening");
         broadcastState(true, true);
+
+        /*
+         * Reset any obsolete deadline and give this actual
+         * recogniser capture the complete eight-second window.
+         */
+        cancelPhoneListeningTimeout();
+
+        if (
+            voiceActive
+                && voiceEndpoint == VoiceEndpoint.PHONE
+                && !brainActive
+                && !playbackActive
+        ) {
+            armPhoneListeningTimeout();
+        }
+    }
+
+    @Override public void onStandardSpeechStarted() {
+        /*
+         * Actual microphone speech owns the session now.
+         * The idle/no-speech deadline must never race a user
+         * who has already started talking.
+         */
+        cancelPhoneListeningTimeout();
+
+        Log.i(
+            TAG,
+            "VOICE_LISTEN_TIMEOUT cancelled_speech_started"
+        );
     }
 
     @Override public void onStandardPartial(
@@ -1852,6 +1945,13 @@ public final class VoiceService extends Service implements
         if (isLikelyPlaybackEcho(text)) {
             return;
         }
+
+        /*
+         * Some Android recognisers may deliver a useful partial
+         * immediately around the beginning-of-speech callback.
+         * Treat a real, non-echo partial as a second safety fence.
+         */
+        cancelPhoneListeningTimeout();
 
         if (hasInterruptibleTurn()) {
             boolean outputActive =
@@ -1896,6 +1996,12 @@ public final class VoiceService extends Service implements
         String text
     ) {
         if (!voiceActive) return;
+
+        /*
+         * Recognition has completed. Invalidate the deadline
+         * belonging to that capture before processing the result.
+         */
+        cancelPhoneListeningTimeout();
 
         String heard =
             text == null ? "" : text.trim();
@@ -2013,6 +2119,12 @@ public final class VoiceService extends Service implements
 
 
     @Override public void onStandardError(String message) {
+        /*
+         * The failed recogniser no longer owns a live capture.
+         * Its deadline must not survive into the replacement.
+         */
+        cancelPhoneListeningTimeout();
+
         Log.w(
             TAG,
             "VOICE_BARGE_IN capture_error message=" + message
