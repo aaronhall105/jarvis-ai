@@ -839,8 +839,8 @@ public final class MainActivity extends Activity {
             JSONObject thread = threads.optJSONObject(index);
             if (thread == null) continue;
             String id = thread.optString("id");
-            String title = thread.optString("name");
-            if (title.isBlank()) title = thread.optString("preview", "Development session");
+            String title = DeveloperThreadPolicy.displayTitle(
+                thread.optString("name", ""), thread.optString("preview", ""));
             if (title.length() > 64) title = title.substring(0, 64) + "…";
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.VERTICAL);
@@ -876,8 +876,8 @@ public final class MainActivity extends Activity {
             JSONObject thread = threads.optJSONObject(index);
             if (thread == null) continue;
             String id = thread.optString("id");
-            String title = thread.optString("name");
-            if (title.isBlank()) title = thread.optString("preview", "Development chat");
+            String title = DeveloperThreadPolicy.displayTitle(
+                thread.optString("name", ""), thread.optString("preview", ""));
             title = title.replace('\n', ' ').trim();
             if (title.length() > 28) title = title.substring(0, 28) + "…";
             TextView pill = sessionPill(title, id.equals(developerClient.threadId()));
