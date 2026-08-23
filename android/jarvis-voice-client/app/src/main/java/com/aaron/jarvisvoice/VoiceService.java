@@ -649,7 +649,8 @@ public final class VoiceService extends Service implements
             if (!audio.isRunning()) audio.start();
             status("Live voice — listening continuously");
             broadcastState(true, true);
-            armPhoneListeningTimeout();
+            // The eight-second no-speech deadline is started by
+            // onAudioReady(), after AudioRecord is genuinely recording.
         }
     }
 
@@ -1570,6 +1571,22 @@ public final class VoiceService extends Service implements
         broadcastEvent("error", ChatMessage.SYSTEM, safe(message, "Unknown voice error"), voiceActive, false);
     }
 
+    @Override public void onAudioReady() {
+        if (
+            !voiceActive
+                || voiceEndpoint != VoiceEndpoint.PHONE
+                || !ConversationMode.LIVE.equals(
+                    store.conversationMode()
+                )
+        ) {
+            return;
+        }
+
+        if (!brainActive && !playbackActive) {
+            armPhoneListeningTimeout();
+        }
+    }
+
     @Override public void onAudioFrame(byte[] pcm16) {
         JarvisRealtimeClient current = client;
 
@@ -1684,7 +1701,9 @@ public final class VoiceService extends Service implements
         } else {
             status("Live voice — listening continuously");
             broadcastState(true, true);
-            armPhoneListeningTimeout();
+            if (audio != null && audio.isCaptureReady()) {
+                armPhoneListeningTimeout();
+            }
         }
     }
 
