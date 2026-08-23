@@ -34,9 +34,10 @@ import android.view.inputmethod.EditorInfo;
 import android.widget.EditText;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -67,11 +68,18 @@ public final class MainActivity extends Activity {
     private LinearLayout root;
     private LinearLayout topBar;
     private LinearLayout composerShell;
+    private LinearLayout developerChrome;
+    private LinearLayout developerSessionRow;
     private ScrollView messageScroll;
     private LinearLayout messageList;
     private EditText composer;
     private TextView statusText;
     private TextView modeText;
+    private TextView developerUsageText;
+    private ProgressBar developerUsageProgress;
+    private ImageButton proactiveButton;
+    private ImageButton topNewChatButton;
+    private ImageButton clearChatButton;
     private ImageButton micButton;
     private ImageButton sendButton;
     private View emptyState;
@@ -246,6 +254,8 @@ public final class MainActivity extends Activity {
 
         topBar = buildTopBar();
         root.addView(topBar, matchWrap());
+        developerChrome = buildDeveloperChrome();
+        root.addView(developerChrome, matchWrap());
 
         FrameLayout conversation = new FrameLayout(this);
         messageScroll = new ScrollView(this);
@@ -322,7 +332,7 @@ public final class MainActivity extends Activity {
             1f
         ));
 
-        ImageButton proactiveButton = iconButton(
+        proactiveButton = iconButton(
             R.drawable.ic_notifications,
             "House activity",
             SOFT,
@@ -338,24 +348,27 @@ public final class MainActivity extends Activity {
             iconParams(dp(40), dp(6))
         );
 
-        ImageButton newChat = iconButton(
+        topNewChatButton = iconButton(
             R.drawable.ic_add,
             "New chat",
             SOFT,
             BLACK
         );
-        newChat.setOnClickListener(view -> newChat());
+        topNewChatButton.setOnClickListener(view -> {
+            if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) newDeveloperSession();
+            else newChat();
+        });
         bar.addView(
-            newChat,
+            topNewChatButton,
             iconParams(dp(40), dp(6))
         );
 
-        ImageButton clearChat = assetButton(
+        clearChatButton = assetButton(
             R.drawable.control_delete_red,
             "Clear current chat"
         );
-        clearChat.setOnClickListener(view -> confirmDeleteChat());
-        bar.addView(clearChat, iconParams(dp(44), dp(6)));
+        clearChatButton.setOnClickListener(view -> confirmDeleteChat());
+        bar.addView(clearChatButton, iconParams(dp(44), dp(6)));
 
         ImageButton settings = iconButton(
             R.drawable.ic_settings,
@@ -373,38 +386,49 @@ public final class MainActivity extends Activity {
         return bar;
     }
 
-    private void showTopMenu(View anchor) {
-        PopupMenu menu = new PopupMenu(this, anchor);
-        menu.getMenu().add(0, 1, 0, "Chat history");
-        menu.getMenu().add(0, 4, 1, "Improvements");
-        menu.getMenu().add(0, 2, 2, "Delete current chat");
-        menu.getMenu().add(0, 3, 3, "Settings");
-        menu.setOnMenuItemClickListener(item -> {
-            return switch (item.getItemId()) {
-                case 1 -> {
-                    openHistory();
-                    yield true;
-                }
-                case 4 -> {
-                    startActivity(
-                        new Intent(this, ImprovementsActivity.class)
-                    );
-                    yield true;
-                }
-                case 2 -> {
-                    confirmDeleteChat();
-                    yield true;
-                }
-                case 3 -> {
-                    startActivity(
-                        new Intent(this, SettingsActivity.class)
-                    );
-                    yield true;
-                }
-                default -> false;
-            };
+    private LinearLayout buildDeveloperChrome() {
+        LinearLayout chrome = new LinearLayout(this);
+        chrome.setOrientation(LinearLayout.VERTICAL);
+        chrome.setPadding(dp(16), dp(2), dp(16), dp(8));
+        chrome.setBackgroundColor(WHITE);
+
+        LinearLayout usageHeader = new LinearLayout(this);
+        usageHeader.setOrientation(LinearLayout.HORIZONTAL);
+        usageHeader.setGravity(Gravity.CENTER_VERTICAL);
+        developerUsageText = text("Usage loading…", 12, MID);
+        developerUsageText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        usageHeader.addView(developerUsageText, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        TextView sessions = text("All chats", 12, BLACK);
+        sessions.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sessions.setPadding(dp(12), dp(7), dp(4), dp(7));
+        sessions.setOnClickListener(view -> {
+            developerClient.listThreads();
+            statusText.setText("Loading chats…");
         });
-        menu.show();
+        usageHeader.addView(sessions, wrapWrap());
+        chrome.addView(usageHeader, matchWrap());
+
+        developerUsageProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        developerUsageProgress.setMax(100);
+        developerUsageProgress.setProgress(0);
+        developerUsageProgress.setProgressTintList(android.content.res.ColorStateList.valueOf(BLACK));
+        developerUsageProgress.setProgressBackgroundTintList(
+            android.content.res.ColorStateList.valueOf(LINE));
+        chrome.addView(developerUsageProgress, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+
+        HorizontalScrollView scroller = new HorizontalScrollView(this);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFillViewport(false);
+        developerSessionRow = new LinearLayout(this);
+        developerSessionRow.setOrientation(LinearLayout.HORIZONTAL);
+        developerSessionRow.setPadding(0, dp(8), 0, 0);
+        scroller.addView(developerSessionRow, new HorizontalScrollView.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        chrome.addView(scroller, matchWrap());
+        chrome.setVisibility(View.GONE);
+        return chrome;
     }
 
     private LinearLayout buildComposer() {
@@ -418,7 +442,7 @@ public final class MainActivity extends Activity {
         row.setPadding(dp(12), dp(6), dp(6), dp(6));
         row.setBackground(rounded(SOFT, 25, 1, LINE));
 
-        ImageButton addButton = assetButton(R.drawable.control_chat, "Chat options");
+        ImageButton addButton = iconButton(R.drawable.ic_add, "Add attachment or action", SOFT, BLACK);
         addButton.setOnClickListener(this::showComposerActions);
         row.addView(addButton, iconParams(dp(42), dp(8)));
 
@@ -496,50 +520,79 @@ public final class MainActivity extends Activity {
     }
 
     private void showComposerActions(View anchor) {
-        PopupMenu menu = new PopupMenu(this, anchor);
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(20), dp(17), dp(20), dp(20));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView heading = text("Add to conversation", 20, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(heading, matchWrap(0, dp(12)));
         if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
-            menu.getMenu().add("Attach image or log").setOnMenuItemClickListener(item -> {
-                Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                    .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
-                    .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/png", "image/jpeg", "image/webp", "text/plain", "text/markdown", "application/json"});
-                startActivityForResult(picker, REQUEST_DEVELOPER_ATTACHMENT);
-                return true;
-            });
-            menu.getMenu().add("New development session").setOnMenuItemClickListener(item -> {
-                developerClient.newSession();
-                store.setDeveloperThreadId("");
-                finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
-                emptyState.setVisibility(View.VISIBLE);
-                statusText.setText("Connected");
-                return true;
-            });
-            menu.getMenu().add("Recent development sessions").setOnMenuItemClickListener(item -> {
-                developerClient.listThreads();
-                statusText.setText("Loading sessions…");
-                return true;
-            });
-            menu.getMenu().add("Use Jarvis Wear workspace").setOnMenuItemClickListener(item -> {
-                switchDeveloperWorkspace("jarvis-wear"); return true;
-            });
-            menu.getMenu().add("Use Jarvis workspace").setOnMenuItemClickListener(item -> {
-                switchDeveloperWorkspace("jarvis"); return true;
-            });
-            menu.show();
-            return;
+            sheet.addView(actionSheetRow("Upload image or file", "Screenshot, log, text or JSON", () -> {
+                dialog.dismiss(); openDeveloperAttachmentPicker();
+            }), matchWrap(0, dp(7)));
+            sheet.addView(actionSheetRow("New development chat", "Start with a fresh Codex context", () -> {
+                dialog.dismiss(); newDeveloperSession();
+            }), matchWrap(0, dp(7)));
+            sheet.addView(actionSheetRow("All development chats", "Browse and resume complete history", () -> {
+                dialog.dismiss(); developerClient.listThreads(); statusText.setText("Loading chats…");
+            }), matchWrap(0, dp(7)));
+            String alternate = "jarvis-wear".equals(store.developerWorkspace()) ? "jarvis" : "jarvis-wear";
+            String workspaceTitle = "jarvis".equals(alternate) ? "Use Jarvis workspace" : "Use Jarvis Wear workspace";
+            sheet.addView(actionSheetRow(workspaceTitle, "Switch the active repository", () -> {
+                dialog.dismiss(); switchDeveloperWorkspace(alternate);
+            }), matchWrap());
+        } else {
+            sheet.addView(actionSheetRow("New chat", "Start a fresh Jarvis conversation", () -> {
+                dialog.dismiss(); newChat();
+            }), matchWrap(0, dp(7)));
+            sheet.addView(actionSheetRow("Chat history", "Open previous Jarvis conversations", () -> {
+                dialog.dismiss(); openHistory();
+            }), matchWrap(0, dp(7)));
+            sheet.addView(actionSheetRow("Improvements", "Review Jarvis improvement activity", () -> {
+                dialog.dismiss(); startActivity(new Intent(this, ImprovementsActivity.class));
+            }), matchWrap());
         }
-        menu.getMenu().add("New chat").setOnMenuItemClickListener(item -> {
-            newChat();
-            return true;
-        });
-        menu.getMenu().add("Chat history").setOnMenuItemClickListener(item -> {
-            openHistory();
-            return true;
-        });
-        menu.getMenu().add("Improvements").setOnMenuItemClickListener(item -> {
-            startActivity(new Intent(this, ImprovementsActivity.class));
-            return true;
-        });
-        menu.show();
+        dialog.setContentView(sheet);
+        dialog.show();
+        styleBottomSheet(dialog);
+    }
+
+    private View actionSheetRow(String title, String description, Runnable action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(16), dp(13), dp(16), dp(13));
+        row.setBackground(rounded(SOFT, 18, 1, LINE));
+        TextView titleView = text(title, 15, BLACK);
+        titleView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        row.addView(titleView, matchWrap(0, dp(3)));
+        row.addView(text(description, 13, MID), matchWrap());
+        row.setClickable(true);
+        row.setFocusable(true);
+        row.setOnClickListener(view -> action.run());
+        return row;
+    }
+
+    private void openDeveloperAttachmentPicker() {
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+            .putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "image/png", "image/jpeg", "image/webp", "text/plain",
+                "text/markdown", "application/json"
+            });
+        startActivityForResult(picker, REQUEST_DEVELOPER_ATTACHMENT);
+    }
+
+    private void newDeveloperSession() {
+        developerClient.newSession();
+        store.setDeveloperThreadId("");
+        finishStreaming();
+        messageList.removeAllViews();
+        developerActivityStatuses.clear();
+        emptyState.setVisibility(View.VISIBLE);
+        statusText.setText("Connected");
+        developerClient.refreshThreads();
     }
 
     private void applySystemInsets() {
@@ -633,16 +686,7 @@ public final class MainActivity extends Activity {
         sheet.addView(modeChoice(dialog, AssistantMode.DEVELOPER, "Developer", "Build and improve Jarvis"), matchWrap());
         dialog.setContentView(sheet);
         dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.setDimAmount(0.20f); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setGravity(Gravity.BOTTOM);
-            WindowManager.LayoutParams params = window.getAttributes();
-            params.width = WindowManager.LayoutParams.MATCH_PARENT;
-            params.horizontalMargin = 0.03f; params.verticalMargin = 0.02f;
-            window.setAttributes(params);
-        }
+        styleBottomSheet(dialog);
     }
 
     private View modeChoice(Dialog dialog, AssistantMode mode, String title, String description) {
@@ -669,6 +713,9 @@ public final class MainActivity extends Activity {
         composer.setHint(DeveloperRoutingPolicy.placeholder(assistantMode));
         micButton.setVisibility(View.VISIBLE);
         micButton.setContentDescription(developer ? "Dictate developer instruction" : "Start voice");
+        developerChrome.setVisibility(developer ? View.VISIBLE : View.GONE);
+        proactiveButton.setVisibility(developer ? View.GONE : View.VISIBLE);
+        clearChatButton.setVisibility(developer ? View.GONE : View.VISIBLE);
         if (clearView || developer) {
             finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
             emptyState.setVisibility(View.VISIBLE);
@@ -694,7 +741,16 @@ public final class MainActivity extends Activity {
             showDeveloperApproval(event.optLong("id"), method, params);
         } else if ("response".equals(event.optString("type"))
                 && "threads.list".equals(event.optString("request_kind"))) {
+            renderDeveloperSessionStrip(event.optJSONObject("result"));
             showDeveloperThreads(event.optJSONObject("result"));
+        } else if ("response".equals(event.optString("type"))
+                && "threads.refresh".equals(event.optString("request_kind"))) {
+            renderDeveloperSessionStrip(event.optJSONObject("result"));
+        } else if ("response".equals(event.optString("type"))
+                && "account.rate_limits".equals(event.optString("request_kind"))) {
+            renderDeveloperUsage(event.optJSONObject("result"));
+        } else if ("account/rateLimits/updated".equals(method)) {
+            renderDeveloperUsage(params);
         } else if ("response".equals(event.optString("type"))
                 && "thread.resume".equals(event.optString("request_kind"))) {
             showDeveloperThreadHistory(event.optJSONObject("result"));
@@ -771,8 +827,14 @@ public final class MainActivity extends Activity {
         sheet.setBackground(rounded(WHITE, 28, 1, LINE));
         TextView heading = text("Development sessions", 20, BLACK);
         heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        sheet.addView(heading, matchWrap(0, dp(12)));
-        int count = Math.min(threads.length(), 8);
+        sheet.addView(heading, matchWrap(0, dp(10)));
+        sheet.addView(actionSheetRow("New development chat", "Start with a fresh Codex context", () -> {
+            dialog.dismiss(); newDeveloperSession();
+        }), matchWrap(0, dp(8)));
+        ScrollView listScroll = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        int count = Math.min(threads.length(), 50);
         for (int index = 0; index < count; index++) {
             JSONObject thread = threads.optJSONObject(index);
             if (thread == null) continue;
@@ -780,25 +842,82 @@ public final class MainActivity extends Activity {
             String title = thread.optString("name");
             if (title.isBlank()) title = thread.optString("preview", "Development session");
             if (title.length() > 64) title = title.substring(0, 64) + "…";
-            TextView row = text(title, 15, BLACK);
-            row.setPadding(dp(14), dp(13), dp(14), dp(13));
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.VERTICAL);
+            row.setPadding(dp(14), dp(11), dp(14), dp(11));
             row.setBackground(rounded(id.equals(developerClient.threadId()) ? SOFT : WHITE, 18, 1, LINE));
+            TextView name = text(title, 15, BLACK);
+            name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            row.addView(name, matchWrap(0, dp(2)));
+            row.addView(text(id.equals(developerClient.threadId()) ? "Current chat" : "Tap to resume", 12, MID), matchWrap());
             row.setOnClickListener(view -> {
                 dialog.dismiss(); developerClient.selectThread(id); store.setDeveloperThreadId(id);
                 finishStreaming(); messageList.removeAllViews(); emptyState.setVisibility(View.VISIBLE);
             });
-            sheet.addView(row, matchWrap(0, dp(7)));
+            list.addView(row, matchWrap(0, dp(7)));
         }
+        listScroll.addView(list, matchWrap());
+        sheet.addView(listScroll, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(470)));
         dialog.setContentView(sheet); dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.setGravity(Gravity.BOTTOM);
-            WindowManager.LayoutParams attributes = window.getAttributes();
-            attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
-            attributes.horizontalMargin = 0.03f; attributes.verticalMargin = 0.02f;
-            window.setAttributes(attributes);
+        styleBottomSheet(dialog);
+    }
+
+    private void renderDeveloperSessionStrip(JSONObject result) {
+        if (developerSessionRow == null) return;
+        developerSessionRow.removeAllViews();
+        TextView fresh = sessionPill("+ New", false);
+        fresh.setOnClickListener(view -> newDeveloperSession());
+        developerSessionRow.addView(fresh, wrapWrap(0, dp(7)));
+        JSONArray threads = result == null ? null : result.optJSONArray("data");
+        if (threads == null) return;
+        int count = Math.min(threads.length(), 12);
+        for (int index = 0; index < count; index++) {
+            JSONObject thread = threads.optJSONObject(index);
+            if (thread == null) continue;
+            String id = thread.optString("id");
+            String title = thread.optString("name");
+            if (title.isBlank()) title = thread.optString("preview", "Development chat");
+            title = title.replace('\n', ' ').trim();
+            if (title.length() > 28) title = title.substring(0, 28) + "…";
+            TextView pill = sessionPill(title, id.equals(developerClient.threadId()));
+            pill.setOnClickListener(view -> {
+                developerClient.selectThread(id); store.setDeveloperThreadId(id);
+                finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+                emptyState.setVisibility(View.VISIBLE);
+            });
+            developerSessionRow.addView(pill, wrapWrap(0, dp(7)));
         }
+    }
+
+    private TextView sessionPill(String label, boolean selected) {
+        TextView pill = text(label, 12, selected ? WHITE : BLACK);
+        pill.setSingleLine(true);
+        pill.setPadding(dp(13), dp(8), dp(13), dp(8));
+        pill.setBackground(rounded(selected ? BLACK : SOFT, 18, selected ? 0 : 1, LINE));
+        return pill;
+    }
+
+    private void renderDeveloperUsage(JSONObject result) {
+        JSONObject limits = result == null ? null : result.optJSONObject("rateLimits");
+        if (limits == null) limits = result;
+        JSONObject primary = limits == null ? null : limits.optJSONObject("primary");
+        JSONObject secondary = limits == null ? null : limits.optJSONObject("secondary");
+        if (primary == null) {
+            developerUsageText.setText("Usage unavailable");
+            developerUsageProgress.setProgress(0);
+            return;
+        }
+        int used = DeveloperUsagePolicy.clampPercent(primary.optInt("usedPercent", 0));
+        String primaryLabel = DeveloperUsagePolicy.windowLabel(primary.optLong("windowDurationMins", 0));
+        String summary = "Usage · " + primaryLabel + " " + used + "%";
+        if (secondary != null) {
+            int secondaryUsed = DeveloperUsagePolicy.clampPercent(secondary.optInt("usedPercent", 0));
+            summary += " · " + DeveloperUsagePolicy.windowLabel(
+                secondary.optLong("windowDurationMins", 0)) + " " + secondaryUsed + "%";
+        }
+        developerUsageText.setText(summary);
+        developerUsageProgress.setProgress(used, true);
     }
 
     private void showDeveloperApproval(long requestId, String method, JSONObject params) {
@@ -827,16 +946,7 @@ public final class MainActivity extends Activity {
         actions.addView(approve, weightedDialogAction(dp(10)));
         sheet.addView(actions, matchWrap());
         dialog.setContentView(sheet); dialog.setCancelable(false); dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.setGravity(Gravity.BOTTOM);
-            WindowManager.LayoutParams attributes = window.getAttributes();
-            attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
-            attributes.horizontalMargin = 0.03f;
-            attributes.verticalMargin = 0.02f;
-            window.setAttributes(attributes);
-        }
+        styleBottomSheet(dialog);
     }
 
     private void addDeveloperActivity(JSONObject item, boolean completed) {
@@ -900,8 +1010,7 @@ public final class MainActivity extends Activity {
         close.setOnClickListener(view -> dialog.dismiss());
         sheet.addView(close, matchWrap(dp(12), 0));
         dialog.setContentView(sheet); dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) { window.setBackgroundDrawableResource(android.R.color.transparent); window.setGravity(Gravity.BOTTOM); window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT); }
+        styleBottomSheet(dialog);
     }
 
     private void startDeveloperDictation() {
@@ -1057,17 +1166,8 @@ public final class MainActivity extends Activity {
         actions.addView(clear, weightedDialogAction(dp(10)));
         sheet.addView(actions, matchWrap());
         dialog.setContentView(sheet);
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawableResource(android.R.color.transparent);
-            window.setDimAmount(0.22f); window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setGravity(Gravity.BOTTOM);
-            WindowManager.LayoutParams params = window.getAttributes();
-            params.width = WindowManager.LayoutParams.MATCH_PARENT;
-            params.horizontalMargin = 0.03f; params.verticalMargin = 0.02f;
-            window.setAttributes(params);
-        }
         dialog.show();
+        styleBottomSheet(dialog);
     }
 
     private void deleteCurrentChat() {
@@ -1243,51 +1343,37 @@ public final class MainActivity extends Activity {
         View anchor,
         ChatMessage message
     ) {
-        PopupMenu popup = new PopupMenu(this, anchor);
-        popup.getMenu().add(0, 1, 0, "Copy");
-
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(20), dp(17), dp(20), dp(20));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView heading = text("Message actions", 20, BLACK);
+        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(heading, matchWrap(0, dp(12)));
+        sheet.addView(actionSheetRow("Copy", "Copy this message to the clipboard", () -> {
+            dialog.dismiss(); copyText(message.text);
+        }), matchWrap(0, dp(7)));
         if (ChatMessage.USER.equals(message.role)) {
-            popup.getMenu().add(
-                0,
-                2,
-                1,
-                "Edit and resend"
-            );
-        } else if (
-            ChatMessage.ASSISTANT.equals(message.role)
-        ) {
-            popup.getMenu().add(
-                0,
-                3,
-                1,
-                "Retry answer"
-            );
+            sheet.addView(actionSheetRow("Edit and resend", "Put this message back in the composer", () -> {
+                dialog.dismiss(); editMessage(message.text);
+            }), matchWrap(0, dp(7)));
+        } else if (ChatMessage.ASSISTANT.equals(message.role)) {
+            sheet.addView(actionSheetRow("Retry answer", "Ask Jarvis to answer the previous message again", () -> {
+                dialog.dismiss(); retryMessage(message);
+            }), matchWrap(0, dp(7)));
         }
-
-        popup.getMenu().add(0, 4, 2, "Delete");
-        popup.setOnMenuItemClickListener(item -> {
-            return switch (item.getItemId()) {
-                case 1 -> {
-                    copyText(message.text);
-                    yield true;
-                }
-                case 2 -> {
-                    editMessage(message.text);
-                    yield true;
-                }
-                case 3 -> {
-                    retryMessage(message);
-                    yield true;
-                }
-                case 4 -> {
-                    history.deleteMessage(message.id);
-                    renderHistory();
-                    yield true;
-                }
-                default -> false;
-            };
+        TextView delete = text("Delete message", 15, Color.rgb(190, 36, 36));
+        delete.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        delete.setPadding(dp(16), dp(14), dp(16), dp(14));
+        delete.setBackground(rounded(Color.rgb(255, 246, 246), 18, 1, Color.rgb(244, 210, 210)));
+        delete.setOnClickListener(view -> {
+            dialog.dismiss(); history.deleteMessage(message.id); renderHistory();
         });
-        popup.show();
+        sheet.addView(delete, matchWrap());
+        dialog.setContentView(sheet);
+        dialog.show();
+        styleBottomSheet(dialog);
     }
 
     private void copyText(String value) {
@@ -1419,6 +1505,21 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(48), 1f);
         params.leftMargin = leftMargin;
         return params;
+    }
+
+    private void styleBottomSheet(Dialog dialog) {
+        Window window = dialog.getWindow();
+        if (window == null) return;
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.setDimAmount(0.22f);
+        window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setGravity(Gravity.BOTTOM);
+        WindowManager.LayoutParams attributes = window.getAttributes();
+        attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
+        attributes.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        attributes.horizontalMargin = 0.025f;
+        attributes.verticalMargin = 0.018f;
+        window.setAttributes(attributes);
     }
 
     private ImageButton assetButton(int icon, String description) {

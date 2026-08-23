@@ -158,6 +158,8 @@ final class DeveloperClient {
                 send(json("type", "thread.resume", "workspace", workspace,
                     "thread_id", threadId, "request_id", id));
             }
+            refreshThreads();
+            requestRateLimits();
         }
         else if ("response".equals(type)) {
             long responseId = message.optLong("request_id", -1);
@@ -186,6 +188,8 @@ final class DeveloperClient {
                 activeTurnId = turn == null ? "" : turn.optString("id");
             } else if (event != null && "turn/completed".equals(event.optString("method"))) {
                 activeTurnId = "";
+                refreshThreads();
+                requestRateLimits();
             }
             postEvent(event);
         }
@@ -196,6 +200,14 @@ final class DeveloperClient {
     void listThreads() {
         long id = nextRequest("threads.list");
         send(json("type", "threads.list", "workspace", workspace, "request_id", id));
+    }
+    void refreshThreads() {
+        long id = nextRequest("threads.refresh");
+        send(json("type", "threads.refresh", "workspace", workspace, "request_id", id));
+    }
+    void requestRateLimits() {
+        long id = nextRequest("account.rate_limits");
+        send(json("type", "account.rate_limits", "request_id", id));
     }
     void selectThread(String selectedThreadId) {
         threadId = selectedThreadId == null ? "" : selectedThreadId;

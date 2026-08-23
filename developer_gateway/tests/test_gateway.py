@@ -43,6 +43,8 @@ class FakeCodex:
             return {"result": {"thread": {"id": "thread-safe"}}}
         if method == "thread/resume":
             return {"result": {"thread": {"id": params["threadId"]}}}
+        if method == "account/rateLimits/read":
+            return {"result": {"rateLimits": {"primary": {"usedPercent": 37}}}}
         return {"result": {}}
     async def respond(self, request_id, result) -> None: pass
 
@@ -67,6 +69,17 @@ def test_authenticated_client_can_start_and_resume_thread(monkeypatch: pytest.Mo
         socket.send_json({"type": "thread.resume", "workspace": "jarvis-wear", "thread_id": "thread-safe", "request_id": 2})
         resumed = socket.receive_json()
         assert resumed["result"]["thread"]["id"] == "thread-safe"
+
+
+def test_authenticated_client_can_read_real_codex_rate_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("developer_gateway.app.TOKEN", "correct-token")
+    monkeypatch.setattr("developer_gateway.app.codex", FakeCodex())
+    with TestClient(app) as client, client.websocket_connect("/api/developer") as socket:
+        socket.send_json({"type": "auth", "token": "correct-token"})
+        assert socket.receive_json()["type"] == "auth.ok"
+        socket.send_json({"type": "account.rate_limits", "request_id": 9})
+        response = socket.receive_json()
+        assert response["result"]["rateLimits"]["primary"]["usedPercent"] == 37
 
 
 def test_turn_rejects_thread_not_owned_by_connection(monkeypatch: pytest.MonkeyPatch) -> None:

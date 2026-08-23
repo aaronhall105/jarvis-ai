@@ -184,6 +184,11 @@ async def developer_socket(socket: WebSocket) -> None:
             if kind == "threads.list":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 result = result_or_raise(await codex.request("thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}))
+            elif kind == "threads.refresh":
+                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                result = result_or_raise(await codex.request("thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}))
+            elif kind == "account.rate_limits":
+                result = result_or_raise(await codex.request("account/rateLimits/read", {}))
             elif kind == "thread.start":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 options = {**thread_options(path), "personality": "pragmatic"}
