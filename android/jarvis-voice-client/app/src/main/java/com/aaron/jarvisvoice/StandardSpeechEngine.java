@@ -174,21 +174,21 @@ public final class StandardSpeechEngine {
             return false;
         }
 
+        /*
+         * The fallback is a new recogniser and therefore gets
+         * its own generation. Any callback from the failed
+         * primary becomes stale immediately.
+         */
+        releaseRecognizer();
+
+        int generation =
+            ++recognitionGeneration;
+
+        running = true;
+        captureReady = false;
+        onDeviceFallback = true;
+
         try {
-            /*
-             * The fallback is a new recogniser and therefore gets
-             * its own generation. Any callback from the failed
-             * primary becomes stale immediately.
-             */
-            releaseRecognizer();
-
-            int generation =
-                ++recognitionGeneration;
-
-            running = true;
-            captureReady = false;
-            onDeviceFallback = true;
-
             recognizer =
                 SpeechRecognizer
                     .createOnDeviceSpeechRecognizer(
@@ -203,8 +203,28 @@ public final class StandardSpeechEngine {
 
             recognizer.startListening(intent());
             return true;
-        } catch (Exception ignored) {
-            return false;
+        } catch (Exception failure) {
+            /*
+             * The fallback generation now owns the recogniser.
+             * If startup fails, clean up that exact generation
+             * here rather than returning control to the stale
+             * primary generation.
+             */
+            if (isCurrent(generation)) {
+                stopInternal();
+
+                listener.onStandardError(
+                    "Speech recognition could not start: "
+                        + safeMessage(failure)
+                );
+            }
+
+            /*
+             * The fallback attempt has been fully handled,
+             * successful or not. The caller must not resume
+             * cleanup using the obsolete primary generation.
+             */
+            return true;
         }
     }
 
