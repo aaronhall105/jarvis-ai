@@ -15,6 +15,7 @@ import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.speech.RecognizerIntent;
@@ -355,7 +356,7 @@ public final class MainActivity extends Activity {
             BLACK
         );
         topNewChatButton.setOnClickListener(view -> {
-            if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) newDeveloperSession();
+            if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) confirmDeleteDeveloperChat();
             else newChat();
         });
         bar.addView(
@@ -397,6 +398,7 @@ public final class MainActivity extends Activity {
         usageHeader.setGravity(Gravity.CENTER_VERTICAL);
         developerUsageText = text("Usage loading…", 12, MID);
         developerUsageText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        developerUsageText.setContentDescription("Open Codex usage and credits");
         usageHeader.addView(developerUsageText, new LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView sessions = text("All chats", 12, BLACK);
@@ -407,6 +409,9 @@ public final class MainActivity extends Activity {
             statusText.setText("Loading chats…");
         });
         usageHeader.addView(sessions, wrapWrap());
+        usageHeader.setClickable(true);
+        usageHeader.setFocusable(true);
+        usageHeader.setOnClickListener(view -> openDeveloperUsage());
         chrome.addView(usageHeader, matchWrap());
 
         developerUsageProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
@@ -716,6 +721,11 @@ public final class MainActivity extends Activity {
         developerChrome.setVisibility(developer ? View.VISIBLE : View.GONE);
         proactiveButton.setVisibility(developer ? View.GONE : View.VISIBLE);
         clearChatButton.setVisibility(developer ? View.GONE : View.VISIBLE);
+        topNewChatButton.setImageResource(developer ? R.drawable.control_delete_red : R.drawable.ic_add);
+        topNewChatButton.clearColorFilter();
+        if (!developer) topNewChatButton.setColorFilter(BLACK);
+        topNewChatButton.setContentDescription(
+            developer ? "Delete current development chat" : "New chat");
         if (clearView || developer) {
             finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
             emptyState.setVisibility(View.VISIBLE);
@@ -749,6 +759,9 @@ public final class MainActivity extends Activity {
         } else if ("response".equals(event.optString("type"))
                 && "account.rate_limits".equals(event.optString("request_kind"))) {
             renderDeveloperUsage(event.optJSONObject("result"));
+        } else if ("response".equals(event.optString("type"))
+                && "thread.delete".equals(event.optString("request_kind"))) {
+            completeDeveloperChatDeletion();
         } else if ("account/rateLimits/updated".equals(method)) {
             renderDeveloperUsage(params);
         } else if ("response".equals(event.optString("type"))
@@ -918,6 +931,59 @@ public final class MainActivity extends Activity {
         }
         developerUsageText.setText(summary);
         developerUsageProgress.setProgress(used, true);
+    }
+
+    private void openDeveloperUsage() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                Uri.parse("https://chatgpt.com/codex/settings/usage")));
+        } catch (Exception exception) {
+            Toast.makeText(this, "Could not open Codex usage", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void confirmDeleteDeveloperChat() {
+        if (developerClient.threadId().isBlank()) {
+            Toast.makeText(this, "This development chat has not started yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Dialog dialog = new Dialog(this);
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(dp(22), dp(20), dp(22), dp(18));
+        sheet.setBackground(rounded(WHITE, 28, 1, LINE));
+        TextView title = text("Delete development chat?", 20, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        sheet.addView(title, matchWrap(0, dp(7)));
+        sheet.addView(text("This removes the selected Codex session and its history.", 14, MID),
+            matchWrap(0, dp(18)));
+        LinearLayout actions = new LinearLayout(this);
+        Button cancel = dialogActionButton("Cancel", false, BLACK);
+        Button delete = dialogActionButton("Delete", true, Color.rgb(190, 36, 46));
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        delete.setOnClickListener(view -> {
+            dialog.dismiss();
+            statusText.setText("Deleting chat…");
+            developerClient.deleteCurrentThread();
+        });
+        actions.addView(cancel, weightedDialogAction(0));
+        actions.addView(delete, weightedDialogAction(dp(10)));
+        sheet.addView(actions, matchWrap());
+        dialog.setContentView(sheet);
+        dialog.show();
+        styleBottomSheet(dialog);
+    }
+
+    private void completeDeveloperChatDeletion() {
+        store.setDeveloperThreadId("");
+        developerClient.newSession();
+        finishStreaming();
+        messageList.removeAllViews();
+        developerActivityStatuses.clear();
+        emptyState.setVisibility(View.VISIBLE);
+        statusText.setText("Connected");
+        developerClient.refreshThreads();
+        Toast.makeText(this, "Development chat deleted", Toast.LENGTH_SHORT).show();
     }
 
     private void showDeveloperApproval(long requestId, String method, JSONObject params) {

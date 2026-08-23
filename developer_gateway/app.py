@@ -189,6 +189,12 @@ async def developer_socket(socket: WebSocket) -> None:
                 result = result_or_raise(await codex.request("thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}))
             elif kind == "account.rate_limits":
                 result = result_or_raise(await codex.request("account/rateLimits/read", {}))
+            elif kind == "thread.delete":
+                thread_id = str(message.get("thread_id", ""))
+                if thread_id not in owned_threads:
+                    raise ValueError("Thread is not owned by this session")
+                result = result_or_raise(await codex.request("thread/delete", {"threadId": thread_id}))
+                owned_threads.discard(thread_id)
             elif kind == "thread.start":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 options = {**thread_options(path), "personality": "pragmatic"}
@@ -228,7 +234,7 @@ async def developer_socket(socket: WebSocket) -> None:
                 result = {"accepted": True}
             else:
                 raise ValueError("Unsupported developer operation")
-            if kind in {"thread.start", "thread.resume", "turn.start", "turn.interrupt", "approval.respond"}:
+            if kind in {"thread.start", "thread.resume", "thread.delete", "turn.start", "turn.interrupt", "approval.respond"}:
                 log.info("Developer audit operation=%s workspace=%s", kind, str(message.get("workspace", "session"))[:32])
             await socket.send_json({"type": "response", "request_id": request_id, "result": result})
     except (WebSocketDisconnect, asyncio.CancelledError):

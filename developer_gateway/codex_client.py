@@ -7,6 +7,7 @@ from typing import Any
 
 log = logging.getLogger("jarvis-developer.codex")
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
+APP_SERVER_STREAM_LIMIT = 32 * 1024 * 1024
 
 
 class CodexAppServer:
@@ -32,6 +33,7 @@ class CodexAppServer:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=APP_SERVER_STREAM_LIMIT,
             )
             self.reader_task = asyncio.create_task(self._read_loop())
             self.stderr_task = asyncio.create_task(self._drain_stderr())
@@ -95,9 +97,10 @@ class CodexAppServer:
         await process.stdin.drain()
 
     async def _read_loop(self) -> None:
-        assert self.process and self.process.stdout
+        process = self.process
+        assert process and process.stdout
         try:
-            while line := await self.process.stdout.readline():
+            while line := await process.stdout.readline():
                 message = json.loads(line)
                 request_id = message.get("id")
                 if request_id in self.pending and ("result" in message or "error" in message):
@@ -118,6 +121,13 @@ class CodexAppServer:
             for future in self.pending.values():
                 if not future.done():
                     future.set_exception(RuntimeError("Codex App Server disconnected"))
+            # A live process without a reader is permanently unusable. Invalidate and
+            # stop it so the next authenticated request starts a fresh App Server.
+            if self.process is process:
+                self.process = None
+                self.started_at = 0.0
+            if process.returncode is None:
+                process.terminate()
 
     async def _drain_stderr(self) -> None:
         assert self.process and self.process.stderr

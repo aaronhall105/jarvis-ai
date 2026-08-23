@@ -224,6 +224,11 @@ final class DeveloperClient {
         pendingAttachments = new JSONArray();
         requestKinds.clear();
     }
+    void deleteCurrentThread() {
+        if (!authenticated || threadId.isBlank()) return;
+        long id = nextRequest("thread.delete");
+        send(json("type", "thread.delete", "thread_id", threadId, "request_id", id));
+    }
     void respondToApproval(long codexRequestId, String decision) {
         long id = nextRequest("approval.respond");
         send(json("type", "approval.respond", "codex_request_id", codexRequestId,
