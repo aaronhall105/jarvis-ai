@@ -3,9 +3,6 @@ package com.aaron.jarvisvoice;
 import android.os.Handler;
 import android.os.Looper;
 import android.content.Context;
-import android.net.ConnectivityManager;
-import android.net.NetworkCapabilities;
-import android.net.Network;
 import org.json.JSONObject;
 import org.json.JSONArray;
 import java.util.concurrent.TimeUnit;
@@ -35,7 +32,7 @@ final class DeveloperClient {
     private String threadId = "";
     private String activeTurnId = "";
     private long requestId;
-    private final ConnectivityManager connectivity;
+    private final NetworkQualityMonitor network;
     private List<String> endpoints = List.of();
     private int endpointIndex;
     private long connectionEpoch;
@@ -48,17 +45,26 @@ final class DeveloperClient {
     private long reconnectDelayMs = 1000;
     private boolean reconnectScheduled;
     private boolean lastLocalNetwork;
-    private final ConnectivityManager.NetworkCallback networkCallback;
 
     DeveloperClient(Context context, Listener listener) {
         this.listener = listener;
-        connectivity = (ConnectivityManager) context.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
-        networkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override public void onAvailable(Network network) { networkChanged(); }
-            @Override public void onLost(Network network) { networkChanged(); }
-            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) { networkChanged(); }
-        };
-        if (connectivity != null) connectivity.registerDefaultNetworkCallback(networkCallback);
+
+        network = new NetworkQualityMonitor(
+            context,
+            new NetworkQualityMonitor.Listener() {
+                @Override public void onNetworkAvailable() {
+                    main.post(
+                        DeveloperClient.this::networkChanged
+                    );
+                }
+
+                @Override public void onNetworkLost() {
+                    main.post(
+                        DeveloperClient.this::networkChanged
+                    );
+                }
+            }
+        );
     }
 
     void connect(String localUrl, String remoteUrl, String token, String workspace, String restoredThread) {
@@ -76,7 +82,17 @@ final class DeveloperClient {
     }
 
     private void connectCurrent() {
-        if (endpoints.isEmpty()) { postError("Developer endpoint is not configured"); return; }
+        if (!enabled) return;
+
+        if (!network.isAvailable()) {
+            postState("Offline — waiting for network");
+            return;
+        }
+
+        if (endpoints.isEmpty()) {
+            postError("Developer endpoint is not configured");
+            return;
+        }
         String ws = endpoints.get(endpointIndex).replaceFirst("^http://", "ws://").replaceFirst("^https://", "wss://")
             + "/api/developer";
         listener.onState("Connecting…");
@@ -113,10 +129,7 @@ final class DeveloperClient {
     }
 
     private boolean hasLocalNetwork() {
-        if (connectivity == null) return false;
-        NetworkCapabilities value = connectivity.getNetworkCapabilities(connectivity.getActiveNetwork());
-        return value != null && (value.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-            || value.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET));
+        return network.isLocalTransport();
     }
 
     void sendInstruction(String text) { sendInstruction(text, new JSONArray()); }
@@ -248,7 +261,7 @@ final class DeveloperClient {
     }
     void destroy() {
         close();
-        if (connectivity != null) connectivity.unregisterNetworkCallback(networkCallback);
+        network.close();
         http.dispatcher().executorService().shutdown();
     }
     private void closeSocket() {
@@ -263,6 +276,12 @@ final class DeveloperClient {
     private final Object reconnectToken = new Object();
     private void scheduleReconnect(String reason) {
         if (!enabled || reconnectScheduled) return;
+
+        if (!network.isAvailable()) {
+            postState("Offline — waiting for network");
+            return;
+        }
+
         reconnectScheduled = true;
         postError(reason);
         long delay = reconnectDelayMs;
@@ -280,15 +299,37 @@ final class DeveloperClient {
     private void networkChanged() {
         main.post(() -> {
             if (!enabled) return;
-            boolean localNetwork = hasLocalNetwork();
-            if (socket != null && localNetwork == lastLocalNetwork) return;
-            lastLocalNetwork = localNetwork;
+
             main.removeCallbacksAndMessages(reconnectToken);
             reconnectScheduled = false;
             reconnectDelayMs = 1000;
+
+            if (!network.isAvailable()) {
+                lastLocalNetwork = false;
+                closeSocket();
+                postState("Offline — waiting for network");
+                return;
+            }
+
+            boolean localNetwork = hasLocalNetwork();
+
+            if (
+                socket != null
+                    && localNetwork == lastLocalNetwork
+            ) {
+                return;
+            }
+
+            lastLocalNetwork = localNetwork;
             closeSocket();
-            endpoints = DeveloperEndpointPolicy.order(lastLocalNetwork, localUrl, remoteUrl);
+
+            endpoints = DeveloperEndpointPolicy.order(
+                lastLocalNetwork,
+                localUrl,
+                remoteUrl
+            );
             endpointIndex = 0;
+
             connectCurrent();
         });
     }

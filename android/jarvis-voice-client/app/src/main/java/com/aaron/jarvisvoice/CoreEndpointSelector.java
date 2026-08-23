@@ -100,11 +100,16 @@ public final class CoreEndpointSelector {
         return normaliseBaseUrl(value) + "/health/live";
     }
 
-    static List<String> preferenceOrder(boolean localTransport, String lan, String remote) {
-        String local = normaliseBaseUrl(lan);
-        String away = normaliseOptionalBaseUrl(remote);
-        if (away.isBlank() || away.equals(local)) return List.of(local);
-        return localTransport ? List.of(local, away) : List.of(away, local);
+    static List<String> preferenceOrder(
+        boolean localTransport,
+        String lan,
+        String remote
+    ) {
+        return EndpointRoutePolicy.order(
+            localTransport,
+            normaliseBaseUrl(lan),
+            normaliseOptionalBaseUrl(remote)
+        );
     }
 
     private String endpointName(String url) { return lanUrl.equals(url) ? "LAN" : "Remote"; }
@@ -191,9 +196,8 @@ public final class CoreEndpointSelector {
         if (connectivity == null) return false;
         Network network = connectivity.getActiveNetwork();
         NetworkCapabilities capabilities = connectivity.getNetworkCapabilities(network);
-        return capabilities != null && (
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-                || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        return NetworkQualityMonitor.isLocalTransport(
+            capabilities
         );
     }
 

@@ -78,6 +78,25 @@ final class NetworkQualityMonitor implements AutoCloseable {
         return available;
     }
 
+    boolean isLocalTransport() {
+        return transport == NetworkTransitionPolicy.WIFI
+            || transport == NetworkTransitionPolicy.ETHERNET;
+    }
+
+    static boolean isLocalTransport(
+        NetworkCapabilities capabilities
+    ) {
+        return capabilities != null
+            && (
+                capabilities.hasTransport(
+                    NetworkCapabilities.TRANSPORT_WIFI
+                )
+                    || capabilities.hasTransport(
+                        NetworkCapabilities.TRANSPORT_ETHERNET
+                    )
+            );
+    }
+
     private boolean calculateAvailable() {
         if (manager == null) return true;
         try {
