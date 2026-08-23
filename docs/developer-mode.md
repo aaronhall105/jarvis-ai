@@ -53,6 +53,19 @@ journalctl --user -u jarvis-developer.service
 The authenticated `/ready` and `/metrics` endpoints require the same bearer credential as the
 WebSocket. Never paste the credential into issue reports or logs.
 
+## Wireless ADB readiness
+
+`tools/adb_readiness.py` runs on the Ubuntu PC and reconnects already-paired phone/watch
+endpoints whenever Android advertises a rotated `_adb-tls-connect._tcp` address. It writes a
+mode-0600 status snapshot to `~/.local/state/jarvis/adb-readiness.json` and only reports the
+explicit SM-G996B phone and SM-L315F watch models. Install it with
+`tools/install_adb_readiness.sh`.
+
+Android intentionally prevents an ordinary application from silently enabling Wireless
+debugging. The Developer options switch must remain enabled on each device; the readiness
+service handles discovery and reconnection after that point. Jarvis does not enable insecure
+TCP/5555, require root or Device Owner provisioning, or use Accessibility workarounds.
+
 ## Remaining deployment prerequisite
 
 The phone must be signed into the existing tailnet and its Tailscale VPN must be active for secure
