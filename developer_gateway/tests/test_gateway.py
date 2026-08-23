@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from developer_gateway.app import app, authorised, codex_inputs
+from developer_gateway.app import app, authorised, codex_inputs, thread_options
 from developer_gateway.codex_client import canonical_workspace
 
 
@@ -21,6 +21,14 @@ def test_workspace_allowlist_rejects_paths_and_unknown_ids(tmp_path: Path) -> No
         canonical_workspace("../../etc", allowed)
     with pytest.raises(ValueError):
         canonical_workspace("/home/aaron/jarvis", allowed)
+
+
+def test_thread_policy_avoids_routine_prompts_but_keeps_workspace_sandbox(tmp_path: Path) -> None:
+    assert thread_options(tmp_path) == {
+        "cwd": str(tmp_path),
+        "approvalPolicy": "on-request",
+        "sandbox": "workspace-write",
+    }
 
 
 class FakeCodex:

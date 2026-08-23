@@ -27,7 +27,9 @@ backoff. The phone microphone remains off unless the user explicitly starts voic
 - TLS is terminated inside the private Tailscale network; no public command socket is created.
 - Workspaces are selected by fixed identifier, then canonicalised and checked against the
   allow-list.
-- Codex uses `workspace-write` and `on-request` approvals. Approval requests are displayed as
+- Codex uses `workspace-write` with `on-request` approvals. The Android action grants matching
+  safe commands for the current development session, avoiding repeated prompts while retaining
+  approval for new or higher-impact operations. Requests are displayed as
   native Android confirmation sheets.
 - Events are filtered to threads owned or resumed by that authenticated WebSocket connection.
 - Requests are rate limited. Audit logs record operation types and workspace IDs, not prompts,

@@ -43,6 +43,17 @@ ATTACHMENT_DIR = Path(os.getenv(
 ))
 TEXT_MIMES = {"text/plain", "text/markdown", "application/json", "text/x-log"}
 IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp"}
+DEVELOPER_APPROVAL_POLICY = "on-request"
+DEVELOPER_SANDBOX = "workspace-write"
+
+
+def thread_options(path: Path) -> dict[str, str]:
+    """Keep routine workspace work quiet while preserving approval for risky commands."""
+    return {
+        "cwd": str(path),
+        "approvalPolicy": DEVELOPER_APPROVAL_POLICY,
+        "sandbox": DEVELOPER_SANDBOX,
+    }
 
 
 def authorised(value: str | None) -> bool:
@@ -175,11 +186,13 @@ async def developer_socket(socket: WebSocket) -> None:
                 result = result_or_raise(await codex.request("thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}))
             elif kind == "thread.start":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                result = result_or_raise(await codex.request("thread/start", {"cwd": str(path), "approvalPolicy": "on-request", "sandbox": "workspace-write", "personality": "pragmatic"}))
+                options = {**thread_options(path), "personality": "pragmatic"}
+                result = result_or_raise(await codex.request("thread/start", options))
                 owned_threads.add(str(result["thread"]["id"]))
             elif kind == "thread.resume":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                result = result_or_raise(await codex.request("thread/resume", {"threadId": str(message["thread_id"]), "cwd": str(path), "approvalPolicy": "on-request", "sandbox": "workspace-write"}))
+                options = {**thread_options(path), "threadId": str(message["thread_id"])}
+                result = result_or_raise(await codex.request("thread/resume", options))
                 owned_threads.add(str(message["thread_id"]))
             elif kind == "thread.name":
                 if str(message["thread_id"]) not in owned_threads:

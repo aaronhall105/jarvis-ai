@@ -816,15 +816,15 @@ public final class MainActivity extends Activity {
         if (!detail.isBlank()) sheet.addView(text(detail, 13, MID), matchWrap(0, dp(14)));
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.END);
-        Button cancel = new Button(this); cancel.setText("Cancel"); cancel.setTextColor(BLACK);
-        cancel.setAllCaps(false); cancel.setBackground(rounded(SOFT, 20, 0, Color.TRANSPARENT));
-        Button approve = new Button(this); approve.setText("Approve"); approve.setTextColor(WHITE);
-        approve.setAllCaps(false); approve.setBackground(rounded(BLACK, 20, 0, Color.TRANSPARENT));
+        Button cancel = dialogActionButton("Cancel", false, BLACK);
+        Button approve = dialogActionButton(DeveloperApprovalPolicy.primaryLabel(), true, BLACK);
         cancel.setOnClickListener(view -> { developerClient.respondToApproval(requestId, "decline"); dialog.dismiss(); });
-        approve.setOnClickListener(view -> { developerClient.respondToApproval(requestId, "accept"); dialog.dismiss(); });
-        actions.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(44)));
-        LinearLayout.LayoutParams approveParams = new LinearLayout.LayoutParams(dp(96), dp(44));
-        approveParams.leftMargin = dp(8); actions.addView(approve, approveParams);
+        approve.setOnClickListener(view -> {
+            developerClient.respondToApproval(requestId, DeveloperApprovalPolicy.approvalDecision());
+            dialog.dismiss();
+        });
+        actions.addView(cancel, weightedDialogAction(0));
+        actions.addView(approve, weightedDialogAction(dp(10)));
         sheet.addView(actions, matchWrap());
         dialog.setContentView(sheet); dialog.setCancelable(false); dialog.show();
         Window window = dialog.getWindow();
@@ -833,6 +833,8 @@ public final class MainActivity extends Activity {
             window.setGravity(Gravity.BOTTOM);
             WindowManager.LayoutParams attributes = window.getAttributes();
             attributes.width = WindowManager.LayoutParams.MATCH_PARENT;
+            attributes.horizontalMargin = 0.03f;
+            attributes.verticalMargin = 0.02f;
             window.setAttributes(attributes);
         }
     }
@@ -894,8 +896,7 @@ public final class MainActivity extends Activity {
         detail.setBackground(rounded(SOFT, 14, 1, LINE));
         scroll.addView(detail, matchWrap());
         sheet.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
-        Button close = new Button(this); close.setText("Close"); close.setAllCaps(false);
-        close.setBackground(rounded(BLACK, 20, 0, Color.TRANSPARENT)); close.setTextColor(WHITE);
+        Button close = dialogActionButton("Close", true, BLACK);
         close.setOnClickListener(view -> dialog.dismiss());
         sheet.addView(close, matchWrap(dp(12), 0));
         dialog.setContentView(sheet); dialog.show();
@@ -1048,15 +1049,12 @@ public final class MainActivity extends Activity {
         sheet.addView(text("Only the current conversation will be removed.", 14, MID), matchWrap(0, dp(18)));
         LinearLayout actions = new LinearLayout(this);
         actions.setGravity(Gravity.END);
-        Button cancel = new Button(this); cancel.setText("Cancel"); cancel.setTextColor(BLACK);
-        cancel.setAllCaps(false); cancel.setBackground(rounded(SOFT, 20, 0, Color.TRANSPARENT));
+        Button cancel = dialogActionButton("Cancel", false, BLACK);
         cancel.setOnClickListener(view -> dialog.dismiss());
-        Button clear = new Button(this); clear.setText("Clear"); clear.setTextColor(Color.WHITE);
-        clear.setAllCaps(false); clear.setBackground(rounded(Color.rgb(190, 36, 46), 20, 0, Color.TRANSPARENT));
+        Button clear = dialogActionButton("Clear", true, Color.rgb(190, 36, 46));
         clear.setOnClickListener(view -> { dialog.dismiss(); deleteCurrentChat(); });
-        actions.addView(cancel, new LinearLayout.LayoutParams(dp(96), dp(44)));
-        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(dp(96), dp(44));
-        clearParams.leftMargin = dp(8); actions.addView(clear, clearParams);
+        actions.addView(cancel, weightedDialogAction(0));
+        actions.addView(clear, weightedDialogAction(dp(10)));
         sheet.addView(actions, matchWrap());
         dialog.setContentView(sheet);
         Window window = dialog.getWindow();
@@ -1398,6 +1396,29 @@ public final class MainActivity extends Activity {
         value.setMinimumHeight(0);
         value.setBackground(rounded(background, 21, 0, Color.TRANSPARENT));
         return value;
+    }
+
+    private Button dialogActionButton(String label, boolean primary, int primaryColour) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(14);
+        button.setTextColor(primary ? WHITE : BLACK);
+        button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        button.setAllCaps(false);
+        button.setMinWidth(0);
+        button.setMinimumWidth(0);
+        button.setMinHeight(0);
+        button.setMinimumHeight(0);
+        button.setPadding(dp(14), 0, dp(14), 0);
+        button.setBackground(rounded(primary ? primaryColour : SOFT, 22, primary ? 0 : 1,
+            primary ? Color.TRANSPARENT : LINE));
+        return button;
+    }
+
+    private LinearLayout.LayoutParams weightedDialogAction(int leftMargin) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(48), 1f);
+        params.leftMargin = leftMargin;
+        return params;
     }
 
     private ImageButton assetButton(int icon, String description) {
