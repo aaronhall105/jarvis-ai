@@ -1650,6 +1650,57 @@ class RealtimeVoiceProxy:
 
         return record
 
+    async def _interrupt_bound_mobile_turns(
+        self,
+        state: dict[str, Any],
+    ) -> int:
+        """
+        Mark every still-bound mobile turn interrupted.
+
+        This is used at transport/session-loss boundaries after
+        execution can no longer safely continue. Replaying such a
+        turn automatically would risk repeating side effects.
+        """
+        bindings = state.get(
+            "turn_ledger_bindings"
+        )
+
+        if (
+            self.turn_ledger is None
+            or not isinstance(bindings, dict)
+            or not bindings
+        ):
+            return 0
+
+        interrupted = 0
+
+        for raw_generation in tuple(
+            bindings.keys()
+        ):
+            try:
+                generation = int(
+                    raw_generation
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            record = (
+                await self
+                ._mark_mobile_turn_terminal(
+                    state,
+                    generation,
+                    "interrupted",
+                )
+            )
+
+            if record is not None:
+                interrupted += 1
+
+        return interrupted
+
     @staticmethod
     def _turn_status_payload(
         client_turn_id: int,
@@ -2165,11 +2216,17 @@ class RealtimeVoiceProxy:
                         )
 
                     if client_finished:
+                        await self._interrupt_bound_mobile_turns(
+                            state
+                        )
                         return
 
                     if not renewal_requested:
                         # Unexpected provider loss may have happened during a
                         # side-effecting turn. Never replay it automatically.
+                        await self._interrupt_bound_mobile_turns(
+                            state
+                        )
                         turn_tasks.clear()
                         _mark_turn_terminal(state)
                         await self._send_json(
@@ -2204,8 +2261,25 @@ class RealtimeVoiceProxy:
             for task in tuple(turn_tasks):
                 task.cancel()
             if turn_tasks:
-                await asyncio.gather(*turn_tasks, return_exceptions=True)
-            self.active_sessions = max(0, self.active_sessions - 1)
+                await asyncio.gather(
+                    *turn_tasks,
+                    return_exceptions=True,
+                )
+
+            try:
+                await self._interrupt_bound_mobile_turns(
+                    state
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Durable realtime turn terminalisation "
+                    "failed during session cleanup"
+                )
+
+            self.active_sessions = max(
+                0,
+                self.active_sessions - 1,
+            )
             if duck_task is not None:
                 await asyncio.gather(duck_task, return_exceptions=True)
             if client_kind == "voice_pe" and self.voice_pe_session_ended is not None:
@@ -2301,6 +2375,9 @@ class RealtimeVoiceProxy:
                 return
             message_type = message.get("type")
             if message_type == "websocket.disconnect":
+                await self._interrupt_bound_mobile_turns(
+                    state
+                )
                 return
             if bool(state.get("provider_transitioning")):
                 # Preserve the one message already removed from the client
@@ -2618,6 +2695,9 @@ class RealtimeVoiceProxy:
                     )
 
             elif kind == "stop":
+                await self._interrupt_bound_mobile_turns(
+                    state
+                )
                 return
 
     async def _openai_to_client(

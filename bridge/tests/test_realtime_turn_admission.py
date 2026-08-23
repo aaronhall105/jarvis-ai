@@ -44,6 +44,68 @@ class RecordingClient:
         self.messages.append(payload)
 
 
+class DisconnectAfterTerminalClient(
+    RecordingClient
+):
+    """
+    Keep a synthetic connection alive until Core emits a
+    terminal event.
+
+    RecordingClient deliberately reports a disconnect when
+    scripted input is exhausted. That remains correct for
+    disconnect tests, but normal completion tests must allow
+    the asynchronous brain task to reach turn.done first.
+    """
+
+    TERMINAL_TYPES = {
+        "turn.done",
+        "turn.cancelled",
+        "turn.interrupted",
+        "turn.conflict",
+        "turn.status",
+    }
+
+    def __init__(
+        self,
+        payloads: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(payloads)
+        self._terminal = asyncio.Event()
+
+    async def receive(
+        self,
+    ) -> dict[str, Any]:
+        if self.payloads:
+            return self.payloads.pop(0)
+
+        try:
+            await asyncio.wait_for(
+                self._terminal.wait(),
+                timeout=1.0,
+            )
+        except TimeoutError:
+            pass
+
+        return {
+            "type":
+                "websocket.disconnect"
+        }
+
+    async def send_json(
+        self,
+        payload: dict[str, Any],
+    ) -> None:
+        await super().send_json(payload)
+
+        event_type = str(
+            payload.get("type")
+            or ""
+        )
+
+        if event_type in self.TERMINAL_TYPES:
+            self._terminal.set()
+
+
 class RecordingUpstream:
     def __init__(self) -> None:
         self.messages: list[
@@ -189,7 +251,7 @@ async def test_first_mobile_text_is_durably_accepted(
             "model": "test",
         }
 
-    client = RecordingClient(
+    client = DisconnectAfterTerminalClient(
         [
             text_message(
                 "Turn the lights off",
@@ -270,7 +332,7 @@ async def test_duplicate_turn_never_runs_brain_twice(
             "model": "test",
         }
 
-    first = RecordingClient(
+    first = DisconnectAfterTerminalClient(
         [
             text_message(
                 "Turn the lights off",
@@ -279,7 +341,7 @@ async def test_duplicate_turn_never_runs_brain_twice(
         ]
     )
 
-    duplicate = RecordingClient(
+    duplicate = DisconnectAfterTerminalClient(
         [
             text_message(
                 " Turn   the lights off ",
@@ -620,6 +682,32 @@ class TerminalCheckingClient(
         self.checked: set[
             tuple[str, int]
         ] = set()
+        self._all_expected_terminal = (
+            asyncio.Event()
+        )
+
+    async def receive(
+        self,
+    ) -> dict[str, Any]:
+        if self.payloads:
+            return self.payloads.pop(0)
+
+        # Keep the synthetic transport alive until every
+        # terminal event this test expects has actually been
+        # observed. This prevents RecordingClient's deliberate
+        # end-of-input disconnect from racing normal completion.
+        try:
+            await asyncio.wait_for(
+                self._all_expected_terminal.wait(),
+                timeout=1.0,
+            )
+        except TimeoutError:
+            pass
+
+        return {
+            "type":
+                "websocket.disconnect"
+        }
 
     async def send_json(
         self,
@@ -657,6 +745,14 @@ class TerminalCheckingClient(
             assert record.status == expected
 
             self.checked.add(key)
+
+            if (
+                self.checked
+                >= set(
+                    self.expectations.keys()
+                )
+            ):
+                self._all_expected_terminal.set()
 
         await super().send_json(payload)
 
@@ -915,4 +1011,161 @@ async def test_interrupted_turn_is_durable_before_terminal_ack(
         assert second.status == "completed"
 
     finally:
+        ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_websocket_disconnect_interrupts_durable_turn_before_reader_returns(
+    tmp_path: Path,
+) -> None:
+    ledger = RealtimeTurnLedger(
+        tmp_path / "turns.db"
+    )
+
+    proxy = RealtimeVoiceProxy(
+        config(),
+        turn_ledger=ledger,
+    )
+
+    blocker = asyncio.Event()
+
+    async def brain(
+        command: str,
+        metadata: dict[str, Any],
+        on_delta,
+    ):
+        await blocker.wait()
+
+    client = RecordingClient(
+        [
+            text_message(
+                "Start a side effect",
+                111,
+            )
+        ]
+    )
+
+    upstream = RecordingUpstream()
+    tasks: set[
+        asyncio.Task[Any]
+    ] = set()
+
+    current_state = state()
+
+    try:
+        await proxy._client_to_openai(
+            client,
+            upstream,
+            brain,
+            metadata(),
+            "realtime",
+            "standard",
+            "marin",
+            tasks,
+            current_state,
+            provider_epoch=1,
+        )
+
+        record = ledger.lookup(
+            client_kind="mobile",
+            device_id="phone-1",
+            conversation_id="chat-1",
+            client_turn_id=111,
+        )
+
+        assert record is not None
+        assert record.status == "interrupted"
+
+    finally:
+        for task in tuple(tasks):
+            task.cancel()
+
+        if tasks:
+            await asyncio.gather(
+                *tuple(tasks),
+                return_exceptions=True,
+            )
+
+        ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_client_stop_interrupts_durable_turn_before_reader_returns(
+    tmp_path: Path,
+) -> None:
+    ledger = RealtimeTurnLedger(
+        tmp_path / "turns.db"
+    )
+
+    proxy = RealtimeVoiceProxy(
+        config(),
+        turn_ledger=ledger,
+    )
+
+    blocker = asyncio.Event()
+
+    async def brain(
+        command: str,
+        metadata: dict[str, Any],
+        on_delta,
+    ):
+        await blocker.wait()
+
+    client = RecordingClient(
+        [
+            text_message(
+                "Start another action",
+                112,
+            ),
+            {
+                "text": json.dumps(
+                    {
+                        "type": "stop"
+                    }
+                )
+            },
+        ]
+    )
+
+    upstream = RecordingUpstream()
+    tasks: set[
+        asyncio.Task[Any]
+    ] = set()
+
+    current_state = state()
+
+    try:
+        await proxy._client_to_openai(
+            client,
+            upstream,
+            brain,
+            metadata(),
+            "realtime",
+            "standard",
+            "marin",
+            tasks,
+            current_state,
+            provider_epoch=1,
+        )
+
+        record = ledger.lookup(
+            client_kind="mobile",
+            device_id="phone-1",
+            conversation_id="chat-1",
+            client_turn_id=112,
+        )
+
+        assert record is not None
+        assert record.status == "interrupted"
+
+    finally:
+        for task in tuple(tasks):
+            task.cancel()
+
+        if tasks:
+            await asyncio.gather(
+                *tuple(tasks),
+                return_exceptions=True,
+            )
+
         ledger.close()
