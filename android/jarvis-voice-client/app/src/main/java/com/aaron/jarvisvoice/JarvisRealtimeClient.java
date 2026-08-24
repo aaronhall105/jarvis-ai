@@ -29,7 +29,26 @@ public final class JarvisRealtimeClient {
         void onAudioDone();
         void onBrainStarted(String command);
         void onBrainDelta(String text);
-        void onBrainResponse(String text, boolean success, String conversationId);
+        void onBrainResponse(
+            String text,
+            boolean success,
+            String conversationId
+        );
+
+        default boolean onBrainResponseDurably(
+            long clientTurnId,
+            String text,
+            boolean success,
+            String conversationId
+        ) {
+            onBrainResponse(
+                text,
+                success,
+                conversationId
+            );
+
+            return true;
+        }
         void onOriginalTts(String text);
         void onTurnDone();
         void onCoreEvent(RealtimeProtocol.Event event);
@@ -804,25 +823,99 @@ public final class JarvisRealtimeClient {
                 post(() -> listener.onBrainDelta(event.text));
             }
             case "brain.response" -> {
-                if (
-                    turnRecovery.matches(
-                        event.clientTurnId
-                    )
-                ) {
-                    markDurableResponseDelivered(
-                        event.clientTurnId
-                    );
+                long clientTurnId =
+                    event.clientTurnId;
 
-                    turnRecovery.markResponseDelivered(
-                        event.clientTurnId
+                if (
+                    clientTurnId > 0L
+                        && turnRecovery.matches(
+                            clientTurnId
+                        )
+                ) {
+                    post(() -> {
+                        boolean persisted;
+
+                        try {
+                            persisted =
+                                listener
+                                    .onBrainResponseDurably(
+                                        clientTurnId,
+                                        event.text,
+                                        event.success,
+                                        event.conversationId
+                                    );
+
+                        } catch (
+                            Exception exception
+                        ) {
+                            persisted = false;
+
+                            listener.onError(
+                                "Could not persist Jarvis "
+                                    + "response: "
+                                    + safeMessage(
+                                        exception
+                                    )
+                            );
+                        }
+
+                        if (
+                            !turnRecovery.matches(
+                                clientTurnId
+                            )
+                        ) {
+                            return;
+                        }
+
+                        if (!persisted) {
+                            diagnostics.recordRecovery(
+                                "Assistant response not yet "
+                                    + "durable turn="
+                                    + clientTurnId
+                            );
+
+                            listener.onError(
+                                "Jarvis could not save the "
+                                    + "response safely"
+                            );
+
+                            return;
+                        }
+
+                        if (
+                            markDurableResponseDelivered(
+                                clientTurnId
+                            )
+                        ) {
+                            turnRecovery
+                                .markResponseDelivered(
+                                    clientTurnId
+                                );
+
+                        } else {
+                            diagnostics.recordRecovery(
+                                "Assistant response saved but "
+                                    + "delivery checkpoint "
+                                    + "failed turn="
+                                    + clientTurnId
+                            );
+
+                            listener.onStatus(
+                                "Confirming saved Jarvis "
+                                    + "response"
+                            );
+                        }
+                    });
+
+                } else {
+                    post(() ->
+                        listener.onBrainResponse(
+                            event.text,
+                            event.success,
+                            event.conversationId
+                        )
                     );
                 }
-
-                post(() -> listener.onBrainResponse(
-                    event.text,
-                    event.success,
-                    event.conversationId
-                ));
             }
             case "original.tts" ->
                 post(() -> listener.onOriginalTts(event.text));
@@ -868,31 +961,35 @@ public final class JarvisRealtimeClient {
 
             case "turn.done" -> {
                 performance.finishTurn();
-                if (
-                    event.clientTurnId > 0L
-                        && event.clientTurnId
+
+                long clientTurnId =
+                    event.clientTurnId;
+
+                boolean tracked =
+                    clientTurnId > 0L
+                        && clientTurnId
                             == activeClientTurnId
-                ) {
-                    clearDurableRecovery(
-                        event.clientTurnId
-                    );
+                        && turnRecovery.matches(
+                            clientTurnId
+                        );
 
-                    turnRecovery.clear();
-                    activeClientTurnId = 0L;
-                    recoveryScheduleGeneration++;
-                }
                 if (event.generation > 0) {
-                    minimumServerGeneration = Math.max(
-                        minimumServerGeneration,
-                        event.generation + 1
-                    );
+                    minimumServerGeneration =
+                        Math.max(
+                            minimumServerGeneration,
+                            event.generation + 1
+                        );
                 }
-                post(listener::onTurnDone);
 
-                if (
-                    deferredReadyEvent != null
-                ) {
-                    publishDeferredReady();
+                if (tracked) {
+                    post(() ->
+                        finishTrackedTurnDone(
+                            clientTurnId
+                        )
+                    );
+
+                } else {
+                    post(listener::onTurnDone);
                 }
             }
             case "session.context",
@@ -1230,6 +1327,72 @@ public final class JarvisRealtimeClient {
         }
     }
 
+    private void finishTrackedTurnDone(
+        long clientTurnId
+    ) {
+        if (
+            !turnRecovery.matches(
+                clientTurnId
+            )
+        ) {
+            listener.onTurnDone();
+
+            if (
+                deferredReadyEvent != null
+            ) {
+                publishDeferredReady();
+            }
+
+            return;
+        }
+
+        TurnDeliveryFence.Action action =
+            TurnDeliveryFence.afterTerminal(
+                true,
+                turnRecovery
+                    .responseDelivered()
+            );
+
+        if (
+            action
+                == TurnDeliveryFence.Action
+                    .RECONCILE_COMPLETED
+        ) {
+            diagnostics.recordRecovery(
+                "Core completed before durable "
+                    + "response acknowledgement "
+                    + "turn="
+                    + clientTurnId
+            );
+
+            listener.onStatus(
+                "Confirming Jarvis response"
+            );
+
+            requestTurnRecovery(
+                generation
+            );
+
+            return;
+        }
+
+        clearDurableRecovery(
+            clientTurnId
+        );
+
+        turnRecovery.clear();
+        activeClientTurnId = 0L;
+        recoveryScheduleGeneration++;
+
+        listener.onTurnDone();
+
+        if (
+            deferredReadyEvent != null
+        ) {
+            publishDeferredReady();
+        }
+    }
+
     private void restoreCompletedTurn(
         RealtimeProtocol.Event event
     ) {
@@ -1244,50 +1407,139 @@ public final class JarvisRealtimeClient {
                 + clientTurnId
         );
 
-        boolean deliver =
-            !alreadyDelivered
-                && event.recoveryText != null
-                && !event.recoveryText.isBlank();
-
-        if (deliver) {
-            markDurableResponseDelivered(
-                clientTurnId
-            );
-
-            turnRecovery.markResponseDelivered(
-                clientTurnId
-            );
-        }
-
-        turnRecovery.clear();
-        activeClientTurnId = 0L;
-        recoveryScheduleGeneration++;
         performance.finishTurn();
 
-        if (deliver) {
-            post(() -> {
-                listener.onBrainResponse(
-                    event.recoveryText,
-                    event.recoverySuccess,
-                    event.recoveryConversationId
-                );
+        boolean hasResponse =
+            event.recoveryText != null
+                && !event.recoveryText.isBlank();
 
-                clearDurableRecovery(
-                    clientTurnId
-                );
-
-                listener.onTurnDone();
-            });
-
-        } else {
+        if (alreadyDelivered) {
             clearDurableRecovery(
                 clientTurnId
             );
 
+            turnRecovery.clear();
+            activeClientTurnId = 0L;
+            recoveryScheduleGeneration++;
+
             post(listener::onTurnDone);
+            publishDeferredReady();
+
+            return;
         }
 
-        publishDeferredReady();
+        if (!hasResponse) {
+            /*
+             * Core proved terminal completion and there is no
+             * user-visible response payload to persist.
+             */
+            clearDurableRecovery(
+                clientTurnId
+            );
+
+            turnRecovery.clear();
+            activeClientTurnId = 0L;
+            recoveryScheduleGeneration++;
+
+            post(listener::onTurnDone);
+            publishDeferredReady();
+
+            return;
+        }
+
+        post(() -> {
+            if (
+                !turnRecovery.matches(
+                    clientTurnId
+                )
+            ) {
+                return;
+            }
+
+            boolean persisted;
+
+            try {
+                persisted =
+                    listener
+                        .onBrainResponseDurably(
+                            clientTurnId,
+                            event.recoveryText,
+                            event.recoverySuccess,
+                            event.recoveryConversationId
+                        );
+
+            } catch (
+                Exception exception
+            ) {
+                persisted = false;
+
+                listener.onError(
+                    "Could not persist recovered "
+                        + "Jarvis response: "
+                        + safeMessage(
+                            exception
+                        )
+                );
+            }
+
+            if (!persisted) {
+                diagnostics.recordRecovery(
+                    "Recovered response still not "
+                        + "durable turn="
+                        + clientTurnId
+                );
+
+                listener.onError(
+                    "Jarvis could not save the "
+                        + "recovered response safely"
+                );
+
+                scheduleTurnRecoveryRecheck(
+                    generation
+                );
+
+                return;
+            }
+
+            if (
+                !markDurableResponseDelivered(
+                    clientTurnId
+                )
+            ) {
+                diagnostics.recordRecovery(
+                    "Recovered response saved but "
+                        + "journal checkpoint failed "
+                        + "turn="
+                        + clientTurnId
+                );
+
+                listener.onStatus(
+                    "Confirming saved Jarvis response"
+                );
+
+                scheduleTurnRecoveryRecheck(
+                    generation
+                );
+
+                return;
+            }
+
+            turnRecovery
+                .markResponseDelivered(
+                    clientTurnId
+                );
+
+            clearDurableRecovery(
+                clientTurnId
+            );
+
+            turnRecovery.clear();
+            activeClientTurnId = 0L;
+            recoveryScheduleGeneration++;
+
+            listener.onTurnDone();
+            publishDeferredReady();
+        });
     }
 
     private void finishRecoveredTerminal(

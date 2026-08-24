@@ -563,7 +563,19 @@ public final class VoiceService extends Service implements
         String text = rawText == null ? "" : rawText.trim();
         if (text.isEmpty()) return;
         prepareSpokenTurn(speak);
-        addMessage(ChatMessage.USER, text);
+
+        if (
+            !addMessageDurable(
+                ChatMessage.USER,
+                text
+            )
+        ) {
+            status(
+                "Could not save this message safely"
+            );
+            return;
+        }
+
         if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
         }
@@ -1541,16 +1553,111 @@ public final class VoiceService extends Service implements
         boolean success,
         String conversationId
     ) {
+        handleBrainResponse(
+            0L,
+            text,
+            success,
+            conversationId,
+            false
+        );
+    }
+
+    @Override public boolean onBrainResponseDurably(
+        long clientTurnId,
+        String text,
+        boolean success,
+        String conversationId
+    ) {
+        return handleBrainResponse(
+            clientTurnId,
+            text,
+            success,
+            conversationId,
+            true
+        );
+    }
+
+    private boolean handleBrainResponse(
+        long clientTurnId,
+        String text,
+        boolean success,
+        String conversationId,
+        boolean durable
+    ) {
         brainActive = false;
-        String response = text == null ? "" : text.trim();
-        lastAssistantResponse = response;
-        currentAssistantSpeech = response;
+
+        String response =
+            text == null
+                ? ""
+                : text.trim();
+
+        lastAssistantResponse =
+            response;
+
+        currentAssistantSpeech =
+            response;
+
+        boolean alreadyPresent = false;
 
         if (!response.isEmpty()) {
-            addMessage(ChatMessage.ASSISTANT, response);
-            if (voiceEndpoint == VoiceEndpoint.WATCH) {
-                wearVoiceBridge.assistantDone(response, endpointGeneration);
+            if (durable) {
+                ChatHistoryStore.DurableAddResult result =
+                    addRealtimeAssistantMessageDurable(
+                        clientTurnId,
+                        response
+                    );
+
+                if (
+                    result
+                        == ChatHistoryStore
+                            .DurableAddResult
+                            .FAILED
+                ) {
+                    status(
+                        "Could not save Jarvis response safely"
+                    );
+
+                    return false;
+                }
+
+                alreadyPresent =
+                    result
+                        == ChatHistoryStore
+                            .DurableAddResult
+                            .ALREADY_PRESENT;
+
+            } else {
+                addMessage(
+                    ChatMessage.ASSISTANT,
+                    response
+                );
             }
+
+            if (
+                voiceEndpoint
+                        == VoiceEndpoint.WATCH
+                    && !alreadyPresent
+            ) {
+                wearVoiceBridge.assistantDone(
+                    response,
+                    endpointGeneration
+                );
+            }
+        }
+
+        /*
+         * A recovered response that is already present in
+         * durable chat history must not trigger duplicate UI,
+         * fallback speech or watch completion side effects.
+         */
+        if (alreadyPresent) {
+            status(
+                success
+                    ? "Jarvis response restored"
+                    : "Jarvis response restored with an error"
+            );
+
+            return true;
         }
 
         status(
@@ -1565,21 +1672,35 @@ public final class VoiceService extends Service implements
                 turnReceivedRealtimeAudio,
                 success,
                 response,
-                VoiceCatalog.isOriginal(store.voiceId())
+                VoiceCatalog.isOriginal(
+                    store.voiceId()
+                )
             );
 
-        if (useFallback && voiceEndpoint == VoiceEndpoint.WATCH) {
+        if (
+            useFallback
+                && voiceEndpoint
+                    == VoiceEndpoint.WATCH
+        ) {
             wearVoiceBridge.error(
                 "Watch speech unavailable — try again",
                 endpointGeneration
             );
+
             stopVoice(false);
-            return;
+            return true;
         }
 
-        if (useFallback && speechFallback != null) {
+        if (
+            useFallback
+                && speechFallback != null
+        ) {
             fallbackPending = true;
-            speechFallback.schedule(response, 900L);
+
+            speechFallback.schedule(
+                response,
+                900L
+            );
         }
 
         if (endConversationAfterReply) {
@@ -1597,6 +1718,7 @@ public final class VoiceService extends Service implements
                 },
                 1_600L
             );
+
         } else if (
             voiceEndpoint != VoiceEndpoint.WATCH
                 && !store.keepConversationOpen()
@@ -1604,7 +1726,9 @@ public final class VoiceService extends Service implements
                 && !playbackActive
                 && !fallbackPending
                 && !fallbackSpeaking
-                && !VoiceCatalog.isOriginal(store.voiceId())
+                && !VoiceCatalog.isOriginal(
+                    store.voiceId()
+                )
         ) {
             main.postDelayed(
                 () -> {
@@ -1619,6 +1743,8 @@ public final class VoiceService extends Service implements
                 350L
             );
         }
+
+        return true;
     }
 
     @Override public void onOriginalTts(String text) {
@@ -2226,9 +2352,79 @@ public final class VoiceService extends Service implements
 
 
 
-    private void addMessage(String role, String text) {
-        history.add(role, text);
-        broadcastEvent("message", role, text, voiceActive, false);
+    private void addMessage(
+        String role,
+        String text
+    ) {
+        history.add(
+            role,
+            text
+        );
+
+        broadcastEvent(
+            "message",
+            role,
+            text,
+            voiceActive,
+            false
+        );
+    }
+
+    private boolean addMessageDurable(
+        String role,
+        String text
+    ) {
+        boolean persisted =
+            history.addDurable(
+                role,
+                text
+            );
+
+        if (!persisted) {
+            return false;
+        }
+
+        broadcastEvent(
+            "message",
+            role,
+            text,
+            voiceActive,
+            false
+        );
+
+        return true;
+    }
+
+    private ChatHistoryStore.DurableAddResult
+        addRealtimeAssistantMessageDurable(
+            long clientTurnId,
+            String text
+        ) {
+
+        ChatHistoryStore.DurableAddResult result =
+            history.addDurable(
+                "realtime-assistant-"
+                    + clientTurnId,
+                ChatMessage.ASSISTANT,
+                text
+            );
+
+        if (
+            result
+                == ChatHistoryStore
+                    .DurableAddResult
+                    .ADDED
+        ) {
+            broadcastEvent(
+                "message",
+                ChatMessage.ASSISTANT,
+                text,
+                voiceActive,
+                false
+            );
+        }
+
+        return result;
     }
 
     private void status(String message) {
