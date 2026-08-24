@@ -25,6 +25,7 @@ public final class TurnRecoveryJournalTest {
             speak,
             "chat-1",
             "PHONE",
+            false,
             delivered,
             created
         );
@@ -346,4 +347,150 @@ public final class TurnRecoveryJournalTest {
             Files.exists(file)
         );
     }
+
+    @Test public void differentEndpointsUseDifferentJournalFiles() {
+        String phone =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-1",
+                "PHONE"
+            );
+
+        String watch =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-1",
+                "WATCH"
+            );
+
+        assertFalse(
+            phone.equals(watch)
+        );
+
+        assertFalse(
+            phone.contains("chat-1")
+        );
+
+        assertFalse(
+            watch.contains("chat-1")
+        );
+    }
+
+    @Test public void differentConversationsUseDifferentJournalFiles() {
+        String first =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-1",
+                "PHONE"
+            );
+
+        String second =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-2",
+                "PHONE"
+            );
+
+        assertFalse(
+            first.equals(second)
+        );
+    }
+
+    @Test public void identityFileNameIsDeterministic() {
+        assertEquals(
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-1",
+                "PHONE"
+            ),
+            TurnRecoveryJournal.fileNameForIdentity(
+                "chat-1",
+                "phone"
+            )
+        );
+    }
+
+    @Test public void abandonedTurnCanNeverAuthoriseUnknownReplay()
+        throws Exception {
+
+        TurnRecoveryJournal journal =
+            journal();
+
+        long created =
+            1_900_000_000_000L;
+
+        journal.save(
+            snapshot(
+                701L,
+                "Turn oven off",
+                false,
+                false,
+                created
+            )
+        );
+
+        assertTrue(
+            journal.markAbandoned(
+                701L,
+                "chat-1",
+                "PHONE"
+            )
+        );
+
+        TurnRecoveryJournal.Snapshot loaded =
+            journal.load();
+
+        assertTrue(
+            loaded.abandoned()
+        );
+
+        assertFalse(
+            loaded.mayReplayUnknown(
+                created + 1L
+            )
+        );
+    }
+
+    @Test public void recentNonAbandonedTurnMayReplayUnknown()
+        throws Exception {
+
+        long created =
+            1_900_000_000_000L;
+
+        TurnRecoveryJournal.Snapshot snapshot =
+            snapshot(
+                702L,
+                "Recent command",
+                false,
+                false,
+                created
+            );
+
+        assertTrue(
+            snapshot.mayReplayUnknown(
+                created + 1L
+            )
+        );
+    }
+
+    @Test public void staleNonAbandonedTurnStillCannotReplayUnknown()
+        throws Exception {
+
+        long created =
+            1_900_000_000_000L;
+
+        TurnRecoveryJournal.Snapshot snapshot =
+            snapshot(
+                703L,
+                "Old command",
+                false,
+                false,
+                created
+            );
+
+        assertFalse(
+            snapshot.mayReplayUnknown(
+                created
+                    + TurnRecoveryJournal
+                        .MAX_REPLAY_AGE_MS
+                    + 1L
+            )
+        );
+    }
+
 }

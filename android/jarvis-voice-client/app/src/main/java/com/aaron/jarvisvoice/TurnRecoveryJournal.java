@@ -14,6 +14,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.UUID;
 
 /**
  * App-private crash journal for one ambiguous realtime text
@@ -26,6 +27,12 @@ import java.nio.file.StandardOpenOption;
 final class TurnRecoveryJournal {
     static final String FILE_NAME =
         "jarvis_realtime_turn_recovery.json";
+
+    private static final String FILE_PREFIX =
+        "jarvis_realtime_turn_recovery_";
+
+    private static final String FILE_SUFFIX =
+        ".json";
 
     /*
      * A process restart normally recovers in seconds. Never
@@ -45,6 +52,7 @@ final class TurnRecoveryJournal {
         boolean speak,
         String conversationId,
         String endpoint,
+        boolean abandoned,
         boolean responseDelivered,
         long createdAtMs
     ) {
@@ -73,6 +81,13 @@ final class TurnRecoveryJournal {
             return nowMs - createdAtMs
                 <= MAX_REPLAY_AGE_MS;
         }
+
+        boolean mayReplayUnknown(
+            long nowMs
+        ) {
+            return !abandoned
+                && replayFresh(nowMs);
+        }
     }
 
     private final Path file;
@@ -85,6 +100,24 @@ final class TurnRecoveryJournal {
                 .getFilesDir()
                 .toPath()
                 .resolve(FILE_NAME)
+        );
+    }
+
+    TurnRecoveryJournal(
+        Context context,
+        String conversationId,
+        String endpoint
+    ) {
+        this(
+            applicationContext(context)
+                .getFilesDir()
+                .toPath()
+                .resolve(
+                    fileNameForIdentity(
+                        conversationId,
+                        endpoint
+                    )
+                )
         );
     }
 
@@ -133,6 +166,11 @@ final class TurnRecoveryJournal {
             root.put(
                 "endpoint",
                 checked.endpoint()
+            );
+
+            root.put(
+                "abandoned",
+                checked.abandoned()
             );
 
             root.put(
@@ -201,6 +239,10 @@ final class TurnRecoveryJournal {
                         ""
                     ),
                     root.optBoolean(
+                        "abandoned",
+                        false
+                    ),
+                    root.optBoolean(
                         "response_delivered",
                         false
                     ),
@@ -251,7 +293,48 @@ final class TurnRecoveryJournal {
                 existing.speak(),
                 existing.conversationId(),
                 existing.endpoint(),
+                existing.abandoned(),
                 true,
+                existing.createdAtMs()
+            )
+        );
+
+        return true;
+    }
+
+    synchronized boolean markAbandoned(
+        long clientTurnId,
+        String conversationId,
+        String endpoint
+    ) throws IOException {
+        Snapshot existing =
+            load();
+
+        if (
+            existing == null
+                || existing.clientTurnId()
+                    != clientTurnId
+                || !existing.matchesIdentity(
+                    conversationId,
+                    endpoint
+                )
+        ) {
+            return false;
+        }
+
+        if (existing.abandoned()) {
+            return true;
+        }
+
+        save(
+            new Snapshot(
+                existing.clientTurnId(),
+                existing.text(),
+                existing.speak(),
+                existing.conversationId(),
+                existing.endpoint(),
+                true,
+                existing.responseDelivered(),
                 existing.createdAtMs()
             )
         );
@@ -449,9 +532,43 @@ final class TurnRecoveryJournal {
             snapshot.speak(),
             conversationId,
             endpoint,
+            snapshot.abandoned(),
             snapshot.responseDelivered(),
             snapshot.createdAtMs()
         );
+    }
+
+    static String fileNameForIdentity(
+        String conversationId,
+        String endpoint
+    ) {
+        String conversation =
+            safe(conversationId);
+
+        if (conversation.isEmpty()) {
+            throw new IllegalArgumentException(
+                "conversationId must not be empty"
+            );
+        }
+
+        String normalisedEndpoint =
+            normaliseEndpoint(endpoint);
+
+        String identity =
+            normalisedEndpoint
+                + "\n"
+                + conversation;
+
+        UUID opaque =
+            UUID.nameUUIDFromBytes(
+                identity.getBytes(
+                    StandardCharsets.UTF_8
+                )
+            );
+
+        return FILE_PREFIX
+            + opaque
+            + FILE_SUFFIX;
     }
 
     private static String safe(
