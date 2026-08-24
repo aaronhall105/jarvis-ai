@@ -23,6 +23,7 @@ public final class TurnRecoveryJournalTest {
             id,
             text,
             speak,
+            "phone-1",
             "chat-1",
             "PHONE",
             false,
@@ -80,6 +81,11 @@ public final class TurnRecoveryJournalTest {
 
         assertTrue(
             loaded.speak()
+        );
+
+        assertEquals(
+            "phone-1",
+            loaded.deviceId()
         );
 
         assertEquals(
@@ -165,6 +171,7 @@ public final class TurnRecoveryJournalTest {
         assertTrue(
             journal.markResponseDelivered(
                 301L,
+                "phone-1",
                 "chat-1",
                 "PHONE"
             )
@@ -195,6 +202,7 @@ public final class TurnRecoveryJournalTest {
         assertFalse(
             journal.markResponseDelivered(
                 401L,
+                "phone-1",
                 "another-chat",
                 "PHONE"
             )
@@ -203,6 +211,7 @@ public final class TurnRecoveryJournalTest {
         assertFalse(
             journal.clearMatching(
                 401L,
+                "phone-1",
                 "chat-1",
                 "WATCH"
             )
@@ -233,6 +242,7 @@ public final class TurnRecoveryJournalTest {
         assertTrue(
             journal.clearMatching(
                 501L,
+                "phone-1",
                 "chat-1",
                 "PHONE"
             )
@@ -351,12 +361,14 @@ public final class TurnRecoveryJournalTest {
     @Test public void differentEndpointsUseDifferentJournalFiles() {
         String phone =
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-1",
                 "PHONE"
             );
 
         String watch =
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-1",
                 "WATCH"
             );
@@ -377,12 +389,14 @@ public final class TurnRecoveryJournalTest {
     @Test public void differentConversationsUseDifferentJournalFiles() {
         String first =
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-1",
                 "PHONE"
             );
 
         String second =
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-2",
                 "PHONE"
             );
@@ -395,10 +409,12 @@ public final class TurnRecoveryJournalTest {
     @Test public void identityFileNameIsDeterministic() {
         assertEquals(
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-1",
                 "PHONE"
             ),
             TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
                 "chat-1",
                 "phone"
             )
@@ -427,6 +443,7 @@ public final class TurnRecoveryJournalTest {
         assertTrue(
             journal.markAbandoned(
                 701L,
+                "phone-1",
                 "chat-1",
                 "PHONE"
             )
@@ -489,6 +506,133 @@ public final class TurnRecoveryJournalTest {
                     + TurnRecoveryJournal
                         .MAX_REPLAY_AGE_MS
                     + 1L
+            )
+        );
+    }
+
+
+    @Test public void differentDevicesUseDifferentJournalFiles() {
+        String first =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
+                "chat-1",
+                "PHONE"
+            );
+
+        String second =
+            TurnRecoveryJournal.fileNameForIdentity(
+                "phone-2",
+                "chat-1",
+                "PHONE"
+            );
+
+        assertFalse(
+            first.equals(second)
+        );
+
+        assertFalse(
+            first.contains("phone-1")
+        );
+
+        assertFalse(
+            second.contains("phone-2")
+        );
+    }
+
+    @Test public void wrongDeviceCannotMutateJournal()
+        throws Exception {
+
+        TurnRecoveryJournal journal =
+            journal();
+
+        journal.save(
+            snapshot(
+                801L,
+                "Garage off",
+                false,
+                false,
+                1_900_000_000_000L
+            )
+        );
+
+        assertFalse(
+            journal.markAbandoned(
+                801L,
+                "phone-2",
+                "chat-1",
+                "PHONE"
+            )
+        );
+
+        assertFalse(
+            journal.clearMatching(
+                801L,
+                "phone-2",
+                "chat-1",
+                "PHONE"
+            )
+        );
+
+        assertTrue(
+            journal.load() != null
+        );
+    }
+
+    @Test public void ledgerIdentityUsesCoreLengthBound() {
+        String longDevice =
+            "d".repeat(
+                TurnRecoveryJournal
+                    .MAX_LEDGER_ID_CHARS
+                    + 20
+            );
+
+        String truncated =
+            longDevice.substring(
+                0,
+                TurnRecoveryJournal
+                    .MAX_LEDGER_ID_CHARS
+            );
+
+        assertEquals(
+            TurnRecoveryJournal.fileNameForIdentity(
+                longDevice,
+                "chat-1",
+                "PHONE"
+            ),
+            TurnRecoveryJournal.fileNameForIdentity(
+                truncated,
+                "chat-1",
+                "PHONE"
+            )
+        );
+    }
+
+    @Test public void blankDeviceUsesCoreFallbackIdentity() {
+        assertEquals(
+            TurnRecoveryJournal.fileNameForIdentity(
+                "",
+                "chat-1",
+                "PHONE"
+            ),
+            TurnRecoveryJournal.fileNameForIdentity(
+                "unknown-device",
+                "chat-1",
+                "PHONE"
+            )
+        );
+    }
+
+    @Test public void blankConversationUsesCoreFallbackIdentity() {
+        assertEquals(
+            TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
+                "",
+                "PHONE"
+            ),
+            TurnRecoveryJournal.fileNameForIdentity(
+                "phone-1",
+                "unknown-conversation",
+                "PHONE"
             )
         );
     }

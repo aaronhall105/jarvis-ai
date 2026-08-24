@@ -46,10 +46,14 @@ final class TurnRecoveryJournal {
     static final int MAX_TEXT_CHARS =
         131_072;
 
+    static final int MAX_LEDGER_ID_CHARS =
+        200;
+
     record Snapshot(
         long clientTurnId,
         String text,
         boolean speak,
+        String deviceId,
         String conversationId,
         String endpoint,
         boolean abandoned,
@@ -57,12 +61,22 @@ final class TurnRecoveryJournal {
         long createdAtMs
     ) {
         boolean matchesIdentity(
+            String deviceId,
             String conversationId,
             String endpoint
         ) {
-            return this.conversationId.equals(
-                safe(conversationId)
+            return this.deviceId.equals(
+                cleanLedgerIdentity(
+                    deviceId,
+                    "unknown-device"
+                )
             )
+                && this.conversationId.equals(
+                    cleanLedgerIdentity(
+                        conversationId,
+                        "unknown-conversation"
+                    )
+                )
                 && this.endpoint.equals(
                     normaliseEndpoint(endpoint)
                 );
@@ -105,6 +119,7 @@ final class TurnRecoveryJournal {
 
     TurnRecoveryJournal(
         Context context,
+        String deviceId,
         String conversationId,
         String endpoint
     ) {
@@ -114,6 +129,7 @@ final class TurnRecoveryJournal {
                 .toPath()
                 .resolve(
                     fileNameForIdentity(
+                        deviceId,
                         conversationId,
                         endpoint
                     )
@@ -156,6 +172,11 @@ final class TurnRecoveryJournal {
             root.put(
                 "speak",
                 checked.speak()
+            );
+
+            root.put(
+                "device_id",
+                checked.deviceId()
             );
 
             root.put(
@@ -231,6 +252,10 @@ final class TurnRecoveryJournal {
                         false
                     ),
                     root.optString(
+                        "device_id",
+                        ""
+                    ),
+                    root.optString(
                         "conversation_id",
                         ""
                     ),
@@ -268,6 +293,7 @@ final class TurnRecoveryJournal {
 
     synchronized boolean markResponseDelivered(
         long clientTurnId,
+        String deviceId,
         String conversationId,
         String endpoint
     ) throws IOException {
@@ -279,6 +305,7 @@ final class TurnRecoveryJournal {
                 || existing.clientTurnId()
                     != clientTurnId
                 || !existing.matchesIdentity(
+                    deviceId,
                     conversationId,
                     endpoint
                 )
@@ -291,6 +318,7 @@ final class TurnRecoveryJournal {
                 existing.clientTurnId(),
                 existing.text(),
                 existing.speak(),
+                existing.deviceId(),
                 existing.conversationId(),
                 existing.endpoint(),
                 existing.abandoned(),
@@ -304,6 +332,7 @@ final class TurnRecoveryJournal {
 
     synchronized boolean markAbandoned(
         long clientTurnId,
+        String deviceId,
         String conversationId,
         String endpoint
     ) throws IOException {
@@ -315,6 +344,7 @@ final class TurnRecoveryJournal {
                 || existing.clientTurnId()
                     != clientTurnId
                 || !existing.matchesIdentity(
+                    deviceId,
                     conversationId,
                     endpoint
                 )
@@ -331,6 +361,7 @@ final class TurnRecoveryJournal {
                 existing.clientTurnId(),
                 existing.text(),
                 existing.speak(),
+                existing.deviceId(),
                 existing.conversationId(),
                 existing.endpoint(),
                 true,
@@ -344,6 +375,7 @@ final class TurnRecoveryJournal {
 
     synchronized boolean clearMatching(
         long clientTurnId,
+        String deviceId,
         String conversationId,
         String endpoint
     ) throws IOException {
@@ -355,6 +387,7 @@ final class TurnRecoveryJournal {
                 || existing.clientTurnId()
                     != clientTurnId
                 || !existing.matchesIdentity(
+                    deviceId,
                     conversationId,
                     endpoint
                 )
@@ -499,18 +532,17 @@ final class TurnRecoveryJournal {
             );
         }
 
-        String conversationId =
-            safe(
-                snapshot.conversationId()
+        String deviceId =
+            cleanLedgerIdentity(
+                snapshot.deviceId(),
+                "unknown-device"
             );
 
-        if (
-            conversationId.isEmpty()
-        ) {
-            throw new IllegalArgumentException(
-                "conversationId must not be empty"
+        String conversationId =
+            cleanLedgerIdentity(
+                snapshot.conversationId(),
+                "unknown-conversation"
             );
-        }
 
         String endpoint =
             normaliseEndpoint(
@@ -530,6 +562,7 @@ final class TurnRecoveryJournal {
             snapshot.clientTurnId(),
             text,
             snapshot.speak(),
+            deviceId,
             conversationId,
             endpoint,
             snapshot.abandoned(),
@@ -539,23 +572,29 @@ final class TurnRecoveryJournal {
     }
 
     static String fileNameForIdentity(
+        String deviceId,
         String conversationId,
         String endpoint
     ) {
-        String conversation =
-            safe(conversationId);
-
-        if (conversation.isEmpty()) {
-            throw new IllegalArgumentException(
-                "conversationId must not be empty"
+        String device =
+            cleanLedgerIdentity(
+                deviceId,
+                "unknown-device"
             );
-        }
+
+        String conversation =
+            cleanLedgerIdentity(
+                conversationId,
+                "unknown-conversation"
+            );
 
         String normalisedEndpoint =
             normaliseEndpoint(endpoint);
 
         String identity =
             normalisedEndpoint
+                + "\n"
+                + device
                 + "\n"
                 + conversation;
 
@@ -569,6 +608,26 @@ final class TurnRecoveryJournal {
         return FILE_PREFIX
             + opaque
             + FILE_SUFFIX;
+    }
+
+    private static String cleanLedgerIdentity(
+        String value,
+        String fallback
+    ) {
+        String cleaned =
+            safe(value);
+
+        if (cleaned.isEmpty()) {
+            cleaned = fallback;
+        }
+
+        return cleaned.substring(
+            0,
+            Math.min(
+                MAX_LEDGER_ID_CHARS,
+                cleaned.length()
+            )
+        );
     }
 
     private static String safe(
