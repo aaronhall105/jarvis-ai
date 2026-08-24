@@ -218,4 +218,63 @@ public final class TurnRecoveryStateTest {
             state.noteStatusCheck()
         );
     }
+
+    @Test public void restorePreservesDurableResponseDelivery() {
+        TurnRecoveryState state =
+            new TurnRecoveryState();
+
+        state.restore(
+            90L,
+            "Recovered request",
+            true,
+            true
+        );
+
+        assertTrue(
+            state.hasPending()
+        );
+
+        assertEquals(
+            90L,
+            state.clientTurnId()
+        );
+
+        assertEquals(
+            "Recovered request",
+            state.text()
+        );
+
+        assertTrue(
+            state.speak()
+        );
+
+        assertTrue(
+            state.responseDelivered()
+        );
+    }
+
+    @Test public void restoreCanPreserveUndeliveredResponse() {
+        TurnRecoveryState state =
+            new TurnRecoveryState();
+
+        state.restore(
+            91L,
+            "Recovered request",
+            false,
+            false
+        );
+
+        assertTrue(
+            state.hasPending()
+        );
+
+        assertFalse(
+            state.speak()
+        );
+
+        assertFalse(
+            state.responseDelivered()
+        );
+    }
+
 }

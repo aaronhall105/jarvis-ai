@@ -411,7 +411,7 @@ public final class VoiceService extends Service implements
         history.ensureActiveConversation();
         ready = false;
         voiceFoundation.opening("connecting to Jarvis Core");
-        closeClientAndAudio();
+        replaceClientAndAudio();
         if (!requestedVoiceActive && store.wakeEnabled()) {
             scheduleWakeRearm(
                 "wake stays active during Core connection"
@@ -1199,12 +1199,33 @@ public final class VoiceService extends Service implements
         if (homeAssistantTts != null) homeAssistantTts.cancelActiveRun();
     }
 
+    private void replaceClientAndAudio() {
+        closeClientAndAudio(
+            true
+        );
+    }
+
     private void closeClientAndAudio() {
+        closeClientAndAudio(
+            false
+        );
+    }
+
+    private void closeClientAndAudio(
+        boolean replacement
+    ) {
         stopCaptureAndPlayback();
+
         if (client != null) {
-            client.close();
+            if (replacement) {
+                client.closeForReplacement();
+            } else {
+                client.close();
+            }
+
             client = null;
         }
+
         if (homeAssistantTts != null) {
             homeAssistantTts.close();
             homeAssistantTts = null;
@@ -1626,6 +1647,19 @@ public final class VoiceService extends Service implements
 
     @Override public void onTurnDone() {
         if (fallbackPending || fallbackSpeaking) return;
+
+        if (
+            ready
+                && client != null
+                && !pendingText.isBlank()
+        ) {
+            flushPendingText();
+
+            if (brainActive) {
+                return;
+            }
+        }
+
         if (endConversationAfterReply && !playbackActive) {
             finishConversation();
             return;

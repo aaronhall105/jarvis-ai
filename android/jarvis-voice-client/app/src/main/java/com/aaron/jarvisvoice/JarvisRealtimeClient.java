@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 
+import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.OkHttpClient;
@@ -81,8 +82,13 @@ public final class JarvisRealtimeClient {
     private long turnStartedAtMs;
     private boolean firstAudioMeasured;
     private final ClientTurnIdStore turnIds;
+    private final TurnRecoveryJournal recoveryJournal;
     private final TurnRecoveryState turnRecovery =
         new TurnRecoveryState();
+
+    private TurnRecoveryJournal.Snapshot recoverySnapshot;
+    private boolean recoveryJournalReadable = true;
+
     private long activeClientTurnId;
     private RealtimeProtocol.Event deferredReadyEvent;
     private int recoveryScheduleGeneration;
@@ -120,10 +126,31 @@ public final class JarvisRealtimeClient {
         this.conversationId = conversationId;
         this.endpoint = "WATCH".equalsIgnoreCase(endpoint) ? "WATCH" : "PHONE";
         this.listener = listener;
-        turnIds = new ClientTurnIdStore(context);
-        diagnostics = new VoiceDiagnosticsStore(context);
-        performance = new TurnPerformanceTracker(diagnostics);
-        endpoints = new CoreEndpointSelector(context, coreUrl);
+
+        turnIds =
+            new ClientTurnIdStore(context);
+
+        diagnostics =
+            new VoiceDiagnosticsStore(context);
+
+        performance =
+            new TurnPerformanceTracker(diagnostics);
+
+        recoveryJournal =
+            new TurnRecoveryJournal(
+                context,
+                deviceId,
+                conversationId,
+                this.endpoint
+            );
+
+        restoreDurableRecovery();
+
+        endpoints =
+            new CoreEndpointSelector(
+                context,
+                coreUrl
+            );
         lanRecheckTask = () -> {
             if (!ready || endpoints.isLan(activeCoreUrl)) return;
             endpoints.probeLan(new CoreEndpointSelector.Listener() {
@@ -169,30 +196,73 @@ public final class JarvisRealtimeClient {
     }
 
     public void close() {
+        closeInternal(
+            true
+        );
+    }
+
+    void closeForReplacement() {
+        closeInternal(
+            false
+        );
+    }
+
+    private void closeInternal(
+        boolean abandonRecovery
+    ) {
         shouldReconnect = false;
         reconnectScheduled = false;
         reconnectScheduleGeneration++;
+
         performance.abandonTurn();
+
+        if (
+            abandonRecovery
+                && turnRecovery.hasPending()
+        ) {
+            durablyAbandonRecovery(
+                turnRecovery.clientTurnId()
+            );
+        }
+
+        /*
+         * The Java object may now disappear. A replacement
+         * client reconstructs this logical turn from the
+         * journal when abandonRecovery is false.
+         */
         turnRecovery.clear();
         activeClientTurnId = 0L;
         deferredReadyEvent = null;
         recoveryScheduleGeneration++;
+
         highestServerGeneration = 0;
         minimumServerGeneration = 0;
         audioServerGeneration = 0;
+
         authenticated = false;
         ready = false;
         opening = false;
         probing = false;
+
         generation++;
+
         endpoints.cancel();
         cancelTimers();
+
         WebSocket current = socket;
         socket = null;
+
         if (current != null) {
-            current.send(RealtimeProtocol.stop());
-            current.close(1000, "Jarvis voice stopped");
+            current.send(
+                RealtimeProtocol.stop()
+            );
+
+            current.close(
+                1000,
+                "Jarvis voice stopped"
+            );
         }
+
         network.close();
     }
 
@@ -208,22 +278,55 @@ public final class JarvisRealtimeClient {
 
     public void cancelResponse() {
         WebSocket current = socket;
-        long cancelledTurnId = activeClientTurnId;
-        turnRecovery.clear();
-        activeClientTurnId = 0L;
-        recoveryScheduleGeneration++;
+
+        long cancelledTurnId =
+            activeClientTurnId;
+
+        if (
+            cancelledTurnId > 0L
+                && turnRecovery.matches(
+                    cancelledTurnId
+                )
+        ) {
+            if (
+                !durablyAbandonRecovery(
+                    cancelledTurnId
+                )
+            ) {
+                post(() -> listener.onError(
+                    "Jarvis could not persist cancellation "
+                        + "safely"
+                ));
+            }
+        }
+
         audioServerGeneration = 0;
-        minimumServerGeneration = Math.max(
-            minimumServerGeneration,
-            highestServerGeneration + 1
-        );
-        if (authenticated && current != null) {
+
+        minimumServerGeneration =
+            Math.max(
+                minimumServerGeneration,
+                highestServerGeneration + 1
+            );
+
+        if (
+            authenticated
+                && current != null
+                && cancelledTurnId > 0L
+        ) {
             performance.abandonTurn();
-            current.send(RealtimeProtocol.cancel(cancelledTurnId));
+
+            current.send(
+                RealtimeProtocol.cancel(
+                    cancelledTurnId
+                )
+            );
         }
     }
 
-    public boolean sendText(String text, boolean speak) {
+    public boolean sendText(
+        String text,
+        boolean speak
+    ) {
         WebSocket current = socket;
 
         if (
@@ -235,27 +338,105 @@ public final class JarvisRealtimeClient {
             return false;
         }
 
-        try {
-            String command = text.trim();
+        /*
+         * Never overwrite recovery authority for a previous
+         * logical turn.
+         */
+        if (turnRecovery.hasPending()) {
+            post(() -> listener.onStatus(
+                "Finishing previous Jarvis request"
+            ));
 
-            turnStartedAtMs =
-                SystemClock.elapsedRealtime();
-            firstAudioMeasured = false;
-            performance.beginTurn();
-
-            long clientTurnId =
-                turnIds.next();
-
-            turnRecovery.begin(
-                clientTurnId,
-                command,
-                speak
+            requestTurnRecovery(
+                generation
             );
 
-            activeClientTurnId =
-                clientTurnId;
-            audioServerGeneration = 0;
+            return false;
+        }
 
+        if (
+            !recoveryJournalReadable
+                && !restoreDurableRecovery()
+        ) {
+            post(() -> listener.onError(
+                "Jarvis recovery storage is unavailable"
+            ));
+
+            return false;
+        }
+
+        if (turnRecovery.hasPending()) {
+            requestTurnRecovery(
+                generation
+            );
+
+            return false;
+        }
+
+        String command =
+            text.trim();
+
+        final long clientTurnId;
+
+        try {
+            clientTurnId =
+                turnIds.next();
+
+        } catch (Exception exception) {
+            post(() -> listener.onError(
+                "Could not allocate Jarvis request id: "
+                    + safeMessage(exception)
+            ));
+
+            return false;
+        }
+
+        TurnRecoveryJournal.Snapshot snapshot =
+            new TurnRecoveryJournal.Snapshot(
+                clientTurnId,
+                command,
+                speak,
+                deviceId,
+                conversationId,
+                endpoint,
+                false,
+                false,
+                System.currentTimeMillis()
+            );
+
+        /*
+         * CRITICAL ORDER:
+         *
+         *   durable journal
+         *       BEFORE
+         *   WebSocket transmission
+         */
+        if (
+            !persistNewRecoverySnapshot(
+                snapshot
+            )
+        ) {
+            return false;
+        }
+
+        turnRecovery.begin(
+            clientTurnId,
+            command,
+            speak
+        );
+
+        activeClientTurnId =
+            clientTurnId;
+
+        audioServerGeneration = 0;
+
+        turnStartedAtMs =
+            SystemClock.elapsedRealtime();
+
+        firstAudioMeasured = false;
+        performance.beginTurn();
+
+        try {
             boolean queued = current.send(
                 RealtimeProtocol.text(
                     command,
@@ -277,26 +458,32 @@ public final class JarvisRealtimeClient {
                     generation,
                     "Jarvis request transport changed"
                 );
-
-                /*
-                 * Recovery now owns this logical request, so
-                 * VoiceService must not submit it a second time.
-                 */
-                return true;
             }
 
+            /*
+             * Once the durable record exists, this logical
+             * request belongs to JarvisRealtimeClient even when
+             * OkHttp could not prove transmission.
+             */
             return true;
 
         } catch (Exception exception) {
-            turnRecovery.clear();
-            activeClientTurnId = 0L;
-
-            post(() -> listener.onError(
-                "Could not send text: "
+            diagnostics.recordRecovery(
+                "Realtime text send became ambiguous "
+                    + "turn="
+                    + clientTurnId
+                    + " · "
                     + safeMessage(exception)
-            ));
+            );
 
-            return false;
+            performance.abandonTurn();
+
+            failCurrent(
+                generation,
+                "Jarvis request transport changed"
+            );
+
+            return true;
         }
     }
 
@@ -617,9 +804,19 @@ public final class JarvisRealtimeClient {
                 post(() -> listener.onBrainDelta(event.text));
             }
             case "brain.response" -> {
-                turnRecovery.markResponseDelivered(
-                    event.clientTurnId
-                );
+                if (
+                    turnRecovery.matches(
+                        event.clientTurnId
+                    )
+                ) {
+                    markDurableResponseDelivered(
+                        event.clientTurnId
+                    );
+
+                    turnRecovery.markResponseDelivered(
+                        event.clientTurnId
+                    );
+                }
 
                 post(() -> listener.onBrainResponse(
                     event.text,
@@ -676,6 +873,10 @@ public final class JarvisRealtimeClient {
                         && event.clientTurnId
                             == activeClientTurnId
                 ) {
+                    clearDurableRecovery(
+                        event.clientTurnId
+                    );
+
                     turnRecovery.clear();
                     activeClientTurnId = 0L;
                     recoveryScheduleGeneration++;
@@ -687,6 +888,12 @@ public final class JarvisRealtimeClient {
                     );
                 }
                 post(listener::onTurnDone);
+
+                if (
+                    deferredReadyEvent != null
+                ) {
+                    publishDeferredReady();
+                }
             }
             case "session.context",
                  "tool.started",
@@ -846,10 +1053,17 @@ public final class JarvisRealtimeClient {
             );
 
         switch (action) {
-            case REPLAY_UNKNOWN ->
-                replayRecoveredTurn(
-                    socketGeneration
-                );
+            case REPLAY_UNKNOWN -> {
+                if (
+                    mayReplayUnknown()
+                ) {
+                    replayRecoveredTurn(
+                        socketGeneration
+                    );
+                } else {
+                    finishUnknownWithoutReplay();
+                }
+            }
 
             case WAIT_ACCEPTED -> {
                 diagnostics.recordRecovery(
@@ -999,7 +1213,10 @@ public final class JarvisRealtimeClient {
                     + clientTurnId
             );
 
-            publishDeferredReady();
+            /*
+             * Keep external READY deferred. turn.done or another
+             * terminal recovery result releases it.
+             */
 
         } catch (Exception exception) {
             post(() -> listener.onError(
@@ -1016,41 +1233,75 @@ public final class JarvisRealtimeClient {
     private void restoreCompletedTurn(
         RealtimeProtocol.Event event
     ) {
+        long clientTurnId =
+            event.clientTurnId;
+
         boolean alreadyDelivered =
             turnRecovery.responseDelivered();
 
         diagnostics.recordRecovery(
             "Restored completed realtime turn="
-                + event.clientTurnId
+                + clientTurnId
         );
+
+        boolean deliver =
+            !alreadyDelivered
+                && event.recoveryText != null
+                && !event.recoveryText.isBlank();
+
+        if (deliver) {
+            markDurableResponseDelivered(
+                clientTurnId
+            );
+
+            turnRecovery.markResponseDelivered(
+                clientTurnId
+            );
+        }
 
         turnRecovery.clear();
         activeClientTurnId = 0L;
         recoveryScheduleGeneration++;
         performance.finishTurn();
 
-        publishDeferredReady();
+        if (deliver) {
+            post(() -> {
+                listener.onBrainResponse(
+                    event.recoveryText,
+                    event.recoverySuccess,
+                    event.recoveryConversationId
+                );
 
-        if (
-            !alreadyDelivered
-                && event.recoveryText != null
-                && !event.recoveryText.isBlank()
-        ) {
-            post(() -> listener.onBrainResponse(
-                event.recoveryText,
-                event.recoverySuccess,
-                event.recoveryConversationId
-            ));
+                clearDurableRecovery(
+                    clientTurnId
+                );
+
+                listener.onTurnDone();
+            });
+
+        } else {
+            clearDurableRecovery(
+                clientTurnId
+            );
+
+            post(listener::onTurnDone);
         }
 
-        post(listener::onTurnDone);
+        publishDeferredReady();
     }
 
     private void finishRecoveredTerminal(
         String message
     ) {
+        long clientTurnId =
+            turnRecovery.clientTurnId();
+
         diagnostics.recordRecovery(
             message
+        );
+
+        clearDurableRecovery(
+            clientTurnId
         );
 
         turnRecovery.clear();
@@ -1058,13 +1309,13 @@ public final class JarvisRealtimeClient {
         recoveryScheduleGeneration++;
         performance.abandonTurn();
 
-        publishDeferredReady();
-
         post(() -> listener.onStatus(
             message
         ));
 
         post(listener::onTurnDone);
+
+        publishDeferredReady();
     }
 
     private void failRecoveredConflict(
@@ -1073,17 +1324,23 @@ public final class JarvisRealtimeClient {
         long clientTurnId =
             event.clientTurnId;
 
+        clearDurableRecovery(
+            clientTurnId
+        );
+
         turnRecovery.clear();
         activeClientTurnId = 0L;
         recoveryScheduleGeneration++;
         performance.abandonTurn();
 
-        publishDeferredReady();
-
         post(() -> listener.onError(
             "Jarvis rejected conflicting turn id "
                 + clientTurnId
         ));
+
+        post(listener::onTurnDone);
+
+        publishDeferredReady();
     }
 
     private void abandonRecoveryWithoutReplay(
@@ -1099,21 +1356,354 @@ public final class JarvisRealtimeClient {
         );
 
         /*
-         * Never guess that an admitted or otherwise unresolved
-         * side-effecting request is safe to execute again.
+         * Preserve a durable tombstone. If a future client
+         * eventually receives UNKNOWN for this turn it still
+         * must not replay it.
          */
+        durablyAbandonRecovery(
+            clientTurnId
+        );
+
         turnRecovery.clear();
         activeClientTurnId = 0L;
         recoveryScheduleGeneration++;
         performance.abandonTurn();
-
-        publishDeferredReady();
 
         post(() -> listener.onError(
             message + " — it was not repeated"
         ));
 
         post(listener::onTurnDone);
+
+        publishDeferredReady();
+    }
+
+    private boolean restoreDurableRecovery() {
+        try {
+            TurnRecoveryJournal.Snapshot snapshot =
+                recoveryJournal.load();
+
+            recoveryJournalReadable = true;
+
+            if (snapshot == null) {
+                recoverySnapshot = null;
+                return true;
+            }
+
+            if (
+                !snapshot.matchesIdentity(
+                    deviceId,
+                    conversationId,
+                    endpoint
+                )
+            ) {
+                diagnostics.recordRecovery(
+                    "Discarded mismatched realtime recovery journal"
+                );
+
+                recoveryJournal.clear();
+                recoverySnapshot = null;
+
+                return true;
+            }
+
+            recoverySnapshot =
+                snapshot;
+
+            turnRecovery.restore(
+                snapshot.clientTurnId(),
+                snapshot.text(),
+                snapshot.speak(),
+                snapshot.responseDelivered()
+            );
+
+            activeClientTurnId =
+                snapshot.clientTurnId();
+
+            diagnostics.recordRecovery(
+                "Restored durable realtime turn="
+                    + snapshot.clientTurnId()
+                    + (snapshot.abandoned()
+                        ? " abandoned=true"
+                        : "")
+            );
+
+            return true;
+
+        } catch (IOException exception) {
+            recoveryJournalReadable = false;
+
+            diagnostics.recordRecovery(
+                "Realtime recovery journal unavailable: "
+                    + safeMessage(exception)
+            );
+
+            return false;
+        }
+    }
+
+    private boolean persistNewRecoverySnapshot(
+        TurnRecoveryJournal.Snapshot snapshot
+    ) {
+        try {
+            recoveryJournal.save(
+                snapshot
+            );
+
+            recoverySnapshot =
+                snapshot;
+
+            recoveryJournalReadable = true;
+
+            return true;
+
+        } catch (IOException exception) {
+            recoveryJournalReadable = false;
+
+            diagnostics.recordRecovery(
+                "Could not persist realtime request: "
+                    + safeMessage(exception)
+            );
+
+            post(() -> listener.onError(
+                "Jarvis could not safely save this request"
+            ));
+
+            return false;
+        }
+    }
+
+    private boolean markDurableResponseDelivered(
+        long clientTurnId
+    ) {
+        if (clientTurnId <= 0L) {
+            return true;
+        }
+
+        try {
+            boolean marked =
+                recoveryJournal.markResponseDelivered(
+                    clientTurnId,
+                    deviceId,
+                    conversationId,
+                    endpoint
+                );
+
+            if (marked) {
+                TurnRecoveryJournal.Snapshot snapshot =
+                    recoverySnapshot;
+
+                if (
+                    snapshot != null
+                        && snapshot.clientTurnId()
+                            == clientTurnId
+                ) {
+                    recoverySnapshot =
+                        new TurnRecoveryJournal.Snapshot(
+                            snapshot.clientTurnId(),
+                            snapshot.text(),
+                            snapshot.speak(),
+                            snapshot.deviceId(),
+                            snapshot.conversationId(),
+                            snapshot.endpoint(),
+                            snapshot.abandoned(),
+                            true,
+                            snapshot.createdAtMs()
+                        );
+                }
+            }
+
+            return marked;
+
+        } catch (IOException exception) {
+            diagnostics.recordRecovery(
+                "Could not persist response delivery "
+                    + "turn="
+                    + clientTurnId
+                    + " · "
+                    + safeMessage(exception)
+            );
+
+            return false;
+        }
+    }
+
+    private boolean durablyAbandonRecovery(
+        long clientTurnId
+    ) {
+        if (clientTurnId <= 0L) {
+            return true;
+        }
+
+        try {
+            boolean marked =
+                recoveryJournal.markAbandoned(
+                    clientTurnId,
+                    deviceId,
+                    conversationId,
+                    endpoint
+                );
+
+            if (marked) {
+                TurnRecoveryJournal.Snapshot snapshot =
+                    recoverySnapshot;
+
+                if (
+                    snapshot != null
+                        && snapshot.clientTurnId()
+                            == clientTurnId
+                ) {
+                    recoverySnapshot =
+                        new TurnRecoveryJournal.Snapshot(
+                            snapshot.clientTurnId(),
+                            snapshot.text(),
+                            snapshot.speak(),
+                            snapshot.deviceId(),
+                            snapshot.conversationId(),
+                            snapshot.endpoint(),
+                            true,
+                            snapshot.responseDelivered(),
+                            snapshot.createdAtMs()
+                        );
+                }
+
+                return true;
+            }
+
+            /*
+             * No matching replay authority exists. Removing the
+             * scoped file is also a safe abandonment result.
+             */
+            recoveryJournal.clear();
+            recoverySnapshot = null;
+
+            return true;
+
+        } catch (IOException exception) {
+            diagnostics.recordRecovery(
+                "Could not persist realtime abandonment "
+                    + "turn="
+                    + clientTurnId
+                    + " · "
+                    + safeMessage(exception)
+            );
+
+            /*
+             * Best-effort fallback: deletion removes automatic
+             * replay authority entirely.
+             */
+            try {
+                recoveryJournal.clear();
+                recoverySnapshot = null;
+                return true;
+
+            } catch (IOException deleteFailure) {
+                diagnostics.recordRecovery(
+                    "Could not remove realtime replay authority "
+                        + "turn="
+                        + clientTurnId
+                        + " · "
+                        + safeMessage(deleteFailure)
+                );
+
+                return false;
+            }
+        }
+    }
+
+    private void clearDurableRecovery(
+        long clientTurnId
+    ) {
+        if (clientTurnId <= 0L) {
+            recoverySnapshot = null;
+            return;
+        }
+
+        try {
+            recoveryJournal.clearMatching(
+                clientTurnId,
+                deviceId,
+                conversationId,
+                endpoint
+            );
+
+            recoverySnapshot = null;
+            recoveryJournalReadable = true;
+
+        } catch (IOException exception) {
+            /*
+             * Core has already proven terminal state. Leaving
+             * the journal behind is fail-safe: a future client
+             * will query Core rather than execute blindly.
+             */
+            diagnostics.recordRecovery(
+                "Could not clear terminal recovery journal "
+                    + "turn="
+                    + clientTurnId
+                    + " · "
+                    + safeMessage(exception)
+            );
+        }
+    }
+
+    private boolean mayReplayUnknown() {
+        TurnRecoveryJournal.Snapshot snapshot =
+            recoverySnapshot;
+
+        return snapshot != null
+            && snapshot.clientTurnId()
+                == turnRecovery.clientTurnId()
+            && snapshot.matchesIdentity(
+                deviceId,
+                conversationId,
+                endpoint
+            )
+            && snapshot.mayReplayUnknown(
+                System.currentTimeMillis()
+            );
+    }
+
+    private void finishUnknownWithoutReplay() {
+        long clientTurnId =
+            turnRecovery.clientTurnId();
+
+        TurnRecoveryJournal.Snapshot snapshot =
+            recoverySnapshot;
+
+        String reason;
+
+        if (
+            snapshot != null
+                && snapshot.abandoned()
+        ) {
+            reason =
+                "Previous Jarvis request was abandoned";
+        } else {
+            reason =
+                "Previous Jarvis request is too old to replay safely";
+        }
+
+        /*
+         * Core explicitly reported UNKNOWN, so it never admitted
+         * this command. It is therefore safe to discard the local
+         * replay record without executing anything.
+         */
+        clearDurableRecovery(
+            clientTurnId
+        );
+
+        turnRecovery.clear();
+        activeClientTurnId = 0L;
+        recoveryScheduleGeneration++;
+        performance.abandonTurn();
+
+        post(() -> listener.onStatus(
+            reason + " — it was not repeated"
+        ));
+
+        post(listener::onTurnDone);
+
+        publishDeferredReady();
     }
 
     private boolean isStaleTurnEvent(RealtimeProtocol.Event event) {

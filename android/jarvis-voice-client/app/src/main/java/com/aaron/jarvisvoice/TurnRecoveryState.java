@@ -46,6 +46,22 @@ final class TurnRecoveryState {
             0;
     }
 
+    void restore(
+        long clientTurnId,
+        String text,
+        boolean speak,
+        boolean responseDelivered
+    ) {
+        begin(
+            clientTurnId,
+            text,
+            speak
+        );
+
+        this.responseDelivered =
+            responseDelivered;
+    }
+
     boolean hasPending() {
         return clientTurnId > 0L
             && !text.isEmpty();
