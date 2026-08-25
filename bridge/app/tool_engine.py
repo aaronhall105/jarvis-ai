@@ -4,6 +4,7 @@ from typing import Any
 
 from app.device_resolver import DeviceResolver
 from app.home_assistant import HomeAssistantClient
+from app.presence import PresenceResolver
 from app.registry import RegistryEngine
 from app.tools.lights import LightsTool
 from app.tools.switches import SwitchesTool
@@ -190,6 +191,9 @@ class ToolEngine:
         "device_class",
         "fan_mode",
         "friendly_name",
+        "gps_accuracy",
+        "latitude",
+        "longitude",
         "hvac_action",
         "icon",
         "is_volume_muted",
@@ -230,6 +234,7 @@ class ToolEngine:
             client=client,
             registry=registry,
         )
+        self.presence = PresenceResolver(self)
 
     async def entities_in_area(
         self,
@@ -256,6 +261,8 @@ class ToolEngine:
         area_id: str,
         turn_on: bool,
     ) -> dict[str, Any]:
+        # Resolve the area membership against the live registry before acting.
+        await self.registry.refresh()
         target_state = "on" if turn_on else "off"
         action_text = "turn on" if turn_on else "turn off"
         service = "turn_on" if turn_on else "turn_off"
@@ -449,6 +456,8 @@ class ToolEngine:
         area_id: str,
         turn_on: bool,
     ) -> dict[str, Any]:
+        # Resolve the area membership against the live registry before acting.
+        await self.registry.refresh()
         target_state = "on" if turn_on else "off"
         area_result = await self.list_area_states(
             area_id=area_id,
@@ -534,11 +543,17 @@ class ToolEngine:
     ) -> list[dict[str, Any]]:
         return await self.devices.available_entities()
 
+    async def inspect_presence(self, reference: str) -> dict[str, Any]:
+        """Return fresh, structured person/tracker evidence only."""
+        return await self.presence.inspect(reference)
+
     async def control_device(
         self,
         entity_id: str,
         turn_on: bool,
     ) -> dict[str, Any]:
+        # A cache can help discovery, never authorise a mutation.
+        await self.registry.refresh()
         entity = await self.devices.get(entity_id)
         if entity is None:
             raise ValueError(f"Unknown controllable entity: {entity_id}")

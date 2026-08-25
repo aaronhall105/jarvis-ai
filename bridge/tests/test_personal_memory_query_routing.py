@@ -1,4 +1,9 @@
-from app.ai_engine import RequestIntent, RequestRouter
+from app.ai_engine import (
+    RequestIntent,
+    RequestRouter,
+    unbacked_future_promise_reply,
+    unsupported_external_capability_reply,
+)
 
 
 def classify(text: str):
@@ -55,6 +60,22 @@ def test_battery_health_question_remains_device_state() -> None:
     decision = classify("What is the battery health of Amber's phone?")
     assert decision.intent == RequestIntent.STATE_QUERY
     assert decision.allow_home_read is True
+
+
+def test_unavailable_external_capability_cannot_be_claimed() -> None:
+    reply = unsupported_external_capability_reply(
+        "Can you submit a support ticket?", []
+    )
+    assert reply is not None
+    assert "don’t have a connected" in reply
+    assert unsupported_external_capability_reply(
+        "Can you submit a support ticket?", [{"tool": "support_ticket"}]
+    ) is None
+
+
+def test_unbacked_future_commitment_is_blocked() -> None:
+    assert unbacked_future_promise_reply("I'll get back to you later.", []) is not None
+    assert unbacked_future_promise_reply("I'll get back to you later.", [{"tool": "task"}]) is None
 
 
 def test_motion_sensor_question_remains_live_state() -> None:

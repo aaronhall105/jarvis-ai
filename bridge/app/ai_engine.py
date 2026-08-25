@@ -146,6 +146,10 @@ Scope and accuracy:
   unnecessary follow-up questions.
 - Never invent Home Assistant entities, rooms, states, actions, memories, tool
   results or capabilities.
+- Concrete Home Assistant claims must come from fresh tool evidence. Resolve and
+  inspect before reasoning; for mutations resolve, inspect, act and verify.
+- Never turn an unverified name or conversational reference into an entity ID.
+  Report conflicting presence evidence and never invent a source or cause.
 - When speech is unclear, never suggest a possible room or device unless that
   exact room/device appears in the supplied Home Assistant registry or tool
   results. Never creatively complete a garbled device name; ask the user to
@@ -368,7 +372,7 @@ _PERSONAL_MEMORY_QUERY_PATTERN = re.compile(
 
 
 _PERSON_LOCATION_PATTERN = re.compile(
-    r"^\s*where(?:'s| is| are)\s+(?:aaron|amber|my phone|my watch)\b",
+    r"^\s*(?:where(?:'s| is| are)\s+(?:i|aaron|amber|my phone|my watch)\b|where\s+am\s+i\b)",
     re.I,
 )
 
@@ -560,6 +564,45 @@ _SECRET_PATTERN = re.compile(
     r"\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b",
     re.I,
 )
+
+_UNSUPPORTED_EXTERNAL_ACTION_PATTERN = re.compile(
+    r"\b(?:submit|create|open)\s+(?:a\s+)?support\s+ticket\b|"
+    r"\b(?:send|email|contact|message)\s+(?:support|customer service)\b|"
+    r"\b(?:book|reserve)\b",
+    re.I,
+)
+
+_UNBACKED_FUTURE_PROMISE_PATTERN = re.compile(
+    r"\b(?:i(?:'ll| will)\s+(?:get back to you|check(?: again| later)?|let you know|"
+    r"monitor|update you)|i(?:'m| am)\s+monitoring)\b",
+    re.I,
+)
+
+
+def unsupported_external_capability_reply(
+    text: str,
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Block execution claims for integrations that have no registered tool."""
+    if completed_calls or not _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text):
+        return None
+    return (
+        "I don’t have a connected support, email, or booking integration, so I can’t "
+        "create that external request from Jarvis."
+    )
+
+
+def unbacked_future_promise_reply(
+    reply: str,
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Never emit a future commitment unless an execution-backed job exists."""
+    if completed_calls or not _UNBACKED_FUTURE_PROMISE_PATTERN.search(reply):
+        return None
+    return (
+        "I can’t schedule or monitor that in the background from this Core yet, so I "
+        "won’t promise a later update."
+    )
 
 
 class RequestIntent(str, Enum):
@@ -1527,6 +1570,22 @@ class AIEngine:
         definitions: list[dict[str, Any]] = [
             {
                 "type": "function",
+                "name": "inspect_presence",
+                "description": (
+                    "Inspect one real person entity and Home Assistant's live presence "
+                    "source evidence. Use for where someone is, whether that state is "
+                    "reliable, why Home Assistant says home, or which tracker is the source."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"reference": {"type": "string"}},
+                    "required": ["reference"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
                 "name": "search_entity_states",
                 "description": (
                     "Search fresh Home Assistant entity states by natural device, "
@@ -2391,6 +2450,15 @@ class AIEngine:
                     "result": result,
                 }
 
+            if name == "inspect_presence":
+                reference = _normalise_space(str(arguments.get("reference", "")))
+                if not reference:
+                    return self._tool_failure(
+                        name, arguments, "invalid_person_reference", "A person reference is required."
+                    )
+                result = await self.tools.inspect_presence(reference)
+                return {"tool": name, "arguments": arguments, "result": result}
+
             if name in {
                 "list_admin_items",
                 "get_admin_item_config",
@@ -3082,6 +3150,42 @@ class AIEngine:
             return None
 
         owner = self._owner_from_text(user_text, actor.display_name)
+        inspect_presence = getattr(self.tools, "inspect_presence", None)
+        if inspect_presence is not None:
+            evidence = await inspect_presence(owner)
+            call = {
+                "tool": "inspect_presence",
+                "arguments": {"reference": owner},
+                "result": evidence,
+            }
+            if not evidence.get("success"):
+                candidates = list(evidence.get("candidates") or [])
+                if evidence.get("resolution") == "ambiguous" and candidates:
+                    names = ", ".join(
+                        str(item.get("name") or item.get("entity_id")) for item in candidates
+                    )
+                    return f"I found more than one person matching {owner}: {names}.", [call]
+                return f"I couldn’t find {owner}'s person entity in Home Assistant.", [call]
+            person = dict(evidence.get("person") or {})
+            state = str(person.get("state") or "unknown").strip()
+            if state in {"unknown", "unavailable", ""}:
+                return f"{owner}'s location is currently unavailable.", [call]
+            reported = "at home" if state == "home" else "away" if state == "not_home" else f"at {state}"
+            source = evidence.get("source") or {}
+            conflicts = list(evidence.get("conflicts") or [])
+            if source:
+                source_name = str(source.get("name") or source.get("entity_id"))
+                reply = f"Home Assistant currently reports {owner} is {reported}, based on {source_name}."
+                if conflicts:
+                    reply += (
+                        f" However, {source_name} currently reports {source.get('state')}; "
+                        "I can only confirm Home Assistant's reported state, not physical presence."
+                    )
+                return reply, [call]
+            return (
+                f"Home Assistant currently reports {owner} is {reported}, but it does not expose enough evidence to establish which tracker caused that state.",
+                [call],
+            )
         result = await self.tools.search_entity_states(
             query=f"{owner} person location",
             domain="person",
@@ -5760,6 +5864,23 @@ class AIEngine:
             final_reply = await self._fallback_tool_reply(completed_calls)
         elif not final_reply:
             final_reply = await self._fallback_tool_reply(completed_calls)
+
+        # Text generation is never evidence that an external request happened.
+        # This installation has no support, email, contact, or booking tool, so
+        # prevent a fluent model answer from implying that one is available.
+        unavailable_reply = unsupported_external_capability_reply(
+            user_text,
+            completed_calls,
+        )
+        if unavailable_reply is not None:
+            final_reply = unavailable_reply
+
+        unbacked_promise_reply = unbacked_future_promise_reply(
+            final_reply,
+            completed_calls,
+        )
+        if unbacked_promise_reply is not None:
+            final_reply = unbacked_promise_reply
 
         final_reply = _clean_reply(final_reply)
         if not final_reply:

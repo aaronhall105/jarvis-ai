@@ -358,6 +358,7 @@ class DialogueManager:
 
         devices: list[dict[str, Any]] = []
         person: dict[str, Any] | None = None
+        presence_source: dict[str, Any] | None = None
         area: dict[str, Any] | None = None
         action: str | None = None
 
@@ -427,6 +428,26 @@ class DialogueManager:
                         "state": selected.get("state"),
                     }
 
+            elif tool == "inspect_presence":
+                inspected_person = result.get("person") or {}
+                source = result.get("source") or {}
+                if isinstance(inspected_person, dict) and inspected_person:
+                    person = {
+                        "name": inspected_person.get("name"),
+                        "entity_id": inspected_person.get("entity_id"),
+                        "state": inspected_person.get("state"),
+                    }
+                if isinstance(source, dict) and source.get("entity_id"):
+                    # Keep the canonical verified referent separately. It is not
+                    # added to controllable-device focus: a tracker cannot be
+                    # turned off or disabled by the ordinary device tools.
+                    presence_source = {
+                        "entity_id": source.get("entity_id"),
+                        "name": source.get("name"),
+                        "state": source.get("state"),
+                        "domain": source.get("domain"),
+                    }
+
             elif tool in {"list_active_area_devices", "list_area_states"}:
                 if result.get("area_id") or result.get("area_name"):
                     area = {
@@ -454,6 +475,13 @@ class DialogueManager:
             state.focus = {
                 **state.focus,
                 "person": person,
+                "intent": intent,
+                "updated_at": self._iso(self._utc_now()),
+            }
+        if presence_source:
+            state.focus = {
+                **state.focus,
+                "presence_source": presence_source,
                 "intent": intent,
                 "updated_at": self._iso(self._utc_now()),
             }

@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -24,6 +24,8 @@ from app.code_awareness import CodeAwarenessEngine
 from app.config import get_settings
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
+from app.followup_engine import FollowUpEngine
+from app.followup_schedule import resolve_schedule
 from app.intent_engine import IntentEngine, IntentError
 from app.house_awareness import HouseAwarenessEngine
 from app.home_assistant import (
@@ -69,6 +71,11 @@ memory = MemoryEngine(
 )
 conversations = ConversationEngine(
     database_path="/app/data/jarvis_conversations.db",
+)
+followups = FollowUpEngine(
+    database_path="/app/data/jarvis_followups.db",
+    conversations=conversations,
+    states=tools,
 )
 dialogue = DialogueManager(
     database_path="/app/data/jarvis_dialogue.db",
@@ -290,6 +297,80 @@ class ImprovementCreateRequest(BaseModel):
     request: str = Field(min_length=3, max_length=2000)
 
 
+_FOLLOWUP_AFTER_PATTERN = re.compile(
+    r"^\s*(?:check again|tell me|remind me)\s+in\s+(\d{1,4})\s*(seconds?|minutes?)\s*[.!?]*$",
+    re.I,
+)
+_FOLLOWUP_CONDITION_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) (?:is |comes )?([a-z0-9_]+)\s*[.!?]*$", re.I)
+_FOLLOWUP_CHANGE_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) changes?\s*[.!?]*$", re.I)
+_FOLLOWUP_PERIODIC_PATTERN = re.compile(r"^\s*(?:keep (?:an eye on|checking)|monitor) ([a-z_]+\.[a-z0-9_]+)(?: every (\d{1,3}) (seconds?|minutes?))?.*$", re.I)
+_FOLLOWUP_COMPLETION_PATTERN = re.compile(r"^\s*(?:let me know|tell me|get back to me) when (?:it(?:'s| is)|that) (?:is )?(?:finished|done|completes?|completed)\s*[.!?]*$", re.I)
+
+
+async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str, object] | None:
+    """Handle only explicit, harmless delayed checks before model generation."""
+    match = _FOLLOWUP_AFTER_PATTERN.match(text)
+    if match is None:
+        if _FOLLOWUP_COMPLETION_PATTERN.match(text):
+            active = [job for job in await followups.active_for_conversation(conversation_id) if job.get('kind') != 'completion']
+            if len(active) != 1:
+                return {'success':False, 'response':"I can’t identify one verified running job to watch.", 'intent':'followup_unavailable'}
+            source = active[0]
+            job = await followups.create(
+                conversation_id=conversation_id,
+                kind='completion',
+                payload={'source_type':'followup_job', 'source_job_id':source['job_id']},
+                due_at=datetime.now(timezone.utc),
+            )
+            return {'success':True, 'response':"I’ll let you know here when that verified job finishes.", 'intent':'followup_completion', 'job':job}
+        resolved = resolve_schedule(
+            text,
+            timezone_name=os.getenv('JARVIS_TIMEZONE', 'Europe/London'),
+        )
+        if resolved is not None:
+            job = await followups.create(conversation_id=conversation_id, kind='scheduled', payload={'message':'Your scheduled Jarvis follow-up is due.', 'timezone':resolved.timezone_name}, due_at=resolved.due_utc)
+            return {'success':True, 'response':f"I’ll remind you {resolved.description}.", 'intent':'followup_scheduled', 'job':job}
+        condition = _FOLLOWUP_CONDITION_PATTERN.match(text)
+        change = _FOLLOWUP_CHANGE_PATTERN.match(text)
+        if change:
+            entity_id = change.group(1)
+            states = {str(item.get('entity_id')): item for item in await tools.readable_entity_states(refresh=True)}
+            if entity_id not in states: return {'success':False, 'response':"I can’t monitor that because it is not a current Home Assistant entity.", 'intent':'followup_unavailable'}
+            job = await followups.create(conversation_id=conversation_id, kind='condition', payload={'entity_id':entity_id, 'comparison':'changed', 'baseline':str(states[entity_id].get('state'))}, due_at=datetime.now(timezone.utc))
+            return {'success':True, 'response':f"I’ll let you know here when {entity_id} changes.", 'intent':'followup_condition', 'job':job}
+        if condition:
+            entity_id, wanted = condition.group(1), condition.group(2).lower()
+            wanted = {'online':'on', 'available':'on', 'finished':'completed', 'completed':'completed'}.get(wanted, wanted)
+            known = {str(item.get('entity_id')) for item in await tools.readable_entity_states(refresh=True)}
+            if entity_id not in known: return {'success':False, 'response':"I can’t monitor that because it is not a current Home Assistant entity.", 'intent':'followup_unavailable'}
+            job = await followups.create(conversation_id=conversation_id, kind='condition', payload={'entity_id':entity_id, 'state':wanted}, due_at=datetime.now(timezone.utc))
+            return {'success':True, 'response':f"I’ll let you know here when {entity_id} reports {wanted}.", 'intent':'followup_condition', 'job':job}
+        periodic = _FOLLOWUP_PERIODIC_PATTERN.match(text)
+        if periodic:
+            entity_id, amount, unit = periodic.groups(); interval = int(amount or 60) * (60 if (unit or 'minutes').startswith('minute') else 1)
+            states = {str(item.get('entity_id')): item for item in await tools.readable_entity_states(refresh=True)}
+            if entity_id not in states or interval < 10: return {'success':False, 'response':"I can’t safely monitor that request.", 'intent':'followup_unavailable'}
+            job = await followups.create(conversation_id=conversation_id, kind='periodic', payload={'entity_id':entity_id, 'baseline':str(states[entity_id].get('state')), 'interval_seconds':interval}, due_at=datetime.now(timezone.utc)+timedelta(seconds=interval))
+            return {'success':True, 'response':f"I’ll monitor {entity_id} and update you here if it changes.", 'intent':'followup_periodic', 'job':job}
+        return None
+    amount, unit = int(match.group(1)), match.group(2).lower()
+    seconds = amount * (60 if unit.startswith("minute") else 1)
+    if seconds < 1 or seconds > 7 * 24 * 3600:
+        return {"success": False, "response": "I couldn’t safely schedule that delay.", "intent": "followup_invalid"}
+    job = await followups.create(
+        conversation_id=conversation_id,
+        kind="time",
+        payload={"message": "I completed the follow-up check you requested."},
+        due_at=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+    )
+    return {
+        "success": True,
+        "response": f"I’ll check again in {amount} {unit} and update you here.",
+        "intent": "followup_time",
+        "job": job,
+    }
+
+
 def _conversation_scope(
     conversation_id: str | None,
     user_key: str,
@@ -455,10 +536,12 @@ async def lifespan(_: FastAPI):
         )
 
     try:
+        await followups.start()
         await proactive_engine.start()
         await vision_engine.start()
         yield
     finally:
+        await followups.stop()
         await vision_engine.stop()
         await proactive_engine.stop()
         await awareness.stop()
@@ -1109,6 +1192,27 @@ async def _execute_ai_request(
         source=f"home_assistant:{actor.user_key}",
     )
     storage_conversation_id = str(conversation["conversation_id"])
+
+    followup_result = await _try_create_time_followup(
+        request.text,
+        storage_conversation_id,
+    )
+    if followup_result is not None:
+        response = str(followup_result["response"])
+        await conversations.add_user_message(conversation_id=storage_conversation_id, content=request.text)
+        await conversations.add_assistant_message(conversation_id=storage_conversation_id, content=response)
+        followup_result.update({
+            "model": "followup-engine",
+            "deterministic": True,
+            "tool_called": False,
+            "tool_rounds": 0,
+            "calls": [],
+            "memory_used": False,
+        })
+        result = followup_result
+        result["conversation_id"] = external_conversation_id
+        result["message_count"] = await conversations.message_count(storage_conversation_id)
+        return result
 
     proactive_reply = await proactive_engine.handle_reply(
         request.text, actor.user_key
