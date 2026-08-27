@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 
 
@@ -25,6 +26,21 @@ def normalise_user_key(user_id: str | None, display_name: str | None) -> str:
         (user_id or "anonymous").casefold(),
     ).strip("_")
     return (fallback or "anonymous")[:64]
+
+
+def scope_conversation_id(
+    conversation_id: str | None,
+    user_key: str,
+) -> tuple[str, str]:
+    """Return a public conversation ID and a user-isolated storage ID."""
+
+    owner = str(user_key or "").strip()
+    if not owner:
+        raise ValueError("A user scope is required")
+    external_id = str(conversation_id or "").strip() or str(uuid.uuid4())
+    if external_id.startswith(f"usr:{owner}:"):
+        return external_id, external_id
+    return external_id, f"usr:{owner}:{external_id}"
 
 
 @dataclass(frozen=True, slots=True)

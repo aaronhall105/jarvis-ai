@@ -1,3 +1,4 @@
+import asyncio
 import tempfile
 import unittest
 from datetime import timedelta
@@ -8,8 +9,13 @@ from app.followup_engine import FollowUpEngine
 class Conversations:
     def __init__(self):
         self.messages = []
+        self.delivery_keys = set()
 
-    async def add_assistant_message(self, conversation_id, content):
+    async def add_assistant_message(self, conversation_id, content, *, delivery_key=None):
+        if delivery_key is not None and delivery_key in self.delivery_keys:
+            return {}
+        if delivery_key is not None:
+            self.delivery_keys.add(delivery_key)
         self.messages.append((conversation_id, content))
         return {}
 
@@ -202,3 +208,66 @@ class FollowupTests(unittest.IsolatedAsyncioTestCase):
             self.conversations.messages,
         )
         self.assertEqual("failed", (await self.engine.get(job["job_id"]))["status"])
+
+    async def test_health_snapshot_reports_worker_and_durable_database_state(self):
+        stopped = await self.engine.health_snapshot()
+        self.assertFalse(stopped["healthy"])
+        self.assertEqual("degraded", stopped["status"])
+        self.assertEqual("stopped", stopped["worker_state"])
+        self.assertFalse(stopped["worker_running"])
+        self.assertTrue(stopped["database_healthy"])
+        self.assertEqual({"running": False, "state": "stopped"}, stopped["worker"])
+        self.assertEqual({"healthy": True}, stopped["database"])
+
+        await self.engine.start()
+        try:
+            running = await self.engine.health_snapshot()
+            self.assertTrue(running["healthy"])
+            self.assertEqual("healthy", running["status"])
+            self.assertEqual("running", running["worker_state"])
+            self.assertTrue(running["worker_running"])
+            self.assertTrue(running["database_healthy"])
+            self.assertIsNone(running["reason"])
+        finally:
+            await self.engine.stop()
+
+        stopped_again = await self.engine.health_snapshot()
+        self.assertFalse(stopped_again["healthy"])
+        self.assertEqual("stopped", stopped_again["worker_state"])
+        self.assertTrue(stopped_again["database_healthy"])
+
+    async def test_health_snapshot_redacts_database_failure_details(self):
+        self.engine.path = self.engine.path.parent
+        snapshot = await self.engine.health_snapshot()
+        self.assertFalse(snapshot["healthy"])
+        self.assertFalse(snapshot["database_healthy"])
+        self.assertEqual({"healthy": False}, snapshot["database"])
+        self.assertNotIn(self.tmp.name, repr(snapshot))
+        self.assertNotIn("payload", repr(snapshot).lower())
+
+    async def test_start_replaces_finished_or_failed_worker_task(self):
+        async def finish():
+            return None
+
+        finished = asyncio.create_task(finish())
+        await finished
+        self.engine._task = finished
+        await self.engine.start()
+        replacement = self.engine._task
+        self.assertIsNot(replacement, finished)
+        self.assertIsNotNone(replacement)
+        self.assertFalse(replacement.done())
+        await self.engine.stop()
+
+        async def fail():
+            raise RuntimeError("worker stopped")
+
+        failed = asyncio.create_task(fail())
+        await asyncio.gather(failed, return_exceptions=True)
+        self.engine._task = failed
+        await self.engine.start()
+        replacement = self.engine._task
+        self.assertIsNot(replacement, failed)
+        self.assertIsNotNone(replacement)
+        self.assertFalse(replacement.done())
+        await self.engine.stop()

@@ -36,6 +36,34 @@ class FakeTools:
         return {"success": True, "entities": []}
 
 
+class FakeExternalRuntime:
+    def __init__(self, tools):
+        self.tools = tools
+
+    async def execute(self, capability_id, payload, *, operation, **kwargs):
+        del capability_id, kwargs
+        if operation == "control_area_lights":
+            data = await self.tools.control_area_lights(
+                payload["area_id"], payload["action"] == "turn_on"
+            )
+            receipt = {"status": "verified"}
+            status = "verified"
+        elif operation == "search_entity_states":
+            data = await self.tools.search_entity_states(**payload)
+            receipt = None
+            status = "succeeded"
+        else:
+            raise AssertionError(f"Unexpected fixture operation: {operation}")
+        return {
+            "success": True,
+            "accepted": True,
+            "status": status,
+            "data": data,
+            "provider_reference": payload.get("area_id"),
+            "receipt": receipt,
+        }
+
+
 def actor(*, voice=True, area="living_room"):
     return UserContext.from_request(
         user_id="aaron",
@@ -52,6 +80,7 @@ class RoomAwareVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.engine = AIEngine.__new__(AIEngine)
         self.engine.registry = FakeRegistry()
         self.engine.tools = FakeTools()
+        self.engine.external_runtime = FakeExternalRuntime(self.engine.tools)
         self.engine.code_awareness = None
 
     async def execute(self, name, arguments, text, current_actor=None):

@@ -153,6 +153,18 @@ def configuration_report(settings: Any, realtime_status: Any) -> dict[str, Any]:
             warnings.append("JARVIS_MEMORY_ADMIN_TOKEN is unset; memory administration REST endpoints stay disabled")
         if not str(getattr(settings, "jarvis_self_improvement_admin_token", "") or "").strip():
             warnings.append("JARVIS_SELF_IMPROVEMENT_ADMIN_TOKEN is unset; improvement administration REST endpoints stay disabled")
+        if not str(getattr(settings, "jarvis_integrations_admin_token", "") or "").strip():
+            warnings.append(
+                "JARVIS_INTEGRATIONS_ADMIN_TOKEN is unset; connector, receipt, "
+                "plan and monitor administration endpoints stay disabled"
+            )
+
+    if bool(getattr(settings, "jarvis_external_agent_enabled", False)) and not bool(
+        getattr(settings, "jarvis_web_search_enabled", False)
+    ):
+        warnings.append(
+            "External agent mode is enabled but live web search is disabled"
+        )
 
     return {
         "valid": not errors,

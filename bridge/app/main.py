@@ -9,7 +9,7 @@ import re
 import secrets
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -19,11 +19,13 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from pydantic import BaseModel, Field
 
 from app.admin_engine import AdminEngine
+from app.agent_planner import PlanStatus
 from app.ai_engine import AIEngine, AIEngineError
 from app.code_awareness import CodeAwarenessEngine
 from app.config import get_settings
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
+from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.followup_schedule import resolve_schedule
 from app.intent_engine import IntentEngine, IntentError
@@ -47,7 +49,7 @@ from app.registry import RegistryEngine
 from app.realtime_voice import RealtimeVoiceProxy
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
-from app.user_context import UserContext
+from app.user_context import UserContext, scope_conversation_id
 from app.speech_corrections import SpeechCorrectionEngine
 from app.runtime_observability import configuration_report, runtime_metrics
 from app.system_diagnostics import build_voice_reliability_report
@@ -71,11 +73,6 @@ memory = MemoryEngine(
 )
 conversations = ConversationEngine(
     database_path="/app/data/jarvis_conversations.db",
-)
-followups = FollowUpEngine(
-    database_path="/app/data/jarvis_followups.db",
-    conversations=conversations,
-    states=tools,
 )
 dialogue = DialogueManager(
     database_path="/app/data/jarvis_dialogue.db",
@@ -106,6 +103,80 @@ admin = AdminEngine(
     enabled=settings.jarvis_admin_mode_enabled,
     confirmation_ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
 )
+external_agent = ExternalAgentRuntime(
+    api_key=settings.openai_api_key,
+    web_model=settings.jarvis_web_search_model,
+    external_enabled=settings.jarvis_external_agent_enabled,
+    web_enabled=(
+        settings.jarvis_external_agent_enabled
+        and settings.jarvis_web_search_enabled
+    ),
+    home_assistant=home_assistant,
+    tools=tools,
+    admin=admin,
+    health_ttl_seconds=settings.jarvis_connector_health_ttl_seconds,
+    connector_timeout_seconds=settings.jarvis_connector_timeout_seconds,
+)
+followups = FollowUpEngine(
+    database_path="/app/data/jarvis_followups.db",
+    conversations=conversations,
+    states=tools,
+    external_evaluator=(
+        external_agent
+        if settings.jarvis_external_agent_enabled
+        else None
+    ),
+)
+
+
+async def _persist_external_monitor(
+    conversation_id: str,
+    payload: Mapping[str, object],
+    polling_interval_seconds: int,
+    request_id: str | None,
+) -> Mapping[str, object]:
+    return await followups.create(
+        conversation_id=conversation_id,
+        kind="external_monitor",
+        payload=dict(payload),
+        due_at=(
+            datetime.now(timezone.utc)
+            + timedelta(seconds=polling_interval_seconds)
+        ),
+        idempotency_key=request_id,
+    )
+
+
+async def _list_external_monitors_for_conversation(
+    conversation_id: str,
+    status: str | None,
+    limit: int,
+) -> Sequence[Mapping[str, object]]:
+    return await followups.list(
+        conversation_id=conversation_id,
+        kind="external_monitor",
+        status=status,
+        limit=limit,
+    )
+
+
+async def _cancel_external_monitor_for_conversation(
+    conversation_id: str,
+    job_id: str,
+) -> Mapping[str, object] | None:
+    return await followups.cancel(
+        job_id,
+        kind="external_monitor",
+        conversation_id=conversation_id,
+    )
+
+
+external_agent.set_monitor_creator(
+    _persist_external_monitor,
+    lookup=followups.get_by_idempotency_key,
+    lister=_list_external_monitors_for_conversation,
+    canceller=_cancel_external_monitor_for_conversation,
+)
 intents = IntentEngine(registry, tools)
 speech_corrections = SpeechCorrectionEngine(
     "/app/data/jarvis_speech_corrections.db"
@@ -122,7 +193,15 @@ ai = AIEngine(
     awareness=awareness,
     code_awareness=code_awareness,
     speech_corrections=speech_corrections,
+    # The runtime is always present for durable Home Assistant write receipts.
+    # Its own enabled flag independently controls optional external-agent tools.
+    external_runtime=external_agent,
 )
+
+_external_agent_state: dict[str, object] = {
+    "initialized": False,
+    "error": None,
+}
 
 
 realtime_voice = RealtimeVoiceProxy.from_environment()
@@ -277,6 +356,7 @@ class TextCommandRequest(BaseModel):
         examples=["Turn the living room lights off"],
     )
     conversation_id: str | None = None
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
     user_id: str | None = None
     user_name: str | None = None
     user_is_admin: bool = False
@@ -287,6 +367,50 @@ class TextCommandRequest(BaseModel):
     voice_session_turn: int | None = None
     voice_endpoint_kind: str | None = None
     voice_mode: bool = False
+
+
+class AgentPlanStepRequest(BaseModel):
+    step_id: str = Field(min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=500)
+    capability_id: str = Field(min_length=3, max_length=200)
+    access: str = Field(default="read", pattern="^(read|write)$")
+    evidence: str = Field(default="accepted", pattern="^(accepted|verified)$")
+    arguments: dict[str, object] = Field(default_factory=dict)
+    depends_on: list[str] = Field(default_factory=list, max_length=20)
+    risk: str = Field(
+        default="low",
+        pattern="^(low|moderate|high|critical)$",
+    )
+    requires_confirmation: bool = False
+    max_attempts: int = Field(default=1, ge=1, le=3)
+
+
+class AgentPlanRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=200)
+    goal: str = Field(min_length=1, max_length=2000)
+    steps: list[AgentPlanStepRequest] = Field(min_length=2, max_length=12)
+    start: bool = True
+
+
+class AgentReplanRequest(BaseModel):
+    goal: str | None = Field(default=None, min_length=1, max_length=2000)
+    steps: list[AgentPlanStepRequest] = Field(min_length=1, max_length=12)
+    start: bool = True
+
+
+class ExternalMonitorRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=200)
+    provider: str = Field(min_length=1, max_length=100)
+    capability_id: str = Field(min_length=3, max_length=200)
+    query: object | None = None
+    operation: object | None = None
+    arguments: dict[str, object] = Field(default_factory=dict)
+    value_path: str | None = Field(default=None, max_length=300)
+    comparison: object = "changed"
+    polling_interval_seconds: int = Field(default=900, ge=10, le=2_592_000)
+    label: str | None = Field(default=None, max_length=200)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    request_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ImprovementActionRequest(BaseModel):
@@ -312,7 +436,11 @@ async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str
     match = _FOLLOWUP_AFTER_PATTERN.match(text)
     if match is None:
         if _FOLLOWUP_COMPLETION_PATTERN.match(text):
-            active = [job for job in await followups.active_for_conversation(conversation_id) if job.get('kind') != 'completion']
+            active = [
+                job
+                for job in await followups.active_for_conversation(conversation_id)
+                if job.get("kind") != "completion"
+            ]
             if len(active) != 1:
                 return {'success':False, 'response':"I can’t identify one verified running job to watch.", 'intent':'followup_unavailable'}
             source = active[0]
@@ -369,21 +497,6 @@ async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str
         "intent": "followup_time",
         "job": job,
     }
-
-
-def _conversation_scope(
-    conversation_id: str | None,
-    user_key: str,
-) -> tuple[str, str]:
-    """Return the external HA ID and isolated local storage ID."""
-
-    external_id = (conversation_id or "").strip() or str(uuid.uuid4())
-
-    # Accept an already-scoped ID from an older in-flight session.
-    if external_id.startswith("usr:"):
-        return external_id, external_id
-
-    return external_id, f"usr:{user_key}:{external_id}"
 
 
 # EVENT LOOP STALL DIAGNOSTICS
@@ -495,6 +608,25 @@ async def lifespan(_: FastAPI):
 
     logger.info("%s starting", settings.jarvis_name)
 
+    try:
+        external_status = await external_agent.initialize()
+        _external_agent_state.update(
+            initialized=True,
+            error=None,
+            startup=external_status,
+        )
+        logger.info(
+            "External agent platform initialized providers=%s available=%s",
+            external_status["connectors"].get("provider_count"),
+            external_status["connectors"].get("available_provider_count"),
+        )
+    except Exception as exc:
+        _external_agent_state.update(
+            initialized=False,
+            error=type(exc).__name__,
+        )
+        logger.exception("External agent platform initialization failed")
+
     status = await connection_test_with_timeout(home_assistant)
 
     if status.connected:
@@ -545,6 +677,7 @@ async def lifespan(_: FastAPI):
         await vision_engine.stop()
         await proactive_engine.stop()
         await awareness.stop()
+        await external_agent.aclose()
         logger.info("%s stopping", settings.jarvis_name)
 
 
@@ -580,7 +713,23 @@ async def health_ready() -> JSONResponse:
     ha_status = await connection_test_with_timeout(home_assistant)
     realtime = realtime_voice.status()
     config = configuration_report(settings, realtime)
-    ready = bool(ha_status.connected and config["valid"])
+    external_health = await external_agent.health_snapshot()
+    followup_health = await followups.health_snapshot()
+    conversation_health = await conversations.health_snapshot()
+    external_database = external_health.get("database") or {}
+    database_healthy = (
+        bool(external_database.get("healthy"))
+        and bool(followup_health.get("database_healthy"))
+        and bool(conversation_health.get("healthy"))
+    )
+    ready = bool(
+        ha_status.connected
+        and config["valid"]
+        and _external_agent_state.get("initialized")
+        and external_health.get("healthy")
+        and followup_health.get("healthy")
+        and database_healthy
+    )
     payload = {
         **_liveness_payload(),
         "status": "ready" if ready else "degraded",
@@ -590,6 +739,24 @@ async def health_ready() -> JSONResponse:
             "message": ha_status.message,
         },
         "configuration": config,
+        "external_agent": {
+            "initialized": bool(_external_agent_state.get("initialized")),
+            "error": _external_agent_state.get("error"),
+            "healthy": external_health.get("healthy"),
+            "configured_provider_count": external_health.get(
+                "configured_provider_count"
+            ),
+            "available_provider_count": external_health.get(
+                "available_provider_count"
+            ),
+        },
+        "followup_worker": followup_health,
+        "database": {
+            "healthy": database_healthy,
+            "external_agent": external_database,
+            "followups": followup_health.get("database"),
+            "conversations": conversation_health,
+        },
         "realtime_voice": {
             "enabled": realtime.get("enabled"),
             "configured": realtime.get("configured"),
@@ -611,6 +778,44 @@ async def system_status() -> dict[str, object]:
         runtime_metrics.record_error("registry", str(exc))
         registry_status = {"error": "registry status unavailable"}
     runtime = runtime_metrics.snapshot()
+    try:
+        external_status: dict[str, object] = await external_agent.health_snapshot()
+    except Exception as exc:
+        logger.exception("External agent status failed")
+        runtime_metrics.record_error("external_agent", str(exc))
+        external_status = {
+            "healthy": False,
+            "error": "external agent status unavailable",
+        }
+    try:
+        followup_status: dict[str, object] = await followups.health_snapshot()
+    except Exception as exc:
+        logger.exception("Follow-up status failed")
+        runtime_metrics.record_error("followups", str(exc))
+        followup_status = {
+            "healthy": False,
+            "database_healthy": False,
+            "error": "follow-up status unavailable",
+        }
+    try:
+        conversation_status: dict[str, object] = (
+            await conversations.health_snapshot()
+        )
+    except Exception as exc:
+        logger.exception("Conversation database status failed")
+        runtime_metrics.record_error("conversations", str(exc))
+        conversation_status = {
+            "healthy": False,
+            "reason": "conversation database status unavailable",
+        }
+    external_database = external_status.get("database")
+    if not isinstance(external_database, dict):
+        external_database = {"healthy": False}
+    database_healthy = (
+        bool(external_database.get("healthy"))
+        and bool(followup_status.get("database_healthy"))
+        and bool(conversation_status.get("healthy"))
+    )
     return {
         "release": JARVIS_RELEASE,
         "core_application_version": CORE_APPLICATION_VERSION,
@@ -619,6 +824,17 @@ async def system_status() -> dict[str, object]:
             "message": ha_status.message,
         },
         "registry": registry_status,
+        "external_agent": {
+            "initialized": bool(_external_agent_state.get("initialized")),
+            **external_status,
+        },
+        "followup_worker": followup_status,
+        "database": {
+            "healthy": database_healthy,
+            "external_agent": external_database,
+            "followups": followup_status.get("database"),
+            "conversations": conversation_status,
+        },
         "realtime_voice": realtime,
         "configuration": configuration_report(settings, realtime),
         "runtime": runtime,
@@ -628,6 +844,228 @@ async def system_status() -> dict[str, object]:
             runtime=runtime,
         ),
     }
+
+
+@app.get("/api/integrations/providers")
+async def integration_providers(
+    refresh: bool = False,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    providers = await external_agent.providers_snapshot(refresh=refresh)
+    return {"count": len(providers), "providers": providers}
+
+
+@app.get("/api/integrations/capabilities")
+async def integration_capabilities(
+    refresh: bool = False,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    capabilities = await external_agent.capability_snapshot(refresh=refresh)
+    return {"count": len(capabilities), "capabilities": capabilities}
+
+
+@app.get("/api/integrations/health")
+async def integration_health(
+    refresh: bool = False,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    return await external_agent.health_snapshot(refresh=refresh)
+
+
+@app.get("/api/integrations/actions")
+async def integration_actions(
+    limit: int = 50,
+    conversation_id: str | None = None,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    receipts = await external_agent.receipts.list_recent(
+        limit=limit,
+        conversation_id=conversation_id,
+    )
+    return {
+        "count": len(receipts),
+        "actions": [receipt.as_dict() for receipt in receipts],
+    }
+
+
+@app.post("/api/agent/plans")
+async def create_agent_plan(
+    request: AgentPlanRequest,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        return await external_agent.create_plan(
+            conversation_id=request.conversation_id,
+            goal=request.goal,
+            steps=[step.model_dump() for step in request.steps],
+            start=request.start,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/agent/plans")
+async def list_agent_plans(
+    conversation_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        resolved_status = PlanStatus(status) if status is not None else None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Unsupported plan status.") from exc
+    plans = await external_agent.planner.list_plans(
+        conversation_id=conversation_id,
+        status=resolved_status,
+        limit=limit,
+    )
+    values = [plan.as_dict() for plan in plans]
+    return {"count": len(values), "plans": values}
+
+
+@app.get("/api/agent/plans/{plan_id}")
+async def get_agent_plan(
+    plan_id: str,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    plan = await external_agent.planner.get(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Agent plan not found.")
+    return plan.as_dict()
+
+
+@app.post("/api/agent/plans/{plan_id}/resume")
+async def resume_agent_plan(
+    plan_id: str,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        return (await external_agent.planner.resume(plan_id)).as_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent plan not found.") from exc
+
+
+@app.post("/api/agent/plans/{plan_id}/replan")
+async def replan_agent_plan(
+    plan_id: str,
+    request: AgentReplanRequest,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        return await external_agent.replan(
+            plan_id,
+            goal=request.goal,
+            steps=[step.model_dump() for step in request.steps],
+            start=request.start,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent plan not found.") from exc
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/plans/{plan_id}/steps/{step_id}/approve")
+async def approve_agent_plan_step(
+    plan_id: str,
+    step_id: str,
+    approved: bool = True,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        plan = await external_agent.planner.approve(
+            plan_id,
+            step_id,
+            approved=approved,
+        )
+        return (await external_agent.planner.resume(plan.plan_id)).as_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent plan or step not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/plans/{plan_id}/cancel")
+async def cancel_agent_plan(
+    plan_id: str,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        return (await external_agent.planner.cancel(plan_id)).as_dict()
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Agent plan not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/external-monitors")
+async def create_external_monitor(
+    request: ExternalMonitorRequest,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        result = await external_agent.create_external_monitor(
+            conversation_id=request.conversation_id,
+            principal_id="integrations_api",
+            provider=request.provider,
+            capability_id=request.capability_id,
+            query=request.query,
+            operation=request.operation,
+            arguments=request.arguments,
+            value_path=request.value_path,
+            comparison=request.comparison,
+            polling_interval_seconds=request.polling_interval_seconds,
+            label=request.label,
+            max_attempts=request.max_attempts,
+            request_id=request.request_id,
+        )
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@app.get("/api/external-monitors")
+async def list_external_monitors(
+    conversation_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    try:
+        jobs = await followups.list(
+            conversation_id=conversation_id,
+            kind="external_monitor",
+            status=status,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"count": len(jobs), "monitors": jobs}
+
+
+@app.post("/api/external-monitors/{job_id}/cancel")
+async def cancel_external_monitor(
+    job_id: str,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    job = await followups.cancel(job_id, kind="external_monitor")
+    if job is None:
+        raise HTTPException(status_code=404, detail="External monitor not found.")
+    return {"success": job.get("status") == "cancelled", "job": job}
 
 
 @app.get("/api/home-assistant/status")
@@ -681,6 +1119,20 @@ def _privileged_admin_token_valid(
             supplied,
         )
     )
+
+
+def _require_integrations_token(token: str | None) -> None:
+    """Protect provider, receipt, plan and monitor administration APIs."""
+
+    expected = settings.jarvis_integrations_admin_token.strip()
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="JARVIS_INTEGRATIONS_ADMIN_TOKEN is not configured.",
+        )
+    supplied = str(token or "").strip()
+    if not supplied or not secrets.compare_digest(expected, supplied):
+        raise HTTPException(status_code=403, detail="Invalid integrations token.")
 
 
 def _require_improvement_token(token: str | None) -> None:
@@ -1057,14 +1509,49 @@ async def area_lights(area_id: str) -> dict[str, object]:
     }
 
 
+async def _execute_home_api_action(
+    *,
+    operation: str,
+    payload: dict[str, object],
+    target: str,
+    request_id: str | None,
+) -> dict[str, object]:
+    execution = await external_agent.execute(
+        "homeassistant.control",
+        payload,
+        operation=operation,
+        principal_id="core_api",
+        request_id=request_id or str(uuid.uuid4()),
+        target=target,
+        idempotency_key=(
+            f"{request_id}:{operation}:{target}" if request_id else None
+        ),
+    )
+    data = execution.get("data")
+    result = dict(data) if isinstance(data, dict) else {}
+    result.update(
+        success=bool(execution.get("success")),
+        accepted=bool(execution.get("accepted")),
+        execution_status=execution.get("status"),
+        provider_reference=execution.get("provider_reference"),
+        action_receipt=execution.get("receipt"),
+    )
+    if execution.get("error") and not result.get("response_message"):
+        result["response_message"] = execution["error"]
+    return result
+
+
 @app.post("/api/tools/lights/{area_id}/on")
 async def turn_area_lights_on(
     area_id: str,
+    x_request_id: str | None = Header(default=None),
 ) -> dict[str, object]:
     try:
-        return await tools.control_area_lights(
-            area_id=area_id,
-            turn_on=True,
+        return await _execute_home_api_action(
+            operation="control_area_lights",
+            payload={"area_id": area_id, "action": "turn_on"},
+            target=area_id,
+            request_id=x_request_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1076,11 +1563,14 @@ async def turn_area_lights_on(
 @app.post("/api/tools/lights/{area_id}/off")
 async def turn_area_lights_off(
     area_id: str,
+    x_request_id: str | None = Header(default=None),
 ) -> dict[str, object]:
     try:
-        return await tools.control_area_lights(
-            area_id=area_id,
-            turn_on=False,
+        return await _execute_home_api_action(
+            operation="control_area_lights",
+            payload={"area_id": area_id, "action": "turn_off"},
+            target=area_id,
+            request_id=x_request_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1120,11 +1610,14 @@ async def search_devices(
 @app.post("/api/tools/devices/{entity_id:path}/on")
 async def turn_device_on(
     entity_id: str,
+    x_request_id: str | None = Header(default=None),
 ) -> dict[str, object]:
     try:
-        return await tools.control_device(
-            entity_id=entity_id,
-            turn_on=True,
+        return await _execute_home_api_action(
+            operation="control_device",
+            payload={"entity_id": entity_id, "action": "turn_on"},
+            target=entity_id,
+            request_id=x_request_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1136,11 +1629,14 @@ async def turn_device_on(
 @app.post("/api/tools/devices/{entity_id:path}/off")
 async def turn_device_off(
     entity_id: str,
+    x_request_id: str | None = Header(default=None),
 ) -> dict[str, object]:
     try:
-        return await tools.control_device(
-            entity_id=entity_id,
-            turn_on=False,
+        return await _execute_home_api_action(
+            operation="control_device",
+            payload={"entity_id": entity_id, "action": "turn_off"},
+            target=entity_id,
+            request_id=x_request_id,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -1154,7 +1650,33 @@ async def assistant_text(
     request: TextCommandRequest,
 ) -> dict[str, object]:
     try:
-        return await intents.execute(request.text)
+        parsed = await intents.parse(request.text)
+        action = "turn_on" if parsed.intent.endswith("turn_on") else "turn_off"
+        result = await _execute_home_api_action(
+            operation="control_area_lights",
+            payload={"area_id": parsed.area_id, "action": action},
+            target=parsed.area_id,
+            request_id=request.request_id,
+        )
+        action_text = "turned on" if action == "turn_on" else "turned off"
+        entities = result.get("entities")
+        entity_count = len(entities) if isinstance(entities, list) else 0
+        if result.get("success"):
+            response = (
+                f"I have {action_text} {entity_count} light"
+                f"{'' if entity_count == 1 else 's'} in the {parsed.area_name}."
+            )
+        else:
+            response = str(
+                result.get("response_message")
+                or "The request could not be verified as completed."
+            )
+        return {
+            "success": bool(result.get("success")),
+            "response": response,
+            "parsed": parsed.as_dict(),
+            "result": result,
+        }
     except IntentError as exc:
         raise HTTPException(
             status_code=400,
@@ -1182,7 +1704,7 @@ async def _execute_ai_request(
         privilege_verified=privilege_verified,
         area_id=request.area_id,
     )
-    external_conversation_id, storage_conversation_id = _conversation_scope(
+    external_conversation_id, storage_conversation_id = scope_conversation_id(
         request.conversation_id,
         actor.user_key,
     )
@@ -1409,6 +1931,7 @@ async def _execute_ai_request(
                 actor=actor,
                 on_text_delta=on_text_delta,
                 trusted_context=trusted_context,
+                request_id=request.request_id,
             )
 
     if vision_payload:
@@ -1500,6 +2023,13 @@ async def _realtime_brain_handler(
     request = TextCommandRequest(
         text=text,
         conversation_id=conversation_id,
+        request_id=(
+            str(
+                metadata.get("client_turn_id")
+                or metadata.get("request_id")
+                or uuid.uuid4()
+            )
+        ),
         user_id=user_id,
         user_name=user_name,
         user_is_admin=bool(

@@ -104,6 +104,7 @@ class ConversationEngine:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    delivery_key TEXT,
                     FOREIGN KEY (conversation_id)
                         REFERENCES conversations(conversation_id)
                         ON DELETE CASCADE
@@ -123,6 +124,56 @@ class ConversationEngine:
                 );
                 """
             )
+
+            # Existing production databases predate idempotent delivery keys.
+            # SQLite's ``CREATE TABLE IF NOT EXISTS`` does not add new columns,
+            # so make the additive migration explicitly before creating the
+            # unique index.  NULL keeps every historical message valid.
+            message_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(messages)"
+                ).fetchall()
+            }
+            if "delivery_key" not in message_columns:
+                connection.execute(
+                    "ALTER TABLE messages ADD COLUMN delivery_key TEXT"
+                )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    idx_messages_delivery_key
+                ON messages (delivery_key)
+                WHERE delivery_key IS NOT NULL
+                """
+            )
+
+    def _health_snapshot_sync(self) -> dict[str, object]:
+        try:
+            with self._connect() as connection:
+                result = connection.execute("PRAGMA quick_check(1)").fetchone()
+                tables = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+            healthy = bool(
+                result
+                and str(result[0]).casefold() == "ok"
+                and {"conversations", "messages"}.issubset(tables)
+            )
+        except sqlite3.Error:
+            healthy = False
+        return {
+            "healthy": healthy,
+            "reason": None if healthy else "Conversation database probe failed",
+        }
+
+    async def health_snapshot(self) -> dict[str, object]:
+        """Return a redaction-safe live integrity probe for durable chat state."""
+
+        return await asyncio.to_thread(self._health_snapshot_sync)
 
     def _create_conversation_sync(
         self,
@@ -273,9 +324,15 @@ class ConversationEngine:
         conversation_id: str,
         role: str,
         content: str,
+        delivery_key: str | None = None,
     ) -> ConversationMessage:
         resolved_role = role.strip().lower()
         resolved_content = content.strip()
+        resolved_delivery_key = (
+            delivery_key.strip()
+            if delivery_key is not None
+            else None
+        )
 
         if resolved_role not in VALID_ROLES:
             raise ValueError(
@@ -285,6 +342,19 @@ class ConversationEngine:
         if not resolved_content:
             raise ValueError(
                 "Conversation message content cannot be empty."
+            )
+
+        if delivery_key is not None and not resolved_delivery_key:
+            raise ValueError(
+                "Conversation message delivery key cannot be empty."
+            )
+
+        if (
+            resolved_delivery_key is not None
+            and len(resolved_delivery_key) > 255
+        ):
+            raise ValueError(
+                "Conversation message delivery key is too long."
             )
 
         now = self._utc_now()
@@ -305,23 +375,83 @@ class ConversationEngine:
                     f"{conversation_id}"
                 )
 
+            if resolved_delivery_key is not None:
+                existing = connection.execute(
+                    """
+                    SELECT
+                        message_id,
+                        conversation_id,
+                        role,
+                        content,
+                        created_at
+                    FROM messages
+                    WHERE delivery_key = ?
+                    """,
+                    (resolved_delivery_key,),
+                ).fetchone()
+                if existing is not None:
+                    if (
+                        str(existing["conversation_id"])
+                        != conversation_id
+                        or str(existing["role"]) != resolved_role
+                        or str(existing["content"])
+                        != resolved_content
+                    ):
+                        raise ValueError(
+                            "Conversation message delivery key was already "
+                            "used for a different message."
+                        )
+                    return ConversationMessage(**dict(existing))
+
             cursor = connection.execute(
                 """
-                INSERT INTO messages (
+                INSERT OR IGNORE INTO messages (
                     conversation_id,
                     role,
                     content,
-                    created_at
+                    created_at,
+                    delivery_key
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     conversation_id,
                     resolved_role,
                     resolved_content,
                     now,
+                    resolved_delivery_key,
                 ),
             )
+
+            if cursor.rowcount == 0 and resolved_delivery_key is not None:
+                existing = connection.execute(
+                    """
+                    SELECT
+                        message_id,
+                        conversation_id,
+                        role,
+                        content,
+                        created_at
+                    FROM messages
+                    WHERE delivery_key = ?
+                    """,
+                    (resolved_delivery_key,),
+                ).fetchone()
+                if existing is None:
+                    raise RuntimeError(
+                        "Idempotent conversation delivery could not be resolved."
+                    )
+                if (
+                    str(existing["conversation_id"])
+                    != conversation_id
+                    or str(existing["role"]) != resolved_role
+                    or str(existing["content"]) != resolved_content
+                ):
+                    raise ValueError(
+                        "Conversation message delivery key was already "
+                        "used for a different message."
+                    )
+                return ConversationMessage(**dict(existing))
 
             connection.execute(
                 """
@@ -335,6 +465,8 @@ class ConversationEngine:
                 ),
             )
 
+            if cursor.lastrowid is None:  # pragma: no cover - SQLite insert invariant
+                raise RuntimeError("Conversation message insert returned no row ID.")
             message_id = int(cursor.lastrowid)
 
         return ConversationMessage(
@@ -356,6 +488,7 @@ class ConversationEngine:
             conversation_id,
             role,
             content,
+            None,
         )
 
         return asdict(message)
@@ -375,12 +508,18 @@ class ConversationEngine:
         self,
         conversation_id: str,
         content: str,
+        *,
+        delivery_key: str | None = None,
     ) -> dict[str, Any]:
-        return await self.add_message(
-            conversation_id=conversation_id,
-            role="assistant",
-            content=content,
+        message = await asyncio.to_thread(
+            self._add_message_sync,
+            conversation_id,
+            "assistant",
+            content,
+            delivery_key,
         )
+
+        return asdict(message)
 
     def _get_messages_sync(
         self,

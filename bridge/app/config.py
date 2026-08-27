@@ -10,6 +10,14 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
+    jarvis_external_agent_enabled: bool = True
+    jarvis_web_search_enabled: bool = True
+    jarvis_web_search_model: str = "gpt-5-mini"
+    jarvis_connector_health_ttl_seconds: int = 60
+    jarvis_connector_timeout_seconds: int = 45
+    # Protects setup, receipt, plan and monitor administration endpoints.
+    # When empty, those sensitive endpoints remain unavailable rather than open.
+    jarvis_integrations_admin_token: str = ""
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
 

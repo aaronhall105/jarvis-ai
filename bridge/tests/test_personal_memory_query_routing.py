@@ -3,6 +3,9 @@ from app.ai_engine import (
     RequestRouter,
     unbacked_future_promise_reply,
     unsupported_external_capability_reply,
+    verified_monitor_creation_reply,
+    verified_plan_creation_reply,
+    unbacked_external_write_claim_reply,
 )
 
 
@@ -70,12 +73,175 @@ def test_unavailable_external_capability_cannot_be_claimed() -> None:
     assert "don’t have a connected" in reply
     assert unsupported_external_capability_reply(
         "Can you submit a support ticket?", [{"tool": "support_ticket"}]
+    ) is not None
+    assert unsupported_external_capability_reply(
+        "Can you submit a support ticket?",
+        [
+            {
+                "tool": "support_ticket",
+                "result": {
+                    "success": True,
+                    "status": "verified",
+                    "provider_reference": "ticket-1",
+                },
+            }
+        ],
+    ) is None
+
+
+def test_book_research_is_not_misclassified_as_a_booking_action() -> None:
+    assert unsupported_external_capability_reply(
+        "Find the latest book recommendations.",
+        [],
     ) is None
 
 
 def test_unbacked_future_commitment_is_blocked() -> None:
     assert unbacked_future_promise_reply("I'll get back to you later.", []) is not None
-    assert unbacked_future_promise_reply("I'll get back to you later.", [{"tool": "task"}]) is None
+    assert unbacked_future_promise_reply(
+        "I'll get back to you later.", [{"tool": "task"}]
+    ) is not None
+    assert unbacked_future_promise_reply("I'll keep an eye on it.", []) is not None
+    assert unbacked_future_promise_reply("I'll watch it.", []) is not None
+    assert unbacked_future_promise_reply("I'll notify you when it changes.", []) is not None
+    assert unbacked_future_promise_reply("I'll keep you posted.", []) is not None
+    assert unbacked_future_promise_reply(
+        "I'll get back to you later.",
+        [{"tool": "task", "result": {"success": True, "job_id": "job-1"}}],
+    ) is None
+
+
+def test_monitor_creation_reply_never_exposes_or_embellishes_baseline() -> None:
+    reply = verified_monitor_creation_reply(
+        [
+            {
+                "tool": "create_external_monitor",
+                "result": {
+                    "success": True,
+                    "job_id": "monitor-1",
+                    "baseline": {"captured": True, "size_bytes": 120_000},
+                },
+            }
+        ]
+    )
+    assert reply is not None
+    assert "monitor-1" in reply
+    assert "120" not in reply
+    assert "baseline" in reply
+    assert verified_monitor_creation_reply(
+        [{"tool": "create_external_monitor", "result": {"success": False}}]
+    ) is None
+
+
+def test_unverified_external_write_completion_claim_is_blocked() -> None:
+    assert unbacked_external_write_claim_reply(
+        "I've sent the email.", []
+    ) is not None
+    assert unbacked_external_write_claim_reply(
+        "I drafted the email for your review.", []
+    ) is None
+
+
+def test_created_but_blocked_plan_is_never_described_as_completed() -> None:
+    call = {
+        "tool": "create_personal_plan",
+        "result": {
+            "success": True,
+            "plan_created": True,
+            "goal_completed": False,
+            "data": {
+                "plan": {
+                    "plan_id": "plan-1",
+                    "status": "blocked",
+                    "steps": [
+                        {
+                            "status": "blocked",
+                            "capability": {
+                                "capability_id": "calendar.create",
+                                "access": "write",
+                            },
+                            "failure": {
+                                "message": "Calendar is not configured."
+                            },
+                            "action_receipt": None,
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    reply = verified_plan_creation_reply([call])
+
+    assert reply is not None
+    assert "has not completed" in reply
+    assert "blocked" in reply
+    assert "Calendar is not configured" in reply
+    assert unsupported_external_capability_reply(
+        "Book it and put it in my calendar.", [call]
+    ) is not None
+    assert unbacked_external_write_claim_reply(
+        "The booking was confirmed.", [call]
+    ) is not None
+
+
+def test_completed_plan_write_requires_nested_verified_receipt() -> None:
+    call = {
+        "tool": "create_personal_plan",
+        "result": {
+            "success": True,
+            "plan_created": True,
+            "goal_completed": True,
+            "data": {
+                "plan": {
+                    "plan_id": "plan-2",
+                    "status": "completed",
+                    "steps": [
+                        {
+                            "status": "succeeded",
+                            "capability": {
+                                "capability_id": "calendar.create",
+                                "access": "write",
+                            },
+                            "action_receipt": {"status": "verified"},
+                        }
+                    ],
+                }
+            },
+        },
+    }
+
+    assert "completed" in (verified_plan_creation_reply([call]) or "")
+    assert unsupported_external_capability_reply(
+        "Book it and put it in my calendar.", [call]
+    ) is None
+    assert unbacked_external_write_claim_reply(
+        "The booking was confirmed.", [call]
+    ) is None
+    assert unbacked_external_write_claim_reply(
+        "I've sent the email.",
+        [
+            {
+                "tool": "email_send",
+                "result": {
+                    "success": True,
+                    "receipt": {"status": "accepted_unverified"},
+                },
+            }
+        ],
+    ) is not None
+    assert unbacked_external_write_claim_reply(
+        "I've sent the email.",
+        [
+            {
+                "tool": "email_send",
+                "result": {
+                    "success": True,
+                    "receipt": {"status": "verified"},
+                },
+            }
+        ],
+    ) is None
 
 
 def test_motion_sensor_question_remains_live_state() -> None:

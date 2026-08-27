@@ -5,10 +5,11 @@ import logging
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+import uuid
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from openai import (
@@ -37,6 +38,9 @@ from app.tool_outcomes import request_tool_success
 from app.tone_engine import ToneEngine, ToneProfile
 from app.understanding_engine import UnderstandingEngine
 from app.user_context import UserContext
+
+if TYPE_CHECKING:
+    from app.external_agent_runtime import ExternalAgentRuntime
 
 
 logger = logging.getLogger("jarvis-core.ai")
@@ -568,15 +572,81 @@ _SECRET_PATTERN = re.compile(
 _UNSUPPORTED_EXTERNAL_ACTION_PATTERN = re.compile(
     r"\b(?:submit|create|open)\s+(?:a\s+)?support\s+ticket\b|"
     r"\b(?:send|email|contact|message)\s+(?:support|customer service)\b|"
-    r"\b(?:book|reserve)\b",
+    r"\b(?:send|reply to|forward)\b.{0,80}\b(?:email|message|dm)\b|"
+    r"\b(?:post|publish|schedule)\b.{0,80}\b(?:instagram|facebook|tiktok|twitter|\bx\b|social)\b|"
+    r"\b(?:buy|purchase|order|checkout)\b|"
+    r"\b(?:edit|update)\b.{0,80}\b(?:dating\s+)?profile\b|"
+    r"\b(?:swipe|message a match)\b|"
+    r"\b(?:book|reserve)\s+(?:a|an|the|my|our|this|that|it|them)\b",
     re.I,
 )
 
 _UNBACKED_FUTURE_PROMISE_PATTERN = re.compile(
     r"\b(?:i(?:'ll| will)\s+(?:get back to you|check(?: again| later)?|let you know|"
-    r"monitor|update you)|i(?:'m| am)\s+monitoring)\b",
+    r"monitor|update you|keep an eye(?: on (?:it|this|that))?|"
+    r"watch(?: it| this| that| for .{1,60})?|notify you|alert you|ping you|"
+    r"remind you|tell you|follow up|report back|keep you posted|"
+    r"post (?:an? )?update|continue checking)|"
+    r"i(?:'m| am)\s+(?:monitoring|watching|keeping an eye))\b",
     re.I,
 )
+
+_UNBACKED_EXTERNAL_WRITE_CLAIM_PATTERN = re.compile(
+    r"\b(?:i(?:'ve| have)?\s+sent|email (?:was|has been) sent|message (?:was|has been) sent)\b|"
+    r"\b(?:i(?:'ve| have)?\s+(?:posted|published)|post (?:is|was) live)\b|"
+    r"\b(?:reservation|booking) (?:is|was|has been) confirmed\b|"
+    r"\b(?:order (?:was|has been) placed|i(?:'ve| have)?\s+(?:bought|ordered|purchased))\b|"
+    r"\b(?:dating )?profile (?:was|has been) (?:edited|updated)\b",
+    re.I,
+)
+
+
+def _verified_external_write_evidence(
+    completed_calls: Sequence[dict[str, Any]],
+) -> bool:
+    """Return whether a direct call or completed plan contains a verified write."""
+
+    direct_write_tools = {
+        "support_ticket",
+        "email_send",
+        "calendar_create",
+        "browser_action",
+        "social_publish",
+        "travel_reserve",
+        "shopping_purchase",
+        "dating_profile_update",
+    }
+    for call in completed_calls:
+        result = call.get("result")
+        if not isinstance(result, Mapping):
+            continue
+        if call.get("tool") in direct_write_tools and result.get("success") is True:
+            if result.get("status") == "verified" or any(
+                isinstance(receipt, Mapping)
+                and receipt.get("status") == "verified"
+                for receipt in (result.get("receipt"), result.get("action_receipt"))
+            ):
+                return True
+        if call.get("tool") != "create_personal_plan":
+            continue
+        data = result.get("data")
+        plan = data.get("plan") if isinstance(data, Mapping) else None
+        if not isinstance(plan, Mapping) or plan.get("status") != "completed":
+            continue
+        for step in plan.get("steps") or ():
+            if not isinstance(step, Mapping):
+                continue
+            capability = step.get("capability")
+            if not isinstance(capability, Mapping) or capability.get("access") != "write":
+                continue
+            receipt = step.get("action_receipt")
+            if (
+                step.get("status") == "succeeded"
+                and isinstance(receipt, Mapping)
+                and receipt.get("status") == "verified"
+            ):
+                return True
+    return False
 
 
 def unsupported_external_capability_reply(
@@ -584,11 +654,13 @@ def unsupported_external_capability_reply(
     completed_calls: Sequence[dict[str, Any]],
 ) -> str | None:
     """Block execution claims for integrations that have no registered tool."""
-    if completed_calls or not _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text):
+    if not _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text):
+        return None
+    if _verified_external_write_evidence(completed_calls):
         return None
     return (
-        "I don’t have a connected support, email, or booking integration, so I can’t "
-        "create that external request from Jarvis."
+        "I don’t have a connected, executable provider for that external action, "
+        "so I can’t claim it was done."
     )
 
 
@@ -597,11 +669,114 @@ def unbacked_future_promise_reply(
     completed_calls: Sequence[dict[str, Any]],
 ) -> str | None:
     """Never emit a future commitment unless an execution-backed job exists."""
-    if completed_calls or not _UNBACKED_FUTURE_PROMISE_PATTERN.search(reply):
+    if not _UNBACKED_FUTURE_PROMISE_PATTERN.search(reply):
+        return None
+    durable_job = any(
+        call.get("tool") in {"task", "create_external_monitor", "create_followup"}
+        and isinstance(call.get("result"), Mapping)
+        and call["result"].get("success") is True
+        and bool(
+            call["result"].get("job_id")
+            or (
+                isinstance(call["result"].get("data"), Mapping)
+                and call["result"]["data"].get("job_id")
+            )
+        )
+        for call in completed_calls
+    )
+    if durable_job:
         return None
     return (
         "I can’t schedule or monitor that in the background from this Core yet, so I "
         "won’t promise a later update."
+    )
+
+
+def verified_monitor_creation_reply(
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Return a bounded response that cannot embellish a compact baseline."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "create_external_monitor":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping) or result.get("success") is not True:
+            continue
+        job_id = str(result.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        if result.get("reused") is True:
+            return (
+                f"That durable monitor already exists as job {job_id}. I’ll post "
+                "an evidence-bound update in this conversation if its condition "
+                "is verified."
+            )
+        return (
+            f"I captured a live provider baseline and created durable monitor job "
+            f"{job_id}. I’ll post an evidence-bound update in this conversation "
+            "if its condition is verified."
+        )
+    return None
+
+
+def verified_plan_creation_reply(
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Describe durable plan state without turning plan creation into completion."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "create_personal_plan":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping) or result.get("plan_created") is not True:
+            continue
+        data = result.get("data")
+        plan = data.get("plan") if isinstance(data, Mapping) else None
+        if not isinstance(plan, Mapping):
+            continue
+        plan_id = str(plan.get("plan_id") or "").strip()
+        status = str(plan.get("status") or "unknown").strip().casefold()
+        identifier = f" {plan_id}" if plan_id else ""
+        if status == "completed":
+            return (
+                f"Durable plan{identifier} completed with the required structured "
+                "execution evidence for every step."
+            )
+
+        reason = ""
+        for step in plan.get("steps") or ():
+            if not isinstance(step, Mapping):
+                continue
+            failure = step.get("failure")
+            if isinstance(failure, Mapping) and failure.get("message"):
+                reason = f" {str(failure['message']).strip()}"
+                break
+        if status == "awaiting_approval":
+            return (
+                f"I created durable plan{identifier}, but it has not completed; "
+                f"one or more steps require approval.{reason}"
+            )
+        return (
+            f"I created durable plan{identifier}, but it has not completed "
+            f"(status: {status or 'unknown'}).{reason}"
+        )
+    return None
+
+
+def unbacked_external_write_claim_reply(
+    reply: str,
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Reject fluent external-write claims that lack a verified receipt."""
+
+    if not _UNBACKED_EXTERNAL_WRITE_CLAIM_PATTERN.search(reply):
+        return None
+    if _verified_external_write_evidence(completed_calls):
+        return None
+    return (
+        "I don’t have verified execution evidence for that external write, so I "
+        "can’t claim it was completed."
     )
 
 
@@ -1071,6 +1246,7 @@ class AIEngine:
         awareness: HouseAwarenessEngine,
         code_awareness: CodeAwarenessEngine | None = None,
         speech_corrections: SpeechCorrectionEngine | None = None,
+        external_runtime: "ExternalAgentRuntime | None" = None,
     ) -> None:
         if not api_key.strip():
             raise AIEngineError("OPENAI_API_KEY is not configured.")
@@ -1106,6 +1282,7 @@ class AIEngine:
         self.awareness = awareness
         self.code_awareness = code_awareness
         self.speech_corrections = speech_corrections
+        self.external_runtime = external_runtime
         self.router = RequestRouter()
         self.understanding = UnderstandingEngine(registry)
         self.house_context = HouseContextEngine(registry)
@@ -1910,6 +2087,7 @@ class AIEngine:
         self,
         decision: RoutingDecision,
         actor: UserContext,
+        user_text: str = "",
     ) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = []
 
@@ -1935,6 +2113,12 @@ class AIEngine:
 
         if decision.allow_admin_propose and actor.can_admin:
             definitions.append(self._admin_proposal_tool())
+
+        external_runtime = getattr(self, "external_runtime", None)
+        if external_runtime is not None and user_text:
+            definitions.extend(
+                await external_runtime.openai_tools(user_text)
+            )
 
         return definitions
 
@@ -2001,6 +2185,115 @@ class AIEngine:
             },
         }
 
+    async def _execute_registered_home_action(
+        self,
+        *,
+        capability_id: str,
+        operation: str,
+        arguments: dict[str, Any],
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str,
+        target: Any,
+        confirmed: bool = False,
+    ) -> dict[str, Any]:
+        """Run an HA write through audit/policy when the platform is composed."""
+
+        runtime = getattr(self, "external_runtime", None)
+        if runtime is None:
+            # External writes fail closed when durable receipts are unavailable.
+            return {
+                "success": False,
+                "accepted": False,
+                "execution_status": "unavailable",
+                "response_message": (
+                    "The durable external-action audit runtime is unavailable, "
+                    "so I did not perform the action."
+                ),
+            }
+        execution = await runtime.execute(
+            capability_id,
+            arguments,
+            operation=operation,
+            conversation_id=conversation_id,
+            principal_id=actor.user_key,
+            request_id=request_id,
+            confirmed=confirmed,
+            target=target,
+            idempotency_key=(
+                f"{actor.user_key}:{conversation_id}:{request_id}:"
+                f"{capability_id}:{operation}:{target}"
+            ),
+        )
+        data = execution.get("data")
+        result = dict(data) if isinstance(data, dict) else {}
+        result.update(
+            success=bool(execution.get("success")),
+            accepted=bool(execution.get("accepted")),
+            execution_status=execution.get("status"),
+            provider_reference=execution.get("provider_reference"),
+            action_receipt=execution.get("receipt"),
+        )
+        if result["accepted"] and not result["success"]:
+            if capability_id == "homeassistant.notify":
+                result["response_message"] = (
+                    "Home Assistant accepted the notification request, but device "
+                    "delivery is not verified."
+                )
+            else:
+                result["response_message"] = (
+                    "Home Assistant accepted the action, but I couldn’t verify the "
+                    "resulting state."
+                )
+        if execution.get("error") and not result.get("response_message"):
+            result["response_message"] = str(execution["error"])
+        return result
+
+    async def _execute_registered_home_read(
+        self,
+        *,
+        operation: str,
+        arguments: dict[str, Any],
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str,
+        fallback: Callable[[], Awaitable[dict[str, Any]]],
+        capability_id: str = "homeassistant.read",
+    ) -> dict[str, Any]:
+        runtime = getattr(self, "external_runtime", None)
+        if runtime is None:
+            return await fallback()
+        execution = await runtime.execute(
+            capability_id,
+            arguments,
+            operation=operation,
+            conversation_id=conversation_id,
+            principal_id=actor.user_key,
+            request_id=request_id,
+        )
+        data = execution.get("data")
+        result = dict(data) if isinstance(data, dict) else {}
+        result["success"] = bool(execution.get("success"))
+        if execution.get("error") and not result.get("response_message"):
+            result["response_message"] = str(execution["error"])
+        return result
+
+    async def _legacy_admin_config_result(
+        self, domain: str, config_key: str
+    ) -> dict[str, Any]:
+        config = await self.admin.get_config(domain, config_key)
+        if config is None:
+            return {
+                "success": False,
+                "response_message": "Home Assistant configuration item was not found",
+            }
+        return {
+            "success": True,
+            "domain": domain,
+            "config_key": config_key,
+            "config": config,
+        }
+
     @staticmethod
     def _parse_arguments(arguments_json: str) -> dict[str, Any]:
         try:
@@ -2021,7 +2314,9 @@ class AIEngine:
         authorised_tools: set[str],
         conversation_id: str,
         actor: UserContext,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
+        request_id = str(request_id or uuid.uuid4())
         try:
             arguments = self._parse_arguments(arguments_json)
         except AIEngineError as exc:
@@ -2041,6 +2336,54 @@ class AIEngine:
             )
 
         try:
+            external_runtime = getattr(self, "external_runtime", None)
+            if external_runtime is not None and name in {
+                "web_search",
+                "web_fetch",
+                "deep_research",
+                "create_personal_plan",
+                "create_external_monitor",
+                "list_external_monitors",
+                "cancel_external_monitor",
+            }:
+                if name == "create_personal_plan":
+                    raw_steps = arguments.get("steps")
+                    plan_steps = (
+                        raw_steps
+                        if isinstance(raw_steps, Sequence)
+                        and not isinstance(raw_steps, (str, bytes))
+                        else ()
+                    )
+                    requests_admin_capability = any(
+                        isinstance(step, Mapping)
+                        and str(step.get("capability_id") or "").startswith(
+                            "homeassistant.admin."
+                        )
+                        for step in plan_steps
+                    )
+                    if requests_admin_capability and not actor.can_admin:
+                        return self._tool_failure(
+                            name=name,
+                            arguments=arguments,
+                            code="admin_permission_required",
+                            message=(
+                                "Only Aaron's authenticated administrator account may "
+                                "use Home Assistant administration capabilities."
+                            ),
+                        )
+                result = await external_runtime.execute_model_tool(
+                    name,
+                    arguments,
+                    conversation_id=conversation_id,
+                    principal_id=actor.user_key,
+                    request_id=request_id,
+                )
+                return {
+                    "tool": name,
+                    "arguments": arguments,
+                    "result": result,
+                }
+
             if (
                 self.code_awareness is not None
                 and name in self.code_awareness.TOOL_NAMES
@@ -2179,9 +2522,14 @@ class AIEngine:
                         f"Unsupported light action: {action}",
                     )
 
-                result = await self.tools.control_area_lights(
-                    area_id=area_id,
-                    turn_on=action == "turn_on",
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="control_area_lights",
+                    arguments={"area_id": area_id, "action": action},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=area_id,
                 )
                 return {
                     "tool": name,
@@ -2214,9 +2562,14 @@ class AIEngine:
                         f"Unsupported device action: {action}",
                     )
 
-                result = await self.tools.control_device(
-                    entity_id=entity_id,
-                    turn_on=action == "turn_on",
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="control_device",
+                    arguments={"entity_id": entity_id, "action": action},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=entity_id,
                 )
                 return {
                     "tool": name,
@@ -2250,9 +2603,14 @@ class AIEngine:
                         name, arguments, "routine_safety_check_failed", str(exc)
                     )
 
-                result = await self.tools.run_home_routine(
-                    entity_id,
-                    name=str(routine["name"]),
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.routine",
+                    operation="run_home_routine",
+                    arguments={"entity_id": entity_id},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=entity_id,
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
@@ -2263,7 +2621,15 @@ class AIEngine:
                         name, arguments, "unsupported_shortcut",
                         f"Unsupported media shortcut: {shortcut}",
                     )
-                result = await self.tools.run_media_shortcut(shortcut)
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.routine",
+                    operation="run_media_shortcut",
+                    arguments={"shortcut": shortcut},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=shortcut,
+                )
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "control_media_player":
@@ -2279,7 +2645,15 @@ class AIEngine:
                         name, arguments, "unsupported_media_action",
                         f"Unsupported media action: {action}",
                     )
-                result = await self.tools.control_media_player(entity_id, action)
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.media",
+                    operation="control_media_player",
+                    arguments={"entity_id": entity_id, "action": action},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=entity_id,
+                )
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "set_media_volume":
@@ -2295,8 +2669,17 @@ class AIEngine:
                         name, arguments, "invalid_volume",
                         "Volume must be between 0 and 100 percent.",
                     )
-                result = await self.tools.set_media_volume(
-                    entity_id, volume_percent
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.media",
+                    operation="set_media_volume",
+                    arguments={
+                        "entity_id": entity_id,
+                        "volume_percent": volume_percent,
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=entity_id,
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
@@ -2316,8 +2699,18 @@ class AIEngine:
                         name, arguments, "empty_notification",
                         "The notification message is empty.",
                     )
-                result = await self.tools.send_mobile_notification(
-                    recipient=recipient, message=message, title=title or "Jarvis"
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.notify",
+                    operation="send_mobile_notification",
+                    arguments={
+                        "recipient": recipient,
+                        "message": message,
+                        "title": title or "Jarvis",
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=recipient,
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
@@ -2334,15 +2727,23 @@ class AIEngine:
                         name, arguments, "empty_announcement",
                         "The announcement message is empty.",
                     )
-                result = await self.tools.announce_message(target, message)
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.notify",
+                    operation="announce_message",
+                    arguments={"target": target, "message": message},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=target,
+                )
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "search_entity_states":
                 query = _normalise_space(str(arguments.get("query", "")))
                 domain_value = arguments.get("domain")
-                domain = str(domain_value) if domain_value is not None else None
+                search_domain = str(domain_value) if domain_value is not None else None
                 area_value = arguments.get("area_id")
-                area_id = str(area_value) if area_value is not None else None
+                search_area_id = str(area_value) if area_value is not None else None
                 local_area = await self._voice_local_area(actor, user_text)
                 local_reference = bool(re.search(
                     r"\b(?:here|this room|in here|the (?:lights?|windows?|"
@@ -2351,38 +2752,52 @@ class AIEngine:
                     re.I,
                 ))
                 if local_area and local_reference:
-                    area_id = local_area
+                    search_area_id = local_area
                     arguments["area_id"] = local_area
                 state_value = arguments.get("state_filter")
                 state_filter = str(state_value) if state_value is not None else None
                 limit = int(arguments.get("limit", 12))
 
-                if domain and domain not in self.tools.READABLE_DOMAINS:
+                if search_domain and search_domain not in self.tools.READABLE_DOMAINS:
                     return self._tool_failure(
                         name,
                         arguments,
                         "unsupported_state_domain",
-                        f"Unsupported readable Home Assistant domain: {domain}",
+                        f"Unsupported readable Home Assistant domain: {search_domain}",
                     )
 
                 valid_area_ids = {
                     area["area_id"]
                     for area in await self._area_options()
                 }
-                if area_id and area_id not in valid_area_ids:
+                if search_area_id and search_area_id not in valid_area_ids:
                     return self._tool_failure(
                         name,
                         arguments,
                         "unknown_area",
-                        f"Unknown Home Assistant area: {area_id}",
+                        f"Unknown Home Assistant area: {search_area_id}",
                     )
 
-                result = await self.tools.search_entity_states(
-                    query=query,
-                    domain=domain,
-                    area_id=area_id,
-                    state_filter=state_filter,
-                    limit=limit,
+                read_arguments = {
+                    "query": query,
+                    "domain": search_domain,
+                    "area_id": search_area_id,
+                    "state_filter": state_filter,
+                    "limit": limit,
+                }
+                result = await self._execute_registered_home_read(
+                    operation="search_entity_states",
+                    arguments=read_arguments,
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.search_entity_states(
+                        query=query,
+                        domain=search_domain,
+                        area_id=search_area_id,
+                        state_filter=state_filter,
+                        limit=limit,
+                    ),
                 )
                 return {
                     "tool": name,
@@ -2391,13 +2806,13 @@ class AIEngine:
                 }
 
             if name == "list_area_states":
-                area_id = str(arguments.get("area_id", ""))
+                list_area_id = str(arguments.get("area_id", ""))
                 local_area = await self._voice_local_area(actor, user_text)
                 if local_area:
-                    area_id = local_area
+                    list_area_id = local_area
                     arguments["area_id"] = local_area
                 domain_value = arguments.get("domain")
-                domain = str(domain_value) if domain_value is not None else None
+                list_domain = str(domain_value) if domain_value is not None else None
                 state_value = arguments.get("state_filter")
                 state_filter = str(state_value) if state_value is not None else None
                 limit = int(arguments.get("limit", 30))
@@ -2406,26 +2821,38 @@ class AIEngine:
                     area["area_id"]
                     for area in await self._area_options()
                 }
-                if area_id not in valid_area_ids:
+                if list_area_id not in valid_area_ids:
                     return self._tool_failure(
                         name,
                         arguments,
                         "unknown_area",
-                        f"Unknown Home Assistant area: {area_id}",
+                        f"Unknown Home Assistant area: {list_area_id}",
                     )
-                if domain and domain not in self.tools.READABLE_DOMAINS:
+                if list_domain and list_domain not in self.tools.READABLE_DOMAINS:
                     return self._tool_failure(
                         name,
                         arguments,
                         "unsupported_state_domain",
-                        f"Unsupported readable Home Assistant domain: {domain}",
+                        f"Unsupported readable Home Assistant domain: {list_domain}",
                     )
 
-                result = await self.tools.list_area_states(
-                    area_id=area_id,
-                    domain=domain,
-                    state_filter=state_filter,
-                    limit=limit,
+                result = await self._execute_registered_home_read(
+                    operation="list_area_states",
+                    arguments={
+                        "area_id": list_area_id,
+                        "domain": list_domain,
+                        "state_filter": state_filter,
+                        "limit": limit,
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.list_area_states(
+                        area_id=list_area_id,
+                        domain=list_domain,
+                        state_filter=state_filter,
+                        limit=limit,
+                    ),
                 )
                 return {
                     "tool": name,
@@ -2443,7 +2870,14 @@ class AIEngine:
                         "A valid Home Assistant entity_id is required.",
                     )
 
-                result = await self.tools.get_entity_state(entity_id)
+                result = await self._execute_registered_home_read(
+                    operation="get_entity_state",
+                    arguments={"entity_id": entity_id},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.get_entity_state(entity_id),
+                )
                 return {
                     "tool": name,
                     "arguments": arguments,
@@ -2456,7 +2890,14 @@ class AIEngine:
                     return self._tool_failure(
                         name, arguments, "invalid_person_reference", "A person reference is required."
                     )
-                result = await self.tools.inspect_presence(reference)
+                result = await self._execute_registered_home_read(
+                    operation="inspect_presence",
+                    arguments={"reference": reference},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.inspect_presence(reference),
+                )
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name in {
@@ -2472,31 +2913,46 @@ class AIEngine:
                 )
 
             if name == "list_admin_items":
-                domain = _normalise_space(str(arguments.get("domain", ""))).lower()
+                admin_list_domain = _normalise_space(str(arguments.get("domain", ""))).lower()
                 query = _normalise_space(str(arguments.get("query", "")))
                 limit = int(arguments.get("limit", 20))
-                result = await self.admin.list_items(domain, query, limit)
+                result = await self._execute_registered_home_read(
+                    capability_id="homeassistant.admin.read",
+                    operation="list_admin_items",
+                    arguments={"domain": admin_list_domain, "query": query, "limit": limit},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.admin.list_items(admin_list_domain, query, limit),
+                )
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "get_admin_item_config":
-                domain = _normalise_space(str(arguments.get("domain", ""))).lower()
+                admin_get_domain = _normalise_space(str(arguments.get("domain", ""))).lower()
                 config_key = _normalise_space(str(arguments.get("config_key", ""))).lower()
-                config = await self.admin.get_config(domain, config_key)
-                if config is None:
+                result = await self._execute_registered_home_read(
+                    capability_id="homeassistant.admin.read",
+                    operation="get_admin_item_config",
+                    arguments={"domain": admin_get_domain, "config_key": config_key},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self._legacy_admin_config_result(
+                        admin_get_domain, config_key
+                    ),
+                )
+                if result.get("success") is not True:
                     return self._tool_failure(
                         name,
                         arguments,
                         "admin_item_not_found",
-                        f"No {domain} configuration was found for key '{config_key}'.",
+                        f"No {admin_get_domain} configuration was found for key '{config_key}'.",
                     )
                 return {
                     "tool": name,
                     "arguments": arguments,
                     "result": {
-                        "success": True,
-                        "domain": domain,
-                        "config_key": config_key,
-                        "config": config,
+                        **result,
                     },
                 }
 
@@ -2523,14 +2979,21 @@ class AIEngine:
                         "invalid_admin_config",
                         "The proposed Home Assistant configuration must be an object.",
                     )
-                result = await self.admin.propose_change(
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.admin.propose",
+                    operation="propose_admin_change",
+                    arguments={
+                        "domain": domain,
+                        "operation": operation,
+                        "config_key": config_key,
+                        "name": proposal_name,
+                        "summary": summary,
+                        "config": config,
+                    },
                     conversation_id=conversation_id,
-                    domain=domain,
-                    operation=operation,
-                    config_key=config_key,
-                    name=proposal_name,
-                    summary=summary,
-                    config=config,
+                    actor=actor,
+                    request_id=request_id,
+                    target=f"{domain}:{config_key}",
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
@@ -2811,20 +3274,6 @@ class AIEngine:
                 f'{entity.get("name", entity.get("entity_id", "That entity"))} is '
                 f'{entity.get("display_value", entity.get("state", "unknown"))}.'
             )
-
-        if name == "list_admin_items":
-            items = result.get("items", [])
-            if not items:
-                return "I couldn’t find a matching automation or script."
-            return "; ".join(
-                f'{item.get("name", item.get("entity_id"))} ({item.get("config_key")})'
-                for item in items[:8]
-            ) + "."
-
-        if name == "get_admin_item_config":
-            config = result.get("config") or {}
-            alias = config.get("alias") or call.get("arguments", {}).get("config_key")
-            return f"Loaded the configuration for {alias}."
 
         if name == "list_admin_items":
             items = result.get("items", [])
@@ -3279,14 +3728,14 @@ class AIEngine:
         calls: list[dict[str, Any]] = []
         entities: dict[str, dict[str, Any]] = {}
         for entity_id, raw_result in zip(entity_ids, raw_results):
-            if isinstance(raw_result, Exception):
+            if isinstance(raw_result, BaseException):
                 result = {
                     "success": False,
                     "message": str(raw_result),
                     "entity": None,
                 }
             else:
-                result = raw_result
+                result = dict(raw_result)
             calls.append({
                 "tool": "get_entity_state",
                 "arguments": {"entity_id": entity_id},
@@ -3419,7 +3868,10 @@ class AIEngine:
         just_home = _AWARENESS_JUST_HOME_PATTERN.fullmatch(user_text)
         just_left = _AWARENESS_LEFT_PATTERN.fullmatch(user_text)
         if just_home or just_left:
-            raw_person = str((just_home or just_left).group("person") or "")
+            presence_match = just_home or just_left
+            if presence_match is None:  # pragma: no cover - guarded above
+                raise AssertionError("Presence event pattern unexpectedly disappeared")
+            raw_person = str(presence_match.group("person") or "")
             person_key, person_name = self._awareness_person(raw_person, actor)
             event_type = "person_arrived" if just_home else "person_left"
             event = await self.awareness.latest_event(
@@ -3496,6 +3948,7 @@ class AIEngine:
         if _AWARENESS_RECENT_PATTERN.fullmatch(user_text):
             area = await self._resolve_area_from_text(user_text)
             area_id = str(area.get("area_id") or "") if area else None
+            arguments: dict[str, Any]
             if re.search(r"\b(?:today|overnight)\b", user_text, re.I):
                 start, end = self.awareness.local_window(user_text)
                 events = await self.awareness.events_between(
@@ -4288,6 +4741,10 @@ class AIEngine:
     async def _try_direct_power_control(
         self,
         text: str,
+        *,
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str,
     ) -> tuple[str, list[dict[str, Any]]] | None:
         """Fast, deterministic control for one or more exact lights/switches."""
         parsed = self._parse_simple_power_command(text)
@@ -4305,8 +4762,21 @@ class AIEngine:
             "living room tv",
         }:
             shortcut = "tv_on" if turn_on else "tv_off"
-            result = await self.tools.run_media_shortcut(shortcut)
-            reply = "Done." if result.get("success") else "I couldn't do that."
+            result = await self._execute_registered_home_action(
+                capability_id="homeassistant.routine",
+                operation="run_media_shortcut",
+                arguments={"shortcut": shortcut},
+                conversation_id=conversation_id,
+                actor=actor,
+                request_id=request_id,
+                target=shortcut,
+            )
+            if result.get("success"):
+                reply = "Done."
+            elif result.get("accepted"):
+                reply = str(result.get("response_message"))
+            else:
+                reply = "I couldn't do that."
             return reply, [{
                 "tool": "run_media_shortcut",
                 "arguments": {"shortcut": shortcut},
@@ -4344,9 +4814,17 @@ class AIEngine:
 
         raw_results = await asyncio.gather(
             *(
-                self.tools.control_device(
-                    entity_id=str(device["entity_id"]),
-                    turn_on=turn_on,
+                self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="control_device",
+                    arguments={
+                        "entity_id": str(device["entity_id"]),
+                        "action": "turn_on" if turn_on else "turn_off",
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=str(device["entity_id"]),
                 )
                 for device in matched
             ),
@@ -4363,7 +4841,7 @@ class AIEngine:
             if area and area.casefold() not in name.casefold():
                 display_name = f"{area} {name}"
 
-            if isinstance(raw_result, Exception):
+            if isinstance(raw_result, BaseException):
                 result = {
                     "success": False,
                     "entity_id": device.get("entity_id"),
@@ -4372,7 +4850,7 @@ class AIEngine:
                     "error": str(raw_result),
                 }
             else:
-                result = raw_result
+                result = dict(raw_result)
 
             calls.append({
                 "tool": "control_device",
@@ -4404,6 +4882,7 @@ class AIEngine:
         actor: UserContext | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         trusted_context: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         actor = actor or UserContext.from_request(
             user_id=None,
@@ -4421,6 +4900,7 @@ class AIEngine:
             raise AIEngineError("The request is too long.")
 
         started = time.monotonic()
+        resolved_request_id = str(request_id or uuid.uuid4())
 
         conversation = await self.conversations.ensure_conversation(
             conversation_id=conversation_id,
@@ -4533,10 +5013,18 @@ class AIEngine:
             message = str(action.get("message") or "").strip()
             title = str(action.get("title") or "Jarvis")
             try:
-                result = await self.tools.send_mobile_notification(
-                    recipient=recipient,
-                    message=message,
-                    title=title,
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.notify",
+                    operation="send_mobile_notification",
+                    arguments={
+                        "recipient": recipient,
+                        "message": message,
+                        "title": title,
+                    },
+                    conversation_id=resolved_conversation_id,
+                    actor=actor,
+                    request_id=resolved_request_id,
+                    target=recipient,
                 )
             except Exception:
                 logger.exception(
@@ -4721,7 +5209,7 @@ class AIEngine:
             if parsed_control is not None and understanding.needs_clarification:
                 turn_on, requested_target = parsed_control
                 suggested_target = self._suggested_target_from_clarification(
-                    understanding.clarification
+                    understanding.clarification or ""
                 )
                 await self.dialogue.begin_goal(
                     resolved_conversation_id,
@@ -4816,10 +5304,18 @@ class AIEngine:
                 }
 
             try:
-                result = await self.tools.send_mobile_notification(
-                    recipient=pending_notification_recipient,
-                    message=message,
-                    title="Jarvis",
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.notify",
+                    operation="send_mobile_notification",
+                    arguments={
+                        "recipient": pending_notification_recipient,
+                        "message": message,
+                        "title": "Jarvis",
+                    },
+                    conversation_id=resolved_conversation_id,
+                    actor=actor,
+                    request_id=resolved_request_id,
+                    target=pending_notification_recipient,
                 )
             except Exception:
                 logger.exception(
@@ -4912,20 +5408,20 @@ class AIEngine:
             and not _CAPABILITY_GUIDANCE_PATTERN.search(user_text)
             and not _EXPLANATION_PATTERN.search(user_text)
         ):
-            recipient = self._notification_recipient_from_text(user_text, actor)
-            if recipient is not None:
-                message = self._notification_message_from_text(user_text)
+            notification_recipient = self._notification_recipient_from_text(user_text, actor)
+            if notification_recipient is not None:
+                notification_message = self._notification_message_from_text(user_text)
                 await self.conversations.add_user_message(
                     conversation_id=resolved_conversation_id,
                     content=user_text,
                 )
-                if not message:
+                if not notification_message:
                     final_reply = "What should the notification say?"
                     await self.dialogue.begin_goal(
                         resolved_conversation_id,
                         "send_notification",
                         slots={
-                            "recipient": recipient,
+                            "recipient": notification_recipient,
                             "title": "Jarvis",
                         },
                         missing_slots=["message"],
@@ -4958,15 +5454,23 @@ class AIEngine:
                     }
 
                 try:
-                    result = await self.tools.send_mobile_notification(
-                        recipient=recipient,
-                        message=message,
-                        title="Jarvis",
+                    result = await self._execute_registered_home_action(
+                        capability_id="homeassistant.notify",
+                        operation="send_mobile_notification",
+                        arguments={
+                            "recipient": notification_recipient,
+                            "message": notification_message,
+                            "title": "Jarvis",
+                        },
+                        conversation_id=resolved_conversation_id,
+                        actor=actor,
+                        request_id=resolved_request_id,
+                        target=notification_recipient,
                     )
                 except Exception:
                     logger.exception(
                         "Central dialogue inline notification failed recipient=%s",
-                        recipient,
+                        notification_recipient,
                     )
                     result = {
                         "success": False,
@@ -4979,9 +5483,9 @@ class AIEngine:
                 calls = [{
                     "tool": "send_mobile_notification",
                     "arguments": {
-                        "recipient": recipient,
+                        "recipient": notification_recipient,
                         "title": "Jarvis",
-                        "message": message,
+                        "message": notification_message,
                     },
                     "result": result,
                 }]
@@ -5184,7 +5688,20 @@ class AIEngine:
             }
 
         if pending_admin is not None and _ADMIN_CONFIRM_PATTERN.fullmatch(user_text):
-            result = await self.admin.apply_pending(resolved_conversation_id)
+            result = await self._execute_registered_home_action(
+                capability_id="homeassistant.admin.apply",
+                operation="apply_admin_change",
+                arguments={},
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                request_id=resolved_request_id,
+                target=str(
+                    pending_admin.get("proposal_id")
+                    or pending_admin.get("config_key")
+                    or "pending_admin_change"
+                ),
+                confirmed=True,
+            )
             final_reply = _clean_reply(str(result.get("response_message") or ""))
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
@@ -5216,7 +5733,19 @@ class AIEngine:
             }
 
         if pending_admin is not None and _ADMIN_CANCEL_PATTERN.fullmatch(user_text):
-            result = await self.admin.cancel_pending(resolved_conversation_id)
+            result = await self._execute_registered_home_action(
+                capability_id="homeassistant.admin.cancel",
+                operation="cancel_admin_change",
+                arguments={},
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                request_id=resolved_request_id,
+                target=str(
+                    pending_admin.get("proposal_id")
+                    or pending_admin.get("config_key")
+                    or "pending_admin_change"
+                ),
+            )
             final_reply = _clean_reply(str(result.get("response_message") or ""))
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
@@ -5322,7 +5851,12 @@ class AIEngine:
             RequestIntent.CONTROL_NOW,
             RequestIntent.CONTROL_FOLLOW_UP,
         }:
-            direct_control = await self._try_direct_power_control(user_text)
+            direct_control = await self._try_direct_power_control(
+                user_text,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                request_id=resolved_request_id,
+            )
             if direct_control is not None:
                 final_reply, direct_calls = direct_control
                 final_reply = _clean_reply(final_reply)
@@ -5618,6 +6152,19 @@ class AIEngine:
                 }
             )
 
+        external_runtime = getattr(self, "external_runtime", None)
+        if external_runtime is not None:
+            try:
+                external_context = await external_runtime.model_context(user_text)
+            except Exception:
+                logger.exception("External provider context lookup failed")
+                external_context = (
+                    "External provider status could not be checked. Treat all "
+                    "external capabilities as unavailable for this turn."
+                )
+            if external_context:
+                input_items.append({"role": "developer", "content": external_context})
+
         input_items.append(
             {
                 "role": "user",
@@ -5625,7 +6172,7 @@ class AIEngine:
             }
         )
 
-        tool_definitions = await self._openai_tools(decision, actor)
+        tool_definitions = await self._openai_tools(decision, actor, user_text)
 
         if (
             code_awareness_requested
@@ -5758,6 +6305,7 @@ class AIEngine:
                         authorised_tools=authorised_tools,
                         conversation_id=resolved_conversation_id,
                         actor=actor,
+                        request_id=resolved_request_id,
                     )
 
                 completed_calls.append(completed)
@@ -5875,12 +6423,60 @@ class AIEngine:
         if unavailable_reply is not None:
             final_reply = unavailable_reply
 
+        if external_runtime is not None:
+            try:
+                unavailable_service = (
+                    await external_runtime.unavailable_service_reply(user_text)
+                )
+            except Exception:
+                logger.exception("External service availability guard failed")
+                unavailable_service = None
+            if unavailable_service is not None:
+                final_reply = unavailable_service
+
+        if (
+            external_runtime is not None
+            and external_runtime.requires_live_web(user_text)
+        ):
+            live_call_succeeded = any(
+                call.get("tool")
+                in {"web_search", "deep_research", "create_external_monitor"}
+                and call.get("result", {}).get("success") is True
+                for call in completed_calls
+            )
+            if not live_call_succeeded:
+                final_reply = (
+                    "I couldn’t obtain verified live web evidence for that request, "
+                    "so I won’t give you a current answer from model memory."
+                )
+
+        monitor_reply = verified_monitor_creation_reply(completed_calls)
+        live_answer_succeeded = any(
+            call.get("tool") in {"web_search", "deep_research"}
+            and isinstance(call.get("result"), Mapping)
+            and call["result"].get("success") is True
+            for call in completed_calls
+        )
+        if monitor_reply is not None and not live_answer_succeeded:
+            final_reply = monitor_reply
+
+        plan_reply = verified_plan_creation_reply(completed_calls)
+        if plan_reply is not None:
+            final_reply = plan_reply
+
         unbacked_promise_reply = unbacked_future_promise_reply(
             final_reply,
             completed_calls,
         )
         if unbacked_promise_reply is not None:
             final_reply = unbacked_promise_reply
+
+        unbacked_write_reply = unbacked_external_write_claim_reply(
+            final_reply,
+            completed_calls,
+        )
+        if unbacked_write_reply is not None:
+            final_reply = unbacked_write_reply
 
         final_reply = _clean_reply(final_reply)
         if not final_reply:
