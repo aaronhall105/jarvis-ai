@@ -462,6 +462,31 @@ async def test_receipt_store_commits_before_side_effect_and_binds_idempotency(
 
 
 @pytest.mark.asyncio
+async def test_concurrent_write_replay_never_calls_provider_twice(tmp_path: Path) -> None:
+    connector = FakeConnector()
+    connector.execute_delay = 0.05
+    registry, _ = make_registry(tmp_path, connector)
+    request = CapabilityRequest(
+        capability_id="fixture.publish",
+        payload={"body": "one consequential action"},
+        target={"channel": "one"},
+        confirmed=True,
+        idempotency_key="concurrent-action",
+    )
+
+    first, second = await asyncio.gather(
+        registry.execute(request),
+        registry.execute(request),
+    )
+
+    assert len(connector.execute_calls) == 1
+    assert ExecutionStatus.VERIFIED in {first.status, second.status}
+    assert {first.status, second.status}.issubset(
+        {ExecutionStatus.VERIFIED, ExecutionStatus.OUTCOME_UNKNOWN}
+    )
+
+
+@pytest.mark.asyncio
 async def test_write_requires_confirmation_and_records_rejection(
     tmp_path: Path,
 ) -> None:
@@ -664,3 +689,30 @@ async def test_write_is_blocked_when_durable_audit_is_not_configured() -> None:
     assert result.status is ExecutionStatus.REJECTED
     assert result.success is False
     assert connector.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_write_receipt_idempotency_cannot_cross_account_principals(
+    tmp_path: Path,
+) -> None:
+    connector = FakeConnector()
+    registry, _ = make_registry(tmp_path, connector)
+    first = await registry.execute(
+        "fixture.publish",
+        {"body": "principal owned"},
+        principal_id="aaron",
+        confirmed=True,
+        idempotency_key="shared-transport-key",
+    )
+    crossed = await registry.execute(
+        "fixture.publish",
+        {"body": "principal owned"},
+        principal_id="amber",
+        confirmed=True,
+        idempotency_key="shared-transport-key",
+    )
+
+    assert first.status is ExecutionStatus.VERIFIED
+    assert crossed.status is ExecutionStatus.REJECTED
+    assert crossed.data == {}
+    assert connector.execute_calls == ["fixture.publish"]

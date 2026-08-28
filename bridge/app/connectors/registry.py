@@ -73,8 +73,8 @@ class ConnectorRegistry:
         self._connectors: dict[str, Connector] = {}
         self._capabilities: dict[str, CapabilityMetadata] = {}
         self._capability_providers: dict[str, str] = {}
-        self._status_cache: dict[str, _CachedStatus] = {}
-        self._health_locks: dict[str, asyncio.Lock] = {}
+        self._status_cache: dict[tuple[str, str | None], _CachedStatus] = {}
+        self._health_locks: dict[tuple[str, str | None], asyncio.Lock] = {}
 
     def register(self, connector: Connector) -> Connector:
         if connector.provider_id in self._connectors:
@@ -89,11 +89,11 @@ class ConnectorRegistry:
         if collisions:
             raise ConnectorRegistrationError(f"Capability is already registered: {min(collisions)}")
         self._connectors[connector.provider_id] = connector
-        self._health_locks[connector.provider_id] = asyncio.Lock()
+        self._health_locks[(connector.provider_id, None)] = asyncio.Lock()
         for item in connector.capabilities:
             self._capabilities[item.capability_id] = item
             self._capability_providers[item.capability_id] = connector.provider_id
-        self._status_cache.pop(connector.provider_id, None)
+        self._clear_provider_status(connector.provider_id)
         return connector
 
     def unregister(self, provider_id: str) -> Connector | None:
@@ -103,9 +103,30 @@ class ConnectorRegistry:
         for item in connector.capabilities:
             self._capabilities.pop(item.capability_id, None)
             self._capability_providers.pop(item.capability_id, None)
-        self._status_cache.pop(provider_id, None)
-        self._health_locks.pop(provider_id, None)
+        self._clear_provider_status(provider_id)
         return connector
+
+    def _clear_provider_status(self, provider_id: str) -> None:
+        for key in tuple(self._status_cache):
+            if key[0] == provider_id:
+                self._status_cache.pop(key, None)
+        for key in tuple(self._health_locks):
+            if key[0] == provider_id:
+                self._health_locks.pop(key, None)
+
+    def invalidate_status(
+        self,
+        provider_id: str,
+        *,
+        principal_id: str | None = None,
+    ) -> None:
+        """Drop cached health after account connect, reconnect, or disconnect."""
+
+        principal = str(principal_id or "").strip() or None
+        if principal_id is None:
+            self._clear_provider_status(provider_id)
+            return
+        self._status_cache.pop((provider_id, principal), None)
 
     @property
     def provider_ids(self) -> tuple[str, ...]:
@@ -197,19 +218,22 @@ class ConnectorRegistry:
         provider_id: str,
         *,
         refresh: bool = False,
+        principal_id: str | None = None,
     ) -> ProviderStatus:
         connector = self._connectors.get(provider_id)
         if connector is None:
             raise KeyError(f"Unknown connector provider: {provider_id}")
         now = time.monotonic()
-        cached = self._status_cache.get(provider_id)
+        principal = str(principal_id or "").strip() or None
+        cache_key = (provider_id, principal)
+        cached = self._status_cache.get(cache_key)
         if not refresh and cached is not None and cached.expires_at > now:
             return cached.status
 
-        lock = self._health_locks[provider_id]
+        lock = self._health_locks.setdefault(cache_key, asyncio.Lock())
         async with lock:
             now = time.monotonic()
-            cached = self._status_cache.get(provider_id)
+            cached = self._status_cache.get(cache_key)
             if not refresh and cached is not None and cached.expires_at > now:
                 return cached.status
             previous = cached.status if cached is not None else None
@@ -219,7 +243,8 @@ class ConnectorRegistry:
                     if callable(invalidate):
                         invalidate()
                 observed = await asyncio.wait_for(
-                    connector.status(), timeout=self.health_timeout_seconds
+                    connector.status_for_principal(principal),
+                    timeout=self.health_timeout_seconds,
                 )
                 if not isinstance(observed, ProviderStatus):
                     raise TypeError("Connector status returned an invalid result")
@@ -237,23 +262,40 @@ class ConnectorRegistry:
                     previous,
                     f"Provider health check failed: {safe}",
                 )
-            self._status_cache[provider_id] = _CachedStatus(
+            self._status_cache[cache_key] = _CachedStatus(
                 status,
                 time.monotonic() + self.health_ttl_seconds,
             )
             return status
 
-    async def status_snapshot(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+    async def status_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         statuses = await asyncio.gather(
             *(
-                self.provider_status(provider_id, refresh=refresh)
+                self.provider_status(
+                    provider_id,
+                    refresh=refresh,
+                    principal_id=principal_id,
+                )
                 for provider_id in self.provider_ids
             )
         )
         return [status.as_dict() for status in statuses]
 
-    async def health_snapshot(self, *, refresh: bool = False) -> dict[str, Any]:
-        providers = await self.status_snapshot(refresh=refresh)
+    async def health_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        providers = await self.status_snapshot(
+            refresh=refresh,
+            principal_id=principal_id,
+        )
         configured = [item for item in providers if item["configured"]]
         return {
             "healthy": all(item["healthy"] for item in configured),
@@ -268,11 +310,16 @@ class ConnectorRegistry:
         capability_id: str,
         *,
         refresh: bool = False,
+        principal_id: str | None = None,
     ) -> CapabilityMetadata | None:
         metadata = self._capabilities.get(capability_id)
         if metadata is None:
             return None
-        status = await self.provider_status(metadata.provider_id, refresh=refresh)
+        status = await self.provider_status(
+            metadata.provider_id,
+            refresh=refresh,
+            principal_id=principal_id,
+        )
         if capability_id not in (status.executable_capabilities or ()):
             return None
         return metadata
@@ -281,10 +328,15 @@ class ConnectorRegistry:
         self,
         *,
         refresh: bool = False,
+        principal_id: str | None = None,
     ) -> tuple[CapabilityMetadata, ...]:
         statuses = await asyncio.gather(
             *(
-                self.provider_status(provider_id, refresh=refresh)
+                self.provider_status(
+                    provider_id,
+                    refresh=refresh,
+                    principal_id=principal_id,
+                )
                 for provider_id in self.provider_ids
             )
         )
@@ -299,12 +351,21 @@ class ConnectorRegistry:
             if capability_id in self._capabilities
         )
 
-    async def capability_snapshot(self, *, refresh: bool = False) -> list[dict[str, Any]]:
+    async def capability_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         statuses = {
             status.provider_id: status
             for status in await asyncio.gather(
                 *(
-                    self.provider_status(provider_id, refresh=refresh)
+                    self.provider_status(
+                        provider_id,
+                        refresh=refresh,
+                        principal_id=principal_id,
+                    )
                     for provider_id in self.provider_ids
                 )
             )
@@ -365,7 +426,10 @@ class ConnectorRegistry:
                 provider_id=metadata.provider_id,
                 target=request.target,
                 requested_operation=request.operation or metadata.capability_id,
-                request_payload=request.payload,
+                request_payload={
+                    "principal_id": request.principal_id,
+                    "payload": dict(request.payload),
+                },
                 idempotency_key=request.idempotency_key or request.request_id,
             )
         except IdempotencyConflict as exc:
@@ -762,7 +826,11 @@ class ConnectorRegistry:
                 return claimed
             receipt = claimed.receipt
 
-        status = await self.provider_status(metadata.provider_id, refresh=refresh_health)
+        status = await self.provider_status(
+            metadata.provider_id,
+            refresh=refresh_health,
+            principal_id=request.principal_id,
+        )
         if not status.available:
             error = status.health_reason or "Provider is unavailable"
             if receipt is not None:

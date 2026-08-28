@@ -449,6 +449,11 @@ public final class SettingsActivity extends Activity {
         card.addView(fieldGroup("Remote Core URL — optional", remoteCoreUrl), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Mobile voice token", mobileToken), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Your name", userName), matchWrap());
+        Button integrations = secondaryButton("Open integrations & accounts");
+        integrations.setOnClickListener(view ->
+            startActivity(new Intent(this, IntegrationsActivity.class))
+        );
+        card.addView(integrations, matchWrap(dp(14), 0));
         return card;
     }
 

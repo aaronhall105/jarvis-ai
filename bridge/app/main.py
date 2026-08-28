@@ -13,9 +13,16 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, Header, HTTPException, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, Header, HTTPException, Query, WebSocket
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field
 
 from app.admin_engine import AdminEngine
@@ -23,11 +30,12 @@ from app.agent_planner import PlanStatus
 from app.ai_engine import AIEngine, AIEngineError
 from app.code_awareness import CodeAwarenessEngine
 from app.config import get_settings
+from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
-from app.followup_schedule import resolve_schedule
+from app.followup_schedule import parse_periodic_followup, resolve_schedule
 from app.intent_engine import IntentEngine, IntentError
 from app.house_awareness import HouseAwarenessEngine
 from app.home_assistant import (
@@ -58,6 +66,23 @@ from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
 settings = get_settings()
 configure_logging(settings.jarvis_log_level)
 logger = logging.getLogger("jarvis-core")
+
+
+class _UvicornOAuthAccessFilter(logging.Filter):
+    """Keep callback codes and state out of Uvicorn request-line logs."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        arguments = record.args
+        if isinstance(arguments, tuple) and len(arguments) >= 3:
+            request_target = arguments[2]
+            if isinstance(request_target, str) and "?" in request_target:
+                safe = list(arguments)
+                safe[2] = redact_request_target(request_target)
+                record.args = tuple(safe)
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_UvicornOAuthAccessFilter())
 
 home_assistant = HomeAssistantClient(
     base_url=settings.home_assistant_url,
@@ -116,6 +141,11 @@ external_agent = ExternalAgentRuntime(
     admin=admin,
     health_ttl_seconds=settings.jarvis_connector_health_ttl_seconds,
     connector_timeout_seconds=settings.jarvis_connector_timeout_seconds,
+    credential_encryption_key=settings.jarvis_credential_encryption_key,
+    google_oauth_client_id=settings.jarvis_google_oauth_client_id,
+    google_oauth_client_secret=settings.jarvis_google_oauth_client_secret,
+    google_oauth_redirect_uri=settings.jarvis_google_oauth_redirect_uri,
+    google_android_return_uri=settings.jarvis_google_android_return_uri,
 )
 followups = FollowUpEngine(
     database_path="/app/data/jarvis_followups.db",
@@ -410,7 +440,23 @@ class ExternalMonitorRequest(BaseModel):
     polling_interval_seconds: int = Field(default=900, ge=10, le=2_592_000)
     label: str | None = Field(default=None, max_length=200)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    expires_at: str | None = Field(default=None, max_length=100)
+    notify_if_unchanged: bool = False
     request_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class GoogleOAuthStartRequest(BaseModel):
+    features: list[str] = Field(
+        default_factory=lambda: [
+            "gmail_read",
+            "gmail_write",
+            "calendar_read",
+            "calendar_write",
+            "contacts_read",
+        ],
+        min_length=1,
+        max_length=5,
+    )
 
 
 class ImprovementActionRequest(BaseModel):
@@ -427,7 +473,6 @@ _FOLLOWUP_AFTER_PATTERN = re.compile(
 )
 _FOLLOWUP_CONDITION_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) (?:is |comes )?([a-z0-9_]+)\s*[.!?]*$", re.I)
 _FOLLOWUP_CHANGE_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) changes?\s*[.!?]*$", re.I)
-_FOLLOWUP_PERIODIC_PATTERN = re.compile(r"^\s*(?:keep (?:an eye on|checking)|monitor) ([a-z_]+\.[a-z0-9_]+)(?: every (\d{1,3}) (seconds?|minutes?))?.*$", re.I)
 _FOLLOWUP_COMPLETION_PATTERN = re.compile(r"^\s*(?:let me know|tell me|get back to me) when (?:it(?:'s| is)|that) (?:is )?(?:finished|done|completes?|completed)\s*[.!?]*$", re.I)
 
 
@@ -473,9 +518,9 @@ async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str
             if entity_id not in known: return {'success':False, 'response':"I can’t monitor that because it is not a current Home Assistant entity.", 'intent':'followup_unavailable'}
             job = await followups.create(conversation_id=conversation_id, kind='condition', payload={'entity_id':entity_id, 'state':wanted}, due_at=datetime.now(timezone.utc))
             return {'success':True, 'response':f"I’ll let you know here when {entity_id} reports {wanted}.", 'intent':'followup_condition', 'job':job}
-        periodic = _FOLLOWUP_PERIODIC_PATTERN.match(text)
+        periodic = parse_periodic_followup(text)
         if periodic:
-            entity_id, amount, unit = periodic.groups(); interval = int(amount or 60) * (60 if (unit or 'minutes').startswith('minute') else 1)
+            entity_id, interval = periodic
             states = {str(item.get('entity_id')): item for item in await tools.readable_entity_states(refresh=True)}
             if entity_id not in states or interval < 10: return {'success':False, 'response':"I can’t safely monitor that request.", 'intent':'followup_unavailable'}
             job = await followups.create(conversation_id=conversation_id, kind='periodic', payload={'entity_id':entity_id, 'baseline':str(states[entity_id].get('state')), 'interval_seconds':interval}, due_at=datetime.now(timezone.utc)+timedelta(seconds=interval))
@@ -852,7 +897,10 @@ async def integration_providers(
     x_jarvis_integrations_token: str | None = Header(default=None),
 ) -> dict[str, object]:
     _require_integrations_token(x_jarvis_integrations_token)
-    providers = await external_agent.providers_snapshot(refresh=refresh)
+    providers = await external_agent.providers_snapshot(
+        refresh=refresh,
+        principal_id=settings.jarvis_integrations_owner_principal or None,
+    )
     return {"count": len(providers), "providers": providers}
 
 
@@ -862,7 +910,10 @@ async def integration_capabilities(
     x_jarvis_integrations_token: str | None = Header(default=None),
 ) -> dict[str, object]:
     _require_integrations_token(x_jarvis_integrations_token)
-    capabilities = await external_agent.capability_snapshot(refresh=refresh)
+    capabilities = await external_agent.capability_snapshot(
+        refresh=refresh,
+        principal_id=settings.jarvis_integrations_owner_principal or None,
+    )
     return {"count": len(capabilities), "capabilities": capabilities}
 
 
@@ -872,7 +923,104 @@ async def integration_health(
     x_jarvis_integrations_token: str | None = Header(default=None),
 ) -> dict[str, object]:
     _require_integrations_token(x_jarvis_integrations_token)
-    return await external_agent.health_snapshot(refresh=refresh)
+    return await external_agent.health_snapshot(
+        refresh=refresh,
+        principal_id=settings.jarvis_integrations_owner_principal or None,
+    )
+
+
+@app.get("/api/integrations/mobile/providers")
+async def mobile_integration_providers(
+    refresh: bool = True,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal = _require_mobile_integration_principal(authorization)
+    providers = await external_agent.mobile_integrations_snapshot(
+        principal_id=principal,
+        refresh=refresh,
+    )
+    return {"count": len(providers), "providers": providers}
+
+
+@app.post("/api/integrations/mobile/google/start")
+async def start_mobile_google_oauth(
+    request: GoogleOAuthStartRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal = _require_mobile_integration_principal(authorization)
+    try:
+        result = await external_agent.google_oauth.start(
+            principal_id=principal,
+            features=request.features,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return dict(result)
+
+
+@app.get("/api/integrations/google/callback")
+async def google_oauth_callback(
+    state: str = Query(min_length=1, max_length=512),
+    code: str | None = Query(default=None, max_length=4_096),
+    error: str | None = Query(default=None, max_length=200),
+) -> RedirectResponse:
+    status = "failed"
+    session_id = ""
+    try:
+        session = await external_agent.google_oauth.callback(
+            state=state,
+            code=code,
+            provider_error=error,
+        )
+        session_id = session.session_id
+        status = "success"
+        external_agent.registry.invalidate_status(
+            "google",
+            principal_id=session.principal_id,
+        )
+    except Exception:
+        logger.info("Google OAuth callback did not complete")
+    query = urlencode(
+        {
+            "status": status,
+            **({"session_id": session_id} if session_id else {}),
+        }
+    )
+    return RedirectResponse(
+        url=f"{external_agent.google_oauth.config.android_return_uri}?{query}",
+        status_code=302,
+    )
+
+
+@app.get("/api/integrations/mobile/google/sessions/{session_id}")
+async def mobile_google_oauth_session(
+    session_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal = _require_mobile_integration_principal(authorization)
+    session = await external_agent.integration_accounts.oauth_session(
+        session_id,
+        principal_id=principal,
+    )
+    if session is None:
+        raise HTTPException(status_code=404, detail="OAuth session not found.")
+    return session.as_dict()
+
+
+@app.delete("/api/integrations/mobile/google/accounts/{account_id}")
+async def disconnect_mobile_google_account(
+    account_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal = _require_mobile_integration_principal(authorization)
+    result = await external_agent.google_connector.disconnect(
+        principal_id=principal,
+        account_id=account_id,
+    )
+    if not result.get("disconnected"):
+        raise HTTPException(status_code=404, detail="Google account not found.")
+    external_agent.registry.invalidate_status("google", principal_id=principal)
+    return {**result, "provider_id": "google"}
 
 
 @app.get("/api/integrations/actions")
@@ -901,6 +1049,7 @@ async def create_agent_plan(
     try:
         return await external_agent.create_plan(
             conversation_id=request.conversation_id,
+            principal_id=settings.jarvis_integrations_owner_principal or None,
             goal=request.goal,
             steps=[step.model_dump() for step in request.steps],
             start=request.start,
@@ -949,7 +1098,7 @@ async def resume_agent_plan(
 ) -> dict[str, object]:
     _require_integrations_token(x_jarvis_integrations_token)
     try:
-        return (await external_agent.planner.resume(plan_id)).as_dict()
+        return await external_agent.resume_plan(plan_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Agent plan not found.") from exc
 
@@ -988,7 +1137,7 @@ async def approve_agent_plan_step(
             step_id,
             approved=approved,
         )
-        return (await external_agent.planner.resume(plan.plan_id)).as_dict()
+        return await external_agent.resume_plan(plan.plan_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Agent plan or step not found.") from exc
     except ValueError as exc:
@@ -1018,7 +1167,9 @@ async def create_external_monitor(
     try:
         result = await external_agent.create_external_monitor(
             conversation_id=request.conversation_id,
-            principal_id="integrations_api",
+            principal_id=(
+                settings.jarvis_integrations_owner_principal or "integrations_api"
+            ),
             provider=request.provider,
             capability_id=request.capability_id,
             query=request.query,
@@ -1029,6 +1180,8 @@ async def create_external_monitor(
             polling_interval_seconds=request.polling_interval_seconds,
             label=request.label,
             max_attempts=request.max_attempts,
+            expires_at=request.expires_at,
+            notify_if_unchanged=request.notify_if_unchanged,
             request_id=request.request_id,
         )
     except (KeyError, RuntimeError, TypeError, ValueError) as exc:
@@ -1133,6 +1286,27 @@ def _require_integrations_token(token: str | None) -> None:
     supplied = str(token or "").strip()
     if not supplied or not secrets.compare_digest(expected, supplied):
         raise HTTPException(status_code=403, detail="Invalid integrations token.")
+
+
+def _require_mobile_integration_principal(authorization: str | None) -> str:
+    """Authenticate Android, then map it to a server-owned account principal."""
+
+    expected = settings.jarvis_mobile_voice_token.strip()
+    principal = settings.jarvis_integrations_owner_principal.strip()
+    if not expected or not principal:
+        raise HTTPException(
+            status_code=503,
+            detail="Mobile integrations require Core owner and mobile-token setup.",
+        )
+    scheme, separator, supplied = str(authorization or "").partition(" ")
+    if (
+        separator != " "
+        or scheme.casefold() != "bearer"
+        or not supplied
+        or not secrets.compare_digest(expected, supplied.strip())
+    ):
+        raise HTTPException(status_code=403, detail="Invalid mobile integrations token.")
+    return principal
 
 
 def _require_improvement_token(token: str | None) -> None:

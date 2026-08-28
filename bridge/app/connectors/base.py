@@ -407,6 +407,17 @@ class Connector(ABC):
     async def status(self) -> ProviderStatus:
         """Return a live, credential-safe provider status observation."""
 
+    async def status_for_principal(self, principal_id: str | None) -> ProviderStatus:
+        """Return principal-scoped status when a connector owns user accounts.
+
+        Stateless and household connectors inherit the provider-wide status.
+        Account connectors override this method so one user's consent cannot
+        make capabilities executable for another user.
+        """
+
+        del principal_id
+        return await self.status()
+
     @abstractmethod
     async def execute(
         self,

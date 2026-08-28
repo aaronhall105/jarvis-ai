@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_plus
 
 REDACTED = "[REDACTED]"
 _MAX_SECRET_BYTES = 64 * 1024
@@ -35,10 +36,23 @@ _SENSITIVE_KEY_PARTS = {
     "token",
 }
 
-_PEM_PRIVATE_KEY = re.compile(
-    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
-    r"-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
-    re.IGNORECASE | re.DOTALL,
+_PRIVATE_KEY_MARKERS = (
+    ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),
+    ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"),
+    ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),
+    ("-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"),
+)
+_MAX_REDACTION_INPUT = 1_000_000
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "client_secret",
+        "code",
+        "code_verifier",
+        "id_token",
+        "refresh_token",
+        "state",
+    }
 )
 _AUTH_HEADER = re.compile(
     r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*)"
@@ -185,6 +199,58 @@ def _sensitive_key(key: Any) -> bool:
     )
 
 
+def _redact_private_key_blocks(value: str) -> str:
+    """Redact PEM private keys with a deterministic linear scan.
+
+    A missing end marker is treated as sensitive through the end of the input.
+    This avoids the backtracking behaviour of a DOTALL expression and fails
+    closed for truncated keys.
+    """
+
+    lowered = value.casefold()
+    output: list[str] = []
+    cursor = 0
+    while cursor < len(value):
+        match: tuple[int, str] | None = None
+        for begin, end in _PRIVATE_KEY_MARKERS:
+            index = lowered.find(begin.casefold(), cursor)
+            if index >= 0 and (match is None or index < match[0]):
+                match = (index, end)
+        if match is None:
+            output.append(value[cursor:])
+            break
+        begin_at, end_marker = match
+        output.append(value[cursor:begin_at])
+        output.append(REDACTED)
+        end_at = lowered.find(end_marker.casefold(), begin_at)
+        if end_at < 0:
+            cursor = len(value)
+            break
+        cursor = end_at + len(end_marker)
+    return "".join(output)
+
+
+def redact_request_target(value: Any, *, max_length: int = 8_192) -> str:
+    """Redact OAuth secrets in an HTTP request target without regex parsing."""
+
+    rendered = str(value or "")[: max(1, min(int(max_length), 65_536))]
+    path, separator, query = rendered.partition("?")
+    if not separator:
+        return rendered
+    safe_parts: list[str] = []
+    for part in query.split("&"):
+        raw_name, equals, _ = part.partition("=")
+        try:
+            name = unquote_plus(raw_name).casefold()
+        except UnicodeDecodeError:
+            name = raw_name.casefold()
+        if equals and name in _SENSITIVE_QUERY_KEYS:
+            safe_parts.append(f"{raw_name}={REDACTED}")
+        else:
+            safe_parts.append(part)
+    return f"{path}?{'&'.join(safe_parts)}"
+
+
 def redact_text(
     text: Any,
     *,
@@ -194,9 +260,11 @@ def redact_text(
     """Redact credentials embedded in otherwise ordinary free text."""
 
     rendered = str(text or "")
+    if len(rendered) > _MAX_REDACTION_INPUT:
+        rendered = rendered[:_MAX_REDACTION_INPUT] + "...[INPUT_TRUNCATED]"
     for secret in sorted({str(item) for item in known_secrets if str(item)}, key=len, reverse=True):
         rendered = rendered.replace(secret, REDACTED)
-    rendered = _PEM_PRIVATE_KEY.sub(REDACTED, rendered)
+    rendered = _redact_private_key_blocks(rendered)
     rendered = _AUTH_HEADER.sub(lambda match: f"{match.group(1)}{REDACTED}", rendered)
     rendered = _COOKIE_HEADER.sub(lambda match: f"{match.group(1)}{REDACTED}", rendered)
     rendered = _URL_CREDENTIAL.sub(lambda match: f"{match.group(1)}{REDACTED}", rendered)

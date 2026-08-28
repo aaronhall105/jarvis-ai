@@ -113,3 +113,47 @@ def resolve_schedule(
         timezone_name,
         candidate.strftime("%A %d %B at %H:%M %Z"),
     )
+
+
+# This parser is deliberately deterministic because it receives raw user text.
+def parse_periodic_followup(text: str) -> tuple[str, int] | None:
+    """Parse the narrow HA periodic-monitor syntax without regex backtracking."""
+
+    if len(text) > 5_000:
+        return None
+    words = text.strip().rstrip(".!?").casefold().split()
+    prefixes = (("monitor",), ("keep", "checking"), ("keep", "an", "eye", "on"))
+    remainder: list[str] | None = None
+    for prefix in prefixes:
+        if tuple(words[: len(prefix)]) == prefix:
+            remainder = words[len(prefix) :]
+            break
+    if not remainder or len(remainder) not in {1, 4}:
+        return None
+    entity_id = remainder[0]
+    domain, separator, object_id = entity_id.partition(".")
+    allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+    if (
+        separator != "."
+        or not domain
+        or not object_id
+        or len(entity_id) > 255
+        or domain[0].isdigit()
+        or any(character not in allowed for character in domain + object_id)
+    ):
+        return None
+    interval = 60 * 60
+    if len(remainder) == 4:
+        every, amount_text, unit = remainder[1:]
+        if every != "every" or not amount_text.isascii() or not amount_text.isdigit():
+            return None
+        amount = int(amount_text)
+        if not 1 <= amount <= 999 or unit not in {
+            "second",
+            "seconds",
+            "minute",
+            "minutes",
+        }:
+            return None
+        interval = amount * (60 if unit.startswith("minute") else 1)
+    return entity_id, interval

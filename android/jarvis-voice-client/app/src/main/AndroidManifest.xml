@@ -46,6 +46,22 @@
             android:screenOrientation="portrait" />
 
         <activity
+            android:name=".IntegrationsActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="jarvis"
+                    android:host="integrations"
+                    android:path="/google" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".UpdatesActivity"
             android:exported="false"
             android:screenOrientation="portrait" />

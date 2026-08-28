@@ -207,6 +207,87 @@ class ExternalFollowUpIntegrationTests(unittest.IsolatedAsyncioTestCase):
             [item["job_id"] for item in await engine.list(status="cancelled")],
         )
 
+    async def test_no_reply_deadline_delivers_one_truthful_same_chat_reminder(self):
+        evaluator = SequenceEvaluator({"verified": True, "value": 100})
+        engine = FollowUpEngine(
+            self.tmp.name + "/deadline.db",
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        job = await engine.create(
+            conversation_id="same-chat",
+            kind="external_monitor",
+            payload=self.payload(
+                comparison="changed",
+                expires_at=engine._iso(engine._now() + timedelta(hours=1)),
+                notify_if_unchanged=True,
+            ),
+            due_at=engine._now() + timedelta(hours=1),
+        )
+        with engine._db() as con:
+            con.execute(
+                "UPDATE followup_jobs SET expires_at=?,next_run_at=? WHERE job_id=?",
+                (
+                    engine._iso(engine._now() - timedelta(seconds=1)),
+                    engine._iso(engine._now() - timedelta(seconds=1)),
+                    job["job_id"],
+                ),
+            )
+
+        await engine.run_once()
+        await engine.run_once()
+
+        messages = await self.conversations.get_messages("same-chat")
+        self.assertEqual(1, len(messages))
+        self.assertEqual(
+            "I did not observe a verified change for shopping.price before the requested deadline.",
+            messages[0]["content"],
+        )
+        self.assertEqual(1, len(evaluator.calls))
+        self.assertEqual("expired", (await engine.get(job["job_id"]))["status"])
+
+    async def test_reply_observed_at_deadline_wins_over_no_reply_reminder(self):
+        evaluator = SequenceEvaluator({"verified": True, "value": 70})
+        engine = FollowUpEngine(
+            self.tmp.name + "/deadline-change.db",
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        job = await engine.create(
+            conversation_id="same-chat",
+            kind="external_monitor",
+            payload=self.payload(
+                comparison="changed",
+                expires_at=engine._iso(engine._now() + timedelta(hours=1)),
+                notify_if_unchanged=True,
+            ),
+            due_at=engine._now() + timedelta(hours=1),
+        )
+        with engine._db() as con:
+            con.execute(
+                "UPDATE followup_jobs SET expires_at=?,next_run_at=? WHERE job_id=?",
+                (
+                    engine._iso(engine._now() - timedelta(seconds=1)),
+                    engine._iso(engine._now() - timedelta(seconds=1)),
+                    job["job_id"],
+                ),
+            )
+
+        await engine.run_once()
+        await engine.run_once()
+
+        messages = await self.conversations.get_messages("same-chat")
+        self.assertEqual(
+            ["The monitored value changed from 100 to 70."],
+            [message["content"] for message in messages],
+        )
+        self.assertEqual(1, len(evaluator.calls))
+        self.assertEqual("completed", (await engine.get(job["job_id"]))["status"])
+
     async def test_crash_after_message_commit_retries_delivery_without_duplicate(self):
         evaluator = SequenceEvaluator({"verified": True, "value": 70})
         crashing_writer = CrashAfterCommit(self.conversations)

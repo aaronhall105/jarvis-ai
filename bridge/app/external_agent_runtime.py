@@ -15,6 +15,7 @@ import sqlite3
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,14 @@ from app.connectors import (
     redact_secrets,
 )
 from app.home_assistant_connector import HomeAssistantConnector
+from app.google_integration import (
+    GOOGLE_MODEL_TOOL,
+    GoogleConnector,
+    GoogleOAuthConfig,
+    GoogleOAuthService,
+    google_model_tool,
+)
+from app.integration_accounts import CredentialCipher, IntegrationAccountStore
 from app.openai_web_search import OpenAIWebSearchClient, SafeWebFetcher
 from app.research_engine import ResearchEngine
 from app.service_connectors import UNAVAILABLE_CONNECTOR_CATALOG
@@ -144,9 +153,53 @@ class ConnectorPlannerExecutor:
 
     def __init__(self, registry: ConnectorRegistry) -> None:
         self.registry = registry
+        self._principal: ContextVar[str | None] = ContextVar(
+            "jarvis_planner_principal",
+            default=None,
+        )
+
+    def set_principal(self, principal_id: str | None):
+        return self._principal.set(str(principal_id or "").strip() or None)
+
+    def reset_principal(self, token: Any) -> None:
+        self._principal.reset(token)
+
+    @staticmethod
+    def _principal_from_conversation(conversation_id: str) -> str | None:
+        """Recover only Core's server-created ``usr:<owner>:`` namespace."""
+
+        value = str(conversation_id or "")
+        if not value.startswith("usr:"):
+            return None
+        _, separator, remainder = value.partition(":")
+        principal, separator, _ = remainder.partition(":")
+        if not separator or not principal or len(principal) > 64:
+            return None
+        allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_-")
+        return principal if all(character in allowed for character in principal) else None
+
+    @classmethod
+    def scope_conversation(cls, conversation_id: str, principal_id: str | None) -> str:
+        conversation = str(conversation_id or "").strip()
+        if not conversation:
+            raise ValueError("A conversation is required")
+        principal = str(principal_id or "").strip()
+        if not principal:
+            return conversation
+        allowed = set("abcdefghijklmnopqrstuvwxyz0123456789_-")
+        if len(principal) > 64 or any(character not in allowed for character in principal):
+            raise ValueError("The integration account principal is malformed")
+        existing = cls._principal_from_conversation(conversation)
+        if conversation.startswith("usr:"):
+            if existing != principal:
+                raise ValueError("Conversation and integration account owners do not match")
+            return conversation
+        return f"usr:{principal}:{conversation}"
 
     async def snapshot(self) -> Mapping[str, CapabilityState]:
-        live_rows = await self.registry.capability_snapshot()
+        live_rows = await self.registry.capability_snapshot(
+            principal_id=self._principal.get(),
+        )
         output: dict[str, CapabilityState] = {}
         for row in live_rows:
             access = str(row.get("access") or "read")
@@ -215,6 +268,10 @@ class ConnectorPlannerExecutor:
                 payload=arguments,
                 request_id=request.action_id,
                 conversation_id=request.conversation_id,
+                principal_id=(
+                    self._principal.get()
+                    or self._principal_from_conversation(request.conversation_id)
+                ),
                 operation=connector_operation or None,
                 target=target,
                 confirmed=True,
@@ -287,6 +344,11 @@ class ExternalAgentRuntime:
         data_directory: str | Path = "/app/data",
         health_ttl_seconds: float = 60.0,
         connector_timeout_seconds: float = 45.0,
+        credential_encryption_key: str = "",
+        google_oauth_client_id: str = "",
+        google_oauth_client_secret: str = "",
+        google_oauth_redirect_uri: str = "",
+        google_android_return_uri: str = "jarvis://integrations/google",
         web_search_client: OpenAIWebSearchClient | None = None,
         web_fetcher: SafeWebFetcher | None = None,
         monitor_creator: MonitorCreator | None = None,
@@ -305,6 +367,14 @@ class ExternalAgentRuntime:
         )
         self._monitor_locks_guard = asyncio.Lock()
         self.receipts = ActionReceiptStore(data_path / "jarvis_action_receipts.db")
+        try:
+            self.credential_cipher = CredentialCipher(credential_encryption_key)
+        except ValueError:
+            self.credential_cipher = CredentialCipher("")
+        self.integration_accounts = IntegrationAccountStore(
+            data_path / "jarvis_integration_accounts.db",
+            self.credential_cipher,
+        )
         self.registry = ConnectorRegistry(
             receipt_store=self.receipts,
             health_ttl_seconds=health_ttl_seconds,
@@ -329,6 +399,23 @@ class ExternalAgentRuntime:
             enabled=self.enabled,
         )
         self.registry.register(self.web_fetch_connector)
+        self.google_oauth = GoogleOAuthService(
+            config=GoogleOAuthConfig(
+                client_id=google_oauth_client_id,
+                client_secret=google_oauth_client_secret,
+                redirect_uri=google_oauth_redirect_uri,
+                android_return_uri=google_android_return_uri,
+            ),
+            accounts=self.integration_accounts,
+            cipher=self.credential_cipher,
+            timeout_seconds=connector_timeout_seconds,
+        )
+        self.google_connector = GoogleConnector(
+            oauth=self.google_oauth,
+            accounts=self.integration_accounts,
+            timeout_seconds=connector_timeout_seconds,
+        )
+        self.registry.register(self.google_connector)
         self.planner_executor = ConnectorPlannerExecutor(self.registry)
         self.plans = SQLitePlanStore(data_path / "jarvis_agent_plans.db")
         self.planner = PersonalAgentPlanner(self.plans, self.planner_executor)
@@ -342,6 +429,7 @@ class ExternalAgentRuntime:
         )
 
     async def initialize(self) -> dict[str, Any]:
+        await self.integration_accounts.initialize()
         await self.receipts.initialize()
         recovered = await self.receipts.recover_stale(older_than_seconds=300)
         health = await self.registry.health_snapshot(refresh=True)
@@ -356,6 +444,8 @@ class ExternalAgentRuntime:
         await asyncio.gather(
             self.web_search_connector.aclose(),
             self.web_fetch_connector.aclose(),
+            self.google_connector.aclose(),
+            self.google_oauth.aclose(),
         )
 
     def set_monitor_creator(
@@ -371,11 +461,27 @@ class ExternalAgentRuntime:
         self._monitor_lister = lister
         self._monitor_canceller = canceller
 
-    async def providers_snapshot(self, *, refresh: bool = False) -> list[dict[str, Any]]:
-        providers = await self.registry.status_snapshot(refresh=refresh)
+    async def providers_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        providers = await self.registry.status_snapshot(
+            refresh=refresh,
+            principal_id=principal_id,
+        )
         registered = {str(item["provider_id"]) for item in providers}
+        registered_capabilities = {
+            item.capability_id for item in self.registry.potential_capabilities()
+        }
         for entry in UNAVAILABLE_CONNECTOR_CATALOG.values():
             if entry.provider_id in registered:
+                continue
+            catalog_capabilities = {
+                item.capability_id for item in entry.setup.capabilities_after_setup
+            }
+            if catalog_capabilities & registered_capabilities:
                 continue
             providers.append(
                 {
@@ -398,8 +504,16 @@ class ExternalAgentRuntime:
             )
         return sorted(providers, key=lambda item: str(item["provider_id"]))
 
-    async def capability_snapshot(self, *, refresh: bool = False) -> list[dict[str, Any]]:
-        rows = await self.registry.capability_snapshot(refresh=refresh)
+    async def capability_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = await self.registry.capability_snapshot(
+            refresh=refresh,
+            principal_id=principal_id,
+        )
         known = {str(row["capability_id"]) for row in rows}
         for entry in UNAVAILABLE_CONNECTOR_CATALOG.values():
             for potential in entry.setup.capabilities_after_setup:
@@ -418,14 +532,178 @@ class ExternalAgentRuntime:
                 known.add(potential.capability_id)
         return sorted(rows, key=lambda row: str(row["capability_id"]))
 
-    async def health_snapshot(self, *, refresh: bool = False) -> dict[str, Any]:
-        core = await self.registry.health_snapshot(refresh=refresh)
+    async def mobile_integrations_snapshot(
+        self,
+        *,
+        principal_id: str,
+        refresh: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return the Android account catalogue with redacted, live-derived states."""
+
+        principal = str(principal_id or "").strip()
+        if not principal:
+            raise ValueError("An integration account owner is required")
+        statuses = {
+            str(item["provider_id"]): item
+            for item in await self.providers_snapshot(
+                refresh=refresh,
+                principal_id=principal,
+            )
+        }
+        google = statuses.get("google") or {}
+        google_capabilities = set(google.get("executable_capabilities") or ())
+        account = await self.google_connector.account_status(principal)
+
+        def account_state(
+            provider_id: str,
+            name: str,
+            capability_prefix: str,
+        ) -> dict[str, Any]:
+            potential = {
+                item.capability_id
+                for item in self.google_connector.capabilities
+                if item.capability_id.startswith(capability_prefix + ".")
+            }
+            available = potential & google_capabilities
+            google_healthy = bool(google.get("available"))
+            available_health = google_healthy and bool(available)
+            if google_healthy and available == potential:
+                state = "Connected"
+            elif google_healthy and available:
+                state = "Partial permissions"
+            elif account is not None and account.reauthorization_required:
+                state = "Reconnect required"
+            elif google.get("configured") and google.get("authenticated"):
+                state = "Permission required"
+            elif google.get("configured"):
+                state = "Not connected"
+            else:
+                state = "Setup required"
+            return {
+                "provider_id": provider_id,
+                "name": name,
+                "state": state,
+                "connected": available_health,
+                "healthy": available_health,
+                "granted_capabilities": sorted(available),
+                "missing_capabilities": sorted(potential - available),
+                "setup_requirements": list(google.get("setup_requirements") or ()),
+                "health_reason": google.get("health_reason"),
+            }
+
+        if google.get("available"):
+            all_google = {item.capability_id for item in self.google_connector.capabilities}
+            google_state = (
+                "Connected" if google_capabilities == all_google else "Partial permissions"
+            )
+        elif account is not None and account.reauthorization_required:
+            google_state = "Reconnect required"
+        elif google.get("authenticated") and not google.get("healthy"):
+            google_state = "Provider unavailable"
+        elif google.get("configured"):
+            google_state = "Not connected"
+        else:
+            google_state = "Setup required"
+        rows: list[dict[str, Any]] = [
+            {
+                "provider_id": "google",
+                "name": "Google",
+                "state": google_state,
+                "connected": bool(google.get("available")),
+                "healthy": bool(google.get("available")),
+                "account": account.as_dict() if account is not None else None,
+                "granted_scopes": list(google.get("scopes") or ()),
+                "granted_capabilities": sorted(google_capabilities),
+                "setup_requirements": list(google.get("setup_requirements") or ()),
+                "health_reason": google.get("health_reason"),
+                "can_connect": self.google_oauth.configured,
+                "can_reconnect": bool(account is not None),
+                "can_disconnect": bool(account is not None),
+            },
+            account_state("gmail", "Gmail", "gmail"),
+            account_state("calendar", "Calendar", "calendar"),
+            account_state("contacts", "Contacts", "contacts"),
+        ]
+
+        def provider_row(provider_id: str, name: str) -> dict[str, Any]:
+            status = statuses.get(provider_id) or {}
+            connected = bool(status.get("available"))
+            if connected:
+                state = "Connected"
+            elif status.get("configured") and status.get("authenticated"):
+                state = "Provider unavailable"
+            elif status.get("configured"):
+                state = "Reconnect required"
+            else:
+                state = "Setup required"
+            return {
+                "provider_id": provider_id,
+                "name": name,
+                "state": state,
+                "connected": connected,
+                "healthy": connected,
+                "setup_requirements": list(status.get("setup_requirements") or ()),
+                "health_reason": status.get("health_reason"),
+            }
+
+        web_statuses = [
+            statuses.get("openai_web_search") or {},
+            statuses.get("public_web_fetch") or {},
+        ]
+        web_connected = any(bool(item.get("available")) for item in web_statuses)
+        rows.extend(
+            [
+                {
+                    "provider_id": "microsoft",
+                    "name": "Microsoft",
+                    "state": "Setup required",
+                    "connected": False,
+                    "healthy": False,
+                    "setup_requirements": [
+                        "A supported Microsoft OAuth connector is not configured"
+                    ],
+                },
+                {
+                    "provider_id": "web",
+                    "name": "Web",
+                    "state": "Connected" if web_connected else "Setup required",
+                    "connected": web_connected,
+                    "healthy": web_connected,
+                    "setup_requirements": []
+                    if web_connected
+                    else ["Configure an available web search or fetch provider"],
+                },
+                provider_row("homeassistant", "Home Assistant"),
+            ]
+        )
+        for provider_id, name in (
+            ("instagram", "Instagram"),
+            ("facebook", "Facebook"),
+            ("tiktok", "TikTok"),
+            ("x_social", "X"),
+        ):
+            rows.append(provider_row(provider_id, name))
+        return rows
+
+    async def health_snapshot(
+        self,
+        *,
+        refresh: bool = False,
+        principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        core = await self.registry.health_snapshot(
+            refresh=refresh,
+            principal_id=principal_id,
+        )
         database = await self.database_health_snapshot()
         return {
             **core,
             "healthy": bool(core.get("healthy")) and database["healthy"],
             "database": database,
-            "providers": await self.providers_snapshot(refresh=False),
+            "providers": await self.providers_snapshot(
+                refresh=False,
+                principal_id=principal_id,
+            ),
         }
 
     @staticmethod
@@ -447,6 +725,10 @@ class ExternalAgentRuntime:
         stores = {
             "action_receipts": (self.receipts.path, "connector_action_receipts"),
             "agent_plans": (self.plans.database_path, "agent_plans"),
+            "integration_accounts": (
+                self.integration_accounts.path,
+                "integration_accounts",
+            ),
         }
 
         async def probe(path: Path, table: str) -> dict[str, Any]:
@@ -509,10 +791,15 @@ class ExternalAgentRuntime:
             "happening" in lowered and "today" in lowered
         )
 
-    async def model_context(self, text: str) -> str | None:
+    async def model_context(
+        self,
+        text: str,
+        *,
+        principal_id: str | None = None,
+    ) -> str | None:
         if not self.enabled or not self.is_external_request(text):
             return None
-        providers = await self.providers_snapshot()
+        providers = await self.providers_snapshot(principal_id=principal_id)
         lowered = str(text or "").casefold()
         relevance_aliases = {
             "gmail": ("email", "gmail", "inbox"),
@@ -566,7 +853,12 @@ class ExternalAgentRuntime:
             + requirement
         )
 
-    async def unavailable_service_reply(self, text: str) -> str | None:
+    async def unavailable_service_reply(
+        self,
+        text: str,
+        *,
+        principal_id: str | None = None,
+    ) -> str | None:
         """Return a deterministic read/account limitation for explicit services."""
 
         lowered = f" {str(text or '').casefold()} "
@@ -633,7 +925,14 @@ class ExternalAgentRuntime:
             requested.insert(0, ("gmail", "Gmail"))
         if not requested:
             return None
-        statuses = {str(item["provider_id"]): item for item in await self.providers_snapshot()}
+        statuses = {
+            str(item["provider_id"]): item
+            for item in await self.providers_snapshot(principal_id=principal_id)
+        }
+        google = statuses.get("google")
+        if google is not None:
+            for provider_id in ("gmail", "calendar", "contacts"):
+                statuses.setdefault(provider_id, google)
         for provider_id, label in requested:
             status = statuses.get(provider_id)
             if status is None or not status.get("available"):
@@ -641,10 +940,20 @@ class ExternalAgentRuntime:
                 return f"{label} is unavailable — {reason}."
         return None
 
-    async def openai_tools(self, text: str) -> list[dict[str, Any]]:
+    async def openai_tools(
+        self,
+        text: str,
+        *,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not self.enabled or not self.is_external_request(text):
             return []
-        executable = {item.capability_id for item in await self.registry.executable_capabilities()}
+        executable = {
+            item.capability_id
+            for item in await self.registry.executable_capabilities(
+                principal_id=principal_id,
+            )
+        }
         lowered = str(text or "").casefold()
         cancel_monitor_intent = any(
             phrase in lowered
@@ -669,6 +978,9 @@ class ExternalAgentRuntime:
         )
         monitor_management_intent = cancel_monitor_intent or list_monitor_intent
         definitions: list[dict[str, Any]] = []
+        google_tool = google_model_tool(sorted(executable))
+        if google_tool is not None and not monitor_management_intent:
+            definitions.append(google_tool)
         if "web.search" in executable and not monitor_management_intent:
             definitions.append(
                 {
@@ -819,6 +1131,19 @@ class ExternalAgentRuntime:
                                 "maximum": 2_592_000,
                             },
                             "label": {"type": "string", "maxLength": 200},
+                            "expires_at": {
+                                "type": "string",
+                                "description": (
+                                    "Timezone-aware ISO-8601 deadline, only when the user "
+                                    "explicitly requested a deadline."
+                                ),
+                            },
+                            "notify_if_unchanged": {
+                                "type": "boolean",
+                                "description": (
+                                    "True only for an explicit 'remind me if no change by' request."
+                                ),
+                            },
                         },
                         "required": [
                             "provider",
@@ -891,6 +1216,11 @@ class ExternalAgentRuntime:
                 "sort this",
                 "plan it",
                 "organise",
+            )
+        ) or (
+            google_tool is not None
+            and any(
+                word in lowered for word in ("email", "gmail", "calendar", "appointment", "contact")
             )
         ):
             definitions.append(self._planner_tool())
@@ -982,7 +1312,16 @@ class ExternalAgentRuntime:
         conversation_id: str,
         principal_id: str,
         request_id: str | None = None,
+        user_text: str = "",
     ) -> dict[str, Any]:
+        if name == GOOGLE_MODEL_TOOL:
+            return await self._execute_google_model_tool(
+                arguments,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+            )
         if name == "web_search":
             return await self.search(
                 str(arguments.get("query") or ""),
@@ -1008,10 +1347,60 @@ class ExternalAgentRuntime:
             steps = arguments.get("steps") or ()
             if not isinstance(steps, Sequence) or isinstance(steps, (str, bytes)):
                 raise ValueError("Plan steps must be an array")
+            proposed_steps = [dict(item) for item in steps if isinstance(item, Mapping)]
+            steps_by_id = {str(step.get("step_id") or ""): step for step in proposed_steps}
+            for step in proposed_steps:
+                capability_id = str(step.get("capability_id") or "")
+                if str(step.get("access") or "read") == "write" and not self._write_authorized(
+                    capability_id,
+                    user_text,
+                ):
+                    raise ValueError(
+                        f"The user's request did not explicitly authorize {capability_id}"
+                    )
+                step_arguments = step.get("arguments")
+                payload = step_arguments if isinstance(step_arguments, Mapping) else {}
+                if capability_id in {"gmail.draft", "gmail.forward"} and not (
+                    self._plan_recipient_authorized(
+                        payload.get("to"),
+                        user_text=user_text,
+                        steps_by_id=steps_by_id,
+                    )
+                ):
+                    raise ValueError(
+                        "A planned email recipient must be stated by the user or "
+                        "come from an unambiguous Contacts resolve step"
+                    )
+                if capability_id in {"calendar.create", "calendar.update"}:
+                    event_payload = payload
+                    if capability_id == "calendar.update" and isinstance(
+                        payload.get("changes"), Mapping
+                    ):
+                        event_payload = payload["changes"]
+                    attendees = event_payload.get("attendees")
+                    if attendees is not None:
+                        if not isinstance(attendees, Sequence) or isinstance(
+                            attendees, (str, bytes)
+                        ):
+                            raise ValueError("Calendar attendees must be an array")
+                        if any(
+                            not isinstance(attendee, Mapping)
+                            or not self._plan_recipient_authorized(
+                                attendee.get("email"),
+                                user_text=user_text,
+                                steps_by_id=steps_by_id,
+                            )
+                            for attendee in attendees
+                        ):
+                            raise ValueError(
+                                "A planned attendee must be stated by the user or "
+                                "come from an unambiguous Contacts resolve step"
+                            )
             plan = await self.create_plan(
                 conversation_id=conversation_id,
+                principal_id=principal_id,
                 goal=str(arguments.get("goal") or ""),
-                steps=[dict(item) for item in steps if isinstance(item, Mapping)],
+                steps=proposed_steps,
             )
             return {
                 "success": True,
@@ -1050,6 +1439,8 @@ class ExternalAgentRuntime:
                 comparison=arguments.get("comparison", "changed"),
                 polling_interval_seconds=int(arguments.get("polling_interval_seconds") or 3600),
                 label=str(arguments.get("label") or "") or None,
+                expires_at=str(arguments.get("expires_at") or "") or None,
+                notify_if_unchanged=bool(arguments.get("notify_if_unchanged", False)),
                 request_id=monitor_request_id,
             )
         if name == "list_external_monitors":
@@ -1063,6 +1454,149 @@ class ExternalAgentRuntime:
                 job_id=str(arguments.get("job_id") or ""),
             )
         raise ValueError(f"Unsupported external agent tool: {name}")
+
+    @staticmethod
+    def _write_authorized(capability_id: str, user_text: str) -> bool:
+        """Recognize explicit user authority; model/provider content cannot grant it."""
+
+        request_prefix = str(user_text or "")[:5_000]
+        for separator in ("\n", "\r", ":", "?", "!", '"'):
+            request_prefix = request_prefix.partition(separator)[0]
+        normalised = "".join(
+            character.casefold() if character.isalnum() else " " for character in request_prefix
+        )
+        words = normalised.split()[:32]
+        content_markers = {"body", "contains", "reads", "said", "says", "saying", "tells"}
+        for index, word in enumerate(words):
+            if word in content_markers:
+                words = words[:index]
+                break
+        word_set = set(words)
+        required: Mapping[str, frozenset[str]] = {
+            "gmail.draft": frozenset({"draft", "compose", "write"}),
+            "gmail.reply": frozenset({"reply", "respond", "draft"}),
+            "gmail.send": frozenset({"send"}),
+            "gmail.forward": frozenset({"forward"}),
+            "gmail.archive": frozenset({"archive"}),
+            "calendar.create": frozenset({"add", "book", "create", "put", "schedule"}),
+            "calendar.update": frozenset({"change", "move", "reschedule", "update"}),
+            "calendar.cancel": frozenset({"cancel", "delete", "remove"}),
+        }
+        verbs = required.get(capability_id)
+        return verbs is not None and bool(word_set & verbs)
+
+    @staticmethod
+    def _plan_recipient_authorized(
+        value: Any,
+        *,
+        user_text: str,
+        steps_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> bool:
+        """Accept a literal user address or dataflow from Contacts resolution."""
+
+        if isinstance(value, Mapping):
+            if set(value) != {"$from_step", "path"}:
+                return False
+            source = steps_by_id.get(str(value.get("$from_step") or ""))
+            path = str(value.get("path") or "")
+            return bool(
+                source
+                and source.get("capability_id") == "contacts.resolve"
+                and path.startswith("contact.email_addresses.")
+            )
+        recipient = str(value or "").strip().casefold()
+        return bool(recipient and recipient in str(user_text or "").casefold())
+
+    async def _execute_google_model_tool(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+    ) -> dict[str, Any]:
+        capability_id = str(arguments.get("capability_id") or "").strip()
+        payload_value = arguments.get("arguments")
+        if not isinstance(payload_value, Mapping):
+            raise ValueError("Google capability arguments must be an object")
+        payload = dict(payload_value)
+        metadata = self.registry.capability_definition(capability_id)
+        if metadata is None or metadata.provider_id != "google":
+            raise ValueError("The requested Google capability is not registered")
+        confirmed = False
+        if metadata.access is CapabilityAccess.WRITE:
+            if not self._write_authorized(capability_id, user_text):
+                raise ValueError(
+                    "The user's current request did not explicitly authorize this write"
+                )
+            confirmed = True
+        if capability_id in {"gmail.draft", "gmail.forward"}:
+            recipient = str(payload.get("to") or "").strip().casefold()
+            if recipient and recipient not in str(user_text or "").casefold():
+                raise ValueError(
+                    "A recipient not stated by the user must come from a verified plan step"
+                )
+        if capability_id in {"calendar.create", "calendar.update"}:
+            event_payload: Mapping[str, Any] = payload
+            if capability_id == "calendar.update" and isinstance(payload.get("changes"), Mapping):
+                event_payload = payload["changes"]
+            attendees = event_payload.get("attendees")
+            if attendees is not None:
+                if not isinstance(attendees, Sequence) or isinstance(attendees, (str, bytes)):
+                    raise ValueError("Calendar attendees must be an array")
+                current_request = str(user_text or "").casefold()
+                for attendee in attendees:
+                    if not isinstance(attendee, Mapping):
+                        raise ValueError("Each calendar attendee must be an object")
+                    email = str(attendee.get("email") or "").strip().casefold()
+                    if not email or email not in current_request:
+                        raise ValueError(
+                            "An attendee not stated by the user must come from a verified plan step"
+                        )
+        resolved_request_id = str(request_id or uuid.uuid4())
+        idempotency_material = json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        scoped_key = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"google:{principal_id}:{conversation_id}:{resolved_request_id}:"
+                f"{capability_id}:{idempotency_material}",
+            )
+        )
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability_id,
+                payload=payload,
+                request_id=resolved_request_id,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                target=next(
+                    (
+                        payload[key]
+                        for key in (
+                            "draft_id",
+                            "message_id",
+                            "thread_id",
+                            "event_id",
+                            "to",
+                        )
+                        if payload.get(key) not in (None, "")
+                    ),
+                    None,
+                ),
+                operation=capability_id,
+                confirmed=confirmed,
+                idempotency_key=scoped_key,
+            ),
+            refresh_health=True,
+        )
+        return execution.as_dict()
 
     async def search(self, query: str, *, limit: int = 8) -> dict[str, Any]:
         return await self.execute("web.search", {"query": query, "limit": limit})
@@ -1144,15 +1678,23 @@ class ExternalAgentRuntime:
         polling_interval_seconds: int = 900,
         label: str | None = None,
         max_attempts: int = 3,
+        expires_at: str | None = None,
+        notify_if_unchanged: bool = False,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         creator = self._monitor_creator
         if creator is None:
             raise RuntimeError("Durable external monitor creation is unavailable")
-        scoped_conversation = str(conversation_id).strip()
-        if not scoped_conversation:
-            raise ValueError("External monitors require a conversation")
-        metadata = await self.registry.get_capability(str(capability_id).strip(), refresh=True)
+        resolved_principal = str(principal_id or "").strip() or None
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            resolved_principal,
+        )
+        metadata = await self.registry.get_capability(
+            str(capability_id).strip(),
+            refresh=True,
+            principal_id=resolved_principal,
+        )
         if (
             metadata is None
             or metadata.access is not CapabilityAccess.READ
@@ -1178,6 +1720,21 @@ class ExternalAgentRuntime:
             raise ValueError(f"External monitor value_path must be one of: {choices}")
         normalised_comparison = self._normalise_monitor_comparison(comparison)
         now = datetime.now(timezone.utc)
+        configured_expiry = now + timedelta(seconds=int(metadata.monitor_ttl_seconds or interval))
+        if expires_at:
+            rendered_expiry = str(expires_at).strip()
+            if rendered_expiry.endswith("Z"):
+                rendered_expiry = rendered_expiry[:-1] + "+00:00"
+            try:
+                requested_expiry = datetime.fromisoformat(rendered_expiry)
+            except ValueError as exc:
+                raise ValueError("External monitor deadline must be an ISO-8601 timestamp") from exc
+            if requested_expiry.tzinfo is None:
+                raise ValueError("External monitor deadline must include a timezone")
+            requested_expiry = requested_expiry.astimezone(timezone.utc)
+            if requested_expiry <= now or requested_expiry > configured_expiry:
+                raise ValueError("External monitor deadline is outside the capability policy")
+            configured_expiry = requested_expiry
         payload: dict[str, Any] = {
             "provider": metadata.provider_id,
             "capability_id": metadata.capability_id,
@@ -1186,13 +1743,13 @@ class ExternalAgentRuntime:
             "polling_interval_seconds": interval,
             "max_attempts": max(1, min(int(max_attempts), 10)),
             "conversation_id": scoped_conversation,
-            "principal_id": str(principal_id or "").strip() or None,
+            "principal_id": resolved_principal,
             "value_path": selected_path,
             "poll_count": 0,
             "max_polls": int(metadata.maximum_monitor_polls or 1),
-            "expires_at": (
-                now + timedelta(seconds=int(metadata.monitor_ttl_seconds or interval))
-            ).isoformat(),
+            "expires_at": configured_expiry.isoformat(),
+            "deadline_requested": bool(expires_at),
+            "notify_if_unchanged": bool(notify_if_unchanged),
         }
         for key, value in (
             ("query", query),
@@ -1281,7 +1838,18 @@ class ExternalAgentRuntime:
         job = await creator(
             scoped_conversation,
             payload,
-            interval,
+            min(
+                interval,
+                max(
+                    1,
+                    int(
+                        (
+                            datetime.fromisoformat(str(payload["expires_at"]))
+                            - datetime.now(timezone.utc)
+                        ).total_seconds()
+                    ),
+                ),
+            ),
             resolved_request_id,
         )
         return self._compact_monitor_result(
@@ -1403,8 +1971,14 @@ class ExternalAgentRuntime:
             "label",
             "max_attempts",
             "max_polls",
+            "deadline_requested",
+            "notify_if_unchanged",
         )
-        return all(stored.get(key) == requested.get(key) for key in identity_keys)
+        if not all(stored.get(key) == requested.get(key) for key in identity_keys):
+            return False
+        if requested.get("deadline_requested") is True:
+            return stored.get("expires_at") == requested.get("expires_at")
+        return True
 
     async def evaluate_external_monitor(self, monitor: Mapping[str, Any]) -> dict[str, Any]:
         """Re-run one explicitly repeatable read for FollowUpEngine.
@@ -1415,7 +1989,12 @@ class ExternalAgentRuntime:
 
         capability_id = str(monitor.get("capability_id") or "").strip()
         provider_id = str(monitor.get("provider") or "").strip()
-        metadata = await self.registry.get_capability(capability_id, refresh=True)
+        principal_id = str(monitor.get("principal_id") or "").strip() or None
+        metadata = await self.registry.get_capability(
+            capability_id,
+            refresh=True,
+            principal_id=principal_id,
+        )
         if (
             metadata is None
             or metadata.access is not CapabilityAccess.READ
@@ -1448,6 +2027,7 @@ class ExternalAgentRuntime:
                 payload=payload,
                 request_id=str(uuid.uuid4()),
                 conversation_id=str(monitor.get("conversation_id") or "") or None,
+                principal_id=principal_id,
                 operation=operation,
             ),
             refresh_health=True,
@@ -1559,6 +2139,7 @@ class ExternalAgentRuntime:
         self,
         *,
         conversation_id: str,
+        principal_id: str | None = None,
         goal: str,
         steps: Sequence[Mapping[str, Any]],
         continuation: Mapping[str, Any] | None = None,
@@ -1567,16 +2148,27 @@ class ExternalAgentRuntime:
         if not self.enabled:
             raise RuntimeError("External agent mode is disabled")
         proposed = [self._proposed_step(value) for value in steps]
-        plan = await self.planner.create(
-            route=RequestRoute.MULTI_STEP,
-            conversation_id=conversation_id,
-            goal=goal,
-            proposed_steps=proposed,
-            continuation=continuation,
+        resolved_principal = str(
+            principal_id or ""
+        ).strip() or self.planner_executor._principal_from_conversation(conversation_id)
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            resolved_principal,
         )
-        if start:
-            plan = await self.planner.resume(plan.plan_id)
-        return plan.as_dict()
+        token = self.planner_executor.set_principal(resolved_principal)
+        try:
+            plan = await self.planner.create(
+                route=RequestRoute.MULTI_STEP,
+                conversation_id=scoped_conversation,
+                goal=goal,
+                proposed_steps=proposed,
+                continuation=continuation,
+            )
+            if start:
+                plan = await self.planner.resume(plan.plan_id)
+            return plan.as_dict()
+        finally:
+            self.planner_executor.reset_principal(token)
 
     async def replan(
         self,
@@ -1590,15 +2182,34 @@ class ExternalAgentRuntime:
         if not self.enabled:
             raise RuntimeError("External agent mode is disabled")
         proposed = [self._proposed_step(value) for value in steps]
-        plan = await self.planner.replan(
-            plan_id,
-            proposed_steps=proposed,
-            goal=goal,
-            continuation=continuation,
-        )
-        if start:
-            plan = await self.planner.resume(plan.plan_id)
-        return plan.as_dict()
+        existing = await self.planner.get(plan_id)
+        if existing is None:
+            raise KeyError(plan_id)
+        principal = self.planner_executor._principal_from_conversation(existing.conversation_id)
+        token = self.planner_executor.set_principal(principal)
+        try:
+            plan = await self.planner.replan(
+                plan_id,
+                proposed_steps=proposed,
+                goal=goal,
+                continuation=continuation,
+            )
+            if start:
+                plan = await self.planner.resume(plan.plan_id)
+            return plan.as_dict()
+        finally:
+            self.planner_executor.reset_principal(token)
+
+    async def resume_plan(self, plan_id: str) -> dict[str, Any]:
+        plan = await self.planner.get(plan_id)
+        if plan is None:
+            raise KeyError(plan_id)
+        principal = self.planner_executor._principal_from_conversation(plan.conversation_id)
+        token = self.planner_executor.set_principal(principal)
+        try:
+            return (await self.planner.resume(plan_id)).as_dict()
+        finally:
+            self.planner_executor.reset_principal(token)
 
 
 __all__ = ["ConnectorPlannerExecutor", "ExternalAgentRuntime"]

@@ -395,6 +395,12 @@ class FollowUpEngine:
             if parsed_expiry <= self._now():
                 raise ValueError("External monitor expires_at must be in the future")
             payload["expires_at"] = self._iso(parsed_expiry)
+        notify_if_unchanged = payload.get("notify_if_unchanged", False)
+        if not isinstance(notify_if_unchanged, bool):
+            raise ValueError("External monitor notify_if_unchanged must be a boolean")
+        if notify_if_unchanged and expires_at is None:
+            raise ValueError("A no-change reminder requires an expiry deadline")
+        payload["notify_if_unchanged"] = notify_if_unchanged
         # Legacy callers could supply arbitrary notification wording.  Monitor
         # delivery is generated from verified evidence, so that text is neither
         # persisted nor used.
@@ -696,7 +702,32 @@ class FollowUpEngine:
         if job["kind"] == "external_monitor":
             terminal_reason = self._external_monitor_terminal_reason(job)
             if terminal_reason is not None:
-                await self._expire_external_monitor(job, terminal_reason)
+                if (
+                    terminal_reason == "expires_at"
+                    and job["payload"].get("notify_if_unchanged") is True
+                ):
+                    try:
+                        done, message, result = await self._evaluate(job)
+                    except Exception as exc:
+                        await self._handle_evaluation_failure(job, exc)
+                        return
+                    if done:
+                        queued = self._queue_delivery(
+                            job["job_id"],
+                            message,
+                            result,
+                            completion_status="completed",
+                        )
+                        if queued is not None:
+                            await self._deliver_pending(queued)
+                    else:
+                        await self._expire_external_monitor(
+                            job,
+                            terminal_reason,
+                            result=result,
+                        )
+                else:
+                    await self._expire_external_monitor(job, terminal_reason)
                 return
             with self._db() as con:
                 incremented = con.execute(
@@ -761,7 +792,12 @@ class FollowUpEngine:
         result: Mapping[str, Any] | None = None,
     ) -> None:
         capability_id = str(job["payload"].get("capability_id") or "monitor")
-        if reason == "max_polls":
+        if reason == "expires_at" and job["payload"].get("notify_if_unchanged") is True:
+            message = (
+                f"I did not observe a verified change for {capability_id} before "
+                "the requested deadline."
+            )
+        elif reason == "max_polls":
             message = (
                 f"I stopped monitoring {capability_id} after its configured poll "
                 "limit was reached without a verified change."

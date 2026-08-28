@@ -1,5 +1,7 @@
 # Jarvis documentation
 
+- [Integrations & Accounts v1](INTEGRATIONS_ACCOUNTS_V1.md)
+
 ## Current documentation
 
 - [Installation](../INSTALL.md)

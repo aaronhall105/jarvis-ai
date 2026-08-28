@@ -593,8 +593,10 @@ _UNBACKED_FUTURE_PROMISE_PATTERN = re.compile(
 
 _UNBACKED_EXTERNAL_WRITE_CLAIM_PATTERN = re.compile(
     r"\b(?:i(?:'ve| have)?\s+sent|email (?:was|has been) sent|message (?:was|has been) sent)\b|"
+    r"\b(?:email |reply )?draft (?:was|has been) (?:created|updated)\b|"
     r"\b(?:i(?:'ve| have)?\s+(?:posted|published)|post (?:is|was) live)\b|"
     r"\b(?:reservation|booking) (?:is|was|has been) confirmed\b|"
+    r"\b(?:calendar )?(?:event|appointment) (?:was|has been) (?:created|updated|deleted|cancelled)\b|"
     r"\b(?:order (?:was|has been) placed|i(?:'ve| have)?\s+(?:bought|ordered|purchased))\b|"
     r"\b(?:dating )?profile (?:was|has been) (?:edited|updated)\b",
     re.I,
@@ -615,6 +617,7 @@ def _verified_external_write_evidence(
         "travel_reserve",
         "shopping_purchase",
         "dating_profile_update",
+        "google_integration",
     }
     for call in completed_calls:
         result = call.get("result")
@@ -2117,7 +2120,10 @@ class AIEngine:
         external_runtime = getattr(self, "external_runtime", None)
         if external_runtime is not None and user_text:
             definitions.extend(
-                await external_runtime.openai_tools(user_text)
+                await external_runtime.openai_tools(
+                    user_text,
+                    principal_id=actor.user_key,
+                )
             )
 
         return definitions
@@ -2345,6 +2351,7 @@ class AIEngine:
                 "create_external_monitor",
                 "list_external_monitors",
                 "cancel_external_monitor",
+                "google_integration",
             }:
                 if name == "create_personal_plan":
                     raw_steps = arguments.get("steps")
@@ -2377,6 +2384,7 @@ class AIEngine:
                     conversation_id=conversation_id,
                     principal_id=actor.user_key,
                     request_id=request_id,
+                    user_text=user_text,
                 )
                 return {
                     "tool": name,
@@ -6155,7 +6163,10 @@ class AIEngine:
         external_runtime = getattr(self, "external_runtime", None)
         if external_runtime is not None:
             try:
-                external_context = await external_runtime.model_context(user_text)
+                external_context = await external_runtime.model_context(
+                    user_text,
+                    principal_id=actor.user_key,
+                )
             except Exception:
                 logger.exception("External provider context lookup failed")
                 external_context = (
@@ -6426,7 +6437,10 @@ class AIEngine:
         if external_runtime is not None:
             try:
                 unavailable_service = (
-                    await external_runtime.unavailable_service_reply(user_text)
+                    await external_runtime.unavailable_service_reply(
+                        user_text,
+                        principal_id=actor.user_key,
+                    )
                 )
             except Exception:
                 logger.exception("External service availability guard failed")

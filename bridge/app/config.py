@@ -18,6 +18,16 @@ class Settings(BaseSettings):
     # Protects setup, receipt, plan and monitor administration endpoints.
     # When empty, those sensitive endpoints remain unavailable rather than open.
     jarvis_integrations_admin_token: str = ""
+    jarvis_mobile_voice_token: str = ""
+    # Mobile integrations APIs reuse the existing encrypted Android mobile
+    # token, but Core maps it to this server-owned principal rather than
+    # trusting a user ID supplied by the app or model.
+    jarvis_integrations_owner_principal: str = ""
+    jarvis_credential_encryption_key: str = ""
+    jarvis_google_oauth_client_id: str = ""
+    jarvis_google_oauth_client_secret: str = ""
+    jarvis_google_oauth_redirect_uri: str = ""
+    jarvis_google_android_return_uri: str = "jarvis://integrations/google"
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
 

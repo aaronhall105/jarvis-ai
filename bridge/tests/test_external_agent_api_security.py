@@ -23,6 +23,13 @@ SENSITIVE_EXTERNAL_AGENT_ROUTES = {
     ("post", "/api/external-monitors/{job_id}/cancel"),
 }
 
+MOBILE_ACCOUNT_ROUTES = {
+    ("get", "/api/integrations/mobile/providers"),
+    ("post", "/api/integrations/mobile/google/start"),
+    ("get", "/api/integrations/mobile/google/sessions/{session_id}"),
+    ("delete", "/api/integrations/mobile/google/accounts/{account_id}"),
+}
+
 
 def _route(decorator: ast.expr) -> tuple[str, str] | None:
     if not isinstance(decorator, ast.Call) or not decorator.args:
@@ -84,4 +91,38 @@ def test_integration_token_guard_is_fail_closed_and_constant_time() -> None:
     assert "if not expected" in segment
     assert "status_code=503" in segment
     assert "secrets.compare_digest" in segment
+    assert "status_code=403" in segment
+
+
+def test_mobile_account_routes_map_bearer_auth_to_server_owned_principal() -> None:
+    source = MAIN_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(MAIN_PATH))
+    protected: set[tuple[str, str]] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            continue
+        routes = {
+            route
+            for decorator in node.decorator_list
+            if (route := _route(decorator)) in MOBILE_ACCOUNT_ROUTES
+        }
+        if routes and any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "_require_mobile_integration_principal"
+            for child in ast.walk(node)
+        ):
+            protected.update(routes)
+    assert protected == MOBILE_ACCOUNT_ROUTES
+
+    guard = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_require_mobile_integration_principal"
+    )
+    segment = ast.get_source_segment(source, guard) or ""
+    assert "jarvis_integrations_owner_principal" in segment
+    assert "secrets.compare_digest" in segment
+    assert "status_code=503" in segment
     assert "status_code=403" in segment

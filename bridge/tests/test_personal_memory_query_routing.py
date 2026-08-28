@@ -140,6 +140,37 @@ def test_unverified_external_write_completion_claim_is_blocked() -> None:
     assert unbacked_external_write_claim_reply(
         "I drafted the email for your review.", []
     ) is None
+    assert unbacked_external_write_claim_reply(
+        "The email draft was created.", []
+    ) is not None
+    assert unbacked_external_write_claim_reply(
+        "The calendar event was created.", []
+    ) is not None
+
+
+def test_google_write_claim_requires_verified_provider_receipt() -> None:
+    accepted = {
+        "tool": "google_integration",
+        "result": {
+            "success": True,
+            "status": "accepted_unverified",
+            "receipt": {"status": "accepted_unverified"},
+        },
+    }
+    verified = {
+        "tool": "google_integration",
+        "result": {
+            "success": True,
+            "status": "verified",
+            "receipt": {"status": "verified"},
+        },
+    }
+    assert unbacked_external_write_claim_reply(
+        "The calendar event was created.", [accepted]
+    ) is not None
+    assert unbacked_external_write_claim_reply(
+        "The calendar event was created.", [verified]
+    ) is None
 
 
 def test_created_but_blocked_plan_is_never_described_as_completed() -> None:
