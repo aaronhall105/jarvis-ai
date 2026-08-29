@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 190190
-        versionName = "19.0.0-alpha19"
+        versionCode = 190200
+        versionName = "19.0.0-alpha20"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
 
@@ -50,6 +50,7 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -61,4 +62,5 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+    testImplementation("org.robolectric:robolectric:4.16.1")
 }

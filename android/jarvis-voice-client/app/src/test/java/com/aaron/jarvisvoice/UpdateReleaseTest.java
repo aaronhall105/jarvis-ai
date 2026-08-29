@@ -30,6 +30,23 @@ public final class UpdateReleaseTest {
         assertFalse(UpdateRelease.parse(valid("19.0.0-alpha16", 190140, "alpha")).isEligible(UpdateChannel.ALPHA, "19.0.0-alpha15", 190150, 36, 2));
         assertTrue(UpdateRelease.parse(valid("19.0.0-alpha16", 190160, "alpha")).isEligible(UpdateChannel.ALPHA, "19.0.0-alpha15", 190150, 36, 2));
     }
+    @Test public void alpha20EscapesTheAlpha19VersionCollision() {
+        UpdateRelease alpha20 = UpdateRelease.parse(valid("19.0.0-alpha20", 190200, "alpha"));
+        assertTrue(alpha20.isEligible(
+            UpdateChannel.ALPHA,
+            "19.0.0-alpha19",
+            190190,
+            36,
+            JarvisVersion.REALTIME_PROTOCOL
+        ));
+        assertFalse(alpha20.isEligible(
+            UpdateChannel.ALPHA,
+            "19.0.0-alpha20",
+            190200,
+            36,
+            JarvisVersion.REALTIME_PROTOCOL
+        ));
+    }
     @Test public void malformedManifestRejected() {
         assertThrows(IllegalArgumentException.class, () -> UpdateRelease.parse("{"));
         assertThrows(IllegalArgumentException.class, () -> UpdateRelease.parse("{}"));

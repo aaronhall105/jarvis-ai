@@ -33,6 +33,10 @@ import android.widget.Toast;
 import java.util.List;
 
 public final class SettingsActivity extends Activity {
+    static final String INTEGRATIONS_SECTION_TAG = "settings_integrations_section";
+    static final String INTEGRATIONS_CONTENT_TAG = "settings_integrations_content";
+    static final String INTEGRATIONS_BUTTON_TAG = "settings_integrations_open";
+
     private static final int BLACK = Color.rgb(20, 20, 20);
     private static final int MID = Color.rgb(102, 102, 102);
     private static final int LINE = Color.rgb(225, 225, 225);
@@ -144,6 +148,14 @@ public final class SettingsActivity extends Activity {
         page.addView(buildCoreCard(), matchWrap(0, dp(12)));
         page.addView(buildHomeAssistantCard(), matchWrap(0, dp(24)));
 
+        page.addView(buildIntegrationsSection(), matchWrap(0, dp(24)));
+
+        page.addView(sectionHeader(
+            "Developer",
+            "Review Jarvis improvement proposals and protected developer controls."
+        ), matchWrap(0, dp(10)));
+        page.addView(buildDeveloperCard(), matchWrap(0, dp(24)));
+
         page.addView(sectionHeader(
             "Updates",
             "Secure Android updates, release channels and rollback information."
@@ -189,6 +201,62 @@ public final class SettingsActivity extends Activity {
         Button updates = primaryButton("Open Jarvis updates");
         updates.setOnClickListener(view -> startActivity(new Intent(this, UpdatesActivity.class)));
         card.addView(updates, matchWrap());
+        return card;
+    }
+
+    private View buildIntegrationsSection() {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setTag(INTEGRATIONS_SECTION_TAG);
+
+        LinearLayout heading = (LinearLayout) sectionHeader(
+            "Integrations",
+            "Google, email, calendar, contacts and external services."
+        );
+        heading.setPadding(dp(14), dp(13), dp(14), dp(13));
+        heading.setBackground(rounded(SOFT, 18, 1, LINE));
+        heading.setClickable(true);
+        heading.setFocusable(true);
+
+        TextView disclosure = note("Show integrations");
+        disclosure.setPadding(0, dp(8), 0, 0);
+        heading.addView(disclosure, matchWrap());
+
+        LinearLayout content = card();
+        content.setTag(INTEGRATIONS_CONTENT_TAG);
+        content.setVisibility(View.GONE);
+        Button integrations = secondaryButton("Open integrations & accounts");
+        integrations.setTag(INTEGRATIONS_BUTTON_TAG);
+        integrations.setOnClickListener(view ->
+            startActivity(new Intent(this, IntegrationsActivity.class))
+        );
+        content.addView(integrations, matchWrap());
+
+        heading.setContentDescription(
+            "Integrations. Google, email, calendar, contacts and external services. Collapsed."
+        );
+        heading.setOnClickListener(view -> {
+            boolean expanding = content.getVisibility() != View.VISIBLE;
+            content.setVisibility(expanding ? View.VISIBLE : View.GONE);
+            disclosure.setText(expanding ? "Hide integrations" : "Show integrations");
+            heading.setContentDescription(
+                "Integrations. Google, email, calendar, contacts and external services. "
+                    + (expanding ? "Expanded." : "Collapsed.")
+            );
+        });
+
+        section.addView(heading, matchWrap());
+        section.addView(content, matchWrap(dp(10), 0));
+        return section;
+    }
+
+    private View buildDeveloperCard() {
+        LinearLayout card = card();
+        Button improvements = secondaryButton("Open improvements");
+        improvements.setOnClickListener(view ->
+            startActivity(new Intent(this, ImprovementsActivity.class))
+        );
+        card.addView(improvements, matchWrap());
         return card;
     }
 
@@ -449,11 +517,6 @@ public final class SettingsActivity extends Activity {
         card.addView(fieldGroup("Remote Core URL — optional", remoteCoreUrl), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Mobile voice token", mobileToken), matchWrap(0, dp(14)));
         card.addView(fieldGroup("Your name", userName), matchWrap());
-        Button integrations = secondaryButton("Open integrations & accounts");
-        integrations.setOnClickListener(view ->
-            startActivity(new Intent(this, IntegrationsActivity.class))
-        );
-        card.addView(integrations, matchWrap(dp(14), 0));
         return card;
     }
 

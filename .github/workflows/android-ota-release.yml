@@ -98,6 +98,31 @@ jobs:
           "$aapt" dump badging "$apk" > apk-badging.txt
           grep -Fq "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'" apk-badging.txt
           echo "Verified APK package/version: com.aaron.jarvisvoice $version ($code)"
+          "$aapt" dump xmltree "$apk" AndroidManifest.xml > apk-manifest.txt
+          grep -Fq 'com.aaron.jarvisvoice.IntegrationsActivity' apk-manifest.txt
+          grep -Fq 'android:scheme' apk-manifest.txt
+          grep -Fq '="jarvis"' apk-manifest.txt
+          grep -Fq '="integrations"' apk-manifest.txt
+          grep -Fq '="/google"' apk-manifest.txt
+          unzip -p "$apk" classes.dex > "$RUNNER_TEMP/classes.dex"
+          dexdump="$ANDROID_HOME/build-tools/$build_tools/dexdump"
+          test -x "$dexdump"
+          "$dexdump" -d "$RUNNER_TEMP/classes.dex" > "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/SettingsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/IntegrationsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'buildIntegrationsSection' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Open integrations & accounts' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Google, email, calendar, contacts and external services.' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'settings_integrations_open' "$RUNNER_TEMP/classes-dexdump.txt"
+          {
+            echo "Package: com.aaron.jarvisvoice"
+            echo "Version: $version ($code)"
+            echo "SettingsActivity: present with top-level Integrations runtime UI"
+            echo "IntegrationsActivity: present and manifest-declared"
+            echo "Deep link: jarvis://integrations/google"
+            echo "Signer SHA-256: ${actual,,}"
+          } > apk-inspection.txt
+          echo "Verified compiled Integrations Settings UI, activity, and deep link"
           sha256sum "$apk" > "$apk.sha256"
           git log -1 --format=%B "$GITHUB_SHA" > release-notes.txt
           python tools/generate_ota_manifest.py --apk "$apk" --version "$version" --version-code "$code" \
@@ -110,10 +135,10 @@ jobs:
           version="${GITHUB_REF_NAME#v}"; apk="jarvis-assistant-v${version}-release.apk"
           prerelease=""; [[ "$version" == *-* ]] && prerelease="--prerelease"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt --clobber
+            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt apk-inspection.txt --clobber
             gh release edit "$GITHUB_REF_NAME" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           else
-            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt \
+            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt apk-inspection.txt \
               --verify-tag --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           fi
       - name: Publish validated channel feeds
@@ -148,5 +173,6 @@ jobs:
             jarvis-assistant-*-release.apk.sha256
             update-manifest.json
             signing-report.txt
+            apk-inspection.txt
           if-no-files-found: error
           retention-days: 30

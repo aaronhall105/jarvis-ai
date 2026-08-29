@@ -175,10 +175,7 @@ public final class IntegrationsActivity extends Activity {
         client.providers(new IntegrationsClient.ProvidersCallback() {
             @Override public void onSuccess(List<IntegrationProvider> providers) {
                 coreState.setText("Core online — provider states refreshed");
-                providerList.removeAllViews();
-                for (IntegrationProvider provider : providers) {
-                    providerList.addView(providerCard(provider), matchWrap(0, dp(12)));
-                }
+                renderProviders(providers);
             }
 
             @Override public void onError(String message) {
@@ -186,6 +183,13 @@ public final class IntegrationsActivity extends Activity {
                 showOfflineProviders();
             }
         });
+    }
+
+    void renderProviders(List<IntegrationProvider> providers) {
+        providerList.removeAllViews();
+        for (IntegrationProvider provider : providers) {
+            providerList.addView(providerCard(provider), matchWrap(0, dp(12)));
+        }
     }
 
     private void showOfflineProviders() {
