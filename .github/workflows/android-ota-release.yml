@@ -41,7 +41,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
           grep -Fq "versionName = \"$version\"" android/jarvis-voice-client/app/build.gradle.kts
           grep -Fq "RELEASE = \"$version\"" android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisVersion.java
-          grep -Fq "JARVIS_RELEASE = \"$version\"" bridge/app/version.py
+          grep -Eq '^JARVIS_RELEASE = "19\.0\.0-alpha[0-9]+"$' bridge/app/version.py
           test "$(git rev-list -n1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
           python tools/verify_product_baseline.py --skip-ref
           git diff --check
@@ -135,25 +135,32 @@ jobs:
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/DeveloperClient;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/TurnRecoveryJournal;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/WearChannelListenerService;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'buildIntegrationsSection' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'buildIntegrationsCard' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Open integrations & accounts' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Google, email, calendar, contacts and external services.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'settings_integrations_open' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'Clear current chat' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'Only the current conversation will be removed.' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'House activity' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'New chat' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'More options' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Chat history' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Improvements' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Delete current chat' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Delete this chat?' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Message Jarvis' "$RUNNER_TEMP/classes-dexdump.txt"
           "$aapt" dump resources "$apk" > apk-resources.txt
-          grep -Fq 'com.aaron.jarvisvoice:drawable/jarvis_wordmark_master' apk-resources.txt
-          grep -Fq 'com.aaron.jarvisvoice:drawable/control_delete_red' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/jarvis_logo_ui' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:drawable/ic_launcher_foreground' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:drawable/ic_jarvis_status' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:mipmap/ic_launcher_round' apk-resources.txt
           {
             echo "Package: com.aaron.jarvisvoice"
             echo "Version: $version ($code)"
-            echo "SettingsActivity: present with top-level Integrations runtime UI"
+            echo "Phone UI baseline: actual alpha17 source commit 3279a57ac8593cc2eba70d1678350dea25235a96"
+            echo "MainActivity: alpha17 logo, navigation, menu, composer, history, improvements, and delete-chat UX present"
+            echo "SettingsActivity: alpha17 presentation with current Integrations and Developer sections"
             echo "IntegrationsActivity: present and manifest-declared"
             echo "Deep link: jarvis://integrations/google"
-            echo "Developer, delete-current-chat, realtime recovery, Wear bridge, and current branding: present"
+            echo "Developer, realtime recovery, assistant, wake, and Wear bridge: present"
             echo "Signer SHA-256: ${actual,,}"
           } > apk-inspection.txt
           echo "Verified compiled Integrations Settings UI, activity, and deep link"

@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 190230
-        versionName = "19.0.0-alpha21"
+        versionCode = 190240
+        versionName = "19.0.0-alpha22"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
 
@@ -65,4 +65,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.work:work-testing:2.11.0")
 }

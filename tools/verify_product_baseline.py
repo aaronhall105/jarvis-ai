@@ -14,6 +14,21 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs" / "JARVIS_PRODUCT_BASELINE.json"
+ALPHA17_ANDROID_COMMIT = "3279a57ac8593cc2eba70d1678350dea25235a96"
+ALPHA17_EXACT_FILES = (
+    "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ChatHistoryActivity.java",
+    "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ImprovementsActivity.java",
+    "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ProactiveActivity.java",
+    "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png",
+    "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_logo_ui.png",
+    "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml",
+    "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis_status.xml",
+    "android/jarvis-voice-client/app/src/main/res/drawable/ic_launcher_foreground.xml",
+    "android/jarvis-voice-client/app/src/main/res/drawable/ic_launcher_monochrome.xml",
+    "android/jarvis-voice-client/app/src/main/res/mipmap-anydpi-v33/ic_launcher.xml",
+    "android/jarvis-voice-client/app/src/main/res/mipmap-anydpi-v33/ic_launcher_round.xml",
+    "android/jarvis-voice-client/app/src/main/res/values/colors.xml",
+)
 
 
 def _git(*arguments: str) -> str:
@@ -24,6 +39,27 @@ def _git(*arguments: str) -> str:
 
 def load_manifest() -> dict[str, Any]:
     return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def verify_alpha17_android_lineage() -> list[str]:
+    errors: list[str] = []
+    for relative in ALPHA17_EXACT_FILES:
+        path = ROOT / relative
+        if not path.is_file():
+            errors.append(f"alpha17 Android baseline file missing: {relative}")
+            continue
+        try:
+            reference = subprocess.check_output(
+                ["git", "show", f"{ALPHA17_ANDROID_COMMIT}:{relative}"],
+                cwd=ROOT,
+                stderr=subprocess.STDOUT,
+            )
+        except subprocess.CalledProcessError:
+            errors.append(f"alpha17 Android source unavailable for comparison: {relative}")
+            continue
+        if path.read_bytes() != reference:
+            errors.append(f"alpha17 Android baseline bytes changed: {relative}")
+    return errors
 
 
 def verify_authoritative_ref(*, allow_dirty: bool = False) -> list[str]:
@@ -42,6 +78,9 @@ def verify_assertions(manifest: dict[str, Any]) -> list[str]:
     for relative in assertions["files"]:
         if not (ROOT / relative).is_file():
             errors.append(f"mandatory file missing: {relative}")
+    for relative in assertions.get("absent_files", []):
+        if (ROOT / relative).exists():
+            errors.append(f"obsolete product file must be absent: {relative}")
     for relative, markers in assertions["markers"].items():
         path = ROOT / relative
         if not path.is_file():
@@ -51,6 +90,15 @@ def verify_assertions(manifest: dict[str, Any]) -> list[str]:
         for marker in markers:
             if marker not in content:
                 errors.append(f"mandatory marker missing from {relative}: {marker}")
+    for relative, markers in assertions.get("forbidden_markers", {}).items():
+        path = ROOT / relative
+        if not path.is_file():
+            errors.append(f"forbidden-marker file missing: {relative}")
+            continue
+        content = path.read_text(encoding="utf-8")
+        for marker in markers:
+            if marker in content:
+                errors.append(f"obsolete product marker present in {relative}: {marker}")
     for relative, expected in assertions["sha256"].items():
         path = ROOT / relative
         if not path.is_file():
@@ -68,8 +116,8 @@ def verify_android_identity() -> list[str]:
     if 'applicationId = "com.aaron.jarvisvoice"' not in build:
         errors.append("Android applicationId is not com.aaron.jarvisvoice")
     match = re.search(r"versionCode\s*=\s*(\d+)", build)
-    if match is None or int(match.group(1)) <= 190228:
-        errors.append("Android versionCode is not newer than the unified-runtime line")
+    if match is None or int(match.group(1)) <= 190230:
+        errors.append("Android versionCode is not newer than alpha21")
     return errors
 
 
@@ -100,7 +148,12 @@ def main() -> int:
     )
     args = parser.parse_args()
     manifest = load_manifest()
-    errors = verify_assertions(manifest) + verify_android_identity() + verify_release_workflows()
+    errors = (
+        verify_assertions(manifest)
+        + verify_alpha17_android_lineage()
+        + verify_android_identity()
+        + verify_release_workflows()
+    )
     if not args.skip_ref:
         errors += verify_authoritative_ref(allow_dirty=args.allow_dirty)
     if errors:
