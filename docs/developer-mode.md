@@ -32,15 +32,18 @@ backoff. The phone microphone remains off unless the user explicitly starts voic
   approval for new or higher-impact operations. Requests are displayed as
   native Android confirmation sheets.
 - Events are filtered to threads owned or resumed by that authenticated WebSocket connection.
-- Requests are rate limited. Audit logs record operation types and workspace IDs, not prompts,
-  tokens, file contents, or command output.
+- Requests are rate limited. Audit logs use fixed operation-event names and never include
+  user-supplied workspace values, prompts, tokens, file contents, or command output.
 - Destructive actions remain subject to Codex approvals and the existing repository rules.
 
 ## Service installation
 
-The reference unit is `developer_gateway/jarvis-developer.service`. The installed user service is
-`jarvis-developer.service`; it is enabled at boot, restarts on failure, and logs to the user
-journal. Runtime dependencies are in `developer_gateway/requirements.txt`.
+The reference unit is `developer_gateway/jarvis-developer.service`. The installer refuses any
+source other than a clean, remote-matching `jarvis/unified-production` checkout, copies the
+gateway into a commit-addressed runtime release, and atomically points `current` at that release.
+The installed `jarvis-developer.service` is enabled at boot, restarts on failure, and reports its
+exact source commit from `/health`. Runtime dependencies are in
+`developer_gateway/requirements.txt`.
 
 Useful checks:
 

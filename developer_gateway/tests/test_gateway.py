@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from developer_gateway.app import (
+    SOURCE_COMMIT,
     app,
     authorised,
     codex_inputs,
@@ -29,6 +30,14 @@ def test_authentication_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert authorised("Bearer correct-token")
     assert not authorised(None)
     assert not authorised("Bearer incorrect")
+
+
+def test_health_reports_source_provenance() -> None:
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["source_commit"] == SOURCE_COMMIT
+    assert SOURCE_COMMIT == "development" or len(SOURCE_COMMIT) == 40
 
 
 def test_workspace_allowlist_rejects_paths_and_unknown_ids(tmp_path: Path) -> None:

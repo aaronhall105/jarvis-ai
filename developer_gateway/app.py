@@ -18,6 +18,17 @@ logging.basicConfig(level=os.getenv("JARVIS_DEVELOPER_LOG_LEVEL", "INFO"))
 log = logging.getLogger("jarvis-developer")
 
 
+def load_source_commit() -> str:
+    source_file = Path(__file__).resolve().parents[1] / "SOURCE_COMMIT"
+    try:
+        value = source_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "development"
+    if len(value) == 40 and all(character in "0123456789abcdef" for character in value):
+        return value
+    return "unknown"
+
+
 def load_token() -> str:
     direct = os.getenv("JARVIS_DEVELOPER_TOKEN", "").strip()
     if direct:
@@ -31,6 +42,7 @@ def load_token() -> str:
 
 
 TOKEN = load_token()
+SOURCE_COMMIT = load_source_commit()
 WORKSPACES = {
     "jarvis": Path("/home/aaron/jarvis"),
     "jarvis-wear": Path("/home/aaron/jarvis-wear"),
@@ -86,6 +98,7 @@ async def health() -> dict[str, Any]:
     return {
         "status": "healthy",
         "service": "jarvis-developer",
+        "source_commit": SOURCE_COMMIT,
         "uptime_seconds": int(time.monotonic() - started),
     }
 

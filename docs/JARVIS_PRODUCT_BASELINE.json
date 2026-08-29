@@ -338,6 +338,8 @@
       "bridge/app/integration_accounts.py",
       "bridge/app/connectors/audit.py",
       "developer_gateway/app.py",
+      "developer_gateway/install.sh",
+      "developer_gateway/jarvis-developer.service",
       "tools/deploy_unified_core.sh",
       "tools/verify_sqlite_integrity.py",
       "android/jarvis-voice-client/wear/build.gradle.kts",
@@ -348,6 +350,9 @@
     "markers": {
       "bridge/app/realtime_voice.py": ["turn.status", "turn.accepted", "turn.interrupted"],
       "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime"],
+      "developer_gateway/app.py": ["Developer audit event=thread_start", "source_commit"],
+      "developer_gateway/install.sh": ["jarvis/unified-production", "origin/$authoritative_branch", "SOURCE_COMMIT", "systemctl --user restart"],
+      "developer_gateway/jarvis-developer.service": ["WorkingDirectory=%h/.local/share/jarvis-developer/current"],
       "android/jarvis-voice-client/app/src/main/AndroidManifest.xml": [".IntegrationsActivity", "android:host=\"integrations\"", ".WearChannelListenerService", ".JarvisVoiceInteractionService"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.control_delete_red", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java": ["Voice and conversation", "Connections", "Integrations", "Developer", "Open integrations & accounts"],

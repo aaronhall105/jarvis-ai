@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/aaron/jarvis-wear
+WorkingDirectory=%h/.local/share/jarvis-developer/current
 LoadCredential=jarvis-developer-token:%h/.config/jarvis/developer-token
 ExecStart=/home/aaron/.local/share/jarvis-developer/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
 Restart=on-failure
@@ -16,7 +16,7 @@ LockPersonality=true
 RestrictSUIDSGID=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/aaron/jarvis /home/aaron/jarvis-wear /home/aaron/.codex /tmp
+ReadWritePaths=/home/aaron/jarvis /home/aaron/jarvis-wear /home/aaron/.codex %h/.local/share/jarvis-developer /tmp
 
 [Install]
 WantedBy=default.target
