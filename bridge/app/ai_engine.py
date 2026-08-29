@@ -260,7 +260,9 @@ _MEMORY_CATEGORIES = [
 ]
 
 _SAVE_MEMORY_PATTERNS = (
-    re.compile(r"^\s*(?:please\s+)?remember\s+(?!to\b|when\b|where\b|who\b|what\b|why\b|how\b)", re.I),
+    re.compile(
+        r"^\s*(?:please\s+)?remember\s+(?!to\b|when\b|where\b|who\b|what\b|why\b|how\b)", re.I
+    ),
     re.compile(r"\b(?:please\s+)?(?:save|store)\s+(?:this|that|it|the following|my|our)\b", re.I),
     re.compile(r"\b(?:make|keep)\s+(?:a\s+)?note\s+(?:that|of|about)\b", re.I),
     re.compile(r"\bi want you to remember\b", re.I),
@@ -270,7 +272,9 @@ _SAVE_MEMORY_PATTERNS = (
 
 _FORGET_MEMORY_PATTERNS = (
     re.compile(r"^\s*(?:please\s+)?forget\s+(?!about\s+doing\b)", re.I),
-    re.compile(r"\b(?:remove|delete|erase)\s+(?:that|this|the|my|a)?\s*(?:saved\s+)?memory\b", re.I),
+    re.compile(
+        r"\b(?:remove|delete|erase)\s+(?:that|this|the|my|a)?\s*(?:saved\s+)?memory\b", re.I
+    ),
     re.compile(r"\bstop remembering\b", re.I),
     re.compile(r"\bdon['’]?t remember\s+(?:that|this|my|our)\b", re.I),
 )
@@ -377,6 +381,18 @@ _PERSONAL_MEMORY_QUERY_PATTERN = re.compile(
 
 _PERSON_LOCATION_PATTERN = re.compile(
     r"^\s*(?:where(?:'s| is| are)\s+(?:i|aaron|amber|my phone|my watch)\b|where\s+am\s+i\b)",
+    re.I,
+)
+
+_PRESENCE_EVIDENCE_FOLLOWUP_PATTERN = re.compile(
+    r"^\s*(?:are you sure|how come|how do you know|why(?: does)?(?: home assistant| ha)? "
+    r"(?:say|think|report).+|what (?:device|tracker|source) (?:says|is saying|reports|"
+    r"is causing).+|which (?:device|tracker|source) (?:is causing|says|reports).+)\s*[?!.]*\s*$",
+    re.I,
+)
+
+_PRESENCE_EXPLICIT_REFERENT_PATTERN = re.compile(
+    r"\b(?:aaron|amber|i(?:'m| am)|me|my|mine)\b",
     re.I,
 )
 
@@ -625,8 +641,7 @@ def _verified_external_write_evidence(
             continue
         if call.get("tool") in direct_write_tools and result.get("success") is True:
             if result.get("status") == "verified" or any(
-                isinstance(receipt, Mapping)
-                and receipt.get("status") == "verified"
+                isinstance(receipt, Mapping) and receipt.get("status") == "verified"
                 for receipt in (result.get("receipt"), result.get("action_receipt"))
             ):
                 return True
@@ -847,18 +862,12 @@ class RequestRouter:
 
     @staticmethod
     def _has_recent_home_context(history: Sequence[dict[str, str]]) -> bool:
-        recent_context = " ".join(
-            str(item.get("content", ""))
-            for item in history[-6:]
-        )
+        recent_context = " ".join(str(item.get("content", "")) for item in history[-6:])
         return bool(_HOME_CONTEXT_PATTERN.search(recent_context))
 
     @staticmethod
     def _has_recent_state_context(history: Sequence[dict[str, str]]) -> bool:
-        recent_context = " ".join(
-            str(item.get("content", ""))
-            for item in history[-8:]
-        )
+        recent_context = " ".join(str(item.get("content", "")) for item in history[-8:])
         if not recent_context:
             return False
 
@@ -1045,10 +1054,7 @@ class RequestRouter:
             or _ROUTINE_RUN_PATTERN.search(value)
         )
 
-        if (
-            _CAPABILITY_OVERVIEW_PATTERN.search(value)
-            and has_home_language
-        ):
+        if _CAPABILITY_OVERVIEW_PATTERN.search(value) and has_home_language:
             return RoutingDecision(
                 intent=RequestIntent.CAPABILITY_OVERVIEW,
                 deterministic_reply=(
@@ -1076,12 +1082,10 @@ class RequestRouter:
             return RoutingDecision(
                 intent=RequestIntent.FUTURE_HOME_ACTION,
                 deterministic_reply=(
-                    "I can’t schedule that yet. Ask me when you want it done and "
-                    "I’ll do it then."
+                    "I can’t schedule that yet. Ask me when you want it done and I’ll do it then."
                 ),
                 use_long_term_memory=False,
             )
-
 
         if _PERSONAL_MEMORY_QUERY_PATTERN.search(value):
             return RoutingDecision(
@@ -1102,10 +1106,7 @@ class RequestRouter:
                     _STATE_TOPIC_PATTERN.search(value)
                     or (
                         _STATE_VALUE_PATTERN.search(value)
-                        and (
-                            has_home_language
-                            or cls._has_recent_home_context(history)
-                        )
+                        and (has_home_language or cls._has_recent_home_context(history))
                     )
                 )
             )
@@ -1124,10 +1125,7 @@ class RequestRouter:
                 use_long_term_memory=False,
             )
 
-        if (
-            _STATE_FOLLOW_UP_PATTERN.search(value)
-            and cls._has_recent_state_context(history)
-        ):
+        if _STATE_FOLLOW_UP_PATTERN.search(value) and cls._has_recent_state_context(history):
             return RoutingDecision(
                 intent=RequestIntent.STATE_QUERY,
                 allow_home_read=True,
@@ -1328,17 +1326,25 @@ class AIEngine:
             maximum=12,
         )
 
-        self.text_verbosity = os.getenv(
-            "JARVIS_TEXT_VERBOSITY",
-            "low",
-        ).strip().lower()
+        self.text_verbosity = (
+            os.getenv(
+                "JARVIS_TEXT_VERBOSITY",
+                "low",
+            )
+            .strip()
+            .lower()
+        )
         if self.text_verbosity not in {"low", "medium", "high"}:
             self.text_verbosity = "low"
 
-        self.reasoning_effort = os.getenv(
-            "JARVIS_REASONING_EFFORT",
-            "low",
-        ).strip().lower()
+        self.reasoning_effort = (
+            os.getenv(
+                "JARVIS_REASONING_EFFORT",
+                "low",
+            )
+            .strip()
+            .lower()
+        )
         if self.reasoning_effort not in {
             "none",
             "minimal",
@@ -1456,10 +1462,7 @@ class AIEngine:
         local_area = actor.area_id or ""
         if areas:
             area_ids = [area["area_id"] for area in areas]
-            area_descriptions = ", ".join(
-                f'{area["name"]}={area["area_id"]}'
-                for area in areas
-            )
+            area_descriptions = ", ".join(f"{area['name']}={area['area_id']}" for area in areas)
             definitions.append(
                 {
                     "type": "function",
@@ -1497,18 +1500,12 @@ class AIEngine:
 
         devices = await self.tools.controllable_devices()
         valid_devices = [
-            device
-            for device in devices
-            if device.get("entity_id") and device.get("name")
+            device for device in devices if device.get("entity_id") and device.get("name")
         ]
         if valid_devices:
             entity_ids = [str(device["entity_id"]) for device in valid_devices]
             device_descriptions = "; ".join(
-                (
-                    f'{device["name"]} '
-                    f'({device.get("area_name") or "No area"})='
-                    f'{device["entity_id"]}'
-                )
+                (f"{device['name']} ({device.get('area_name') or 'No area'})={device['entity_id']}")
                 for device in valid_devices
             )
             definitions.append(
@@ -1540,16 +1537,11 @@ class AIEngine:
                 }
             )
 
-        routines = (
-            await self.tools.runnable_routines(limit=120)
-            if include_routines
-            else []
-        )
+        routines = await self.tools.runnable_routines(limit=120) if include_routines else []
         if routines:
             routine_ids = [str(item["entity_id"]) for item in routines]
             routine_descriptions = "; ".join(
-                f'{item["name"]} ({item["domain"]})={item["entity_id"]}'
-                for item in routines
+                f"{item['name']} ({item['domain']})={item['entity_id']}" for item in routines
             )
             definitions.append(
                 {
@@ -1579,8 +1571,7 @@ class AIEngine:
         media_shortcuts = self.tools.MEDIA_SHORTCUTS
         if media_shortcuts:
             shortcut_descriptions = "; ".join(
-                f'{key}={value["name"]}'
-                for key, value in media_shortcuts.items()
+                f"{key}={value['name']}" for key, value in media_shortcuts.items()
             )
             definitions.append(
                 {
@@ -1608,8 +1599,7 @@ class AIEngine:
         media_players = self.tools.MEDIA_PLAYER_ENTITIES
         if media_players:
             media_descriptions = "; ".join(
-                f"{name}={entity_id}"
-                for entity_id, name in media_players.items()
+                f"{name}={entity_id}" for entity_id, name in media_players.items()
             )
             definitions.extend(
                 [
@@ -1734,10 +1724,7 @@ class AIEngine:
     async def _home_read_tools(self, actor: UserContext) -> list[dict[str, Any]]:
         areas = await self._area_options()
         area_ids = [area["area_id"] for area in areas]
-        area_descriptions = ", ".join(
-            f'{area["name"]}={area["area_id"]}'
-            for area in areas
-        )
+        area_descriptions = ", ".join(f"{area['name']}={area['area_id']}" for area in areas)
         domains = sorted(self.tools.READABLE_DOMAINS)
         local_area = actor.area_id if actor.area_id in area_ids else None
 
@@ -1939,8 +1926,13 @@ class AIEngine:
                     },
                 },
                 "required": [
-                    "category", "subject", "content", "subject_key",
-                    "visibility", "sensitivity", "expires_at"
+                    "category",
+                    "subject",
+                    "content",
+                    "subject_key",
+                    "visibility",
+                    "sensitivity",
+                    "expires_at",
                 ],
                 "additionalProperties": False,
             },
@@ -1975,7 +1967,6 @@ class AIEngine:
             },
             "strict": True,
         }
-
 
     @staticmethod
     def _admin_read_tools() -> list[dict[str, Any]]:
@@ -2062,15 +2053,11 @@ class AIEngine:
                     "name": {"type": "string"},
                     "summary": {
                         "type": "string",
-                        "description": (
-                            "One concise sentence describing the trigger and result."
-                        ),
+                        "description": ("One concise sentence describing the trigger and result."),
                     },
                     "config_json": {
                         "type": "string",
-                        "description": (
-                            "Complete Home Assistant config object encoded as JSON."
-                        ),
+                        "description": ("Complete Home Assistant config object encoded as JSON."),
                     },
                 },
                 "required": [
@@ -2149,7 +2136,8 @@ class AIEngine:
                 cls._normalise_device_phrase(str(area.get("name") or "")),
             }
             if any(
-                name and re.search(
+                name
+                and re.search(
                     rf"(?<![a-z0-9]){re.escape(name)}(?![a-z0-9])",
                     normalised,
                 )
@@ -2248,8 +2236,7 @@ class AIEngine:
                 )
             else:
                 result["response_message"] = (
-                    "Home Assistant accepted the action, but I couldn’t verify the "
-                    "resulting state."
+                    "Home Assistant accepted the action, but I couldn’t verify the resulting state."
                 )
         if execution.get("error") and not result.get("response_message"):
             result["response_message"] = str(execution["error"])
@@ -2284,9 +2271,7 @@ class AIEngine:
             result["response_message"] = str(execution["error"])
         return result
 
-    async def _legacy_admin_config_result(
-        self, domain: str, config_key: str
-    ) -> dict[str, Any]:
+    async def _legacy_admin_config_result(self, domain: str, config_key: str) -> dict[str, Any]:
         config = await self.admin.get_config(domain, config_key)
         if config is None:
             return {
@@ -2363,9 +2348,7 @@ class AIEngine:
                     )
                     requests_admin_capability = any(
                         isinstance(step, Mapping)
-                        and str(step.get("capability_id") or "").startswith(
-                            "homeassistant.admin."
-                        )
+                        and str(step.get("capability_id") or "").startswith("homeassistant.admin.")
                         for step in plan_steps
                     )
                     if requests_admin_capability and not actor.can_admin:
@@ -2392,10 +2375,7 @@ class AIEngine:
                     "result": result,
                 }
 
-            if (
-                self.code_awareness is not None
-                and name in self.code_awareness.TOOL_NAMES
-            ):
+            if self.code_awareness is not None and name in self.code_awareness.TOOL_NAMES:
                 voice_pe_code_request = bool(
                     re.search(
                         r"\b(?:voice\s*pe|voice\s+preview|satellite)\b",
@@ -2405,13 +2385,9 @@ class AIEngine:
                 )
 
                 if voice_pe_code_request:
-                    requested_root = str(
-                        arguments.get("root") or ""
-                    ).strip()
+                    requested_root = str(arguments.get("root") or "").strip()
 
-                    requested_path = str(
-                        arguments.get("path") or ""
-                    ).strip()
+                    requested_path = str(arguments.get("path") or "").strip()
 
                     while requested_path.startswith("./"):
                         requested_path = requested_path[2:]
@@ -2433,10 +2409,7 @@ class AIEngine:
                         if requested_root == "voice_pe":
                             pass
 
-                        elif (
-                            requested_root == "jarvis"
-                            and requested_path in allowed_core_paths
-                        ):
+                        elif requested_root == "jarvis" and requested_path in allowed_core_paths:
                             pass
 
                         else:
@@ -2457,10 +2430,7 @@ class AIEngine:
                         if requested_root == "voice_pe":
                             pass
 
-                        elif (
-                            requested_root == "jarvis"
-                            and requested_path in allowed_core_paths
-                        ):
+                        elif requested_root == "jarvis" and requested_path in allowed_core_paths:
                             pass
 
                         else:
@@ -2509,10 +2479,7 @@ class AIEngine:
                 if local_area:
                     area_id = local_area
                     arguments["area_id"] = local_area
-                valid_area_ids = {
-                    area["area_id"]
-                    for area in await self._area_options()
-                }
+                valid_area_ids = {area["area_id"] for area in await self._area_options()}
 
                 if area_id not in valid_area_ids:
                     return self._tool_failure(
@@ -2597,7 +2564,9 @@ class AIEngine:
                 routine = routines.get(entity_id)
                 if routine is None:
                     return self._tool_failure(
-                        name, arguments, "unknown_routine",
+                        name,
+                        arguments,
+                        "unknown_routine",
                         f"Unknown or unavailable Home Assistant routine: {entity_id}",
                     )
 
@@ -2626,7 +2595,9 @@ class AIEngine:
                 shortcut = _normalise_space(str(arguments.get("shortcut", "")))
                 if shortcut not in self.tools.MEDIA_SHORTCUTS:
                     return self._tool_failure(
-                        name, arguments, "unsupported_shortcut",
+                        name,
+                        arguments,
+                        "unsupported_shortcut",
                         f"Unsupported media shortcut: {shortcut}",
                     )
                 result = await self._execute_registered_home_action(
@@ -2645,12 +2616,16 @@ class AIEngine:
                 action = _normalise_space(str(arguments.get("action", "")))
                 if entity_id not in self.tools.MEDIA_PLAYER_ENTITIES:
                     return self._tool_failure(
-                        name, arguments, "unsupported_media_player",
+                        name,
+                        arguments,
+                        "unsupported_media_player",
                         f"Unsupported media player: {entity_id}",
                     )
                 if action not in self.tools.MEDIA_ACTION_SERVICES:
                     return self._tool_failure(
-                        name, arguments, "unsupported_media_action",
+                        name,
+                        arguments,
+                        "unsupported_media_action",
                         f"Unsupported media action: {action}",
                     )
                 result = await self._execute_registered_home_action(
@@ -2669,12 +2644,16 @@ class AIEngine:
                 volume_percent = int(arguments.get("volume_percent", -1))
                 if entity_id not in self.tools.MEDIA_PLAYER_ENTITIES:
                     return self._tool_failure(
-                        name, arguments, "unsupported_media_player",
+                        name,
+                        arguments,
+                        "unsupported_media_player",
                         f"Unsupported media player: {entity_id}",
                     )
                 if not 0 <= volume_percent <= 100:
                     return self._tool_failure(
-                        name, arguments, "invalid_volume",
+                        name,
+                        arguments,
+                        "invalid_volume",
                         "Volume must be between 0 and 100 percent.",
                     )
                 result = await self._execute_registered_home_action(
@@ -2692,19 +2671,21 @@ class AIEngine:
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "send_mobile_notification":
-                recipient = _normalise_space(
-                    str(arguments.get("recipient", ""))
-                ).lower()
+                recipient = _normalise_space(str(arguments.get("recipient", ""))).lower()
                 title = _normalise_space(str(arguments.get("title", "Jarvis")))
                 message = _normalise_space(str(arguments.get("message", "")))
                 if recipient not in self.tools.NOTIFICATION_SERVICES:
                     return self._tool_failure(
-                        name, arguments, "unsupported_recipient",
+                        name,
+                        arguments,
+                        "unsupported_recipient",
                         f"Unsupported notification recipient: {recipient}",
                     )
                 if not message:
                     return self._tool_failure(
-                        name, arguments, "empty_notification",
+                        name,
+                        arguments,
+                        "empty_notification",
                         "The notification message is empty.",
                     )
                 result = await self._execute_registered_home_action(
@@ -2727,12 +2708,16 @@ class AIEngine:
                 message = _normalise_space(str(arguments.get("message", "")))
                 if target not in self.tools.ANNOUNCEMENT_TARGETS:
                     return self._tool_failure(
-                        name, arguments, "unsupported_announcement_target",
+                        name,
+                        arguments,
+                        "unsupported_announcement_target",
                         f"Unsupported announcement target: {target}",
                     )
                 if not message:
                     return self._tool_failure(
-                        name, arguments, "empty_announcement",
+                        name,
+                        arguments,
+                        "empty_announcement",
                         "The announcement message is empty.",
                     )
                 result = await self._execute_registered_home_action(
@@ -2753,12 +2738,14 @@ class AIEngine:
                 area_value = arguments.get("area_id")
                 search_area_id = str(area_value) if area_value is not None else None
                 local_area = await self._voice_local_area(actor, user_text)
-                local_reference = bool(re.search(
-                    r"\b(?:here|this room|in here|the (?:lights?|windows?|"
-                    r"temperature|thermostat|humidity|radiator|heating))\b",
-                    user_text,
-                    re.I,
-                ))
+                local_reference = bool(
+                    re.search(
+                        r"\b(?:here|this room|in here|the (?:lights?|windows?|"
+                        r"temperature|thermostat|humidity|radiator|heating))\b",
+                        user_text,
+                        re.I,
+                    )
+                )
                 if local_area and local_reference:
                     search_area_id = local_area
                     arguments["area_id"] = local_area
@@ -2774,10 +2761,7 @@ class AIEngine:
                         f"Unsupported readable Home Assistant domain: {search_domain}",
                     )
 
-                valid_area_ids = {
-                    area["area_id"]
-                    for area in await self._area_options()
-                }
+                valid_area_ids = {area["area_id"] for area in await self._area_options()}
                 if search_area_id and search_area_id not in valid_area_ids:
                     return self._tool_failure(
                         name,
@@ -2825,10 +2809,7 @@ class AIEngine:
                 state_filter = str(state_value) if state_value is not None else None
                 limit = int(arguments.get("limit", 30))
 
-                valid_area_ids = {
-                    area["area_id"]
-                    for area in await self._area_options()
-                }
+                valid_area_ids = {area["area_id"] for area in await self._area_options()}
                 if list_area_id not in valid_area_ids:
                     return self._tool_failure(
                         name,
@@ -2896,7 +2877,10 @@ class AIEngine:
                 reference = _normalise_space(str(arguments.get("reference", "")))
                 if not reference:
                     return self._tool_failure(
-                        name, arguments, "invalid_person_reference", "A person reference is required."
+                        name,
+                        arguments,
+                        "invalid_person_reference",
+                        "A person reference is required.",
                     )
                 result = await self._execute_registered_home_read(
                     operation="inspect_presence",
@@ -2908,11 +2892,15 @@ class AIEngine:
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
-            if name in {
-                "list_admin_items",
-                "get_admin_item_config",
-                "propose_admin_change",
-            } and not actor.can_admin:
+            if (
+                name
+                in {
+                    "list_admin_items",
+                    "get_admin_item_config",
+                    "propose_admin_change",
+                }
+                and not actor.can_admin
+            ):
                 return self._tool_failure(
                     name,
                     arguments,
@@ -2945,9 +2933,7 @@ class AIEngine:
                     conversation_id=conversation_id,
                     actor=actor,
                     request_id=request_id,
-                    fallback=lambda: self._legacy_admin_config_result(
-                        admin_get_domain, config_key
-                    ),
+                    fallback=lambda: self._legacy_admin_config_result(admin_get_domain, config_key),
                 )
                 if result.get("success") is not True:
                     return self._tool_failure(
@@ -3008,22 +2994,18 @@ class AIEngine:
             if name == "save_memory":
                 if not self._explicit_save_requested(user_text):
                     return self._tool_failure(
-                        name, arguments, "memory_permission_required",
+                        name,
+                        arguments,
+                        "memory_permission_required",
                         "The current user did not explicitly ask to save a memory.",
                     )
 
                 category = _normalise_space(str(arguments.get("category", ""))).lower()
                 subject = _normalise_space(str(arguments.get("subject", "")))
                 content = _normalise_space(str(arguments.get("content", "")))
-                subject_key = _normalise_space(
-                    str(arguments.get("subject_key", ""))
-                ).lower()
-                visibility = _normalise_space(
-                    str(arguments.get("visibility", ""))
-                ).lower()
-                sensitivity = _normalise_space(
-                    str(arguments.get("sensitivity", ""))
-                ).lower()
+                subject_key = _normalise_space(str(arguments.get("subject_key", ""))).lower()
+                visibility = _normalise_space(str(arguments.get("visibility", ""))).lower()
+                sensitivity = _normalise_space(str(arguments.get("sensitivity", ""))).lower()
                 expires_at_value = arguments.get("expires_at")
                 expires_at = (
                     _normalise_space(str(expires_at_value))
@@ -3033,22 +3015,30 @@ class AIEngine:
 
                 if category not in _MEMORY_CATEGORIES:
                     return self._tool_failure(
-                        name, arguments, "invalid_memory_category",
+                        name,
+                        arguments,
+                        "invalid_memory_category",
                         f"Unsupported memory category: {category}",
                     )
                 if not subject or not content:
                     return self._tool_failure(
-                        name, arguments, "invalid_memory",
+                        name,
+                        arguments,
+                        "invalid_memory",
                         "The memory subject and content must not be empty.",
                     )
                 if len(subject) > 150 or len(content) > 2000:
                     return self._tool_failure(
-                        name, arguments, "memory_too_long",
+                        name,
+                        arguments,
+                        "memory_too_long",
                         "The requested memory is too long to save safely.",
                     )
                 if self._contains_secret(user_text) or self._contains_secret(content):
                     return self._tool_failure(
-                        name, arguments, "sensitive_memory_rejected",
+                        name,
+                        arguments,
+                        "sensitive_memory_rejected",
                         "I cannot save passwords, tokens, payment details or authentication secrets.",
                     )
 
@@ -3065,11 +3055,13 @@ class AIEngine:
                         detected_subject = person
                         break
 
-                explicit_private = bool(re.search(
-                    r"\b(?:keep (?:it|that) private|privately|only for me|just for me)\b",
-                    user_text,
-                    re.I,
-                ))
+                explicit_private = bool(
+                    re.search(
+                        r"\b(?:keep (?:it|that) private|privately|only for me|just for me)\b",
+                        user_text,
+                        re.I,
+                    )
+                )
                 if detected_subject is not None:
                     subject_key = detected_subject
                     if detected_subject != actor.user_key and not explicit_private:
@@ -3086,22 +3078,30 @@ class AIEngine:
 
                 if subject_key not in {"aaron", "amber", "household"}:
                     return self._tool_failure(
-                        name, arguments, "invalid_memory_subject",
+                        name,
+                        arguments,
+                        "invalid_memory_subject",
                         "Memory subject_key must be Aaron, Amber or household.",
                     )
                 if visibility not in {"private", "subject_and_owner", "household"}:
                     return self._tool_failure(
-                        name, arguments, "invalid_memory_visibility",
+                        name,
+                        arguments,
+                        "invalid_memory_visibility",
                         "Memory visibility is invalid.",
                     )
                 if sensitivity not in {"normal", "sensitive"}:
                     return self._tool_failure(
-                        name, arguments, "invalid_memory_sensitivity",
+                        name,
+                        arguments,
+                        "invalid_memory_sensitivity",
                         "Memory sensitivity is invalid.",
                     )
                 if sensitivity == "sensitive" and visibility == "household":
                     return self._tool_failure(
-                        name, arguments, "sensitive_household_memory_rejected",
+                        name,
+                        arguments,
+                        "sensitive_household_memory_rejected",
                         "Sensitive personal information cannot be shared household-wide.",
                     )
 
@@ -3197,11 +3197,7 @@ class AIEngine:
         if not calls:
             return "I could not determine an appropriate response."
 
-        action_calls = [
-            call
-            for call in calls
-            if call.get("tool") in _AUTHORITATIVE_ACTION_TOOLS
-        ]
+        action_calls = [call for call in calls if call.get("tool") in _AUTHORITATIVE_ACTION_TOOLS]
         if action_calls:
             messages: list[str] = []
             for call in action_calls:
@@ -3228,7 +3224,8 @@ class AIEngine:
             read_calls = [
                 call
                 for call in calls
-                if call.get("tool") in {
+                if call.get("tool")
+                in {
                     "search_entity_states",
                     "list_area_states",
                     "get_entity_state",
@@ -3239,9 +3236,7 @@ class AIEngine:
                 return await self._fallback_tool_reply(read_calls[-1:])
 
             successful_count = sum(
-                1
-                for call in calls
-                if call.get("result", {}).get("success") is True
+                1 for call in calls if call.get("result", {}).get("success") is True
             )
             return f"Completed {successful_count} of {len(calls)} requested actions."
 
@@ -3264,8 +3259,8 @@ class AIEngine:
                 return "I couldn’t find a matching current Home Assistant state."
 
             parts = [
-                f'{entity.get("name", entity.get("entity_id", "Entity"))} is '
-                f'{entity.get("display_value", entity.get("state", "unknown"))}'
+                f"{entity.get('name', entity.get('entity_id', 'Entity'))} is "
+                f"{entity.get('display_value', entity.get('state', 'unknown'))}"
                 for entity in entities[:5]
             ]
             extra = len(entities) - len(parts)
@@ -3279,18 +3274,21 @@ class AIEngine:
             if not entity:
                 return "I couldn’t find that Home Assistant entity."
             return (
-                f'{entity.get("name", entity.get("entity_id", "That entity"))} is '
-                f'{entity.get("display_value", entity.get("state", "unknown"))}.'
+                f"{entity.get('name', entity.get('entity_id', 'That entity'))} is "
+                f"{entity.get('display_value', entity.get('state', 'unknown'))}."
             )
 
         if name == "list_admin_items":
             items = result.get("items", [])
             if not items:
                 return "I couldn’t find a matching automation or script."
-            return "; ".join(
-                f'{item.get("name", item.get("entity_id"))} ({item.get("config_key")})'
-                for item in items[:8]
-            ) + "."
+            return (
+                "; ".join(
+                    f"{item.get('name', item.get('entity_id'))} ({item.get('config_key')})"
+                    for item in items[:8]
+                )
+                + "."
+            )
 
         if name == "get_admin_item_config":
             config = result.get("config") or {}
@@ -3315,9 +3313,7 @@ class AIEngine:
             return "I have removed that memory."
 
         return str(
-            result.get("response_message")
-            or result.get("message")
-            or "The request was completed."
+            result.get("response_message") or result.get("message") or "The request was completed."
         )
 
     @staticmethod
@@ -3520,7 +3516,7 @@ class AIEngine:
         name = str(entity.get("name") or entity.get("entity_id") or "Device").strip()
         area = area_name.strip()
         if area and name.casefold().startswith(area.casefold() + " "):
-            name = name[len(area):].strip()
+            name = name[len(area) :].strip()
         if str(entity.get("domain") or "") == "media_player" and re.search(
             r"\b(?:tv|television)\b",
             name,
@@ -3602,11 +3598,24 @@ class AIEngine:
         self,
         user_text: str,
         actor: UserContext,
+        conversation_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        if not _PERSON_LOCATION_PATTERN.search(user_text):
+        location_request = bool(_PERSON_LOCATION_PATTERN.search(user_text))
+        evidence_followup = bool(_PRESENCE_EVIDENCE_FOLLOWUP_PATTERN.search(user_text))
+        if not location_request and not evidence_followup:
             return None
 
         owner = self._owner_from_text(user_text, actor.display_name)
+        if evidence_followup and not _PRESENCE_EXPLICIT_REFERENT_PATTERN.search(user_text):
+            if not conversation_id:
+                return None
+            focused_person = await self.dialogue.focused_person(
+                conversation_id,
+                max_age_seconds=300,
+            )
+            if not focused_person or not focused_person.get("name"):
+                return None
+            owner = str(focused_person["name"])
         inspect_presence = getattr(self.tools, "inspect_presence", None)
         if inspect_presence is not None:
             evidence = await inspect_presence(owner)
@@ -3627,16 +3636,26 @@ class AIEngine:
             state = str(person.get("state") or "unknown").strip()
             if state in {"unknown", "unavailable", ""}:
                 return f"{owner}'s location is currently unavailable.", [call]
-            reported = "at home" if state == "home" else "away" if state == "not_home" else f"at {state}"
+            reported = (
+                "at home" if state == "home" else "away" if state == "not_home" else f"at {state}"
+            )
             source = evidence.get("source") or {}
             conflicts = list(evidence.get("conflicts") or [])
             if source:
                 source_name = str(source.get("name") or source.get("entity_id"))
-                reply = f"Home Assistant currently reports {owner} is {reported}, based on {source_name}."
+                reply = (
+                    f"Home Assistant currently reports {owner} is {reported}; "
+                    f"its source attribute points to {source_name}."
+                )
                 if conflicts:
+                    conflict_text = ", ".join(
+                        f"{item.get('name') or item.get('entity_id')} currently reports "
+                        f"{item.get('state') if item.get('state') is not None else 'no live state'}"
+                        for item in conflicts
+                    )
                     reply += (
-                        f" However, {source_name} currently reports {source.get('state')}; "
-                        "I can only confirm Home Assistant's reported state, not physical presence."
+                        f" However, {conflict_text}. I can only confirm Home "
+                        "Assistant's reported state, not physical presence."
                     )
                 return reply, [call]
             return (
@@ -3744,18 +3763,19 @@ class AIEngine:
                 }
             else:
                 result = dict(raw_result)
-            calls.append({
-                "tool": "get_entity_state",
-                "arguments": {"entity_id": entity_id},
-                "result": result,
-            })
+            calls.append(
+                {
+                    "tool": "get_entity_state",
+                    "arguments": {"entity_id": entity_id},
+                    "result": result,
+                }
+            )
             entity = result.get("entity") if isinstance(result, dict) else None
             if isinstance(entity, dict):
                 entities[entity_id] = entity
 
-        state_entity = (
-            entities.get("sensor.washing_machine_state")
-            or entities.get("select.washing_machine_state")
+        state_entity = entities.get("sensor.washing_machine_state") or entities.get(
+            "select.washing_machine_state"
         )
         if not state_entity:
             return (
@@ -3766,32 +3786,42 @@ class AIEngine:
         raw_state = str(state_entity.get("state") or "unknown").strip()
         state_key = raw_state.casefold().replace("-", "_").replace(" ", "_")
         sub_state = str(
-            (entities.get("sensor.washing_machine_sub_state") or {}).get("state")
-            or ""
+            (entities.get("sensor.washing_machine_sub_state") or {}).get("state") or ""
         ).strip()
         programme = str(
-            (entities.get("sensor.washing_machine_programme") or {}).get("state")
-            or ""
+            (entities.get("sensor.washing_machine_programme") or {}).get("state") or ""
         ).strip()
-        remaining = self._duration_phrase(
-            entities.get("sensor.washing_machine_remaining")
-        )
+        remaining = self._duration_phrase(entities.get("sensor.washing_machine_remaining"))
         asks_finished = bool(_WASH_FINISHED_WORDS_PATTERN.search(user_text))
 
         running_states = {
-            "device_state_running", "running", "washing", "rinsing",
-            "spinning", "heating", "active", "on",
+            "device_state_running",
+            "running",
+            "washing",
+            "rinsing",
+            "spinning",
+            "heating",
+            "active",
+            "on",
         }
         paused_states = {"device_state_paused", "paused"}
         delayed_states = {
-            "device_state_time_delay_active", "time_delay_active", "delayed",
+            "device_state_time_delay_active",
+            "time_delay_active",
+            "delayed",
         }
         delayed_paused_states = {
-            "device_state_time_delay_paused", "time_delay_paused",
+            "device_state_time_delay_paused",
+            "time_delay_paused",
         }
         stopped_states = {
-            "device_state_off", "off", "idle", "standby", "finished",
-            "complete", "completed",
+            "device_state_off",
+            "off",
+            "idle",
+            "standby",
+            "finished",
+            "complete",
+            "completed",
         }
 
         if state_key in running_states:
@@ -3887,14 +3917,16 @@ class AIEngine:
                 person_key=person_key,
             )
             call_result = event.as_dict() if event else None
-            calls = [{
-                "tool": "house_awareness_latest_event",
-                "arguments": {
-                    "event_type": event_type,
-                    "person_key": person_key,
-                },
-                "result": {"success": True, "event": call_result},
-            }]
+            calls = [
+                {
+                    "tool": "house_awareness_latest_event",
+                    "arguments": {
+                        "event_type": event_type,
+                        "person_key": person_key,
+                    },
+                    "result": {"success": True, "event": call_result},
+                }
+            ]
             if event is None:
                 action = "arrival" if just_home else "departure"
                 return (
@@ -3921,11 +3953,13 @@ class AIEngine:
             person_key, person_name = self._awareness_person(raw_person, actor)
             interval = await self.awareness.latest_away_interval(person_key)
             if interval is None:
-                calls = [{
-                    "tool": "house_awareness_away_interval",
-                    "arguments": {"person_key": person_key},
-                    "result": {"success": True, "interval": None},
-                }]
+                calls = [
+                    {
+                        "tool": "house_awareness_away_interval",
+                        "arguments": {"person_key": person_key},
+                        "result": {"success": True, "interval": None},
+                    }
+                ]
                 return (
                     f"I don’t yet have a complete away-and-return period for {person_name}. "
                     "I can only summarise events observed after House Awareness started.",
@@ -3938,19 +3972,21 @@ class AIEngine:
                 max_items=6,
                 empty_reply="Nothing notable changed while you were out.",
             )
-            calls = [{
-                "tool": "house_awareness_events_between",
-                "arguments": {
-                    "person_key": person_key,
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                },
-                "result": {
-                    "success": True,
-                    "count": len(events),
-                    "events": [event.as_dict() for event in events],
-                },
-            }]
+            calls = [
+                {
+                    "tool": "house_awareness_events_between",
+                    "arguments": {
+                        "person_key": person_key,
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                    },
+                    "result": {
+                        "success": True,
+                        "count": len(events),
+                        "events": [event.as_dict() for event in events],
+                    },
+                }
+            ]
             return reply, calls
 
         if _AWARENESS_RECENT_PATTERN.fullmatch(user_text):
@@ -3959,9 +3995,7 @@ class AIEngine:
             arguments: dict[str, Any]
             if re.search(r"\b(?:today|overnight)\b", user_text, re.I):
                 start, end = self.awareness.local_window(user_text)
-                events = await self.awareness.events_between(
-                    start, end, limit=80, area_id=area_id
-                )
+                events = await self.awareness.events_between(start, end, limit=80, area_id=area_id)
                 arguments = {
                     "start": start.isoformat(),
                     "end": end.isoformat(),
@@ -3976,24 +4010,24 @@ class AIEngine:
                 )
                 arguments = {"minutes": minutes, "area_id": area_id}
             area_phrase = (
-                f" in the {str(area.get('name') or '').lower()}"
-                if area is not None
-                else ""
+                f" in the {str(area.get('name') or '').lower()}" if area is not None else ""
             )
             reply = self.awareness.summarise_events(
                 events,
                 max_items=6,
                 empty_reply=f"Nothing notable changed{area_phrase} in that time.",
             )
-            calls = [{
-                "tool": "house_awareness_recent_events",
-                "arguments": arguments,
-                "result": {
-                    "success": True,
-                    "count": len(events),
-                    "events": [event.as_dict() for event in events],
-                },
-            }]
+            calls = [
+                {
+                    "tool": "house_awareness_recent_events",
+                    "arguments": arguments,
+                    "result": {
+                        "success": True,
+                        "count": len(events),
+                        "events": [event.as_dict() for event in events],
+                    },
+                }
+            ]
             return reply, calls
 
         return None
@@ -4003,6 +4037,7 @@ class AIEngine:
         user_text: str,
         history: Sequence[dict[str, str]],
         actor: UserContext,
+        conversation_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
         # Common personal-state questions should be deterministic, fast and must
         # not enter a clarification loop. More complex state questions continue
@@ -4016,7 +4051,11 @@ class AIEngine:
         phone_reply = await self._direct_phone_battery_reply(user_text, history, actor)
         if phone_reply is not None:
             return phone_reply
-        return await self._direct_person_location_reply(user_text, actor)
+        return await self._direct_person_location_reply(
+            user_text,
+            actor,
+            conversation_id,
+        )
 
     def _response_kwargs(
         self,
@@ -4094,15 +4133,8 @@ class AIEngine:
                 stream_opened_at = time.monotonic()
 
                 logger.info(
-                    "JARVIS PERF | OPENAI STREAM OPEN | "
-                    "request_to_stream_ms=%s",
-                    round(
-                        (
-                            stream_opened_at
-                            - openai_request_started_at
-                        )
-                        * 1000
-                    ),
+                    "JARVIS PERF | OPENAI STREAM OPEN | request_to_stream_ms=%s",
+                    round((stream_opened_at - openai_request_started_at) * 1000),
                 )
 
                 first_delta_at: float | None = None
@@ -4114,9 +4146,7 @@ class AIEngine:
                     iterator = stream.__aiter__()
                     while True:
                         try:
-                            async with asyncio.timeout(
-                                self.stream_idle_timeout_seconds
-                            ):
+                            async with asyncio.timeout(self.stream_idle_timeout_seconds):
                                 event = await anext(iterator)
                         except StopAsyncIteration:
                             break
@@ -4149,20 +4179,8 @@ class AIEngine:
                                         "JARVIS PERF | OPENAI FIRST DELTA | "
                                         "request_to_first_delta_ms=%s "
                                         "stream_to_first_delta_ms=%s",
-                                        round(
-                                            (
-                                                first_delta_at
-                                                - openai_request_started_at
-                                            )
-                                            * 1000
-                                        ),
-                                        round(
-                                            (
-                                                first_delta_at
-                                                - stream_opened_at
-                                            )
-                                            * 1000
-                                        ),
+                                        round((first_delta_at - openai_request_started_at) * 1000),
+                                        round((first_delta_at - stream_opened_at) * 1000),
                                     )
 
                                 emitted_parts.append(delta)
@@ -4176,10 +4194,7 @@ class AIEngine:
                                 "incomplete_details",
                                 None,
                             )
-                            reason = str(
-                                getattr(details, "reason", "unknown")
-                                or "unknown"
-                            )
+                            reason = str(getattr(details, "reason", "unknown") or "unknown")
                             if reason == "max_output_tokens":
                                 current_budget = int(
                                     response_kwargs.get(
@@ -4192,8 +4207,7 @@ class AIEngine:
                                     max(current_budget + 500, current_budget * 2),
                                 )
                             stream_error = AIEngineError(
-                                "OpenAI returned an incomplete response: "
-                                f"{reason}."
+                                f"OpenAI returned an incomplete response: {reason}."
                             )
                             break
                         elif event_type == "response.failed":
@@ -4246,17 +4260,13 @@ class AIEngine:
                 # A transient OpenAI stream or client connection can close after
                 # some deltas have already been displayed. Retry once without
                 # streaming and continue from the common prefix where possible.
-                fallback_response = await self.client.responses.create(
-                    **response_kwargs
-                )
-                fallback_text = str(
-                    getattr(fallback_response, "output_text", "") or ""
-                )
+                fallback_response = await self.client.responses.create(**response_kwargs)
+                fallback_text = str(getattr(fallback_response, "output_text", "") or "")
                 partial_text = "".join(emitted_parts)
 
                 if fallback_text:
                     if fallback_text.startswith(partial_text):
-                        missing_text = fallback_text[len(partial_text):]
+                        missing_text = fallback_text[len(partial_text) :]
                     elif partial_text.startswith(fallback_text):
                         missing_text = ""
                     else:
@@ -4269,11 +4279,7 @@ class AIEngine:
                         if common_length >= min(24, len(partial_text)):
                             missing_text = fallback_text[common_length:]
                         elif partial_text:
-                            missing_text = (
-                                "\n\n"
-                                "The first reply was interrupted. "
-                                + fallback_text
-                            )
+                            missing_text = "\n\nThe first reply was interrupted. " + fallback_text
                         else:
                             missing_text = fallback_text
 
@@ -4292,39 +4298,27 @@ class AIEngine:
         except AIEngineError:
             raise
         except AuthenticationError as exc:
-            raise AIEngineError(
-                "OpenAI authentication failed. Check OPENAI_API_KEY."
-            ) from exc
+            raise AIEngineError("OpenAI authentication failed. Check OPENAI_API_KEY.") from exc
         except RateLimitError as exc:
             raise AIEngineError(
                 "OpenAI is currently rate-limited. Please try again shortly."
             ) from exc
         except APITimeoutError as exc:
-            raise AIEngineError(
-                "OpenAI timed out before completing the response."
-            ) from exc
+            raise AIEngineError("OpenAI timed out before completing the response.") from exc
         except APIConnectionError as exc:
-            raise AIEngineError(
-                "Jarvis could not connect to OpenAI."
-            ) from exc
+            raise AIEngineError("Jarvis could not connect to OpenAI.") from exc
         except BadRequestError as exc:
             logger.exception("OpenAI rejected the request")
-            raise AIEngineError(
-                "OpenAI rejected the Jarvis request configuration."
-            ) from exc
+            raise AIEngineError("OpenAI rejected the Jarvis request configuration.") from exc
         except APIStatusError as exc:
             logger.exception(
                 "OpenAI returned status %s",
                 getattr(exc, "status_code", "unknown"),
             )
-            raise AIEngineError(
-                "OpenAI could not complete the request."
-            ) from exc
+            raise AIEngineError("OpenAI could not complete the request.") from exc
         except Exception as exc:
             logger.exception("Unexpected OpenAI Responses API failure")
-            raise AIEngineError(
-                "Jarvis encountered an unexpected AI service error."
-            ) from exc
+            raise AIEngineError("Jarvis encountered an unexpected AI service error.") from exc
 
     @staticmethod
     def _function_calls(response: Any) -> list[Any]:
@@ -4345,7 +4339,6 @@ class AIEngine:
         details = getattr(usage, "input_tokens_details", None)
         cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
         return input_tokens, output_tokens, cached_tokens
-
 
     @staticmethod
     def _normalise_device_phrase(value: str) -> str:
@@ -4429,9 +4422,7 @@ class AIEngine:
             item = history[index]
             if str(item.get("role", "")).casefold() != "user":
                 continue
-            previous_command = cls._parse_simple_power_command(
-                str(item.get("content", ""))
-            )
+            previous_command = cls._parse_simple_power_command(str(item.get("content", "")))
             if previous_command is not None:
                 break
 
@@ -4616,7 +4607,8 @@ class AIEngine:
             return None
         if not any(
             str(item.get("role", "")).casefold() == "assistant"
-            and "could not determine an appropriate response" in str(item.get("content", "")).casefold()
+            and "could not determine an appropriate response"
+            in str(item.get("content", "")).casefold()
             for item in recent[-2:]
         ):
             return None
@@ -4639,11 +4631,7 @@ class AIEngine:
             aliases.add(f"{area} {name}")
         if entity_id and "." in entity_id:
             aliases.add(entity_id.split(".", 1)[1].replace("_", " "))
-        return {
-            cls._normalise_device_phrase(alias)
-            for alias in aliases
-            if alias.strip()
-        }
+        return {cls._normalise_device_phrase(alias) for alias in aliases if alias.strip()}
 
     @classmethod
     def _match_controllable_device(
@@ -4658,8 +4646,16 @@ class AIEngine:
         # Never fuzzy-match a bare pronoun to an arbitrary entity. Pronouns are
         # resolved from the previous verified control result before this matcher.
         if query in {
-            "it", "that", "this", "them", "those", "these",
-            "device", "devices", "light", "lights",
+            "it",
+            "that",
+            "this",
+            "them",
+            "those",
+            "these",
+            "device",
+            "devices",
+            "light",
+            "lights",
         }:
             return None
 
@@ -4677,9 +4673,7 @@ class AIEngine:
         requires_floodlight = "floodlight" in query_tokens
         for device in devices:
             aliases = cls._device_aliases(device)
-            device_area = cls._normalise_device_phrase(
-                str(device.get("area_name") or "")
-            )
+            device_area = cls._normalise_device_phrase(str(device.get("area_name") or ""))
 
             if area_queries:
                 area_matches = device_area in area_queries or any(
@@ -4698,9 +4692,7 @@ class AIEngine:
             # Preserve the user's explicit device type. "Bedroom floor light" is
             # normalised to "bedroom floodlight" and must not select a generic
             # light in another room.
-            if requires_floodlight and not any(
-                "floodlight" in alias.split() for alias in aliases
-            ):
+            if requires_floodlight and not any("floodlight" in alias.split() for alias in aliases):
                 continue
 
             best = 0.0
@@ -4785,11 +4777,13 @@ class AIEngine:
                 reply = str(result.get("response_message"))
             else:
                 reply = "I couldn't do that."
-            return reply, [{
-                "tool": "run_media_shortcut",
-                "arguments": {"shortcut": shortcut},
-                "result": result,
-            }]
+            return reply, [
+                {
+                    "tool": "run_media_shortcut",
+                    "arguments": {"shortcut": shortcut},
+                    "result": result,
+                }
+            ]
         if (
             re.search(r"\blights\b", target_text, re.I)
             and "floodlight" not in normalised_target
@@ -4860,14 +4854,16 @@ class AIEngine:
             else:
                 result = dict(raw_result)
 
-            calls.append({
-                "tool": "control_device",
-                "arguments": {
-                    "entity_id": str(device.get("entity_id") or ""),
-                    "action": target_state,
-                },
-                "result": result,
-            })
+            calls.append(
+                {
+                    "tool": "control_device",
+                    "arguments": {
+                        "entity_id": str(device.get("entity_id") or ""),
+                        "action": target_state,
+                    },
+                    "result": result,
+                }
+            )
 
             if result.get("already_in_target_state") is True:
                 messages.append(f"{display_name} is already {target_state}.")
@@ -4876,8 +4872,10 @@ class AIEngine:
             else:
                 messages.append(
                     _clean_reply(
-                        str(result.get("response_message") or
-                            f"I couldn’t confirm {display_name} is {target_state}.")
+                        str(
+                            result.get("response_message")
+                            or f"I couldn’t confirm {display_name} is {target_state}."
+                        )
                     )
                 )
 
@@ -4918,11 +4916,7 @@ class AIEngine:
 
         history = await self.conversations.get_ai_history(
             conversation_id=resolved_conversation_id,
-            limit=(
-                min(self.history_limit, 16)
-                if actor.voice_mode
-                else self.history_limit
-            ),
+            limit=(min(self.history_limit, 16) if actor.voice_mode else self.history_limit),
         )
 
         if self.speech_corrections is not None:
@@ -5044,18 +5038,18 @@ class AIEngine:
                     "response_message": "I couldn’t send that notification.",
                 }
             success = bool(result.get("success"))
-            final_reply = _clean_reply(
-                str(result.get("response_message") or "Notification sent.")
-            )
-            calls = [{
-                "tool": "send_mobile_notification",
-                "arguments": {
-                    "recipient": recipient,
-                    "title": title,
-                    "message": message,
-                },
-                "result": result,
-            }]
+            final_reply = _clean_reply(str(result.get("response_message") or "Notification sent."))
+            calls = [
+                {
+                    "tool": "send_mobile_notification",
+                    "arguments": {
+                        "recipient": recipient,
+                        "title": title,
+                        "message": message,
+                    },
+                    "result": result,
+                }
+            ]
             if success:
                 await self.dialogue.clear_goal(
                     resolved_conversation_id,
@@ -5086,10 +5080,7 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
-        interpretation_input = (
-            dialogue_resolution.rewritten_text
-            or raw_user_text
-        )
+        interpretation_input = dialogue_resolution.rewritten_text or raw_user_text
         understanding = await self.understanding.interpret(
             interpretation_input,
             history,
@@ -5109,9 +5100,7 @@ class AIEngine:
             actor.voice_mode
             and isinstance(provider_confidence, (int, float))
             and float(provider_confidence) < 0.20
-            and self.understanding.is_write_action(
-                understanding.interpreted_text
-            )
+            and self.understanding.is_write_action(understanding.interpreted_text)
         )
         if provider_low_confidence_control:
             runtime_metrics.increment("voice_low_confidence_controls_blocked")
@@ -5173,9 +5162,7 @@ class AIEngine:
             )
             user_text = dialogue_pronoun.rewritten_text
 
-        pronoun_control, pronoun_error = self._resolve_control_pronoun_follow_up(
-            user_text, history
-        )
+        pronoun_control, pronoun_error = self._resolve_control_pronoun_follow_up(user_text, history)
         if pronoun_control is not None:
             logger.info(
                 "Resolved control pronoun original=%r resolved=%r",
@@ -5259,9 +5246,7 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
-        pending_notification_recipient = self._pending_notification_recipient(
-            history, actor
-        )
+        pending_notification_recipient = self._pending_notification_recipient(history, actor)
         if pending_notification_recipient is not None:
             await self.conversations.add_user_message(
                 conversation_id=resolved_conversation_id,
@@ -5372,9 +5357,7 @@ class AIEngine:
             }
 
         if _FRUSTRATION_PATTERN.fullmatch(raw_user_text):
-            failed_recipient = self._recent_failed_notification_recipient(
-                history, actor
-            )
+            failed_recipient = self._recent_failed_notification_recipient(history, actor)
             if failed_recipient is not None:
                 await self.conversations.add_user_message(
                     conversation_id=resolved_conversation_id,
@@ -5488,15 +5471,17 @@ class AIEngine:
                 final_reply = _clean_reply(
                     str(result.get("response_message") or "Notification sent.")
                 )
-                calls = [{
-                    "tool": "send_mobile_notification",
-                    "arguments": {
-                        "recipient": notification_recipient,
-                        "title": "Jarvis",
-                        "message": notification_message,
-                    },
-                    "result": result,
-                }]
+                calls = [
+                    {
+                        "tool": "send_mobile_notification",
+                        "arguments": {
+                            "recipient": notification_recipient,
+                            "title": "Jarvis",
+                            "message": notification_message,
+                        },
+                        "result": result,
+                    }
+                ]
                 await self.conversations.add_assistant_message(
                     conversation_id=resolved_conversation_id,
                     content=final_reply,
@@ -5585,7 +5570,8 @@ class AIEngine:
             )
 
         if (
-            decision.intent in {
+            decision.intent
+            in {
                 RequestIntent.ADMIN_READ,
                 RequestIntent.ADMIN_CHANGE,
             }
@@ -5594,8 +5580,7 @@ class AIEngine:
             decision = RoutingDecision(
                 intent=decision.intent,
                 deterministic_reply=(
-                    "Admin Mode is available only to Aaron's authenticated "
-                    "administrator account."
+                    "Admin Mode is available only to Aaron's authenticated administrator account."
                 ),
                 use_long_term_memory=False,
             )
@@ -5784,10 +5769,7 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
-        if (
-            pending_admin is None
-            and _ADMIN_EXPLICIT_CONFIRM_PATTERN.fullmatch(user_text)
-        ):
+        if pending_admin is None and _ADMIN_EXPLICIT_CONFIRM_PATTERN.fullmatch(user_text):
             final_reply = "There is no pending Home Assistant change to confirm."
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
@@ -5809,7 +5791,8 @@ class AIEngine:
 
         if _PERSON_ACTIVITY_INFERENCE_PATTERN.fullmatch(user_text):
             focused_person = await self.dialogue.focused_person(
-                resolved_conversation_id
+                resolved_conversation_id,
+                max_age_seconds=300,
             )
             recent_presence = None
             if focused_person:
@@ -5874,8 +5857,7 @@ class AIEngine:
                 )
                 latency_ms = round((time.monotonic() - started) * 1000)
                 success = all(
-                    call.get("result", {}).get("success") is True
-                    for call in direct_calls
+                    call.get("result", {}).get("success") is True for call in direct_calls
                 )
                 logger.info(
                     "AI direct-control complete conversation=%s latency_ms=%s "
@@ -5912,7 +5894,12 @@ class AIEngine:
                 }
 
         if decision.intent == RequestIntent.STATE_QUERY:
-            direct_state = await self._try_direct_state_reply(user_text, history, actor)
+            direct_state = await self._try_direct_state_reply(
+                user_text,
+                history,
+                actor,
+                resolved_conversation_id,
+            )
             if direct_state is not None:
                 final_reply, direct_calls = direct_state
                 final_reply = _clean_reply(final_reply)
@@ -5922,8 +5909,7 @@ class AIEngine:
                 )
                 latency_ms = round((time.monotonic() - started) * 1000)
                 success = all(
-                    call.get("result", {}).get("success") is True
-                    for call in direct_calls
+                    call.get("result", {}).get("success") is True for call in direct_calls
                 )
                 logger.info(
                     "AI direct-state complete conversation=%s intent=%s "
@@ -5968,8 +5954,7 @@ class AIEngine:
 
             latency_ms = round((time.monotonic() - started) * 1000)
             logger.info(
-                "AI route complete conversation=%s intent=%s latency_ms=%s "
-                "deterministic=true",
+                "AI route complete conversation=%s intent=%s latency_ms=%s deterministic=true",
                 resolved_conversation_id[-12:],
                 decision.intent.value,
                 latency_ms,
@@ -6009,12 +5994,8 @@ class AIEngine:
             )
 
         trusted_time = ""
-        local_datetime = str(
-            trusted_context.get("local_datetime") or ""
-        ).strip()
-        timezone_name = str(
-            trusted_context.get("timezone") or ""
-        ).strip()
+        local_datetime = str(trusted_context.get("local_datetime") or "").strip()
+        timezone_name = str(trusted_context.get("timezone") or "").strip()
         if local_datetime and timezone_name:
             trusted_time = (
                 "\nTrusted local temporal context for this request:\n"
@@ -6026,9 +6007,7 @@ class AIEngine:
                 "morning, evening and the current time."
             )
 
-        vision_context = str(
-            trusted_context.get("vision_context") or ""
-        ).strip()
+        vision_context = str(trusted_context.get("vision_context") or "").strip()
         trusted_vision = ""
         if vision_context:
             trusted_vision = (
@@ -6078,9 +6057,7 @@ class AIEngine:
             }
         )
 
-        dialogue_context = await self.dialogue.context_for_model(
-            resolved_conversation_id
-        )
+        dialogue_context = await self.dialogue.context_for_model(resolved_conversation_id)
         if dialogue_context:
             input_items.append(
                 {
@@ -6126,8 +6103,7 @@ class AIEngine:
                 {
                     "role": "developer",
                     "content": (
-                        "Request router instruction for this turn: "
-                        f"{decision.model_instruction}"
+                        f"Request router instruction for this turn: {decision.model_instruction}"
                     ),
                 }
             )
@@ -6185,33 +6161,18 @@ class AIEngine:
 
         tool_definitions = await self._openai_tools(decision, actor, user_text)
 
-        if (
-            code_awareness_requested
-            and self.code_awareness is not None
-        ):
-            tool_definitions.extend(
-                self.code_awareness.openai_tools()
-            )
+        if code_awareness_requested and self.code_awareness is not None:
+            tool_definitions.extend(self.code_awareness.openai_tools())
 
         authorised_tools = {
-            str(definition["name"])
-            for definition in tool_definitions
-            if definition.get("name")
+            str(definition["name"]) for definition in tool_definitions if definition.get("name")
         }
 
         # Keep ordinary Jarvis requests on the existing conservative
         # tool budget. Live code inspection may legitimately need
         # several search/read steps before it can answer.
-        request_max_tool_rounds = (
-            6
-            if code_awareness_requested
-            else self.max_tool_rounds
-        )
-        request_max_tool_calls = (
-            10
-            if code_awareness_requested
-            else self.max_tool_calls
-        )
+        request_max_tool_rounds = 6 if code_awareness_requested else self.max_tool_rounds
+        request_max_tool_calls = 10 if code_awareness_requested else self.max_tool_calls
 
         working_input = list(input_items)
         completed_calls: list[dict[str, Any]] = []
@@ -6230,9 +6191,7 @@ class AIEngine:
                     tool_definitions=tool_definitions,
                     actor=actor,
                     on_text_delta=(
-                        on_text_delta
-                        if not tool_definitions and tool_rounds == 0
-                        else None
+                        on_text_delta if not tool_definitions and tool_rounds == 0 else None
                     ),
                 )
             except AIEngineError:
@@ -6259,13 +6218,10 @@ class AIEngine:
             if tool_rounds >= request_max_tool_rounds:
                 if code_awareness_requested:
                     logger.warning(
-                        "Jarvis Code Awareness tool-round limit reached; "
-                        "forcing final synthesis"
+                        "Jarvis Code Awareness tool-round limit reached; forcing final synthesis"
                     )
                 else:
-                    logger.error(
-                        "Jarvis tool-round limit reached"
-                    )
+                    logger.error("Jarvis tool-round limit reached")
                 break
 
             working_input.extend(list(getattr(response, "output", [])))
@@ -6278,9 +6234,7 @@ class AIEngine:
                 call_id = str(getattr(function_call, "call_id", ""))
 
                 if not call_id:
-                    raise AIEngineError(
-                        "OpenAI returned a tool call without a call ID."
-                    )
+                    raise AIEngineError("OpenAI returned a tool call without a call ID.")
 
                 try:
                     canonical_arguments = json.dumps(
@@ -6343,11 +6297,7 @@ class AIEngine:
         # its inspection budget without producing final text, perform
         # exactly one no-tools synthesis pass over evidence already
         # returned by Code Awareness.
-        if (
-            code_awareness_requested
-            and completed_calls
-            and not final_reply
-        ):
+        if code_awareness_requested and completed_calls and not final_reply:
             synthesis_input = [
                 *working_input,
                 {
@@ -6373,9 +6323,7 @@ class AIEngine:
                     on_text_delta=None,
                 )
             except AIEngineError:
-                logger.exception(
-                    "Jarvis Code Awareness final synthesis failed"
-                )
+                logger.exception("Jarvis Code Awareness final synthesis failed")
             else:
                 last_response = synthesis_response
 
@@ -6383,9 +6331,7 @@ class AIEngine:
                     used_input,
                     used_output,
                     used_cached,
-                ) = self._usage_values(
-                    synthesis_response
-                )
+                ) = self._usage_values(synthesis_response)
 
                 total_input_tokens += used_input
                 total_output_tokens += used_output
@@ -6409,17 +6355,13 @@ class AIEngine:
                     )
 
         staged_admin_change = any(
-            call.get("tool") == "propose_admin_change"
-            for call in completed_calls
+            call.get("tool") == "propose_admin_change" for call in completed_calls
         )
         if decision.intent == RequestIntent.ADMIN_CHANGE and not staged_admin_change:
             final_reply = (
                 "I couldn’t safely stage that Home Assistant change, so nothing was saved."
             )
-        elif any(
-            call.get("tool") in _AUTHORITATIVE_ACTION_TOOLS
-            for call in completed_calls
-        ):
+        elif any(call.get("tool") in _AUTHORITATIVE_ACTION_TOOLS for call in completed_calls):
             final_reply = await self._fallback_tool_reply(completed_calls)
         elif not final_reply:
             final_reply = await self._fallback_tool_reply(completed_calls)
@@ -6436,11 +6378,9 @@ class AIEngine:
 
         if external_runtime is not None:
             try:
-                unavailable_service = (
-                    await external_runtime.unavailable_service_reply(
-                        user_text,
-                        principal_id=actor.user_key,
-                    )
+                unavailable_service = await external_runtime.unavailable_service_reply(
+                    user_text,
+                    principal_id=actor.user_key,
                 )
             except Exception:
                 logger.exception("External service availability guard failed")
@@ -6448,13 +6388,9 @@ class AIEngine:
             if unavailable_service is not None:
                 final_reply = unavailable_service
 
-        if (
-            external_runtime is not None
-            and external_runtime.requires_live_web(user_text)
-        ):
+        if external_runtime is not None and external_runtime.requires_live_web(user_text):
             live_call_succeeded = any(
-                call.get("tool")
-                in {"web_search", "deep_research", "create_external_monitor"}
+                call.get("tool") in {"web_search", "deep_research", "create_external_monitor"}
                 and call.get("result", {}).get("success") is True
                 for call in completed_calls
             )

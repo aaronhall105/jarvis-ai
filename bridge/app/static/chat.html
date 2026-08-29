@@ -49,7 +49,7 @@
 
         .app {
             display: grid;
-            grid-template-rows: auto 1fr auto;
+            grid-template-rows: auto auto 1fr auto;
             width: min(900px, 100%);
             height: 100dvh;
             margin: 0 auto;
@@ -115,6 +115,49 @@
             border-radius: 50%;
             background: var(--accent);
             box-shadow: 0 0 8px var(--accent);
+        }
+
+        .chat-tabs {
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            padding: 9px 12px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(8, 11, 15, 0.96);
+            scrollbar-width: thin;
+        }
+
+        .chat-tab,
+        .new-chat {
+            min-width: 0;
+            flex: 0 0 auto;
+            padding: 9px 12px;
+            border: 1px solid var(--border);
+            border-radius: 11px;
+            background: var(--surface);
+            color: var(--muted);
+            font: inherit;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .chat-tab {
+            width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-align: left;
+        }
+
+        .chat-tab.active {
+            border-color: var(--accent);
+            background: var(--accent-dark);
+            color: var(--text);
+        }
+
+        .new-chat {
+            color: var(--accent);
+            font-weight: 700;
         }
 
         #messages {
@@ -359,6 +402,10 @@
         </div>
     </header>
 
+    <nav class="chat-tabs" id="chatTabs" aria-label="Conversations">
+        <button class="new-chat" id="newChatButton" type="button">+ New chat</button>
+    </nav>
+
     <main id="messages">
         <section class="welcome" id="welcome">
             <h2>Jarvis is ready</h2>
@@ -424,116 +471,184 @@
 
 <script>
     const messages = document.getElementById("messages");
-    const welcome = document.getElementById("welcome");
     const form = document.getElementById("chatForm");
     const input = document.getElementById("messageInput");
     const sendButton = document.getElementById("sendButton");
     const statusText = document.getElementById("statusText");
+    const chatTabs = document.getElementById("chatTabs");
+    const newChatButton = document.getElementById("newChatButton");
+    const storageKey = "jarvis-chat-tabs-v1";
 
     let requestInProgress = false;
+    let state = loadState();
 
-    function removeWelcome() {
-        if (welcome && welcome.isConnected) {
-            welcome.remove();
+    function createId() {
+        return globalThis.crypto?.randomUUID?.() ||
+            `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function createChat() {
+        return {id: createId(), title: "New chat", items: []};
+    }
+
+    function loadState() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(storageKey));
+            if (Array.isArray(saved?.chats) && saved.chats.length &&
+                saved.chats.some((chat) => chat.id === saved.activeId)) {
+                return saved;
+            }
+        } catch (error) {
+            console.warn("Unable to restore saved chats", error);
         }
+        const chat = createChat();
+        return {activeId: chat.id, chats: [chat]};
+    }
+
+    function saveState() {
+        try {
+            localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch (error) {
+            console.warn("Unable to save chats", error);
+        }
+    }
+
+    function activeChat() {
+        return state.chats.find((chat) => chat.id === state.activeId);
+    }
+
+    function chatById(id) {
+        return state.chats.find((chat) => chat.id === id);
+    }
+
+    function titleFrom(text) {
+        const title = text.replace(/\s+/g, " ").trim();
+        return title.length > 32 ? `${title.slice(0, 32)}…` : title;
+    }
+
+    function renderTabs() {
+        chatTabs.querySelectorAll(".chat-tab").forEach((tab) => tab.remove());
+        state.chats.forEach((chat) => {
+            const tab = document.createElement("button");
+            tab.type = "button";
+            tab.className = `chat-tab${chat.id === state.activeId ? " active" : ""}`;
+            tab.textContent = chat.title;
+            tab.title = chat.title;
+            tab.dataset.chatId = chat.id;
+            tab.setAttribute("aria-current", chat.id === state.activeId ? "page" : "false");
+            chatTabs.insertBefore(tab, newChatButton);
+        });
+        chatTabs.querySelector(".chat-tab.active")?.scrollIntoView({
+            behavior: "smooth", block: "nearest", inline: "nearest",
+        });
+    }
+
+    function renderWelcome() {
+        const section = document.createElement("section");
+        section.className = "welcome";
+        section.id = "welcome";
+        const heading = document.createElement("h2");
+        heading.textContent = "Jarvis is ready";
+        const copy = document.createElement("p");
+        copy.textContent = "Ask a question or control your Home Assistant devices using natural language.";
+        const examples = document.createElement("div");
+        examples.className = "examples";
+        [
+            "Turn the living room lights off",
+            "Switch the living room lights back on",
+            "What can you currently control?",
+        ].forEach((text) => {
+            const button = document.createElement("button");
+            button.className = "example";
+            button.type = "button";
+            button.dataset.message = text;
+            button.textContent = text;
+            examples.appendChild(button);
+        });
+        section.append(heading, copy, examples);
+        messages.appendChild(section);
     }
 
     function scrollToBottom() {
         messages.scrollTop = messages.scrollHeight;
     }
 
-    function addMessage(role, text, extraClass = "") {
-        removeWelcome();
-
+    function renderMessage(role, text, extraClass = "") {
         const wrapper = document.createElement("div");
         wrapper.className = `message ${role} ${extraClass}`.trim();
-
         const bubble = document.createElement("div");
         bubble.className = "bubble";
         bubble.textContent = text;
-
         wrapper.appendChild(bubble);
         messages.appendChild(wrapper);
-        scrollToBottom();
-
-        return wrapper;
     }
 
-    function addTypingIndicator() {
-        removeWelcome();
-
-        const wrapper = document.createElement("div");
-        wrapper.className = "message assistant";
-        wrapper.id = "typingIndicator";
-
-        const bubble = document.createElement("div");
-        bubble.className = "bubble";
-
-        const typing = document.createElement("span");
-        typing.className = "typing";
-        typing.innerHTML = "<span></span><span></span><span></span>";
-
-        bubble.appendChild(typing);
-        wrapper.appendChild(bubble);
-        messages.appendChild(wrapper);
-        scrollToBottom();
-    }
-
-    function removeTypingIndicator() {
-        document.getElementById("typingIndicator")?.remove();
-    }
-
-    function formatToolCard(call) {
-        const tool = call.tool || "Unknown tool";
-        const argumentsValue = call.arguments || {};
+    function toolDetails(call) {
+        const args = call.arguments || {};
         const result = call.result || {};
-
-        const area = argumentsValue.area_id
-            ? argumentsValue.area_id.replaceAll("_", " ")
-            : "Unknown area";
-
-        const action = argumentsValue.action
-            ? argumentsValue.action.replaceAll("_", " ")
-            : "Unknown action";
-
-        const entities = Array.isArray(result.entities)
-            ? result.entities.length
-            : 0;
-
         return {
-            tool,
-            area,
-            action,
-            entities,
+            tool: call.tool || "Unknown tool",
+            area: args.area_id ? args.area_id.replaceAll("_", " ") : "Unknown area",
+            action: args.action ? args.action.replaceAll("_", " ") : "Unknown action",
+            entities: Array.isArray(result.entities) ? result.entities.length : 0,
             success: Boolean(result.success),
         };
     }
 
-    function addToolActivity(calls) {
-        if (!Array.isArray(calls) || calls.length === 0) {
-            return;
-        }
-
+    function renderTools(calls) {
         calls.forEach((call) => {
-            const details = formatToolCard(call);
-
+            const details = toolDetails(call);
             const card = document.createElement("div");
             card.className = "tool-card";
-
-            const state = details.success
-                ? "Completed"
-                : "Failed";
-
-            card.innerHTML = `
-                <strong>${state}: ${details.tool}</strong><br>
-                Area: ${details.area}<br>
-                Action: ${details.action}<br>
-                Entities affected: ${details.entities}
-            `;
-
+            const heading = document.createElement("strong");
+            heading.textContent = `${details.success ? "Completed" : "Failed"}: ${details.tool}`;
+            card.append(heading, document.createElement("br"));
+            card.append(`Area: ${details.area}`, document.createElement("br"));
+            card.append(`Action: ${details.action}`, document.createElement("br"));
+            card.append(`Entities affected: ${details.entities}`);
             messages.appendChild(card);
         });
+    }
 
+    function renderActiveChat() {
+        messages.replaceChildren();
+        const chat = activeChat();
+        if (!chat?.items.length) {
+            renderWelcome();
+            return;
+        }
+        chat.items.forEach((item) => {
+            if (item.kind === "tool") renderTools(item.calls);
+            else renderMessage(item.role, item.text, item.extraClass || "");
+        });
+        scrollToBottom();
+    }
+
+    function addItem(chatId, item) {
+        const chat = chatById(chatId);
+        if (!chat) return;
+        chat.items.push(item);
+        saveState();
+        if (chatId !== state.activeId) return;
+        document.getElementById("welcome")?.remove();
+        if (item.kind === "tool") renderTools(item.calls);
+        else renderMessage(item.role, item.text, item.extraClass || "");
+        scrollToBottom();
+    }
+
+    function addTypingIndicator() {
+        document.getElementById("welcome")?.remove();
+        const wrapper = document.createElement("div");
+        wrapper.className = "message assistant";
+        wrapper.id = "typingIndicator";
+        const bubble = document.createElement("div");
+        bubble.className = "bubble";
+        const typing = document.createElement("span");
+        typing.className = "typing";
+        typing.innerHTML = "<span></span><span></span><span></span>";
+        bubble.appendChild(typing);
+        wrapper.appendChild(bubble);
+        messages.appendChild(wrapper);
         scrollToBottom();
     }
 
@@ -551,13 +666,15 @@
 
     async function sendMessage(text) {
         const message = text.trim();
+        if (!message || requestInProgress) return;
 
-        if (!message || requestInProgress) {
-            return;
+        const chat = activeChat();
+        const chatId = chat.id;
+        if (chat.title === "New chat") {
+            chat.title = titleFrom(message);
+            renderTabs();
         }
-
-        addMessage("user", message);
-
+        addItem(chatId, {kind: "message", role: "user", text: message});
         input.value = "";
         resizeInput();
         setBusy(true);
@@ -566,56 +683,32 @@
         try {
             const response = await fetch("/api/assistant/ai", {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                    text: message,
-                }),
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({text: message, conversation_id: chatId}),
             });
-
             let payload;
-
-            try {
-                payload = await response.json();
-            } catch {
-                payload = {};
-            }
-
-            removeTypingIndicator();
-
+            try { payload = await response.json(); } catch { payload = {}; }
+            document.getElementById("typingIndicator")?.remove();
             if (!response.ok) {
-                const detail =
-                    payload.detail ||
-                    `Jarvis returned HTTP ${response.status}.`;
-
-                addMessage(
-                    "assistant",
-                    detail,
-                    "error",
-                );
-
+                addItem(chatId, {
+                    kind: "message", role: "assistant", extraClass: "error",
+                    text: payload.detail || `Jarvis returned HTTP ${response.status}.`,
+                });
                 return;
             }
-
-            addMessage(
-                "assistant",
-                payload.response ||
-                    "The request completed without a response.",
-            );
-
-            if (payload.tool_called) {
-                addToolActivity(payload.calls);
+            addItem(chatId, {
+                kind: "message", role: "assistant",
+                text: payload.response || "The request completed without a response.",
+            });
+            if (payload.tool_called && Array.isArray(payload.calls) && payload.calls.length) {
+                addItem(chatId, {kind: "tool", calls: payload.calls});
             }
         } catch (error) {
-            removeTypingIndicator();
-
-            addMessage(
-                "assistant",
-                "Jarvis Core could not be reached. Check the server connection.",
-                "error",
-            );
-
+            document.getElementById("typingIndicator")?.remove();
+            addItem(chatId, {
+                kind: "message", role: "assistant", extraClass: "error",
+                text: "Jarvis Core could not be reached. Check the server connection.",
+            });
             console.error(error);
         } finally {
             setBusy(false);
@@ -627,26 +720,41 @@
         event.preventDefault();
         sendMessage(input.value);
     });
-
     input.addEventListener("input", resizeInput);
-
     input.addEventListener("keydown", (event) => {
-        if (
-            event.key === "Enter" &&
-            !event.shiftKey
-        ) {
+        if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             form.requestSubmit();
         }
     });
-
-    document.querySelectorAll(".example").forEach((button) => {
-        button.addEventListener("click", () => {
-            sendMessage(button.dataset.message || "");
-        });
+    messages.addEventListener("click", (event) => {
+        const example = event.target.closest(".example");
+        if (example) sendMessage(example.dataset.message || "");
+    });
+    chatTabs.addEventListener("click", (event) => {
+        const tab = event.target.closest(".chat-tab");
+        if (!tab) return;
+        state.activeId = tab.dataset.chatId;
+        saveState();
+        renderTabs();
+        renderActiveChat();
+        input.focus();
+    });
+    newChatButton.addEventListener("click", () => {
+        const chat = createChat();
+        state.chats.push(chat);
+        state.activeId = chat.id;
+        saveState();
+        renderTabs();
+        renderActiveChat();
+        input.focus();
     });
 
+    saveState();
+    renderTabs();
+    renderActiveChat();
     input.focus();
 </script>
+
 </body>
 </html>

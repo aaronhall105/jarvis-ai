@@ -73,15 +73,9 @@ class ConversationEngine:
 
         connection.row_factory = sqlite3.Row
 
-        connection.execute(
-            "PRAGMA foreign_keys = ON"
-        )
-        connection.execute(
-            "PRAGMA journal_mode = WAL"
-        )
-        connection.execute(
-            "PRAGMA synchronous = NORMAL"
-        )
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
 
         return connection
 
@@ -131,14 +125,10 @@ class ConversationEngine:
             # unique index.  NULL keeps every historical message valid.
             message_columns = {
                 str(row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(messages)"
-                ).fetchall()
+                for row in connection.execute("PRAGMA table_info(messages)").fetchall()
             }
             if "delivery_key" not in message_columns:
-                connection.execute(
-                    "ALTER TABLE messages ADD COLUMN delivery_key TEXT"
-                )
+                connection.execute("ALTER TABLE messages ADD COLUMN delivery_key TEXT")
             connection.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS
@@ -183,16 +173,11 @@ class ConversationEngine:
     ) -> Conversation:
         resolved_id = (
             conversation_id.strip()
-            if conversation_id
-            and conversation_id.strip()
+            if conversation_id and conversation_id.strip()
             else str(uuid.uuid4())
         )
 
-        resolved_source = (
-            source.strip()
-            if source.strip()
-            else "unknown"
-        )
+        resolved_source = source.strip() if source.strip() else "unknown"
 
         now = self._utc_now()
 
@@ -306,9 +291,7 @@ class ConversationEngine:
         title: str | None = None,
     ) -> dict[str, Any]:
         if conversation_id:
-            existing = await self.get_conversation(
-                conversation_id
-            )
+            existing = await self.get_conversation(conversation_id)
 
             if existing is not None:
                 return existing
@@ -328,34 +311,19 @@ class ConversationEngine:
     ) -> ConversationMessage:
         resolved_role = role.strip().lower()
         resolved_content = content.strip()
-        resolved_delivery_key = (
-            delivery_key.strip()
-            if delivery_key is not None
-            else None
-        )
+        resolved_delivery_key = delivery_key.strip() if delivery_key is not None else None
 
         if resolved_role not in VALID_ROLES:
-            raise ValueError(
-                f"Unsupported conversation role: {role}"
-            )
+            raise ValueError(f"Unsupported conversation role: {role}")
 
         if not resolved_content:
-            raise ValueError(
-                "Conversation message content cannot be empty."
-            )
+            raise ValueError("Conversation message content cannot be empty.")
 
         if delivery_key is not None and not resolved_delivery_key:
-            raise ValueError(
-                "Conversation message delivery key cannot be empty."
-            )
+            raise ValueError("Conversation message delivery key cannot be empty.")
 
-        if (
-            resolved_delivery_key is not None
-            and len(resolved_delivery_key) > 255
-        ):
-            raise ValueError(
-                "Conversation message delivery key is too long."
-            )
+        if resolved_delivery_key is not None and len(resolved_delivery_key) > 255:
+            raise ValueError("Conversation message delivery key is too long.")
 
         now = self._utc_now()
 
@@ -370,10 +338,7 @@ class ConversationEngine:
             ).fetchone()
 
             if conversation is None:
-                raise ValueError(
-                    "Conversation does not exist: "
-                    f"{conversation_id}"
-                )
+                raise ValueError(f"Conversation does not exist: {conversation_id}")
 
             if resolved_delivery_key is not None:
                 existing = connection.execute(
@@ -391,11 +356,9 @@ class ConversationEngine:
                 ).fetchone()
                 if existing is not None:
                     if (
-                        str(existing["conversation_id"])
-                        != conversation_id
+                        str(existing["conversation_id"]) != conversation_id
                         or str(existing["role"]) != resolved_role
-                        or str(existing["content"])
-                        != resolved_content
+                        or str(existing["content"]) != resolved_content
                     ):
                         raise ValueError(
                             "Conversation message delivery key was already "
@@ -438,12 +401,9 @@ class ConversationEngine:
                     (resolved_delivery_key,),
                 ).fetchone()
                 if existing is None:
-                    raise RuntimeError(
-                        "Idempotent conversation delivery could not be resolved."
-                    )
+                    raise RuntimeError("Idempotent conversation delivery could not be resolved.")
                 if (
-                    str(existing["conversation_id"])
-                    != conversation_id
+                    str(existing["conversation_id"]) != conversation_id
                     or str(existing["role"]) != resolved_role
                     or str(existing["content"]) != resolved_content
                 ):
@@ -557,21 +517,14 @@ class ConversationEngine:
                 ),
             ).fetchall()
 
-        return [
-            ConversationMessage(**dict(row))
-            for row in rows
-        ]
+        return [ConversationMessage(**dict(row)) for row in rows]
 
     async def get_messages(
         self,
         conversation_id: str,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        resolved_limit = (
-            limit
-            if limit is not None
-            else self.default_history_limit
-        )
+        resolved_limit = limit if limit is not None else self.default_history_limit
 
         messages = await asyncio.to_thread(
             self._get_messages_sync,
@@ -579,10 +532,7 @@ class ConversationEngine:
             resolved_limit,
         )
 
-        return [
-            asdict(message)
-            for message in messages
-        ]
+        return [asdict(message) for message in messages]
 
     async def get_ai_history(
         self,
@@ -600,7 +550,8 @@ class ConversationEngine:
                 "content": message["content"],
             }
             for message in messages
-            if message["role"] in {
+            if message["role"]
+            in {
                 "user",
                 "assistant",
                 "system",
@@ -610,44 +561,53 @@ class ConversationEngine:
     def _list_conversations_sync(
         self,
         limit: int,
+        conversation_id_prefix: str | None = None,
     ) -> list[Conversation]:
         safe_limit = max(1, min(limit, 100))
 
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                    conversation_id,
-                    title,
-                    summary,
-                    source,
-                    created_at,
-                    updated_at
-                FROM conversations
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
+            if conversation_id_prefix is None:
+                rows = connection.execute(
+                    """
+                    SELECT conversation_id, title, summary, source,
+                           created_at, updated_at
+                    FROM conversations
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT conversation_id, title, summary, source,
+                           created_at, updated_at
+                    FROM conversations
+                    WHERE substr(conversation_id, 1, ?) = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (
+                        len(conversation_id_prefix),
+                        conversation_id_prefix,
+                        safe_limit,
+                    ),
+                ).fetchall()
 
-        return [
-            Conversation(**dict(row))
-            for row in rows
-        ]
+        return [Conversation(**dict(row)) for row in rows]
 
     async def list_conversations(
         self,
         limit: int = 50,
+        conversation_id_prefix: str | None = None,
     ) -> list[dict[str, Any]]:
         conversations = await asyncio.to_thread(
             self._list_conversations_sync,
             limit,
+            conversation_id_prefix,
         )
 
-        return [
-            asdict(conversation)
-            for conversation in conversations
-        ]
+        return [asdict(conversation) for conversation in conversations]
 
     def _rename_conversation_sync(
         self,
@@ -657,9 +617,7 @@ class ConversationEngine:
         resolved_title = title.strip()
 
         if not resolved_title:
-            raise ValueError(
-                "Conversation title cannot be empty."
-            )
+            raise ValueError("Conversation title cannot be empty.")
 
         now = self._utc_now()
 
@@ -697,12 +655,7 @@ class ConversationEngine:
         conversation_id: str,
         summary: str | None,
     ) -> bool:
-        resolved_summary = (
-            summary.strip()
-            if summary
-            and summary.strip()
-            else None
-        )
+        resolved_summary = summary.strip() if summary and summary.strip() else None
 
         now = self._utc_now()
 

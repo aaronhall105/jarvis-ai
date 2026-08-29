@@ -1,9 +1,10 @@
 import asyncio
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from app.device_resolver import DeviceResolver
-from app.home_assistant import HomeAssistantClient
+from app.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.presence import PresenceResolver
 from app.registry import RegistryEngine
 from app.tools.lights import LightsTool
@@ -278,14 +279,11 @@ class ToolEngine:
         available = [
             entity
             for entity in entities
-            if str(entity.get("state") or "").lower()
-            not in {"unavailable", "unknown", ""}
+            if str(entity.get("state") or "").lower() not in {"unavailable", "unknown", ""}
         ]
         unavailable = [entity for entity in entities if entity not in available]
         already = [
-            entity
-            for entity in available
-            if str(entity.get("state") or "").lower() == target_state
+            entity for entity in available if str(entity.get("state") or "").lower() == target_state
         ]
         pending = [entity for entity in available if entity not in already]
 
@@ -300,12 +298,8 @@ class ToolEngine:
                 "verified": False,
                 "already_in_target_state": False,
                 "entities": [],
-                "unavailable_entities": [
-                    self._public_state(entity) for entity in unavailable
-                ],
-                "response_message": (
-                    f"No available lights were found in the {area_name}."
-                ),
+                "unavailable_entities": [self._public_state(entity) for entity in unavailable],
+                "response_message": (f"No available lights were found in the {area_name}."),
             }
 
         if not pending:
@@ -332,9 +326,7 @@ class ToolEngine:
                 "already_count": len(already),
                 "changed_count": 0,
                 "entities": [self._public_state(entity) for entity in available],
-                "unavailable_entities": [
-                    self._public_state(entity) for entity in unavailable
-                ],
+                "unavailable_entities": [self._public_state(entity) for entity in unavailable],
                 "response_message": response_message,
             }
 
@@ -347,10 +339,12 @@ class ToolEngine:
 
         final_lookup: dict[str, dict[str, Any]] = {}
         retried = False
-        for attempt, delays in enumerate((
-            self.STATE_VERIFY_DELAYS,
-            self.STATE_RETRY_VERIFY_DELAYS,
-        )):
+        for attempt, delays in enumerate(
+            (
+                self.STATE_VERIFY_DELAYS,
+                self.STATE_RETRY_VERIFY_DELAYS,
+            )
+        ):
             for delay in delays:
                 await asyncio.sleep(delay)
                 refreshed = await self.readable_entity_states(refresh=True)
@@ -360,8 +354,7 @@ class ToolEngine:
                     if entity.get("entity_id") in pending_ids
                 }
                 if all(
-                    str(final_lookup.get(entity_id, {}).get("state") or "").lower()
-                    == target_state
+                    str(final_lookup.get(entity_id, {}).get("state") or "").lower() == target_state
                     for entity_id in pending_ids
                 ):
                     break
@@ -369,8 +362,7 @@ class ToolEngine:
             remaining_ids = [
                 entity_id
                 for entity_id in pending_ids
-                if str(final_lookup.get(entity_id, {}).get("state") or "").lower()
-                != target_state
+                if str(final_lookup.get(entity_id, {}).get("state") or "").lower() != target_state
             ]
             if not remaining_ids:
                 break
@@ -385,15 +377,12 @@ class ToolEngine:
         verified_ids = [
             entity_id
             for entity_id in pending_ids
-            if str(final_lookup.get(entity_id, {}).get("state") or "").lower()
-            == target_state
+            if str(final_lookup.get(entity_id, {}).get("state") or "").lower() == target_state
         ]
         failed_ids = [entity_id for entity_id in pending_ids if entity_id not in verified_ids]
 
         if not failed_ids:
-            response_message = (
-                f"The {area_name} lights are now {target_state}."
-            )
+            response_message = f"The {area_name} lights are now {target_state}."
             if already:
                 response_message += (
                     f" {len(already)} "
@@ -417,7 +406,9 @@ class ToolEngine:
                 )
 
         final_entities = [
-            self._public_state(final_lookup.get(entity_id, {"entity_id": entity_id, "state": "unknown"}))
+            self._public_state(
+                final_lookup.get(entity_id, {"entity_id": entity_id, "state": "unknown"})
+            )
             for entity_id in pending_ids
         ]
         return {
@@ -476,9 +467,7 @@ class ToolEngine:
                 "changed": False,
                 "verified": False,
                 "entities": [],
-                "response_message": (
-                    f"No switches were found in the {area_name}."
-                ),
+                "response_message": (f"No switches were found in the {area_name}."),
             }
 
         results = [
@@ -493,9 +482,7 @@ class ToolEngine:
             1 for result in results if result.get("already_in_target_state") is True
         )
         failed = [
-            result
-            for result in results
-            if not result.get("success") or not result.get("verified")
+            result for result in results if not result.get("success") or not result.get("verified")
         ]
 
         if not failed:
@@ -513,7 +500,7 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": not failed,
             "area_id": area_id,
             "area_name": area_name,
             "domain": "switch",
@@ -546,6 +533,13 @@ class ToolEngine:
     async def inspect_presence(self, reference: str) -> dict[str, Any]:
         """Return fresh, structured person/tracker evidence only."""
         return await self.presence.inspect(reference)
+
+    async def person_configurations(self) -> list[dict[str, Any]]:
+        """Return HA's authoritative person-to-tracker configuration graph."""
+        result = await self.client.send_command({"type": "person/list"})
+        if not isinstance(result, list) or not all(isinstance(item, Mapping) for item in result):
+            raise HomeAssistantError("Home Assistant returned an invalid person list response")
+        return [dict(item) for item in result]
 
     async def control_device(
         self,
@@ -613,10 +607,12 @@ class ToolEngine:
         final_entity: dict[str, Any] = current_entity
         verified = False
         retried = False
-        for attempt, delays in enumerate((
-            self.STATE_VERIFY_DELAYS,
-            self.STATE_RETRY_VERIFY_DELAYS,
-        )):
+        for attempt, delays in enumerate(
+            (
+                self.STATE_VERIFY_DELAYS,
+                self.STATE_RETRY_VERIFY_DELAYS,
+            )
+        ):
             for delay in delays:
                 await asyncio.sleep(delay)
                 refreshed = await self.get_entity_state(entity_id)
@@ -714,9 +710,7 @@ class ToolEngine:
             if (area.get("area_id") or area.get("id")) and area.get("name")
         }
         device_lookup = {
-            str(device.get("id")): device
-            for device in snapshot.devices
-            if device.get("id")
+            str(device.get("id")): device for device in snapshot.devices if device.get("id")
         }
         registry_lookup = {
             str(entity.get("entity_id")): entity
@@ -754,10 +748,9 @@ class ToolEngine:
                 if isinstance(state_object.get("attributes"), dict)
                 else {}
             )
-            raw_attributes = (
-                state_object.get("attributes")
-                if isinstance(state_object.get("attributes"), dict)
-                else {}
+            attributes_value = state_object.get("attributes")
+            raw_attributes: dict[str, Any] = (
+                attributes_value if isinstance(attributes_value, dict) else {}
             )
 
             name = str(
@@ -772,11 +765,7 @@ class ToolEngine:
             unit_value = raw_attributes.get("unit_of_measurement")
             unit = str(unit_value) if unit_value not in {None, ""} else None
             device_class_value = raw_attributes.get("device_class")
-            device_class = (
-                str(device_class_value)
-                if device_class_value not in {None, ""}
-                else None
-            )
+            device_class = str(device_class_value) if device_class_value not in {None, ""} else None
 
             search_text = self._normalise(
                 " ".join(
@@ -811,11 +800,7 @@ class ToolEngine:
                     "entity_category": registry_entity.get("entity_category"),
                     "platform": registry_entity.get("platform"),
                     "device_id": registry_entity.get("device_id"),
-                    "device_name": str(
-                        device.get("name_by_user")
-                        or device.get("name")
-                        or ""
-                    ),
+                    "device_name": str(device.get("name_by_user") or device.get("name") or ""),
                     "unit": unit,
                     "attributes": attributes,
                     "last_changed": state_object.get("last_changed"),
@@ -836,11 +821,7 @@ class ToolEngine:
 
     @staticmethod
     def _public_state(entity: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in entity.items()
-            if key != "search_text"
-        }
+        return {key: value for key, value in entity.items() if key != "search_text"}
 
     async def runnable_routines(self, limit: int = 100) -> list[dict[str, Any]]:
         """Return fresh script and automation entities available to run."""
@@ -885,10 +866,7 @@ class ToolEngine:
         name: str | None = None,
     ) -> dict[str, Any]:
         """Start one exact script or trigger one automation safely."""
-        routines = {
-            item["entity_id"]: item
-            for item in await self.runnable_routines(limit=200)
-        }
+        routines = {item["entity_id"]: item for item in await self.runnable_routines(limit=200)}
         routine = routines.get(entity_id)
         if routine is None:
             return {
@@ -935,7 +913,10 @@ class ToolEngine:
                 "changed": True,
                 "verified": False,
                 "command_accepted": True,
-                "response_message": f"{routine_name} started.",
+                "response_message": (
+                    f"Home Assistant accepted the request to start {routine_name}; "
+                    "completion is not confirmed."
+                ),
             }
 
         await self.client.call_service(
@@ -954,7 +935,8 @@ class ToolEngine:
             "conditions_respected": True,
             "command_accepted": True,
             "response_message": (
-                f"{routine_name} was triggered with its conditions respected."
+                f"Home Assistant accepted the request to trigger {routine_name} "
+                "with its conditions respected; completion is not confirmed."
             ),
         }
 
@@ -997,11 +979,7 @@ class ToolEngine:
         safe_limit = max(1, min(int(limit), 50))
 
         ranked: list[tuple[int, dict[str, Any]]] = []
-        query_terms = [
-            term
-            for term in normalised_query.split()
-            if len(term) >= 2
-        ]
+        query_terms = [term for term in normalised_query.split() if len(term) >= 2]
 
         for entity in await self.readable_entity_states(refresh=True):
             if domain and entity["domain"] != domain:
@@ -1041,19 +1019,30 @@ class ToolEngine:
             ),
             reverse=True,
         )
-        entities = [
-            self._public_state(entity)
-            for _, entity in ranked[:safe_limit]
-        ]
+        entities = [self._public_state(entity) for _, entity in ranked[:safe_limit]]
+        top_score = ranked[0][0] if ranked else None
+        top_ties = sum(1 for score, _ in ranked if score == top_score) if ranked else 0
+        exact = bool(top_score is not None and top_score >= 130)
+        resolution = (
+            "zero"
+            if not entities
+            else "ambiguous"
+            if top_ties > 1
+            else "exact"
+            if exact
+            else "ranked"
+        )
 
         return {
             "success": True,
+            "resolution": resolution,
             "query": query,
             "domain": domain,
             "area_id": area_id,
             "state_filter": state_filter,
             "count": len(entities),
             "entities": entities,
+            "selected_entity": entities[0] if resolution == "exact" else None,
         }
 
     async def list_area_states(
@@ -1099,6 +1088,7 @@ class ToolEngine:
             "count": len(matches),
             "entities": matches,
         }
+
     @classmethod
     def _is_user_facing_active_entity(cls, entity: dict[str, Any]) -> bool:
         domain = str(entity.get("domain") or "")
@@ -1131,12 +1121,15 @@ class ToolEngine:
         # Idle smart speakers and voice satellites are not "on" in the human
         # sense. Playing/paused/buffering devices remain visible.
         if domain == "media_player" and state == "on":
-            if any(term in combined for term in {
-                "home assistant voice",
-                "voice satellite",
-                "echo",
-                "everywhere",
-            }):
+            if any(
+                term in combined
+                for term in {
+                    "home assistant voice",
+                    "voice satellite",
+                    "echo",
+                    "everywhere",
+                }
+            ):
                 return False
 
         return True
@@ -1188,7 +1181,9 @@ class ToolEngine:
         # Multiple integrations often expose the same physical television.
         if domain == "media_player" and re.search(r"\b(?:tv|television)\b", combined):
             return "media_player:television"
-        return f"{domain}:{cls._normalise(str(entity.get('name') or entity.get('entity_id') or ''))}"
+        return (
+            f"{domain}:{cls._normalise(str(entity.get('name') or entity.get('entity_id') or ''))}"
+        )
 
     async def list_active_area_devices(
         self,
@@ -1227,7 +1222,9 @@ class ToolEngine:
             public["summary_status"] = self._area_summary_status(entity)
             key = self._area_summary_key(entity)
             current = selected.get(key)
-            if current is None or self._area_summary_priority(public) < self._area_summary_priority(current):
+            if current is None or self._area_summary_priority(public) < self._area_summary_priority(
+                current
+            ):
                 selected[key] = public
 
         entities = sorted(selected.values(), key=self._area_summary_priority)[:safe_limit]
@@ -1394,7 +1391,7 @@ class ToolEngine:
                 )
             )
             return {
-                "success": True,
+                "success": verified,
                 "shortcut": shortcut,
                 "script_entity_id": script_entity_id,
                 "state_entity_id": state_entity_id,
@@ -1553,7 +1550,7 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": verified is not False,
             "entity_id": entity_id,
             "name": name,
             "action": action,
@@ -1613,17 +1610,17 @@ class ToolEngine:
             service_data={"volume_level": safe_volume / 100},
         )
 
-        current_volume: int | None = previous_volume
-        verification_available = previous_volume is not None
+        current_volume: int | None = None
+        verification_available = False
         verified = False
         for delay in self.STATE_VERIFY_DELAYS:
             await asyncio.sleep(delay)
             refreshed = await self.get_entity_state(entity_id)
             current_entity = refreshed.get("entity") or {}
-            current_volume = self._volume_percent(current_entity)
-            if current_volume is None:
-                verification_available = False
+            observed_volume = self._volume_percent(current_entity)
+            if observed_volume is None:
                 continue
+            current_volume = observed_volume
             verification_available = True
             if abs(current_volume - safe_volume) <= 2:
                 verified = True
@@ -1633,8 +1630,9 @@ class ToolEngine:
             response_message = f"{name} volume is now {current_volume}%."
         elif not verification_available:
             response_message = (
-                f"The {safe_volume}% volume command was sent to {name}, but this "
-                "media player does not report its volume level."
+                f"Home Assistant accepted the {safe_volume}% volume command for {name}, "
+                "but it did not return a volume level after the command, so the "
+                "requested level is not confirmed."
             )
         else:
             response_message = (
@@ -1643,13 +1641,14 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": verified or not verification_available,
             "entity_id": entity_id,
             "name": name,
             "volume_percent": safe_volume,
             "changed": verified,
             "verified": verified,
             "verification_available": verification_available,
+            "command_accepted": True,
             "already_in_target_state": False,
             "previous_volume_percent": previous_volume,
             "current_volume_percent": current_volume,
@@ -1675,23 +1674,45 @@ class ToolEngine:
         if len(clean_title) > 100:
             raise ValueError("Notification title is too long")
 
-        completed: list[str] = []
-        for service in services:
-            await self.client.call_service(
-                "notify",
-                service,
-                service_data={
-                    "title": clean_title,
-                    "message": clean_message,
-                },
-            )
-            completed.append(f"notify.{service}")
-
         recipient_text = {
             "aaron": "your phone",
             "amber": "Amber's phone",
             "both": "both phones",
         }.get(recipient, recipient)
+        completed: list[str] = []
+        for service in services:
+            try:
+                await self.client.call_service(
+                    "notify",
+                    service,
+                    service_data={
+                        "title": clean_title,
+                        "message": clean_message,
+                    },
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "recipient": recipient,
+                    "services": completed,
+                    "failed_service": f"notify.{service}",
+                    "title": clean_title,
+                    "notification_message": clean_message,
+                    "verified": False,
+                    "delivery_confirmed": False,
+                    "command_sent": bool(completed),
+                    "outcome_unknown": True,
+                    "error": str(exc),
+                    "response_message": (
+                        f"Home Assistant accepted the notification for "
+                        f"{len(completed)} target(s), but the request for "
+                        f"{recipient_text} was interrupted. Delivery to the "
+                        "remaining target is unknown, so I will not claim it "
+                        "was fully sent."
+                    ),
+                }
+            completed.append(f"notify.{service}")
+
         return {
             "success": True,
             "recipient": recipient,
@@ -1701,7 +1722,10 @@ class ToolEngine:
             "verified": False,
             "delivery_confirmed": False,
             "command_accepted": True,
-            "response_message": f"Notification sent to {recipient_text}.",
+            "response_message": (
+                f"Home Assistant accepted the notification request for {recipient_text}; "
+                "device delivery is not confirmed."
+            ),
         }
 
     async def announce_message(
@@ -1740,5 +1764,8 @@ class ToolEngine:
             "verified": False,
             "heard_confirmed": False,
             "command_accepted": True,
-            "response_message": f"Announcement sent to the {target_name}.",
+            "response_message": (
+                f"Home Assistant accepted the announcement request for the {target_name}; "
+                "playback is not confirmed."
+            ),
         }

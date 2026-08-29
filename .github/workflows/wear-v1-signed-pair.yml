@@ -1,0 +1,108 @@
+name: Jarvis unified signed phone and Wear pair
+
+on:
+  push:
+    branches: [jarvis/unified-production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unified-signed-pair-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-verify-pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with: {fetch-depth: 0}
+      - name: Verify authoritative source
+        run: |
+          set -Eeuo pipefail
+          git fetch origin jarvis/unified-production
+          test "$(git rev-parse origin/jarvis/unified-production)" = "$GITHUB_SHA"
+          python tools/verify_product_baseline.py --skip-ref
+      - uses: actions/setup-java@v5
+        with: {distribution: temurin, java-version: '17'}
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with: {gradle-version: '9.4.1'}
+      - name: Prepare deterministic Android assets
+        run: ./tools/prepare_android_wake_assets.sh
+      - name: Restore stable signing keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.JARVIS_SIGNING_KEYSTORE_BASE64 }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$KEYSTORE_BASE64" || { echo "Required stable signing secret is absent" >&2; exit 1; }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/jarvis-release.jks"
+      - name: Build stable-signed phone and watch APKs
+        working-directory: android/jarvis-voice-client
+        env:
+          JARVIS_SIGNING_STORE_FILE: ${{ runner.temp }}/jarvis-release.jks
+          JARVIS_SIGNING_STORE_PASSWORD: ${{ secrets.JARVIS_SIGNING_STORE_PASSWORD }}
+          JARVIS_SIGNING_KEY_ALIAS: ${{ secrets.JARVIS_SIGNING_KEY_ALIAS }}
+          JARVIS_SIGNING_KEY_PASSWORD: ${{ secrets.JARVIS_SIGNING_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease :wear:assembleRelease
+      - name: Verify, report, and package signed pair
+        env:
+          EXPECTED_CERT: 009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac
+        run: |
+          set -Eeuo pipefail
+          test -n "$EXPECTED_CERT" || { echo "Required certificate secret is absent" >&2; exit 1; }
+          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+          apksigner="$ANDROID_HOME/build-tools/$build_tools/apksigner"
+          aapt="$ANDROID_HOME/build-tools/$build_tools/aapt"
+          test -x "$apksigner" && test -x "$aapt"
+
+          output="$RUNNER_TEMP/signed-pair"
+          mkdir -p "$output"
+          version="$(sed -nE 's/.*versionName = "([^"]+)".*/\1/p' android/jarvis-voice-client/app/build.gradle.kts)"
+          phone="$output/jarvis-phone-${version}-release.apk"
+          watch="$output/jarvis-watch-${version}-release.apk"
+          cp android/jarvis-voice-client/app/build/outputs/apk/release/app-release.apk "$phone"
+          cp android/jarvis-voice-client/wear/build/outputs/apk/release/wear-release.apk "$watch"
+
+          "$apksigner" verify --verbose --print-certs "$phone" > "$output/phone-signing-report.txt"
+          "$apksigner" verify --verbose --print-certs "$watch" > "$output/watch-signing-report.txt"
+          phone_cert="$(grep -m1 'certificate SHA-256 digest:' "$output/phone-signing-report.txt" | sed -E 's/.*digest:[[:space:]]*//' | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          watch_cert="$(grep -m1 'certificate SHA-256 digest:' "$output/watch-signing-report.txt" | sed -E 's/.*digest:[[:space:]]*//' | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          expected_cert="$(printf '%s' "$EXPECTED_CERT" | tr -d '[:space:]:' | tr '[:upper:]' '[:lower:]')"
+          [[ "$phone_cert" =~ ^[[:xdigit:]]{64}$ ]]
+          [[ "$watch_cert" =~ ^[[:xdigit:]]{64}$ ]]
+          [[ "$expected_cert" =~ ^[[:xdigit:]]{64}$ ]]
+          test "$phone_cert" = "$expected_cert" || { echo "Phone certificate does not match the configured stable certificate" >&2; exit 1; }
+          test "$watch_cert" = "$expected_cert" || { echo "Watch certificate does not match the configured stable certificate" >&2; exit 1; }
+          test "$phone_cert" = "$watch_cert" || { echo "Phone and watch certificates differ" >&2; exit 1; }
+
+          phone_badging="$("$aapt" dump badging "$phone" | sed -n '1p')"
+          watch_badging="$("$aapt" dump badging "$watch" | sed -n '1p')"
+          phone_id="$(sed -nE "s/.*package: name='([^']+)'.*/\1/p" <<<"$phone_badging")"
+          watch_id="$(sed -nE "s/.*package: name='([^']+)'.*/\1/p" <<<"$watch_badging")"
+          test "$phone_id" = "com.aaron.jarvisvoice"
+          test "$watch_id" = "com.aaron.jarvisvoice"
+          phone_code="$(sed -nE "s/.*versionCode='([^']+)'.*/\1/p" <<<"$phone_badging")"
+          phone_name="$(sed -nE "s/.*versionName='([^']+)'.*/\1/p" <<<"$phone_badging")"
+          watch_code="$(sed -nE "s/.*versionCode='([^']+)'.*/\1/p" <<<"$watch_badging")"
+          watch_name="$(sed -nE "s/.*versionName='([^']+)'.*/\1/p" <<<"$watch_badging")"
+
+          echo "Phone package/version: $phone_id $phone_name ($phone_code)"
+          echo "Watch package/version: $watch_id $watch_name ($watch_code)"
+          echo "Phone verified signing certificate SHA-256: $phone_cert"
+          echo "Watch verified signing certificate SHA-256: $watch_cert"
+          (cd "$output" && sha256sum jarvis-phone-*-release.apk jarvis-watch-*-release.apk > SHA256SUMS.txt)
+          cat "$output/SHA256SUMS.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-unified-signed-pair
+          path: ${{ runner.temp }}/signed-pair/
+          if-no-files-found: error
+          retention-days: 14

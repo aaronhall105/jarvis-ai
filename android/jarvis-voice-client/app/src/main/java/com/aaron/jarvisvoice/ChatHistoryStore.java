@@ -14,6 +14,16 @@ import java.util.Set;
 import java.util.UUID;
 
 public final class ChatHistoryStore {
+    public enum DurableAddResult {
+        ADDED,
+        ALREADY_PRESENT,
+        FAILED;
+
+        public boolean persisted() {
+            return this != FAILED;
+        }
+    }
+
     private static final String PREFS = "jarvis_chat_history";
     private static final String LEGACY_MESSAGES = "messages_v1800";
     private static final String KEY_CONVERSATIONS =
@@ -65,33 +75,153 @@ public final class ChatHistoryStore {
         return new ArrayList<>(active.messages);
     }
 
-    public synchronized void add(String role, String text) {
-        String cleaned = ConversationPolicy.clean(text);
-        if (cleaned.isBlank()) return;
-
-        List<Record> records = loadRecords();
-        Record active = resolveActive(records, true);
-        active.messages.add(
-            new ChatMessage(
-                role,
-                cleaned,
-                System.currentTimeMillis()
-            )
+    public synchronized void add(
+        String role,
+        String text
+    ) {
+        addInternal(
+            "",
+            role,
+            text,
+            false
         );
+    }
+
+    public synchronized boolean addDurable(
+        String role,
+        String text
+    ) {
+        return addInternal(
+            "",
+            role,
+            text,
+            true
+        ).persisted();
+    }
+
+    public synchronized DurableAddResult addDurable(
+        String messageId,
+        String role,
+        String text
+    ) {
+        return addInternal(
+            messageId,
+            role,
+            text,
+            true
+        );
+    }
+
+    private DurableAddResult addInternal(
+        String messageId,
+        String role,
+        String text,
+        boolean durable
+    ) {
+        String cleaned =
+            ConversationPolicy.clean(text);
+
+        if (cleaned.isBlank()) {
+            return DurableAddResult.ALREADY_PRESENT;
+        }
+
+        List<Record> records =
+            loadRecords();
+
+        Record active =
+            resolveActive(
+                records,
+                true
+            );
+
+        String stableId =
+            messageId == null
+                ? ""
+                : messageId.trim();
+
+        if (!stableId.isEmpty()) {
+            for (
+                ChatMessage message
+                    : active.messages
+            ) {
+                if (
+                    stableId.equals(
+                        message.id
+                    )
+                ) {
+                    /*
+                     * A previous attempt may have updated the
+                     * SharedPreferences in-memory map even when
+                     * its disk commit reported failure. Retry
+                     * the synchronous disk commit before
+                     * claiming durability.
+                     */
+                    if (
+                        durable
+                            && !saveRecords(
+                                records,
+                                true
+                            )
+                    ) {
+                        return DurableAddResult.FAILED;
+                    }
+
+                    return DurableAddResult
+                        .ALREADY_PRESENT;
+                }
+            }
+        }
+
+        long now =
+            System.currentTimeMillis();
+
+        ChatMessage message =
+            stableId.isEmpty()
+                ? new ChatMessage(
+                    role,
+                    cleaned,
+                    now
+                )
+                : new ChatMessage(
+                    stableId,
+                    role,
+                    cleaned,
+                    now
+                );
+
+        active.messages.add(
+            message
+        );
+
         trimMessages(active);
 
         if (
             ChatMessage.USER.equals(role)
                 && (
                     active.title.isBlank()
-                        || "New chat".equals(active.title)
+                        || "New chat".equals(
+                            active.title
+                        )
                 )
         ) {
-            active.title = ConversationPolicy.titleFromText(cleaned);
+            active.title =
+                ConversationPolicy
+                    .titleFromText(
+                        cleaned
+                    );
         }
 
-        active.updatedAt = System.currentTimeMillis();
-        saveRecords(records);
+        active.updatedAt = now;
+
+        boolean saved =
+            saveRecords(
+                records,
+                durable
+            );
+
+        return saved
+            ? DurableAddResult.ADDED
+            : DurableAddResult.FAILED;
     }
 
     public synchronized String createConversation() {
@@ -599,32 +729,101 @@ public final class ChatHistoryStore {
         return records;
     }
 
-    private void saveRecords(List<Record> records) {
-        JSONArray array = new JSONArray();
+    private void saveRecords(
+        List<Record> records
+    ) {
+        saveRecords(
+            records,
+            false
+        );
+    }
+
+    private boolean saveRecords(
+        List<Record> records,
+        boolean durable
+    ) {
+        JSONArray array =
+            new JSONArray();
+
         for (Record record : records) {
             try {
-                JSONArray messages = new JSONArray();
-                for (ChatMessage message : record.messages) {
-                    messages.put(new JSONObject()
-                        .put("id", message.id)
-                        .put("role", message.role)
-                        .put("text", message.text)
-                        .put("created_at", message.createdAt));
+                JSONArray messages =
+                    new JSONArray();
+
+                for (
+                    ChatMessage message
+                        : record.messages
+                ) {
+                    messages.put(
+                        new JSONObject()
+                            .put(
+                                "id",
+                                message.id
+                            )
+                            .put(
+                                "role",
+                                message.role
+                            )
+                            .put(
+                                "text",
+                                message.text
+                            )
+                            .put(
+                                "created_at",
+                                message.createdAt
+                            )
+                    );
                 }
-                array.put(new JSONObject()
-                    .put("id", record.id)
-                    .put("title", record.title)
-                    .put("owner", record.owner)
-                    .put("created_at", record.createdAt)
-                    .put("updated_at", record.updatedAt)
-                    .put("pinned", record.pinned)
-                    .put("messages", messages));
+
+                array.put(
+                    new JSONObject()
+                        .put(
+                            "id",
+                            record.id
+                        )
+                        .put(
+                            "title",
+                            record.title
+                        )
+                        .put(
+                            "owner",
+                            record.owner
+                        )
+                        .put(
+                            "created_at",
+                            record.createdAt
+                        )
+                        .put(
+                            "updated_at",
+                            record.updatedAt
+                        )
+                        .put(
+                            "pinned",
+                            record.pinned
+                        )
+                        .put(
+                            "messages",
+                            messages
+                        )
+                );
+
             } catch (Exception ignored) {
             }
         }
-        preferences.edit()
-            .putString(KEY_CONVERSATIONS, array.toString())
-            .apply();
+
+        SharedPreferences.Editor editor =
+            preferences.edit()
+                .putString(
+                    KEY_CONVERSATIONS,
+                    array.toString()
+                );
+
+        if (durable) {
+            return editor.commit();
+        }
+
+        editor.apply();
+        return true;
     }
 
     private void prune(

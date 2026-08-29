@@ -9,9 +9,7 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +40,7 @@ public final class IntegrationsClient implements AutoCloseable {
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private final SecureStore store;
+    private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final OkHttpClient client = new OkHttpClient.Builder()
@@ -52,7 +51,8 @@ public final class IntegrationsClient implements AutoCloseable {
         .build();
 
     public IntegrationsClient(Context context) {
-        store = new SecureStore(context.getApplicationContext());
+        this.context = context.getApplicationContext();
+        store = new SecureStore(this.context);
     }
 
     public void providers(ProvidersCallback callback) {
@@ -158,12 +158,11 @@ public final class IntegrationsClient implements AutoCloseable {
     }
 
     private List<String> endpoints() {
-        Set<String> values = new LinkedHashSet<>();
-        String configured = CoreEndpointSelector.normaliseBaseUrl(store.coreUrl());
-        if (!configured.isBlank()) values.add(configured);
-        String remote = CoreEndpointSelector.normaliseOptionalBaseUrl(store.remoteCoreUrl());
-        if (!remote.isBlank()) values.add(remote);
-        return new ArrayList<>(values);
+        return CoreEndpointSelector.candidateUrls(
+            context,
+            store.coreUrl(),
+            store.remoteCoreUrl()
+        );
     }
 
     static boolean isGoogleAuthorizationUrl(String value) {

@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.JarvisWear" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">@color/jarvis_white</item>
+        <item name="android:colorAccent">@color/jarvis_black</item>
+        <item name="android:navigationBarColor">@color/jarvis_white</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

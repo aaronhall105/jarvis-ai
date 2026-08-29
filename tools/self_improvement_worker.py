@@ -40,6 +40,7 @@ WORKTREES = WORK_ROOT / "worktrees"
 ARTIFACTS = WORK_ROOT / "artifacts"
 LOCK_PATH = WORK_ROOT / "worker.lock"
 VENV_PYTHON = ROOT / ".venv-improver" / "bin" / "python"
+AUTHORITATIVE_PRODUCTION_BRANCH = "jarvis/unified-production"
 
 
 class WorkerError(RuntimeError):
@@ -143,15 +144,6 @@ def env_int(values: dict[str, str], name: str, default: int, minimum: int, maxim
 def load_config() -> tuple[WorkerConfig, dict[str, str]]:
     values = load_env(ENV_PATH)
     model = values.get("JARVIS_IMPROVEMENT_MODEL") or values.get("OPENAI_MODEL") or "gpt-5.1-codex"
-    branch_result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    current_branch = branch_result.stdout.strip() or "main"
     return (
         WorkerConfig(
             model=model,
@@ -171,7 +163,11 @@ def load_config() -> tuple[WorkerConfig, dict[str, str]]:
             ),
             candidate_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_CANDIDATE_TIMEOUT_SECONDS", 600, 60, 3600),
             deploy_health_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_DEPLOY_HEALTH_TIMEOUT_SECONDS", 90, 20, 600),
-            base_branch=values.get("JARVIS_IMPROVEMENT_BASE_BRANCH", current_branch).strip() or current_branch,
+            base_branch=values.get(
+                "JARVIS_IMPROVEMENT_BASE_BRANCH",
+                AUTHORITATIVE_PRODUCTION_BRANCH,
+            ).strip()
+            or AUTHORITATIVE_PRODUCTION_BRANCH,
         ),
         values,
     )
@@ -4885,6 +4881,11 @@ def deploy_candidate(
     if config.proposal_only:
         raise WorkerError(
             "Deployment is disabled while Proposal Mode is active."
+        )
+    if config.base_branch != AUTHORITATIVE_PRODUCTION_BRANCH:
+        raise WorkerError(
+            "Deployment is restricted to the authoritative "
+            f"{AUTHORITATIVE_PRODUCTION_BRANCH} product line."
         )
 
     ensure_candidate_transaction_columns()

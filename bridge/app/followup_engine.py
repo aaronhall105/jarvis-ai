@@ -119,6 +119,7 @@ class FollowUpEngine:
         self.max_attempts = max(1, min(int(max_attempts), 10))
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._operation_lock = asyncio.Lock()
         self._init()
 
     @contextmanager
@@ -567,6 +568,20 @@ class FollowUpEngine:
     ) -> dict[str, Any] | None:
         """Cancel work that has not atomically claimed its chat delivery."""
 
+        async with self._operation_lock:
+            return await self._cancel_locked(
+                job_id,
+                kind=kind,
+                conversation_id=conversation_id,
+            )
+
+    async def _cancel_locked(
+        self,
+        job_id: str,
+        *,
+        kind: str | None = None,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any] | None:
         filters = ["job_id=?"]
         values: list[Any] = [job_id]
         if kind is not None:
@@ -589,6 +604,42 @@ class FollowUpEngine:
             )
             row = con.execute("SELECT * FROM followup_jobs WHERE " + predicate, values).fetchone()
         return self._row(row) if row else None
+
+    async def cancel_for_conversation(self, conversation_id: str) -> int:
+        """Cancel all runnable jobs before their conversation is removed."""
+
+        async with self._operation_lock:
+            with self._db() as con:
+                rows = con.execute(
+                    """
+                    SELECT job_id FROM followup_jobs
+                    WHERE conversation_id=?
+                    AND status IN ('pending','executing','delivery_pending')
+                    """,
+                    (conversation_id,),
+                ).fetchall()
+                if rows:
+                    con.execute(
+                        """
+                        UPDATE followup_jobs SET status='cancelled',cancelled_at=?,
+                        delivery_state='cancelled',result_json=?
+                        WHERE conversation_id=?
+                        AND status IN ('pending','executing','delivery_pending')
+                        """,
+                        (
+                            self._iso(self._now()),
+                            json.dumps(
+                                {
+                                    "cancelled": True,
+                                    "reason": "conversation_deleted",
+                                },
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ),
+                            conversation_id,
+                        ),
+                    )
+            return len(rows)
 
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
@@ -689,6 +740,10 @@ class FollowUpEngine:
             await self._execute(self._row(row))
 
     async def _execute(self, job: dict[str, Any]) -> None:
+        async with self._operation_lock:
+            await self._execute_locked(job)
+
+    async def _execute_locked(self, job: dict[str, Any]) -> None:
         if job["status"] == "delivery_pending":
             await self._deliver_pending(job)
             return

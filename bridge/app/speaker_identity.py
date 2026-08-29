@@ -507,7 +507,8 @@ class SpeakerIdentityRuntime:
             return None
         if self.apply(metadata, result):
             state["speaker_last_identity"] = {"at": time.monotonic(), "result": result}
-            profile = result.get("speaker") if isinstance(result.get("speaker"), dict) else {}
+            raw_profile = result.get("speaker")
+            profile: dict[str, Any] = raw_profile if isinstance(raw_profile, dict) else {}
             await send({
                 "type": "speaker.identified",
                 "speaker_id": profile.get("speaker_id"),
@@ -597,7 +598,8 @@ class SpeakerIdentityRuntime:
             state.pop("speaker_enrollment", None); await speak("I couldn't finish the voice profile. Please start voice enrollment again."); return True
         if not bool(finished.get("enrolled")):
             state.pop("speaker_enrollment", None); await speak(friendly_quality_message(finished.get("reason"))); return True
-        profile = finished.get("speaker") if isinstance(finished.get("speaker"), dict) else {}
+        raw_profile = finished.get("speaker")
+        profile: dict[str, Any] = raw_profile if isinstance(raw_profile, dict) else {}
         synthetic={"recognized":True,"reason":"guided_enrollment","speaker":profile,"score":1.0,"margin":1.0}
         self.apply(metadata, synthetic, "guided_enrollment")
         state["speaker_last_identity"]={"at":time.monotonic(),"result":synthetic}; state.pop("speaker_enrollment", None)

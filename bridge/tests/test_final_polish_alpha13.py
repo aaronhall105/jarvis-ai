@@ -7,7 +7,7 @@ from app.realtime_voice import VERSION
 
 class FinalPolishAlpha13Test(unittest.TestCase):
     def test_release_identity(self):
-        self.assertEqual(VERSION, "19.0.0-alpha20")
+        self.assertEqual(VERSION, "19.0.0-alpha21")
 
     def test_story_gets_long_voice_budget(self):
         budget = ReplyBudgetPolicy.output_tokens(
@@ -33,9 +33,7 @@ class FinalPolishAlpha13Test(unittest.TestCase):
                 {"role": "assistant", "content": "Hello"},
                 {
                     "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "Explain it in detail"}
-                    ],
+                    "content": [{"type": "input_text", "text": "Explain it in detail"}],
                 },
             ]
         )
@@ -43,23 +41,19 @@ class FinalPolishAlpha13Test(unittest.TestCase):
 
     def test_early_speech_waits_for_complete_sentence(self):
         self.assertEqual(
-            SpeechRenderPolicy.early_segment(
-                "This reply has not finished yet"
-            ),
+            SpeechRenderPolicy.early_segment("This reply has not finished yet"),
             "",
         )
         self.assertEqual(
             SpeechRenderPolicy.early_segment(
-                "Here is the useful opening sentence. "
-                "The full explanation continues in the chat."
+                "Here is the useful opening sentence. The full explanation continues in the chat."
             ),
             "Here is the useful opening sentence.",
         )
 
     def test_early_speech_uses_first_sentence(self):
         value = SpeechRenderPolicy.early_segment(
-            "Here is the first useful sentence. "
-            "This second sentence is still streaming."
+            "Here is the first useful sentence. This second sentence is still streaming."
         )
 
         self.assertEqual(
@@ -84,10 +78,7 @@ class FinalPolishAlpha13Test(unittest.TestCase):
         self.assertLessEqual(len(value), 111)
 
     def test_remaining_text_does_not_repeat_early_segment(self):
-        complete = (
-            "Here is the first useful sentence. "
-            "This is the remaining explanation."
-        )
+        complete = "Here is the first useful sentence. This is the remaining explanation."
 
         remainder = SpeechRenderPolicy.remaining_text(
             complete,
@@ -100,19 +91,15 @@ class FinalPolishAlpha13Test(unittest.TestCase):
         )
 
     def test_long_speech_is_complete_and_bounded(self):
-        response = (
-            "This is the first complete sentence. "
-            "This is the second complete sentence. "
-            + ("More written detail follows. " * 60)
+        response = "This is the first complete sentence. This is the second complete sentence. " + (
+            "More written detail follows. " * 60
         )
         spoken = SpeechRenderPolicy.spoken_text(
             response,
             maximum_chars=120,
         )
         self.assertLess(len(spoken), 190)
-        self.assertTrue(
-            spoken.endswith("The full reply is in the chat.")
-        )
+        self.assertTrue(spoken.endswith("The full reply is in the chat."))
 
 
 if __name__ == "__main__":

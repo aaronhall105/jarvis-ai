@@ -15,7 +15,7 @@ import wave
 from pathlib import Path
 
 import httpx
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from dataclasses import dataclass
@@ -25,6 +25,7 @@ from urllib.parse import quote
 from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
 from app.runtime_observability import runtime_metrics
+from app.realtime_turn_ledger import RealtimeTurnLedger, TurnRecord
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
 VERSION = JARVIS_RELEASE
@@ -169,7 +170,22 @@ def normalise_voice_mode(value: Any) -> str:
 
 def normalise_conversation_mode(value: Any) -> str:
     mode = str(value or "").strip().casefold()
-    return CONVERSATION_MODE_STANDARD if mode == CONVERSATION_MODE_STANDARD else CONVERSATION_MODE_LIVE
+    return (
+        CONVERSATION_MODE_STANDARD if mode == CONVERSATION_MODE_STANDARD else CONVERSATION_MODE_LIVE
+    )
+
+
+def normalise_voice_endpoint(value: Any) -> str:
+    return "WATCH" if str(value or "").strip().upper() == "WATCH" else "PHONE"
+
+
+def quiet_controls_enabled(configured: bool, metadata: dict[str, Any]) -> bool:
+    """Keep phone controls terse while ensuring remote watch endpoints get audible completion."""
+    return (
+        bool(configured)
+        and metadata.get("client_kind") != "voice_pe"
+        and normalise_voice_endpoint(metadata.get("voice_endpoint")) != "WATCH"
+    )
 
 
 def normalise_eagerness(value: Any) -> str:
@@ -223,10 +239,9 @@ def trusted_local_context(timezone_name: Any) -> dict[str, Any]:
 SPEAKER_CAPTURE_RATE = INPUT_RATE
 SPEAKER_CAPTURE_SAMPLE_WIDTH = 2
 SPEAKER_CAPTURE_DIR = Path("/tmp/jarvis-speaker-captures")
-SPEAKER_CAPTURE_DIAGNOSTICS = (
-    os.getenv("JARVIS_SPEAKER_CAPTURE_DIAGNOSTICS", "false")
-    .strip().casefold() in {"1", "true", "yes", "on"}
-)
+SPEAKER_CAPTURE_DIAGNOSTICS = os.getenv(
+    "JARVIS_SPEAKER_CAPTURE_DIAGNOSTICS", "false"
+).strip().casefold() in {"1", "true", "yes", "on"}
 
 SPEAKER_VERIFY_URL = os.getenv(
     "JARVIS_SPEAKER_VERIFY_URL",
@@ -240,24 +255,18 @@ SPEAKER_VERIFY_TIMEOUT_SECONDS = 3.0
 # Core fails open for short audio, setup/wake-like residue,
 # missing audio, verifier errors, policy mismatches, uncertain
 # results and Aaron-like results.
-SPEAKER_SUPPRESSION_ENABLED = (
-    os.getenv(
-        "JARVIS_SPEAKER_SUPPRESSION_ENABLED",
-        "false",
-    )
-    .strip()
-    .lower()
-    in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-)
+SPEAKER_SUPPRESSION_ENABLED = os.getenv(
+    "JARVIS_SPEAKER_SUPPRESSION_ENABLED",
+    "false",
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 SPEAKER_SUPPRESSION_MIN_SECONDS = 1.0
 SPEAKER_SUPPRESSION_POLICY_VERSION = "V1.3"
-
 
 
 def _speaker_capture_append_pcm(
@@ -280,10 +289,7 @@ def _speaker_capture_mark_start(
     item_id = str(event.get("item_id") or "").strip()
     audio_start_ms = event.get("audio_start_ms")
 
-    if (
-        not item_id
-        or not isinstance(audio_start_ms, (int, float))
-    ):
+    if not item_id or not isinstance(audio_start_ms, (int, float)):
         return
 
     segments = state.get("speaker_capture_segments")
@@ -304,10 +310,7 @@ def _speaker_capture_mark_stop(
     item_id = str(event.get("item_id") or "").strip()
     audio_end_ms = event.get("audio_end_ms")
 
-    if (
-        not item_id
-        or not isinstance(audio_end_ms, (int, float))
-    ):
+    if not item_id or not isinstance(audio_end_ms, (int, float)):
         return
 
     segments = state.get("speaker_capture_segments")
@@ -344,8 +347,7 @@ def _speaker_capture_write_segment(
 
     if not isinstance(segment, dict):
         _LOGGER.info(
-            "JARVIS SPEAKER CAPTURE SKIP: "
-            "missing VAD segment item=%s transcript=%r",
+            "JARVIS SPEAKER CAPTURE SKIP: missing VAD segment item=%s transcript=%r",
             item_id,
             transcript,
         )
@@ -354,11 +356,7 @@ def _speaker_capture_write_segment(
     start_ms = segment.get("start_ms")
     end_ms = segment.get("end_ms")
 
-    if (
-        not isinstance(start_ms, int)
-        or not isinstance(end_ms, int)
-        or end_ms <= start_ms
-    ):
+    if not isinstance(start_ms, int) or not isinstance(end_ms, int) or end_ms <= start_ms:
         _LOGGER.info(
             "JARVIS SPEAKER CAPTURE SKIP: "
             "invalid timing item=%s start_ms=%r end_ms=%r "
@@ -375,12 +373,8 @@ def _speaker_capture_write_segment(
     if not isinstance(archive, bytearray):
         return
 
-    start_frame = round(
-        (start_ms / 1000.0) * SPEAKER_CAPTURE_RATE
-    )
-    end_frame = round(
-        (end_ms / 1000.0) * SPEAKER_CAPTURE_RATE
-    )
+    start_frame = round((start_ms / 1000.0) * SPEAKER_CAPTURE_RATE)
+    end_frame = round((end_ms / 1000.0) * SPEAKER_CAPTURE_RATE)
 
     start_byte = max(
         0,
@@ -418,9 +412,7 @@ def _speaker_capture_write_segment(
 
     stamp = time.time_ns()
 
-    wav_path = SPEAKER_CAPTURE_DIR / (
-        f"{stamp}-{safe_item}.wav"
-    )
+    wav_path = SPEAKER_CAPTURE_DIR / (f"{stamp}-{safe_item}.wav")
 
     json_path = wav_path.with_suffix(".json")
 
@@ -453,9 +445,7 @@ def _speaker_capture_write_segment(
     )
 
     _LOGGER.info(
-        "JARVIS SPEAKER CAPTURE SAVED | "
-        "item=%s duration_ms=%s bytes=%s "
-        "transcript=%r wav=%s",
+        "JARVIS SPEAKER CAPTURE SAVED | item=%s duration_ms=%s bytes=%s transcript=%r wav=%s",
         item_id,
         end_ms - start_ms,
         len(pcm),
@@ -464,26 +454,18 @@ def _speaker_capture_write_segment(
     )
 
 
-
-
-
 def _speaker_capture_segment_pcm(
     state: dict[str, Any],
     event: dict[str, Any],
 ) -> bytes | None:
     """Return the exact 24 kHz PCM span for one VAD item."""
 
-    item_id = str(
-        event.get("item_id")
-        or ""
-    ).strip()
+    item_id = str(event.get("item_id") or "").strip()
 
     if not item_id:
         return None
 
-    segments = state.get(
-        "speaker_capture_segments"
-    )
+    segments = state.get("speaker_capture_segments")
 
     if not isinstance(
         segments,
@@ -491,9 +473,7 @@ def _speaker_capture_segment_pcm(
     ):
         return None
 
-    segment = segments.get(
-        item_id
-    )
+    segment = segments.get(item_id)
 
     if not isinstance(
         segment,
@@ -501,13 +481,9 @@ def _speaker_capture_segment_pcm(
     ):
         return None
 
-    start_ms = segment.get(
-        "start_ms"
-    )
+    start_ms = segment.get("start_ms")
 
-    end_ms = segment.get(
-        "end_ms"
-    )
+    end_ms = segment.get("end_ms")
 
     if (
         not isinstance(
@@ -522,9 +498,7 @@ def _speaker_capture_segment_pcm(
     ):
         return None
 
-    archive = state.get(
-        "speaker_capture_pcm_24k"
-    )
+    archive = state.get("speaker_capture_pcm_24k")
 
     if not isinstance(
         archive,
@@ -532,42 +506,24 @@ def _speaker_capture_segment_pcm(
     ):
         return None
 
-    start_frame = round(
-        (
-            start_ms
-            / 1000.0
-        )
-        * SPEAKER_CAPTURE_RATE
-    )
+    start_frame = round((start_ms / 1000.0) * SPEAKER_CAPTURE_RATE)
 
-    end_frame = round(
-        (
-            end_ms
-            / 1000.0
-        )
-        * SPEAKER_CAPTURE_RATE
-    )
+    end_frame = round((end_ms / 1000.0) * SPEAKER_CAPTURE_RATE)
 
     start_byte = max(
         0,
-        start_frame
-        * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+        start_frame * SPEAKER_CAPTURE_SAMPLE_WIDTH,
     )
 
     end_byte = min(
         len(archive),
-        end_frame
-        * SPEAKER_CAPTURE_SAMPLE_WIDTH,
+        end_frame * SPEAKER_CAPTURE_SAMPLE_WIDTH,
     )
 
     if end_byte <= start_byte:
         return None
 
-    return bytes(
-        archive[
-            start_byte:end_byte
-        ]
-    )
+    return bytes(archive[start_byte:end_byte])
 
 
 def _speaker_verify_request(
@@ -582,8 +538,7 @@ def _speaker_verify_request(
         data=pcm,
         method="POST",
         headers={
-            "Content-Type":
-                "application/octet-stream",
+            "Content-Type": "application/octet-stream",
         },
     )
 
@@ -591,21 +546,15 @@ def _speaker_verify_request(
         request,
         timeout=SPEAKER_VERIFY_TIMEOUT_SECONDS,
     ) as response:
-        payload = json.load(
-            response
-        )
+        payload = json.load(response)
 
     if not isinstance(
         payload,
         dict,
     ):
-        raise RuntimeError(
-            "speaker verifier returned "
-            "non-object response"
-        )
+        raise RuntimeError("speaker verifier returned non-object response")
 
     return payload
-
 
 
 async def _speaker_verify_gate_decision(
@@ -618,36 +567,19 @@ async def _speaker_verify_gate_decision(
     This function is deliberately fail-open.
     """
 
-    item_id = str(
-        event.get("item_id")
-        or ""
-    ).strip()
+    item_id = str(event.get("item_id") or "").strip()
 
-    if (
-        not item_id
-        or not pcm
-    ):
+    if not item_id or not pcm:
         return (
             False,
             "MISSING_AUDIO_FAIL_OPEN",
         )
 
-    duration_seconds = (
-        len(pcm)
-        / (
-            SPEAKER_CAPTURE_RATE
-            * SPEAKER_CAPTURE_SAMPLE_WIDTH
-        )
-    )
+    duration_seconds = len(pcm) / (SPEAKER_CAPTURE_RATE * SPEAKER_CAPTURE_SAMPLE_WIDTH)
 
-    if (
-        duration_seconds
-        < SPEAKER_SUPPRESSION_MIN_SECONDS
-    ):
+    if duration_seconds < SPEAKER_SUPPRESSION_MIN_SECONDS:
         _LOGGER.info(
-            "JARVIS SPEAKER GATE BYPASS | "
-            "item=%s reason=SHORT_ALLOW "
-            "duration=%.3f transcript=%r",
+            "JARVIS SPEAKER GATE BYPASS | item=%s reason=SHORT_ALLOW duration=%.3f transcript=%r",
             item_id,
             duration_seconds,
             transcript,
@@ -668,9 +600,7 @@ async def _speaker_verify_gate_decision(
 
     except Exception as exc:
         _LOGGER.warning(
-            "JARVIS SPEAKER GATE FAIL OPEN | "
-            "item=%s reason=VERIFY_ERROR "
-            "error=%s transcript=%r",
+            "JARVIS SPEAKER GATE FAIL OPEN | item=%s reason=VERIFY_ERROR error=%s transcript=%r",
             item_id,
             str(exc)[:300],
             transcript,
@@ -681,13 +611,7 @@ async def _speaker_verify_gate_decision(
             "VERIFY_ERROR_FAIL_OPEN",
         )
 
-    elapsed_ms = round(
-        (
-            time.monotonic()
-            - started
-        )
-        * 1000
-    )
+    elapsed_ms = round((time.monotonic() - started) * 1000)
 
     policy_version = str(
         result.get(
@@ -703,21 +627,11 @@ async def _speaker_verify_gate_decision(
         )
     )
 
-    suppress_candidate = (
-        result.get(
-            "policy_suppress_candidate"
-        )
-        is True
-    )
+    suppress_candidate = result.get("policy_suppress_candidate") is True
 
-    window_short_score = result.get(
-        "window_short_score"
-    )
+    window_short_score = result.get("window_short_score")
 
-    if (
-        policy_version
-        != SPEAKER_SUPPRESSION_POLICY_VERSION
-    ):
+    if policy_version != SPEAKER_SUPPRESSION_POLICY_VERSION:
         _LOGGER.warning(
             "JARVIS SPEAKER GATE FAIL OPEN | "
             "item=%s reason=POLICY_VERSION "
@@ -737,17 +651,9 @@ async def _speaker_verify_gate_decision(
             "POLICY_VERSION_FAIL_OPEN",
         )
 
-    suppress = (
-        policy_decision
-        == "STRONG_BACKGROUND"
-        and suppress_candidate
-    )
+    suppress = policy_decision == "STRONG_BACKGROUND" and suppress_candidate
 
-    reason = (
-        "STRONG_BACKGROUND_DROP"
-        if suppress
-        else "ALLOW"
-    )
+    reason = "STRONG_BACKGROUND_DROP" if suppress else "ALLOW"
 
     _LOGGER.info(
         "JARVIS SPEAKER GATE | "
@@ -775,6 +681,7 @@ async def _speaker_verify_gate_decision(
         reason,
     )
 
+
 def _speaker_verify_schedule(
     state: dict[str, Any],
     event: dict[str, Any],
@@ -783,29 +690,19 @@ def _speaker_verify_schedule(
 ) -> None:
     """Schedule observe-only verification without delaying the brain."""
 
-    item_id = str(
-        event.get("item_id")
-        or ""
-    ).strip()
+    item_id = str(event.get("item_id") or "").strip()
 
-    if (
-        not item_id
-        or not pcm
-    ):
+    if not item_id or not pcm:
         return
 
-    tasks = state.get(
-        "speaker_verify_tasks"
-    )
+    tasks = state.get("speaker_verify_tasks")
 
     if not isinstance(
         tasks,
         set,
     ):
         tasks = set()
-        state[
-            "speaker_verify_tasks"
-        ] = tasks
+        state["speaker_verify_tasks"] = tasks
 
     async def observe() -> None:
         started = time.monotonic()
@@ -818,25 +715,16 @@ def _speaker_verify_schedule(
 
         except Exception as exc:
             _LOGGER.warning(
-                "JARVIS SPEAKER VERIFY FAILED | "
-                "item=%s error=%s transcript=%r",
+                "JARVIS SPEAKER VERIFY FAILED | item=%s error=%s transcript=%r",
                 item_id,
                 str(exc)[:300],
                 transcript,
             )
             return
 
-        elapsed_ms = round(
-            (
-                time.monotonic()
-                - started
-            )
-            * 1000
-        )
+        elapsed_ms = round((time.monotonic() - started) * 1000)
 
-        score = result.get(
-            "score"
-        )
+        score = result.get("score")
 
         classification = str(
             result.get(
@@ -852,9 +740,7 @@ def _speaker_verify_schedule(
             )
         )
 
-        inference_ms = result.get(
-            "inference_ms"
-        )
+        inference_ms = result.get("inference_ms")
 
         gate_enabled = bool(
             result.get(
@@ -884,17 +770,11 @@ def _speaker_verify_schedule(
             transcript,
         )
 
-    task = asyncio.create_task(
-        observe()
-    )
+    task = asyncio.create_task(observe())
 
-    tasks.add(
-        task
-    )
+    tasks.add(task)
 
-    task.add_done_callback(
-        tasks.discard
-    )
+    task.add_done_callback(tasks.discard)
 
 
 @dataclass(frozen=True)
@@ -916,6 +796,7 @@ class RealtimeVoiceConfig:
     elevenlabs_voice_id: str = ""
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     elevenlabs_output_format: str = "pcm_24000"
+
     @classmethod
     def from_environment(cls) -> "RealtimeVoiceConfig":
         return cls(
@@ -932,9 +813,7 @@ class RealtimeVoiceConfig:
                 "JARVIS_REALTIME_TRANSCRIPTION_PROMPT",
                 "",
             ),
-            timezone=normalise_timezone(
-                _env_text("JARVIS_TIMEZONE", "Europe/London")
-            ),
+            timezone=normalise_timezone(_env_text("JARVIS_TIMEZONE", "Europe/London")),
             quiet_controls=_env_bool(
                 "JARVIS_MOBILE_QUIET_CONTROLS",
                 True,
@@ -1082,7 +961,6 @@ def speak_response_event(
     }
 
 
-
 def _normalise_voice_closure(value: Any) -> str:
     text = str(value or "").casefold()
     text = text.replace("’", "'").replace("‘", "'")
@@ -1090,14 +968,10 @@ def _normalise_voice_closure(value: Any) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = text.replace("'", "")
 
-    prefixes = re.compile(
-        r"^(?:(?:okay|ok|alright|all right|right|well)\s+)+"
-    )
+    prefixes = re.compile(r"^(?:(?:okay|ok|alright|all right|right|well)\s+)+")
     jarvis_prefix = re.compile(r"^(?:hey\s+)?jarvis\s+")
     jarvis_suffix = re.compile(r"\s+jarvis$")
-    polite_edge = re.compile(
-        r"^(?:please\s+)|(?:\s+please)$"
-    )
+    polite_edge = re.compile(r"^(?:please\s+)|(?:\s+please)$")
 
     previous = None
     while previous != text:
@@ -1213,11 +1087,7 @@ def _match_voice_closure(
 
     if text in goodbye:
         first_name = str(user_name or "").strip().split(" ", 1)[0]
-        response = (
-            f"Goodbye, {first_name}."
-            if first_name
-            else "Goodbye."
-        )
+        response = f"Goodbye, {first_name}." if first_name else "Goodbye."
         return ("goodbye", response)
 
     if text in thanks:
@@ -1242,9 +1112,7 @@ def _provider_epoch_is_current(
 ) -> bool:
     """Allow legacy/unit-test calls with epoch zero, fence live provider tasks."""
 
-    return provider_epoch <= 0 or provider_epoch == _safe_int(
-        state.get("provider_epoch")
-    )
+    return provider_epoch <= 0 or provider_epoch == _safe_int(state.get("provider_epoch"))
 
 
 def _turn_is_active(state: dict[str, Any]) -> bool:
@@ -1264,10 +1132,7 @@ def _mark_turn_terminal(
 ) -> None:
     """Mark the safe renewal boundary after all legitimate turn audio ends."""
 
-    if (
-        generation is not None
-        and _safe_int(state.get("turn_in_progress_generation")) != generation
-    ):
+    if generation is not None and _safe_int(state.get("turn_in_progress_generation")) != generation:
         return
     state["turn_in_progress"] = False
     state.pop("turn_in_progress_generation", None)
@@ -1347,11 +1212,13 @@ def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
             )
         )
 
-        events.append({
-            "tool": name,
-            "success": success,
-            "message": message,
-        })
+        events.append(
+            {
+                "tool": name,
+                "success": success,
+                "message": message,
+            }
+        )
 
     return events
 
@@ -1366,7 +1233,9 @@ QUIET_CONTROL_TOOLS = {
 }
 
 
-def control_voice_policy(command: str, tool_events: list[dict[str, Any]], *, enabled: bool) -> tuple[bool, str]:
+def control_voice_policy(
+    command: str, tool_events: list[dict[str, Any]], *, enabled: bool
+) -> tuple[bool, str]:
     if not enabled or len(tool_events) != 1:
         return False, ""
     event = tool_events[0]
@@ -1376,23 +1245,67 @@ def control_voice_policy(command: str, tool_events: list[dict[str, Any]], *, ena
         return False, ""
     message = _clean_event_message(event.get("message"), 240)
     lowered = message.casefold()
-    if any(term in lowered for term in ("failed", "could not", "unavailable", "not responding", "not confirming", "still reports", "has not reported")):
+    if any(
+        term in lowered
+        for term in (
+            "failed",
+            "could not",
+            "unavailable",
+            "not responding",
+            "not confirming",
+            "still reports",
+            "has not reported",
+        )
+    ):
         return False, ""
     if "already" in lowered:
         return True, "Already done."
     normalised = " ".join(str(command or "").casefold().split())
     if re.search(r"\b(?:turn|switch|power)\b.*\boff\b", normalised):
-        choices = ("Done.", "Done.", "That's off.", "Done, sir.", "Consider it handled.", "Done.", "Certainly.", "Done.")
+        choices = (
+            "Done.",
+            "Done.",
+            "That's off.",
+            "Done, sir.",
+            "Consider it handled.",
+            "Done.",
+            "Certainly.",
+            "Done.",
+        )
     elif "light" in normalised and re.search(r"\b(?:turn|switch|power)\b.*\bon\b", normalised):
-        choices = ("Done.", "Done.", "It's on.", "Done, sir.", "Let there be light.", "Done.", "Certainly.", "Done.")
+        choices = (
+            "Done.",
+            "Done.",
+            "It's on.",
+            "Done, sir.",
+            "Let there be light.",
+            "Done.",
+            "Certainly.",
+            "Done.",
+        )
     else:
-        choices = ("Done.", "Done.", "Certainly.", "Done, sir.", "Consider it handled.", "Done.", "All sorted.", "Done.")
+        choices = (
+            "Done.",
+            "Done.",
+            "Certainly.",
+            "Done, sir.",
+            "Consider it handled.",
+            "Done.",
+            "All sorted.",
+            "Done.",
+        )
     return True, choices[sum(normalised.encode("utf-8")) % len(choices)]
 
 
 class RealtimeVoiceProxy:
-    def __init__(self, config: RealtimeVoiceConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RealtimeVoiceConfig | None = None,
+        *,
+        turn_ledger: RealtimeTurnLedger | None = None,
+    ) -> None:
         self.config = config or RealtimeVoiceConfig.from_environment()
+        self.turn_ledger = turn_ledger
         self.speaker_identity = SpeakerIdentityClient.from_environment()
         self.speaker_identity_runtime = SpeakerIdentityRuntime(
             self.speaker_identity,
@@ -1418,9 +1331,253 @@ class RealtimeVoiceProxy:
         self.last_error: str | None = None
         self._provider_epoch_counter = 0
         self.voice_pe_wake_arbiter = VoicePeWakeArbiter()
-        self.voice_pe_session_started: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-        self.voice_pe_session_ended: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self.voice_pe_session_started: Callable[
+            [dict[str, Any]], Coroutine[Any, Any, None]
+        ] | None = None
+        self.voice_pe_session_ended: Callable[
+            [dict[str, Any]], Coroutine[Any, Any, None]
+        ] | None = None
         self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
+
+    def _turn_ledger_identity(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> dict[str, Any]:
+        return {
+            "client_kind": str(metadata.get("client_kind") or "mobile"),
+            "device_id": str(metadata.get("device_id") or "unknown-device"),
+            "conversation_id": str(metadata.get("conversation_id") or "unknown-conversation"),
+            "client_turn_id": int(client_turn_id),
+        }
+
+    def _uses_mobile_turn_ledger(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> bool:
+        return (
+            self.turn_ledger is not None
+            and metadata.get("client_kind") == "mobile"
+            and int(client_turn_id) > 0
+        )
+
+    async def _claim_mobile_turn(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+        command: str,
+    ) -> Any:
+        ledger = self.turn_ledger
+
+        if ledger is None or not self._uses_mobile_turn_ledger(
+            metadata,
+            client_turn_id,
+        ):
+            return None
+
+        identity = self._turn_ledger_identity(
+            metadata,
+            client_turn_id,
+        )
+
+        return await asyncio.to_thread(
+            ledger.claim,
+            **identity,
+            command=command,
+        )
+
+    async def _lookup_mobile_turn(
+        self,
+        metadata: dict[str, Any],
+        client_turn_id: int,
+    ) -> TurnRecord | None:
+        ledger = self.turn_ledger
+
+        if ledger is None or not self._uses_mobile_turn_ledger(
+            metadata,
+            client_turn_id,
+        ):
+            return None
+
+        identity = self._turn_ledger_identity(
+            metadata,
+            client_turn_id,
+        )
+
+        return await asyncio.to_thread(
+            ledger.lookup,
+            **identity,
+        )
+
+    @staticmethod
+    def _bound_turn_ledger_key(
+        state: dict[str, Any],
+        generation: int,
+    ) -> dict[str, Any] | None:
+        bindings = state.get("turn_ledger_bindings")
+
+        if not isinstance(bindings, dict):
+            return None
+
+        key = bindings.get(int(generation))
+
+        if not isinstance(key, dict):
+            return None
+
+        return dict(key)
+
+    @classmethod
+    def _remember_turn_ledger_response(
+        cls,
+        state: dict[str, Any],
+        generation: int,
+        response: dict[str, Any],
+    ) -> None:
+        if (
+            cls._bound_turn_ledger_key(
+                state,
+                generation,
+            )
+            is None
+        ):
+            return
+
+        responses = state.setdefault(
+            "turn_ledger_responses",
+            {},
+        )
+
+        if isinstance(responses, dict):
+            responses[int(generation)] = dict(response)
+
+    async def _mark_mobile_turn_terminal(
+        self,
+        state: dict[str, Any],
+        generation: int,
+        status: str,
+    ) -> TurnRecord | None:
+        ledger = self.turn_ledger
+
+        if ledger is None:
+            return None
+
+        key = self._bound_turn_ledger_key(
+            state,
+            generation,
+        )
+
+        if key is None:
+            return None
+
+        responses = state.get("turn_ledger_responses")
+
+        recovery_response = responses.get(int(generation)) if isinstance(responses, dict) else None
+
+        if not isinstance(
+            recovery_response,
+            dict,
+        ):
+            recovery_response = None
+
+        if status == "completed":
+            record = await asyncio.to_thread(
+                ledger.mark_completed,
+                **key,
+                response=recovery_response,
+            )
+        elif status == "cancelled":
+            record = await asyncio.to_thread(
+                ledger.mark_cancelled,
+                **key,
+            )
+        elif status == "interrupted":
+            record = await asyncio.to_thread(
+                ledger.mark_interrupted,
+                **key,
+            )
+        else:
+            raise ValueError(f"Unsupported durable turn status: {status}")
+
+        bindings = state.get("turn_ledger_bindings")
+
+        if isinstance(bindings, dict):
+            bindings.pop(
+                int(generation),
+                None,
+            )
+
+        if isinstance(responses, dict):
+            responses.pop(
+                int(generation),
+                None,
+            )
+
+        return record
+
+    async def _interrupt_bound_mobile_turns(
+        self,
+        state: dict[str, Any],
+    ) -> int:
+        """
+        Mark every still-bound mobile turn interrupted.
+
+        This is used at transport/session-loss boundaries after
+        execution can no longer safely continue. Replaying such a
+        turn automatically would risk repeating side effects.
+        """
+        bindings = state.get("turn_ledger_bindings")
+
+        if self.turn_ledger is None or not isinstance(bindings, dict) or not bindings:
+            return 0
+
+        interrupted = 0
+
+        for raw_generation in tuple(bindings.keys()):
+            try:
+                generation = int(raw_generation)
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            record = await self._mark_mobile_turn_terminal(
+                state,
+                generation,
+                "interrupted",
+            )
+
+            if record is not None:
+                interrupted += 1
+
+        return interrupted
+
+    @staticmethod
+    def _turn_status_payload(
+        client_turn_id: int,
+        record: TurnRecord | None,
+    ) -> dict[str, Any]:
+        if record is None:
+            return {
+                "type": "turn.status",
+                "client_turn_id": int(client_turn_id),
+                "found": False,
+                "status": "unknown",
+            }
+
+        payload: dict[str, Any] = {
+            "type": "turn.status",
+            "client_turn_id": record.client_turn_id,
+            "conversation_id": record.conversation_id,
+            "found": True,
+            "status": record.status,
+        }
+
+        if record.response is not None:
+            payload["response"] = record.response
+
+        return payload
 
     def _next_provider_epoch(self) -> int:
         self._provider_epoch_counter += 1
@@ -1468,8 +1625,15 @@ class RealtimeVoiceProxy:
         return True
 
     @classmethod
-    def from_environment(cls) -> "RealtimeVoiceProxy":
-        return cls(RealtimeVoiceConfig.from_environment())
+    def from_environment(
+        cls,
+        *,
+        turn_ledger: RealtimeTurnLedger | None = None,
+    ) -> "RealtimeVoiceProxy":
+        return cls(
+            RealtimeVoiceConfig.from_environment(),
+            turn_ledger=turn_ledger,
+        )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -1477,20 +1641,10 @@ class RealtimeVoiceProxy:
             "core_application_version": CORE_APPLICATION_VERSION,
             "enabled": self.config.enabled,
             "configured": bool(
-                self.config.api_key
-                and (
-                    self.config.mobile_token
-                    or self.config.voice_pe_token
-                )
+                self.config.api_key and (self.config.mobile_token or self.config.voice_pe_token)
             ),
-            "mobile_configured": bool(
-                self.config.api_key
-                and self.config.mobile_token
-            ),
-            "voice_pe_configured": bool(
-                self.config.api_key
-                and self.config.voice_pe_token
-            ),
+            "mobile_configured": bool(self.config.api_key and self.config.mobile_token),
+            "voice_pe_configured": bool(self.config.api_key and self.config.voice_pe_token),
             "model": self.config.model,
             "default_voice": self.config.voice,
             "supported_voices": list(SUPPORTED_VOICES),
@@ -1539,16 +1693,10 @@ class RealtimeVoiceProxy:
         client_kind: str = "mobile",
     ) -> bool:
         expected = (
-            self.config.voice_pe_token
-            if client_kind == "voice_pe"
-            else self.config.mobile_token
+            self.config.voice_pe_token if client_kind == "voice_pe" else self.config.mobile_token
         )
         candidate = (supplied or "").strip()
-        return bool(
-            expected
-            and candidate
-            and secrets.compare_digest(expected, candidate)
-        )
+        return bool(expected and candidate and secrets.compare_digest(expected, candidate))
 
     async def handle(self, client: Any, brain_handler: BrainHandler) -> None:
         await client.accept()
@@ -1566,15 +1714,14 @@ class RealtimeVoiceProxy:
             auth = await asyncio.wait_for(client.receive_text(), timeout=12)
             auth_payload = json.loads(auth)
         except Exception:
-            await self._send_json(client, {"type": "auth.error", "message": "Authentication required"})
+            await self._send_json(
+                client, {"type": "auth.error", "message": "Authentication required"}
+            )
             await self._close(client, 4401)
             return
 
         client_kind = (
-            str(auth_payload.get("client_kind") or "mobile")
-            .strip()
-            .casefold()
-            .replace("-", "_")
+            str(auth_payload.get("client_kind") or "mobile").strip().casefold().replace("-", "_")
         )
 
         if client_kind not in {"mobile", "voice_pe"}:
@@ -1588,12 +1735,9 @@ class RealtimeVoiceProxy:
             await self._close(client, 4403)
             return
 
-        if (
-            auth_payload.get("type") != "auth"
-            or not self.token_is_valid(
-                auth_payload.get("token"),
-                client_kind,
-            )
+        if auth_payload.get("type") != "auth" or not self.token_is_valid(
+            auth_payload.get("token"),
+            client_kind,
         ):
             await self._send_json(
                 client,
@@ -1608,11 +1752,7 @@ class RealtimeVoiceProxy:
         metadata["client_kind"] = client_kind
         session_id = f"{client_kind}-{uuid.uuid4()}"
         metadata["session_id"] = session_id
-        metadata["voice_endpoint_kind"] = (
-            "voice_pe"
-            if client_kind == "voice_pe"
-            else "android"
-        )
+        metadata["voice_endpoint_kind"] = "voice_pe" if client_kind == "voice_pe" else "android"
 
         for key in ("device_id", "area_id", "user_name"):
             value = auth_payload.get(key)
@@ -1629,8 +1769,7 @@ class RealtimeVoiceProxy:
             if candidate:
                 metadata["user_id"] = candidate
                 metadata["user_is_admin"] = bool(
-                    self.config.user_is_admin
-                    and candidate == self.config.user_id
+                    self.config.user_is_admin and candidate == self.config.user_id
                 )
 
         if client_kind == "voice_pe" and self.speaker_identity.enabled:
@@ -1659,6 +1798,7 @@ class RealtimeVoiceProxy:
         )
         voice_mode = normalise_voice_mode(auth_payload.get("voice_mode"))
         conversation_mode = normalise_conversation_mode(auth_payload.get("conversation_mode"))
+        voice_endpoint = normalise_voice_endpoint(auth_payload.get("endpoint"))
         requested_voice = str(auth_payload.get("voice") or "").strip().casefold()
         voice = normalise_voice(requested_voice, self.config.voice)
         eagerness = normalise_eagerness(auth_payload.get("vad_eagerness"))
@@ -1668,14 +1808,19 @@ class RealtimeVoiceProxy:
             requested_voice=requested_voice,
             conversation_mode=conversation_mode,
             vad_eagerness=eagerness,
+            voice_endpoint=voice_endpoint,
         )
 
         if not self.config.enabled:
-            await self._send_json(client, {"type": "error", "message": "Realtime voice is disabled"})
+            await self._send_json(
+                client, {"type": "error", "message": "Realtime voice is disabled"}
+            )
             await self._close(client, 4410)
             return
         if not self.config.api_key:
-            await self._send_json(client, {"type": "error", "message": "OPENAI_API_KEY is not configured"})
+            await self._send_json(
+                client, {"type": "error", "message": "OPENAI_API_KEY is not configured"}
+            )
             await self._close(client, 4411)
             return
 
@@ -1740,6 +1885,7 @@ class RealtimeVoiceProxy:
                 "voice_mode": voice_mode,
                 "conversation_mode": conversation_mode,
                 "conversation_id": metadata["conversation_id"],
+                "endpoint": voice_endpoint,
                 "sample_rate": INPUT_RATE,
                 "transport": "websocket_pcm",
                 "unified_brain": True,
@@ -1766,7 +1912,9 @@ class RealtimeVoiceProxy:
             session_transcription_prompt = self.config.transcription_prompt
             if self.transcription_prompt_provider is not None:
                 try:
-                    session_transcription_prompt = await self.transcription_prompt_provider(metadata)
+                    session_transcription_prompt = await self.transcription_prompt_provider(
+                        metadata
+                    )
                 except Exception:
                     _LOGGER.exception("Dynamic transcription vocabulary failed")
             websocket_connect = _load_websocket_connect()
@@ -1796,13 +1944,15 @@ class RealtimeVoiceProxy:
                     state["provider_transitioning"] = False
                     state["openai_response_turns"] = {}
                     await upstream.send(
-                        json.dumps(build_session_update(
-                            self.config,
-                            voice,
-                            conversation_mode,
-                            eagerness,
-                            transcription_prompt=session_transcription_prompt,
-                        ))
+                        json.dumps(
+                            build_session_update(
+                                self.config,
+                                voice,
+                                conversation_mode,
+                                eagerness,
+                                transcription_prompt=session_transcription_prompt,
+                            )
+                        )
                     )
                     await self._send_json(
                         client,
@@ -1883,10 +2033,12 @@ class RealtimeVoiceProxy:
                         return_exceptions=True,
                     )
 
-                    if renewal_task in done and renewal_task.exception() is not None:
-                        raise renewal_task.exception()
-                    if client_task in done and client_task.exception() is not None:
-                        raise client_task.exception()
+                    renewal_error = renewal_task.exception() if renewal_task in done else None
+                    if isinstance(renewal_error, BaseException):
+                        raise renewal_error
+                    client_error = client_task.exception() if client_task in done else None
+                    if isinstance(client_error, BaseException):
+                        raise client_error
                     if upstream_task in done and upstream_task.exception() is not None:
                         self.last_error = str(upstream_task.exception())[:500]
                         _LOGGER.warning(
@@ -1895,11 +2047,13 @@ class RealtimeVoiceProxy:
                         )
 
                     if client_finished:
+                        await self._interrupt_bound_mobile_turns(state)
                         return
 
                     if not renewal_requested:
                         # Unexpected provider loss may have happened during a
                         # side-effecting turn. Never replay it automatically.
+                        await self._interrupt_bound_mobile_turns(state)
                         turn_tasks.clear()
                         _mark_turn_terminal(state)
                         await self._send_json(
@@ -1934,8 +2088,22 @@ class RealtimeVoiceProxy:
             for task in tuple(turn_tasks):
                 task.cancel()
             if turn_tasks:
-                await asyncio.gather(*turn_tasks, return_exceptions=True)
-            self.active_sessions = max(0, self.active_sessions - 1)
+                await asyncio.gather(
+                    *turn_tasks,
+                    return_exceptions=True,
+                )
+
+            try:
+                await self._interrupt_bound_mobile_turns(state)
+            except Exception:
+                _LOGGER.exception(
+                    "Durable realtime turn terminalisation failed during session cleanup"
+                )
+
+            self.active_sessions = max(
+                0,
+                self.active_sessions - 1,
+            )
             if duck_task is not None:
                 await asyncio.gather(duck_task, return_exceptions=True)
             if client_kind == "voice_pe" and self.voice_pe_session_ended is not None:
@@ -2031,6 +2199,7 @@ class RealtimeVoiceProxy:
                 return
             message_type = message.get("type")
             if message_type == "websocket.disconnect":
+                await self._interrupt_bound_mobile_turns(state)
                 return
             if bool(state.get("provider_transitioning")):
                 # Preserve the one message already removed from the client
@@ -2064,15 +2233,13 @@ class RealtimeVoiceProxy:
                         pcm,
                     )
 
-                state["pcm_diagnostic_chunks"] = (
-                    int(state.get("pcm_diagnostic_chunks", 0)) + 1
-                )
+                state["pcm_diagnostic_chunks"] = int(state.get("pcm_diagnostic_chunks", 0)) + 1
                 diagnostic_chunks = int(state["pcm_diagnostic_chunks"])
 
                 if diagnostic_chunks == 1 or diagnostic_chunks % 100 == 0:
                     sample_values = [
                         int.from_bytes(
-                            pcm[index:index + 2],
+                            pcm[index : index + 2],
                             byteorder="little",
                             signed=True,
                         )
@@ -2082,51 +2249,28 @@ class RealtimeVoiceProxy:
                     if sample_values:
                         sample_count = len(sample_values)
 
-                        dc_mean = (
-                            sum(sample_values) /
-                            sample_count
-                        )
+                        dc_mean = sum(sample_values) / sample_count
 
                         raw_rms = int(
-                            (
-                                sum(
-                                    sample * sample
-                                    for sample in sample_values
-                                ) /
-                                sample_count
-                            )
-                            ** 0.5
+                            (sum(sample * sample for sample in sample_values) / sample_count) ** 0.5
                         )
 
                         centered_rms = int(
                             (
                                 sum(
-                                    (sample - dc_mean)
-                                    * (sample - dc_mean)
+                                    (sample - dc_mean) * (sample - dc_mean)
                                     for sample in sample_values
-                                ) /
-                                sample_count
+                                )
+                                / sample_count
                             )
                             ** 0.5
                         )
 
-                        raw_peak = max(
-                            abs(sample)
-                            for sample in sample_values
-                        )
+                        raw_peak = max(abs(sample) for sample in sample_values)
 
-                        centered_peak = int(
-                            max(
-                                abs(sample - dc_mean)
-                                for sample in sample_values
-                            )
-                        )
+                        centered_peak = int(max(abs(sample - dc_mean) for sample in sample_values))
 
-                        clipped_samples = sum(
-                            1
-                            for sample in sample_values
-                            if abs(sample) >= 32760
-                        )
+                        clipped_samples = sum(1 for sample in sample_values if abs(sample) >= 32760)
 
                         _LOGGER.info(
                             "Voice PE PCM diagnostic: "
@@ -2171,10 +2315,13 @@ class RealtimeVoiceProxy:
                 )
                 state["cancelled_client_turn_id"] = cancelled_client_turn_id
                 state["cancelled_generation"] = cancelled_generation
-                state["generation"] = max(
-                    _safe_int(state.get("generation")),
-                    cancelled_generation,
-                ) + 1
+                state["generation"] = (
+                    max(
+                        _safe_int(state.get("generation")),
+                        cancelled_generation,
+                    )
+                    + 1
+                )
                 state["suppress_audio"] = True
                 state.pop("active_generation", None)
                 state.pop("active_client_turn_id", None)
@@ -2196,13 +2343,26 @@ class RealtimeVoiceProxy:
                     task.cancel()
                 if tasks_to_cancel:
                     await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-                _mark_turn_terminal(state, cancelled_generation)
+                await self._mark_mobile_turn_terminal(
+                    state,
+                    cancelled_generation,
+                    "cancelled",
+                )
+
+                _mark_turn_terminal(
+                    state,
+                    cancelled_generation,
+                )
+
                 await self._send_json(
                     client,
                     _turn_payload(
                         cancelled_generation,
                         cancelled_client_turn_id,
-                        {"type": "turn.cancelled", "status": "cancelled"},
+                        {
+                            "type": "turn.cancelled",
+                            "status": "cancelled",
+                        },
                     ),
                 )
                 _LOGGER.info(
@@ -2212,12 +2372,84 @@ class RealtimeVoiceProxy:
                     cancelled_client_turn_id,
                     len(turn_tasks),
                 )
+            elif kind == "turn.status":
+                client_turn_id = _safe_int(payload.get("client_turn_id"))
+
+                record = await self._lookup_mobile_turn(
+                    metadata,
+                    client_turn_id,
+                )
+
+                await self._send_json(
+                    client,
+                    self._turn_status_payload(
+                        client_turn_id,
+                        record,
+                    ),
+                )
+
             elif kind == "text":
                 text = str(payload.get("text") or "").strip()
+
                 if text:
+                    client_turn_id = _safe_int(payload.get("client_turn_id"))
+
+                    turn_ledger_key = None
+
+                    claim = await self._claim_mobile_turn(
+                        metadata,
+                        client_turn_id,
+                        text,
+                    )
+
+                    if claim is not None:
+                        if claim.is_conflict:
+                            await self._send_json(
+                                client,
+                                {
+                                    "type": "turn.conflict",
+                                    "client_turn_id": client_turn_id,
+                                    "status": claim.record.status,
+                                    "message": "client_turn_id "
+                                    "already belongs "
+                                    "to a different "
+                                    "command",
+                                },
+                            )
+                            continue
+
+                        if claim.is_duplicate:
+                            await self._send_json(
+                                client,
+                                self._turn_status_payload(
+                                    client_turn_id,
+                                    claim.record,
+                                ),
+                            )
+                            continue
+
+                        turn_ledger_key = self._turn_ledger_identity(
+                            metadata,
+                            client_turn_id,
+                        )
+
+                        await self._send_json(
+                            client,
+                            {
+                                "type": "turn.accepted",
+                                "client_turn_id": client_turn_id,
+                                "status": "accepted",
+                            },
+                        )
+
                     await self._start_brain_turn(
                         text,
-                        bool(payload.get("speak", True)),
+                        bool(
+                            payload.get(
+                                "speak",
+                                True,
+                            )
+                        ),
                         client,
                         upstream,
                         brain_handler,
@@ -2226,10 +2458,13 @@ class RealtimeVoiceProxy:
                         voice,
                         turn_tasks,
                         state,
-                        client_turn_id=_safe_int(payload.get("client_turn_id")),
+                        client_turn_id=client_turn_id,
                         provider_epoch=provider_epoch,
+                        turn_ledger_key=turn_ledger_key,
                     )
+
             elif kind == "stop":
+                await self._interrupt_bound_mobile_turns(state)
                 return
 
     async def _openai_to_client(
@@ -2327,9 +2562,8 @@ class RealtimeVoiceProxy:
                     state.get("generation"),
                     state.get("turn_in_progress"),
                 )
-                if (
-                    metadata.get("client_kind") == "voice_pe"
-                    and bool(state.get("turn_in_progress"))
+                if metadata.get("client_kind") == "voice_pe" and bool(
+                    state.get("turn_in_progress")
                 ):
                     continue
 
@@ -2355,9 +2589,8 @@ class RealtimeVoiceProxy:
                     state.get("generation"),
                     state.get("turn_in_progress"),
                 )
-                if (
-                    metadata.get("client_kind") == "voice_pe"
-                    and bool(state.get("turn_in_progress"))
+                if metadata.get("client_kind") == "voice_pe" and bool(
+                    state.get("turn_in_progress")
                 ):
                     continue
 
@@ -2371,9 +2604,7 @@ class RealtimeVoiceProxy:
 
                 await self._send_json(client, {"type": "speech.stopped"})
             elif kind == "conversation.item.input_audio_transcription.completed":
-                transcript = str(
-                    event.get("transcript") or ""
-                ).strip()
+                transcript = str(event.get("transcript") or "").strip()
                 transcription_confidence = input_transcription_confidence(event)
                 if transcription_confidence is not None:
                     metadata["transcription_confidence"] = transcription_confidence
@@ -2405,16 +2636,11 @@ class RealtimeVoiceProxy:
                             event,
                             transcript,
                         )
-                    speaker_pcm = (
-                        _speaker_capture_segment_pcm(
-                            state,
-                            event,
-                        )
-                    )
-                    if (
-                        speaker_pcm
-                        and not SPEAKER_SUPPRESSION_ENABLED
-                    ):
+                    speaker_pcm = _speaker_capture_segment_pcm(
+                        state,
+                        event,
+                    ) or b""
+                    if speaker_pcm and not SPEAKER_SUPPRESSION_ENABLED:
                         _speaker_verify_schedule(
                             state,
                             event,
@@ -2422,34 +2648,18 @@ class RealtimeVoiceProxy:
                             speaker_pcm,
                         )
 
-                if (
-                    transcript
-                    and conversation_mode
-                    == CONVERSATION_MODE_LIVE
-                ):
+                if transcript and conversation_mode == CONVERSATION_MODE_LIVE:
                     # Own the utterance before any awaited identity/routing work
                     # so renewal cannot consume and then lose this transcript.
                     _mark_turn_started(state)
                     if metadata.get("client_kind") == "voice_pe":
-                        transcript_index = (
-                            int(state.get("voice_pe_transcripts_seen", 0)) + 1
-                        )
+                        transcript_index = int(state.get("voice_pe_transcripts_seen", 0)) + 1
                         state["voice_pe_transcripts_seen"] = transcript_index
 
-                        last_speech_ms = state.get(
-                            "voice_pe_last_completed_speech_ms"
-                        )
-                        session_started_at = state.get(
-                            "voice_pe_session_started_at"
-                        )
+                        last_speech_ms = state.get("voice_pe_last_completed_speech_ms")
+                        session_started_at = state.get("voice_pe_session_started_at")
                         session_age_ms = (
-                            round(
-                                (
-                                    time.monotonic()
-                                    - float(session_started_at)
-                                )
-                                * 1000
-                            )
+                            round((time.monotonic() - float(session_started_at)) * 1000)
                             if isinstance(
                                 session_started_at,
                                 (int, float),
@@ -2459,12 +2669,8 @@ class RealtimeVoiceProxy:
 
                         drop_wake_residue = (
                             transcript_index == 1
-                            and not bool(
-                                state.get("voice_pe_wake_guard_used")
-                            )
-                            and bool(
-                                state.get("voice_pe_speech_active")
-                            )
+                            and not bool(state.get("voice_pe_wake_guard_used"))
+                            and bool(state.get("voice_pe_speech_active"))
                             and int(
                                 state.get(
                                     "voice_pe_speech_start_count",
@@ -2498,10 +2704,7 @@ class RealtimeVoiceProxy:
                             _mark_turn_terminal(state)
                             continue
 
-                    if (
-                        metadata.get("client_kind") == "voice_pe"
-                        and self.speaker_identity.enabled
-                    ):
+                    if metadata.get("client_kind") == "voice_pe" and self.speaker_identity.enabled:
                         state.pop("speaker_prompt_started", None)
                         speaker_flow_handled = await self._speaker_identity_process(
                             client,
@@ -2532,9 +2735,7 @@ class RealtimeVoiceProxy:
                             )
                             and session_age_ms <= 6000
                             and len(transcript) <= 24
-                            and len(
-                                transcript.split()
-                            ) <= 3
+                            and len(transcript.split()) <= 3
                         )
 
                         if setup_or_wake_bypass:
@@ -2543,12 +2744,7 @@ class RealtimeVoiceProxy:
                                 "item=%s "
                                 "reason=FIRST_SHORT_SETUP_ALLOW "
                                 "transcript=%r",
-                                str(
-                                    event.get(
-                                        "item_id"
-                                    )
-                                    or ""
-                                ),
+                                str(event.get("item_id") or ""),
                                 transcript,
                             )
 
@@ -2558,12 +2754,7 @@ class RealtimeVoiceProxy:
                                 "item=%s "
                                 "reason=NO_PCM "
                                 "transcript=%r",
-                                str(
-                                    event.get(
-                                        "item_id"
-                                    )
-                                    or ""
-                                ),
+                                str(event.get("item_id") or ""),
                                 transcript,
                             )
 
@@ -2571,12 +2762,10 @@ class RealtimeVoiceProxy:
                             (
                                 suppress_background,
                                 speaker_gate_reason,
-                            ) = (
-                                await _speaker_verify_gate_decision(
-                                    event,
-                                    transcript,
-                                    speaker_pcm,
-                                )
+                            ) = await _speaker_verify_gate_decision(
+                                event,
+                                transcript,
+                                speaker_pcm,
                             )
 
                             if suppress_background:
@@ -2585,12 +2774,7 @@ class RealtimeVoiceProxy:
                                     "item=%s "
                                     "reason=%s "
                                     "transcript=%r",
-                                    str(
-                                        event.get(
-                                            "item_id"
-                                        )
-                                        or ""
-                                    ),
+                                    str(event.get("item_id") or ""),
                                     speaker_gate_reason,
                                     transcript,
                                 )
@@ -2608,28 +2792,16 @@ class RealtimeVoiceProxy:
 
                     closure = _match_voice_closure(
                         transcript,
-                        str(
-                            metadata.get("user_name")
-                            or ""
-                        ),
+                        str(metadata.get("user_name") or ""),
                     )
 
                     if closure is not None:
                         closure_kind, closure_response = closure
 
-                        state["generation"] = (
-                            int(state.get("generation", 0))
-                            + 1
-                        )
+                        state["generation"] = int(state.get("generation", 0)) + 1
                         state["suppress_audio"] = True
 
-                        await upstream.send(
-                            json.dumps(
-                                {
-                                    "type": "response.cancel"
-                                }
-                            )
-                        )
+                        await upstream.send(json.dumps({"type": "response.cancel"}))
 
                         await self._send_json(
                             client,
@@ -2654,9 +2826,7 @@ class RealtimeVoiceProxy:
                             _mark_turn_started(state)
                             state["active_generation"] = _safe_int(state.get("generation"))
                             state["active_client_turn_id"] = 0
-                            state[
-                                "close_after_response"
-                            ] = closure_kind
+                            state["close_after_response"] = closure_kind
                             state["suppress_audio"] = False
 
                             if self._use_direct_elevenlabs(metadata):
@@ -2710,15 +2880,12 @@ class RealtimeVoiceProxy:
                             await self._start_brain_turn(*turn_args)
             elif kind == "response.created":
                 response_object = (
-                    event.get("response")
-                    if isinstance(event.get("response"), dict)
-                    else {}
+                    event.get("response") if isinstance(event.get("response"), dict) else {}
                 )
                 response_id = str(response_object.get("id") or "").strip()
-                response_metadata = (
-                    response_object.get("metadata")
-                    if isinstance(response_object.get("metadata"), dict)
-                    else {}
+                metadata_value = response_object.get("metadata")
+                response_metadata: dict[str, Any] = (
+                    metadata_value if isinstance(metadata_value, dict) else {}
                 )
                 bound_generation = _safe_int(
                     response_metadata.get("jarvis_generation"),
@@ -2751,14 +2918,9 @@ class RealtimeVoiceProxy:
                     if isinstance(contexts, dict) and response_id
                     else None
                 )
-                if (
-                    isinstance(context, dict)
-                    and (
-                        _safe_int(context.get("provider_epoch"), provider_epoch)
-                        != provider_epoch
-                        or _safe_int(context.get("generation"))
-                        != _safe_int(state.get("generation"))
-                    )
+                if isinstance(context, dict) and (
+                    _safe_int(context.get("provider_epoch"), provider_epoch) != provider_epoch
+                    or _safe_int(context.get("generation")) != _safe_int(state.get("generation"))
                 ):
                     continue
                 if bool(state.get("suppress_audio")) or voice_mode == VOICE_MODE_HOME_ASSISTANT:
@@ -2775,7 +2937,11 @@ class RealtimeVoiceProxy:
             elif kind == "response.output_audio_transcript.delta":
                 response_id = str(event.get("response_id") or "").strip()
                 contexts = state.get("openai_response_turns")
-                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                context = (
+                    contexts.get(response_id)
+                    if isinstance(contexts, dict) and response_id
+                    else None
+                )
                 if isinstance(context, dict) and (
                     _safe_int(context.get("provider_epoch"), provider_epoch) != provider_epoch
                     or _safe_int(context.get("generation")) != _safe_int(state.get("generation"))
@@ -2783,13 +2949,32 @@ class RealtimeVoiceProxy:
                     continue
                 delta = str(event.get("delta") or "")
                 if delta and voice_mode == VOICE_MODE_REALTIME:
-                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
-                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
-                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "assistant.transcript.delta", "text": delta}))
+                    turn_generation = (
+                        _safe_int(context.get("generation"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("generation"))
+                    )
+                    turn_id = (
+                        _safe_int(context.get("client_turn_id"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("active_client_turn_id"))
+                    )
+                    await self._send_json(
+                        client,
+                        _turn_payload(
+                            turn_generation,
+                            turn_id,
+                            {"type": "assistant.transcript.delta", "text": delta},
+                        ),
+                    )
             elif kind == "response.output_audio_transcript.done":
                 response_id = str(event.get("response_id") or "").strip()
                 contexts = state.get("openai_response_turns")
-                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                context = (
+                    contexts.get(response_id)
+                    if isinstance(contexts, dict) and response_id
+                    else None
+                )
                 if isinstance(context, dict) and (
                     _safe_int(context.get("provider_epoch"), provider_epoch) != provider_epoch
                     or _safe_int(context.get("generation")) != _safe_int(state.get("generation"))
@@ -2797,22 +2982,51 @@ class RealtimeVoiceProxy:
                     continue
                 transcript = str(event.get("transcript") or "").strip()
                 if transcript and voice_mode == VOICE_MODE_REALTIME:
-                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
-                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
-                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "assistant.transcript.done", "text": transcript}))
+                    turn_generation = (
+                        _safe_int(context.get("generation"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("generation"))
+                    )
+                    turn_id = (
+                        _safe_int(context.get("client_turn_id"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("active_client_turn_id"))
+                    )
+                    await self._send_json(
+                        client,
+                        _turn_payload(
+                            turn_generation,
+                            turn_id,
+                            {"type": "assistant.transcript.done", "text": transcript},
+                        ),
+                    )
             elif kind == "response.output_audio.done":
                 response_id = str(event.get("response_id") or "").strip()
                 contexts = state.get("openai_response_turns")
-                context = contexts.get(response_id) if isinstance(contexts, dict) and response_id else None
+                context = (
+                    contexts.get(response_id)
+                    if isinstance(contexts, dict) and response_id
+                    else None
+                )
                 if isinstance(context, dict) and (
                     _safe_int(context.get("provider_epoch"), provider_epoch) != provider_epoch
                     or _safe_int(context.get("generation")) != _safe_int(state.get("generation"))
                 ):
                     continue
                 if voice_mode == VOICE_MODE_REALTIME:
-                    turn_generation = _safe_int(context.get("generation")) if isinstance(context, dict) else _safe_int(state.get("generation"))
-                    turn_id = _safe_int(context.get("client_turn_id")) if isinstance(context, dict) else _safe_int(state.get("active_client_turn_id"))
-                    await self._send_json(client, _turn_payload(turn_generation, turn_id, {"type": "audio.done"}))
+                    turn_generation = (
+                        _safe_int(context.get("generation"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("generation"))
+                    )
+                    turn_id = (
+                        _safe_int(context.get("client_turn_id"))
+                        if isinstance(context, dict)
+                        else _safe_int(state.get("active_client_turn_id"))
+                    )
+                    await self._send_json(
+                        client, _turn_payload(turn_generation, turn_id, {"type": "audio.done"})
+                    )
             elif kind == "response.done":
                 response = (
                     event.get("response")
@@ -2832,9 +3046,7 @@ class RealtimeVoiceProxy:
                     else None
                 )
 
-                response_id = str(
-                    response.get("id") or event.get("response_id") or ""
-                ).strip()
+                response_id = str(response.get("id") or event.get("response_id") or "").strip()
                 contexts = state.get("openai_response_turns")
                 context = (
                     contexts.pop(response_id, None)
@@ -2856,9 +3068,8 @@ class RealtimeVoiceProxy:
                     if isinstance(context, dict)
                     else provider_epoch
                 )
-                if (
-                    completion_epoch != provider_epoch
-                    or completion_generation != _safe_int(state.get("generation"))
+                if completion_epoch != provider_epoch or completion_generation != _safe_int(
+                    state.get("generation")
                 ):
                     continue
                 await self._complete_audio_response(
@@ -2871,7 +3082,6 @@ class RealtimeVoiceProxy:
                     usage=usage,
                     provider_epoch=provider_epoch,
                 )
-
 
             elif kind == "error":
                 error = event.get("error") if isinstance(event.get("error"), dict) else {}
@@ -2916,12 +3126,8 @@ class RealtimeVoiceProxy:
         if not _provider_epoch_is_current(state, provider_epoch):
             return
 
-        if bool(
-            state.get("early_speech_active")
-        ):
-            if not bool(
-                state.get("brain_turn_complete")
-            ):
+        if bool(state.get("early_speech_active")):
+            if not bool(state.get("brain_turn_complete")):
                 state["early_audio_done"] = True
                 return
 
@@ -2936,9 +3142,7 @@ class RealtimeVoiceProxy:
             ).strip()
 
             if remainder:
-                state[
-                    "continuation_speech_active"
-                ] = True
+                state["continuation_speech_active"] = True
 
                 await upstream.send(
                     json.dumps(
@@ -2950,9 +3154,7 @@ class RealtimeVoiceProxy:
                                     self.config.voice,
                                 )
                             ),
-                            generation=_safe_int(
-                                generation, _safe_int(state.get("generation"))
-                            ),
+                            generation=_safe_int(generation, _safe_int(state.get("generation"))),
                             client_turn_id=_safe_int(
                                 client_turn_id, _safe_int(state.get("active_client_turn_id"))
                             ),
@@ -2971,16 +3173,36 @@ class RealtimeVoiceProxy:
 
                 return
 
-        state[
-            "continuation_speech_active"
-        ] = False
+        state["continuation_speech_active"] = False
+
+        resolved_generation = _safe_int(
+            generation,
+            _safe_int(state.get("generation")),
+        )
+
+        resolved_client_turn_id = _safe_int(
+            client_turn_id,
+            _safe_int(state.get("active_client_turn_id")),
+        )
+
+        durable_status = "completed" if str(status).casefold() == "completed" else "interrupted"
+
+        await self._mark_mobile_turn_terminal(
+            state,
+            resolved_generation,
+            durable_status,
+        )
 
         await self._send_json(
             client,
             _turn_payload(
-                _safe_int(generation, _safe_int(state.get("generation"))),
-                _safe_int(client_turn_id, _safe_int(state.get("active_client_turn_id"))),
-                {"type": "turn.done", "status": status, "usage": usage},
+                resolved_generation,
+                resolved_client_turn_id,
+                {
+                    "type": "turn.done",
+                    "status": status,
+                    "usage": usage,
+                },
             ),
         )
 
@@ -3011,15 +3233,11 @@ class RealtimeVoiceProxy:
         self,
         metadata: dict[str, Any],
     ) -> bool:
-        return (
-            self.config.tts_provider == "elevenlabs"
-            and (
-                metadata.get("client_kind") == "voice_pe"
-                or (
-                    metadata.get("client_kind") == "mobile"
-                    and metadata.get("requested_voice")
-                    in {"original", "home_assistant_original"}
-                )
+        return self.config.tts_provider == "elevenlabs" and (
+            metadata.get("client_kind") == "voice_pe"
+            or (
+                metadata.get("client_kind") == "mobile"
+                and metadata.get("requested_voice") in {"original", "home_assistant_original"}
             )
         )
 
@@ -3032,9 +3250,7 @@ class RealtimeVoiceProxy:
         generation: int | None = None,
         client_turn_id: int | None = None,
     ) -> None:
-        resolved_generation = _safe_int(
-            generation, _safe_int(state.get("generation"))
-        )
+        resolved_generation = _safe_int(generation, _safe_int(state.get("generation")))
         resolved_client_turn_id = _safe_int(
             client_turn_id, _safe_int(state.get("active_client_turn_id"))
         )
@@ -3042,8 +3258,7 @@ class RealtimeVoiceProxy:
             return
 
         _LOGGER.info(
-            "JARVIS DIAG | TURN COMPLETE | generation=%s "
-            "spoken_characters=%d text=%r",
+            "JARVIS DIAG | TURN COMPLETE | generation=%s spoken_characters=%d text=%r",
             state.get("generation"),
             len(spoken_text),
             spoken_text,
@@ -3061,8 +3276,16 @@ class RealtimeVoiceProxy:
         await self._send_json(
             client,
             _turn_payload(
-                resolved_generation, resolved_client_turn_id, {"type": "audio.done"}
+                resolved_generation,
+                resolved_client_turn_id,
+                {"type": "audio.done"},
             ),
+        )
+
+        await self._mark_mobile_turn_terminal(
+            state,
+            resolved_generation,
+            "completed",
         )
 
         await self._send_json(
@@ -3070,7 +3293,11 @@ class RealtimeVoiceProxy:
             _turn_payload(
                 resolved_generation,
                 resolved_client_turn_id,
-                {"type": "turn.done", "status": "completed", "usage": None},
+                {
+                    "type": "turn.done",
+                    "status": "completed",
+                    "usage": None,
+                },
             ),
         )
 
@@ -3094,7 +3321,6 @@ class RealtimeVoiceProxy:
             )
 
         _mark_turn_terminal(state)
-
 
     async def _stream_elevenlabs_websocket(
         self,
@@ -3132,9 +3358,7 @@ class RealtimeVoiceProxy:
         # ElevenLabs audio must be drained independently from playback.
         # Otherwise real-time playback sleeps block the WebSocket receiver
         # and cause jitter, pauses and apparent jumps.
-        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
-            maxsize=128
-        )
+        audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=128)
 
         websocket_connect = _load_websocket_connect()
 
@@ -3150,9 +3374,7 @@ class RealtimeVoiceProxy:
             ) as tts_ws:
                 _LOGGER.info(
                     "ELEVENLABS WS CONNECTED: latency_ms=%d",
-                    round(
-                        (time.monotonic() - started_at) * 1000
-                    ),
+                    round((time.monotonic() - started_at) * 1000),
                 )
 
                 # JARVIS LOW-LATENCY SENTENCE MODE:
@@ -3208,15 +3430,8 @@ class RealtimeVoiceProxy:
                             first_text_at = time.monotonic()
 
                             _LOGGER.info(
-                                "ELEVENLABS WS FIRST TEXT: "
-                                "latency_ms=%d characters=%d",
-                                round(
-                                    (
-                                        first_text_at
-                                        - started_at
-                                    )
-                                    * 1000
-                                ),
+                                "ELEVENLABS WS FIRST TEXT: latency_ms=%d characters=%d",
+                                round((first_text_at - started_at) * 1000),
                                 len(chunk),
                             )
 
@@ -3234,9 +3449,7 @@ class RealtimeVoiceProxy:
                             chunk[-40:],
                         )
 
-                        await tts_ws.send(
-                            json.dumps(payload)
-                        )
+                        await tts_ws.send(json.dumps(payload))
 
                     while True:
                         item = await text_queue.get()
@@ -3263,8 +3476,7 @@ class RealtimeVoiceProxy:
                                 )
 
                             _LOGGER.info(
-                                "ELEVENLABS WS TEXT COMPLETE: "
-                                "characters=%d",
+                                "ELEVENLABS WS TEXT COMPLETE: characters=%d",
                                 total_characters,
                             )
 
@@ -3309,9 +3521,7 @@ class RealtimeVoiceProxy:
                                 if (
                                     character == "."
                                     and character_index > 0
-                                    and buffer[
-                                        character_index - 1
-                                    ].isdigit()
+                                    and buffer[character_index - 1].isdigit()
                                 ):
                                     # "3." at the current streaming edge may
                                     # become "3.8" in the next GPT delta.
@@ -3323,10 +3533,7 @@ class RealtimeVoiceProxy:
                                     if buffer[next_index].isdigit():
                                         continue
 
-                                if (
-                                    next_index == len(buffer)
-                                    or buffer[next_index].isspace()
-                                ):
+                                if next_index == len(buffer) or buffer[next_index].isspace():
                                     cut = next_index
                                     break
 
@@ -3350,11 +3557,7 @@ class RealtimeVoiceProxy:
                                         buffer.rfind("\n", 220, 320),
                                         buffer.rfind("\t", 220, 320),
                                     )
-                                    cut = (
-                                        boundary + 1
-                                        if boundary >= 220
-                                        else 320
-                                    )
+                                    cut = boundary + 1 if boundary >= 220 else 320
 
                             if not cut:
                                 break
@@ -3362,6 +3565,7 @@ class RealtimeVoiceProxy:
                             chunk = buffer[:cut]
                             buffer = buffer[cut:]
                             await send_chunk(chunk)
+
                 async def receive_audio() -> None:
                     previous_audio_at: float | None = None
                     audio_event_count = 0
@@ -3370,9 +3574,7 @@ class RealtimeVoiceProxy:
                         async for raw_message in tts_ws:
                             if isinstance(raw_message, bytes):
                                 try:
-                                    raw_message = (
-                                        raw_message.decode("utf-8")
-                                    )
+                                    raw_message = raw_message.decode("utf-8")
                                 except UnicodeDecodeError:
                                     continue
 
@@ -3400,9 +3602,7 @@ class RealtimeVoiceProxy:
                                     audio_event_count += 1
 
                                     if previous_audio_at is not None:
-                                        gap_ms = round(
-                                            (now - previous_audio_at) * 1000
-                                        )
+                                        gap_ms = round((now - previous_audio_at) * 1000)
 
                                         if gap_ms >= 100:
                                             _LOGGER.info(
@@ -3451,23 +3651,14 @@ class RealtimeVoiceProxy:
                     audio_seconds_sent = 0.0
 
                     while True:
-                        while (
-                            len(pending) < frame_size
-                            and not finished
-                        ):
+                        while len(pending) < frame_size and not finished:
                             queue_wait_started = time.monotonic()
                             item = await audio_queue.get()
-                            queue_wait_ms = round(
-                                (time.monotonic() - queue_wait_started) * 1000
-                            )
+                            queue_wait_ms = round((time.monotonic() - queue_wait_started) * 1000)
 
-                            if (
-                                playback_started_at is not None
-                                and queue_wait_ms >= 40
-                            ):
+                            if playback_started_at is not None and queue_wait_ms >= 40:
                                 _LOGGER.info(
-                                    "ELEVENLABS PLAYER STARVATION: "
-                                    "wait_ms=%d pending_bytes=%d",
+                                    "ELEVENLABS PLAYER STARVATION: wait_ms=%d pending_bytes=%d",
                                     queue_wait_ms,
                                     len(pending),
                                 )
@@ -3482,9 +3673,7 @@ class RealtimeVoiceProxy:
                             return
 
                         if len(pending) >= frame_size:
-                            frame = bytes(
-                                pending[:frame_size]
-                            )
+                            frame = bytes(pending[:frame_size])
                             del pending[:frame_size]
                         elif finished:
                             frame = bytes(pending)
@@ -3492,9 +3681,7 @@ class RealtimeVoiceProxy:
                         else:
                             continue
 
-                        if generation != int(
-                            state.get("generation", 0)
-                        ):
+                        if generation != int(state.get("generation", 0)):
                             return
 
                         if not frame:
@@ -3506,36 +3693,21 @@ class RealtimeVoiceProxy:
                             playback_started_at = first_audio_at
 
                             _LOGGER.info(
-                                "ELEVENLABS WS FIRST AUDIO: "
-                                "latency_ms=%d",
-                                round(
-                                    (
-                                        first_audio_at
-                                        - started_at
-                                    )
-                                    * 1000
-                                ),
+                                "ELEVENLABS WS FIRST AUDIO: latency_ms=%d",
+                                round((first_audio_at - started_at) * 1000),
                             )
 
                             _LOGGER.info(
-                                "ELEVENLABS WS SMOOTH PLAYER: "
-                                "frame_bytes=%d lead_ms=%d",
+                                "ELEVENLABS WS SMOOTH PLAYER: frame_bytes=%d lead_ms=%d",
                                 frame_size,
-                                round(
-                                    playback_lead_seconds
-                                    * 1000
-                                ),
+                                round(playback_lead_seconds * 1000),
                             )
 
                         await client.send_bytes(frame)
 
-                        self.total_audio_output_bytes += len(
-                            frame
-                        )
+                        self.total_audio_output_bytes += len(frame)
 
-                        audio_seconds_sent += (
-                            len(frame) / 48_000.0
-                        )
+                        audio_seconds_sent += len(frame) / 48_000.0
 
                         # Absolute pacing rather than sleeping for the
                         # complete chunk duration. This accounts for network
@@ -3543,28 +3715,17 @@ class RealtimeVoiceProxy:
                         # of the speaker to prevent underruns.
                         if playback_started_at is not None:
                             target = (
-                                playback_started_at
-                                + audio_seconds_sent
-                                - playback_lead_seconds
+                                playback_started_at + audio_seconds_sent - playback_lead_seconds
                             )
 
-                            delay = (
-                                target
-                                - time.monotonic()
-                            )
+                            delay = target - time.monotonic()
 
                             if delay > 0:
                                 await asyncio.sleep(delay)
 
-                sender_task = asyncio.create_task(
-                    send_text()
-                )
-                receiver_task = asyncio.create_task(
-                    receive_audio()
-                )
-                player_task = asyncio.create_task(
-                    play_audio()
-                )
+                sender_task = asyncio.create_task(send_text())
+                receiver_task = asyncio.create_task(receive_audio())
+                player_task = asyncio.create_task(play_audio())
 
                 try:
                     # Limit ElevenLabs text/audio generation, not the
@@ -3604,24 +3765,12 @@ class RealtimeVoiceProxy:
                 "success": bool(audio_started),
                 "audio_started": bool(audio_started),
                 "first_text_ms": (
-                    round(
-                        (
-                            first_text_at
-                            - started_at
-                        )
-                        * 1000
-                    )
+                    round((first_text_at - started_at) * 1000)
                     if first_text_at is not None
                     else None
                 ),
                 "first_audio_ms": (
-                    round(
-                        (
-                            first_audio_at
-                            - started_at
-                        )
-                        * 1000
-                    )
+                    round((first_audio_at - started_at) * 1000)
                     if first_audio_at is not None
                     else None
                 ),
@@ -3631,20 +3780,15 @@ class RealtimeVoiceProxy:
             raise
 
         except Exception as exc:
-            self.last_error = (
-                f"ElevenLabs WebSocket TTS failed: {exc}"
-            )[:500]
+            self.last_error = (f"ElevenLabs WebSocket TTS failed: {exc}")[:500]
 
-            _LOGGER.exception(
-                "ElevenLabs streaming WebSocket failed"
-            )
+            _LOGGER.exception("ElevenLabs streaming WebSocket failed")
 
             return {
                 "success": False,
                 "audio_started": bool(audio_started),
                 "error": str(exc)[:300],
             }
-
 
     async def _stream_elevenlabs_response(
         self,
@@ -3659,9 +3803,7 @@ class RealtimeVoiceProxy:
         spoken_text = " ".join(str(text or "").split()).strip()
         if not spoken_text:
             return False
-        resolved_generation = _safe_int(
-            generation, _safe_int(state.get("generation"))
-        )
+        resolved_generation = _safe_int(generation, _safe_int(state.get("generation")))
         resolved_client_turn_id = _safe_int(
             client_turn_id, _safe_int(state.get("active_client_turn_id"))
         )
@@ -3672,25 +3814,17 @@ class RealtimeVoiceProxy:
         voice_id = self.config.elevenlabs_voice_id
 
         if not api_key or not voice_id:
-            self.last_error = (
-                "ElevenLabs API key or voice ID is not configured"
-            )
+            self.last_error = "ElevenLabs API key or voice ID is not configured"
             await self._send_json(
                 client,
                 {
                     "type": "status",
-                    "message": (
-                        "Original Jarvis voice is not configured; "
-                        "using realtime fallback"
-                    ),
+                    "message": ("Original Jarvis voice is not configured; using realtime fallback"),
                 },
             )
             return False
 
-        url = (
-            "https://api.elevenlabs.io/v1/text-to-speech/"
-            f"{quote(voice_id, safe='')}/stream"
-        )
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{quote(voice_id, safe='')}/stream"
 
         headers = {
             "xi-api-key": api_key,
@@ -3722,8 +3856,7 @@ class RealtimeVoiceProxy:
                     "POST",
                     url,
                     params={
-                        "output_format":
-                            self.config.elevenlabs_output_format,
+                        "output_format": self.config.elevenlabs_output_format,
                     },
                     headers=headers,
                     json=payload,
@@ -3770,10 +3903,7 @@ class RealtimeVoiceProxy:
                 client,
                 {
                     "type": "status",
-                    "message": (
-                        "Original Jarvis voice failed; "
-                        "using realtime fallback"
-                    ),
+                    "message": ("Original Jarvis voice failed; using realtime fallback"),
                 },
             )
             return False
@@ -3791,7 +3921,6 @@ class RealtimeVoiceProxy:
 
         return True
 
-
     async def _start_brain_turn(
         self,
         transcript: str,
@@ -3807,6 +3936,7 @@ class RealtimeVoiceProxy:
         client_turn_id: int | None = None,
         provider_epoch: int = 0,
         turn_already_started: bool = False,
+        turn_ledger_key: dict[str, Any] | None = None,
     ) -> None:
         if not _provider_epoch_is_current(state, provider_epoch):
             return
@@ -3833,6 +3963,22 @@ class RealtimeVoiceProxy:
         resolved_client_turn_id = _safe_int(client_turn_id)
         state["active_generation"] = generation
         state["active_client_turn_id"] = resolved_client_turn_id
+
+        if (
+            isinstance(
+                turn_ledger_key,
+                dict,
+            )
+            and _safe_int(turn_ledger_key.get("client_turn_id")) == resolved_client_turn_id
+        ):
+            bindings = state.setdefault(
+                "turn_ledger_bindings",
+                {},
+            )
+
+            if isinstance(bindings, dict):
+                bindings[generation] = dict(turn_ledger_key)
+
         state["turn_in_progress_generation"] = generation
         state.pop("queued_speech_remainder", None)
         state["brain_turn_complete"] = False
@@ -3889,8 +4035,7 @@ class RealtimeVoiceProxy:
         state["active_voice"] = voice
 
         _LOGGER.info(
-            "JARVIS DIAG | BRAIN START | generation=%s command=%r "
-            "client=%s voice_mode=%s",
+            "JARVIS DIAG | BRAIN START | generation=%s command=%r client=%s voice_mode=%s",
             generation,
             command,
             metadata.get("client_kind"),
@@ -3918,9 +4063,7 @@ class RealtimeVoiceProxy:
         )
 
         elevenlabs_text_queue: asyncio.Queue[str | None] | None = (
-            asyncio.Queue()
-            if direct_elevenlabs_stream
-            else None
+            asyncio.Queue() if direct_elevenlabs_stream else None
         )
 
         elevenlabs_stream_task: asyncio.Task[dict[str, Any]] | None = (
@@ -3945,9 +4088,8 @@ class RealtimeVoiceProxy:
         async def on_delta(delta: str) -> None:
             nonlocal speech_buffer, early_speech_sent, early_speech_text
             nonlocal early_speech_task, elevenlabs_streamed_text
-            if (
-                not _provider_epoch_is_current(state, provider_epoch)
-                or generation != int(state.get("generation", 0))
+            if not _provider_epoch_is_current(state, provider_epoch) or generation != int(
+                state.get("generation", 0)
             ):
                 return
             text = str(delta or "")
@@ -3970,10 +4112,7 @@ class RealtimeVoiceProxy:
                 ),
             )
 
-            if (
-                direct_elevenlabs_stream
-                and elevenlabs_text_queue is not None
-            ):
+            if direct_elevenlabs_stream and elevenlabs_text_queue is not None:
                 # Stream the complete GPT response. Do not truncate at
                 # 420 characters; the WebSocket can remain open for the
                 # entire turn.
@@ -4000,9 +4139,7 @@ class RealtimeVoiceProxy:
                     maximum_chars=96,
                 )
             else:
-                segment = SpeechRenderPolicy.early_segment(
-                    speech_buffer
-                )
+                segment = SpeechRenderPolicy.early_segment(speech_buffer)
 
             if not segment:
                 return
@@ -4051,7 +4188,8 @@ class RealtimeVoiceProxy:
                 await self._send_json(
                     client,
                     _turn_payload(
-                        generation, client_turn_id,
+                        generation,
+                        client_turn_id,
                         {"type": "speech.early.started", "characters": len(segment)},
                     ),
                 )
@@ -4071,9 +4209,7 @@ class RealtimeVoiceProxy:
 
         try:
             turn_metadata = dict(metadata)
-            turn_metadata.update(
-                trusted_local_context(self.config.timezone)
-            )
+            turn_metadata.update(trusted_local_context(self.config.timezone))
             turn_metadata["speak"] = bool(speak)
             raw_result = await brain_handler(command, turn_metadata, on_delta)
             if hasattr(raw_result, "model_dump"):
@@ -4093,18 +4229,14 @@ class RealtimeVoiceProxy:
                 response,
             )
 
-            conversation_id = str(
-                raw_result.get("conversation_id") or ""
-            ).strip()
+            conversation_id = str(raw_result.get("conversation_id") or "").strip()
             if conversation_id:
                 metadata["conversation_id"] = conversation_id
-            tool_events = sanitise_tool_events(
-                raw_result.get("calls")
-            )
+            tool_events = sanitise_tool_events(raw_result.get("calls"))
             quiet_control, compact_response = control_voice_policy(
                 command,
                 tool_events,
-                enabled=self.config.quiet_controls and metadata.get("client_kind") != "voice_pe",
+                enabled=quiet_controls_enabled(self.config.quiet_controls, metadata),
             )
             if quiet_control:
                 response = compact_response
@@ -4119,19 +4251,15 @@ class RealtimeVoiceProxy:
                 if isinstance(user_payload, dict)
                 else str(metadata.get("user_name") or "").strip()
             )
-            result = {
+            result: dict[str, Any] = {
                 "success": bool(raw_result.get("success", True)),
                 "response": response,
                 "intent": raw_result.get("intent"),
                 "conversation_id": metadata.get("conversation_id"),
                 "model": raw_result.get("model"),
                 "tool_events": tool_events,
-                "tool_called": bool(
-                    raw_result.get("tool_called", bool(tool_events))
-                ),
-                "streamed": bool(
-                    raw_result.get("streamed", False)
-                ),
+                "tool_called": bool(raw_result.get("tool_called", bool(tool_events))),
+                "streamed": bool(raw_result.get("streamed", False)),
                 "quiet_control": quiet_control,
                 "memory_used": memory_used,
                 "message_count": message_count,
@@ -4168,14 +4296,11 @@ class RealtimeVoiceProxy:
                 "quiet_control": False,
                 "memory_used": False,
                 "message_count": 0,
-                "user_name": str(
-                    metadata.get("user_name") or ""
-                ).strip(),
+                "user_name": str(metadata.get("user_name") or "").strip(),
             }
 
-        if (
-            not _provider_epoch_is_current(state, provider_epoch)
-            or generation != int(state.get("generation", 0))
+        if not _provider_epoch_is_current(state, provider_epoch) or generation != int(
+            state.get("generation", 0)
         ):
             if elevenlabs_stream_task is not None:
                 elevenlabs_stream_task.cancel()
@@ -4185,14 +4310,49 @@ class RealtimeVoiceProxy:
                     return_exceptions=True,
                 )
 
+            await self._mark_mobile_turn_terminal(
+                state,
+                generation,
+                "interrupted",
+            )
+
             self.total_discarded_stale_turns += 1
+
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id, {"type": "brain.discarded", "command": command}
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "brain.discarded",
+                        "command": command,
+                    },
                 ),
             )
+
+            await self._send_json(
+                client,
+                _turn_payload(
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "turn.interrupted",
+                        "status": "interrupted",
+                    },
+                ),
+            )
+
             return
+
+        self._remember_turn_ledger_response(
+            state,
+            generation,
+            {
+                "text": str(result.get("response") or ""),
+                "success": bool(result.get("success")),
+                "conversation_id": str(result.get("conversation_id") or ""),
+            },
+        )
 
         for tool_event in result.get("tool_events", []):
             await self._send_json(
@@ -4276,11 +4436,22 @@ class RealtimeVoiceProxy:
         )
 
         if not speak or bool(result.get("quiet_control")):
+            await self._mark_mobile_turn_terminal(
+                state,
+                generation,
+                "completed",
+            )
+
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id,
-                    {"type": "turn.done", "status": "completed", "usage": None},
+                    generation,
+                    client_turn_id,
+                    {
+                        "type": "turn.done",
+                        "status": "completed",
+                        "usage": None,
+                    },
                 ),
             )
             _mark_turn_terminal(state)
@@ -4292,14 +4463,12 @@ class RealtimeVoiceProxy:
         ):
             # Voice PE should speak the full answer, not the generic
             # 520-character voice preview used by shorter UI surfaces.
-            complete_spoken_response = (
-                SpeechRenderPolicy.spoken_text(
-                    result["response"],
-                    maximum_chars=max(
-                        520,
-                        len(result["response"]) + 32,
-                    ),
-                )
+            complete_spoken_response = SpeechRenderPolicy.spoken_text(
+                result["response"],
+                maximum_chars=max(
+                    520,
+                    len(result["response"]) + 32,
+                ),
             )
 
             if bool(result.get("streamed")):
@@ -4307,15 +4476,11 @@ class RealtimeVoiceProxy:
                 # on_delta. Do not reconstruct a remainder from normalised
                 # text; doing so can repeat, skip or jump at the join.
                 if not elevenlabs_streamed_text:
-                    elevenlabs_text_queue.put_nowait(
-                        complete_spoken_response
-                    )
+                    elevenlabs_text_queue.put_nowait(complete_spoken_response)
             else:
                 # Tool turns intentionally do not stream provisional text.
                 # Once tools are complete, speak the final answer once.
-                elevenlabs_text_queue.put_nowait(
-                    complete_spoken_response
-                )
+                elevenlabs_text_queue.put_nowait(complete_spoken_response)
 
             # Flush and finalise this SAME ElevenLabs generation.
             elevenlabs_text_queue.put_nowait(None)
@@ -4325,9 +4490,7 @@ class RealtimeVoiceProxy:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                _LOGGER.exception(
-                    "Voice PE ElevenLabs WS task failed"
-                )
+                _LOGGER.exception("Voice PE ElevenLabs WS task failed")
 
                 ws_result = {
                     "success": False,
@@ -4337,8 +4500,7 @@ class RealtimeVoiceProxy:
 
             if bool(ws_result.get("success")):
                 _LOGGER.info(
-                    "ELEVENLABS WS TURN COMPLETE: "
-                    "first_text_ms=%s first_audio_ms=%s",
+                    "ELEVENLABS WS TURN COMPLETE: first_text_ms=%s first_audio_ms=%s",
                     ws_result.get("first_text_ms"),
                     ws_result.get("first_audio_ms"),
                 )
@@ -4356,8 +4518,7 @@ class RealtimeVoiceProxy:
                 # Some of the answer has already been spoken.
                 # Never replay it using another TTS provider.
                 _LOGGER.warning(
-                    "ElevenLabs WS ended after audio started; "
-                    "not replaying spoken text"
+                    "ElevenLabs WS ended after audio started; not replaying spoken text"
                 )
 
                 await self._send_json(
@@ -4377,10 +4538,7 @@ class RealtimeVoiceProxy:
                 )
                 return
 
-            _LOGGER.warning(
-                "ElevenLabs WS produced no audio; "
-                "falling back to HTTP TTS"
-            )
+            _LOGGER.warning("ElevenLabs WS produced no audio; falling back to HTTP TTS")
 
             handled = await self._stream_elevenlabs_response(
                 client,
@@ -4408,23 +4566,14 @@ class RealtimeVoiceProxy:
             return
 
         if early_speech_sent:
-            complete_spoken_response = (
-                SpeechRenderPolicy.spoken_text(
-                    result["response"]
-                )
+            complete_spoken_response = SpeechRenderPolicy.spoken_text(result["response"])
+
+            remainder = SpeechRenderPolicy.remaining_text(
+                complete_spoken_response,
+                early_speech_text,
             )
 
-            remainder = (
-                SpeechRenderPolicy.remaining_text(
-                    complete_spoken_response,
-                    early_speech_text,
-                )
-            )
-
-            if (
-                self._use_direct_elevenlabs(metadata)
-                and voice_mode != VOICE_MODE_HOME_ASSISTANT
-            ):
+            if self._use_direct_elevenlabs(metadata) and voice_mode != VOICE_MODE_HOME_ASSISTANT:
                 state["brain_turn_complete"] = True
                 state["early_speech_active"] = False
 
@@ -4436,9 +4585,7 @@ class RealtimeVoiceProxy:
                     except asyncio.CancelledError:
                         raise
                     except Exception:
-                        _LOGGER.exception(
-                            "Voice PE early ElevenLabs task failed"
-                        )
+                        _LOGGER.exception("Voice PE early ElevenLabs task failed")
                         early_ok = False
 
                 if not early_ok:
@@ -4464,15 +4611,13 @@ class RealtimeVoiceProxy:
                         len(remainder),
                     )
 
-                    remainder_ok = (
-                        await self._stream_elevenlabs_response(
-                            client,
-                            remainder,
-                            state,
-                            generation=generation,
-                            client_turn_id=client_turn_id,
-                            finalize_turn=False,
-                        )
+                    remainder_ok = await self._stream_elevenlabs_response(
+                        client,
+                        remainder,
+                        state,
+                        generation=generation,
+                        client_turn_id=client_turn_id,
+                        finalize_turn=False,
                     )
 
                     if not remainder_ok:
@@ -4500,18 +4645,15 @@ class RealtimeVoiceProxy:
 
                 return
 
-            state[
-                "queued_speech_remainder"
-            ] = remainder
+            state["queued_speech_remainder"] = remainder
 
-            state[
-                "brain_turn_complete"
-            ] = True
+            state["brain_turn_complete"] = True
 
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id,
+                    generation,
+                    client_turn_id,
                     {"type": "speech.remainder.ready", "characters": len(remainder)},
                 ),
             )
@@ -4541,7 +4683,8 @@ class RealtimeVoiceProxy:
             await self._send_json(
                 client,
                 _turn_payload(
-                    generation, client_turn_id,
+                    generation,
+                    client_turn_id,
                     {"type": "original.tts", "text": spoken_response},
                 ),
             )

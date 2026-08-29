@@ -1,7 +1,6 @@
 name: Jarvis Android OTA release
 
 on:
-  workflow_dispatch:
   push:
     tags: ['v*']
 
@@ -33,12 +32,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          git fetch origin jarvis/unified-production
+          test "$(git rev-parse origin/jarvis/unified-production)" = "$GITHUB_SHA" || {
+            echo "Releases must be tagged at the current jarvis/unified-production head" >&2
+            exit 1
+          }
           version="${GITHUB_REF_NAME#v}"
           test "$GITHUB_REF_NAME" = "v$version"
           grep -Fq "versionName = \"$version\"" android/jarvis-voice-client/app/build.gradle.kts
           grep -Fq "RELEASE = \"$version\"" android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisVersion.java
           grep -Fq "JARVIS_RELEASE = \"$version\"" bridge/app/version.py
           test "$(git rev-list -n1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
+          python tools/verify_product_baseline.py --skip-ref
           git diff --check
       - name: Install test dependencies
         run: |
@@ -49,12 +54,16 @@ jobs:
       - name: Test Core and release tooling
         env: {PYTHONPATH: bridge}
         run: |
-          python -m pytest -q bridge/tests tools/tests/test_generate_ota_manifest.py
-          python -m ruff check --select E9,F63,F7,F82 bridge/app bridge/tests tools/generate_ota_manifest.py tools/tests/test_generate_ota_manifest.py
+          python -m pytest -q bridge/tests tools/tests developer_gateway/tests
+          python -m ruff check --select E9,F63,F7,F82 bridge/app bridge/tests developer_gateway tools
           python -m bandit -q -lll tools/generate_ota_manifest.py
-      - name: Android unit tests and lint
+      - name: Android and Wear unit tests and lint
         working-directory: android/jarvis-voice-client
-        run: gradle --no-daemon :app:testDebugUnitTest :app:lintRelease
+        run: >-
+          ./gradlew --no-daemon
+          :wearprotocol:test
+          :app:testDebugUnitTest :app:lintRelease
+          :wear:testDebugUnitTest :wear:lintRelease
       - name: Restore stable signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.JARVIS_SIGNING_KEYSTORE_BASE64 }}
@@ -63,40 +72,53 @@ jobs:
           test -n "$KEYSTORE_BASE64" || { echo "Required stable signing secret is absent" >&2; exit 1; }
           umask 077
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/jarvis-release.jks"
-      - name: Build stable signed release APK
+      - name: Build stable-signed phone and Wear release APKs
         working-directory: android/jarvis-voice-client
         env:
           JARVIS_SIGNING_STORE_FILE: ${{ runner.temp }}/jarvis-release.jks
           JARVIS_SIGNING_STORE_PASSWORD: ${{ secrets.JARVIS_SIGNING_STORE_PASSWORD }}
           JARVIS_SIGNING_KEY_ALIAS: ${{ secrets.JARVIS_SIGNING_KEY_ALIAS }}
           JARVIS_SIGNING_KEY_PASSWORD: ${{ secrets.JARVIS_SIGNING_KEY_PASSWORD }}
-        run: gradle --no-daemon :app:assembleRelease
-      - name: Verify and name the exact tested APK
+        run: ./gradlew --no-daemon :app:assembleRelease :wear:assembleRelease
+      - name: Verify and name the exact tested APKs
         env:
-          EXPECTED_CERT: ${{ secrets.JARVIS_SIGNING_CERT_SHA256 }}
+          EXPECTED_CERT: 009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac
         run: |
           set -Eeuo pipefail
           version="${GITHUB_REF_NAME#v}"
           code="$(sed -nE 's/.*versionCode = ([0-9]+).*/\1/p' android/jarvis-voice-client/app/build.gradle.kts)"
           source="android/jarvis-voice-client/app/build/outputs/apk/release/app-release.apk"
+          wear_source="android/jarvis-voice-client/wear/build/outputs/apk/release/wear-release.apk"
           apk="jarvis-assistant-v${version}-release.apk"
+          wear_apk="jarvis-wear-v${version}-release.apk"
           build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
           apksigner="$ANDROID_HOME/build-tools/$build_tools/apksigner"
           aapt="$ANDROID_HOME/build-tools/$build_tools/aapt"
           test -x "$apksigner" && test -x "$aapt"
           cp "$source" "$apk"
+          cp "$wear_source" "$wear_apk"
           "$apksigner" verify --verbose --print-certs "$apk" > signing-report.txt
+          "$apksigner" verify --verbose --print-certs "$wear_apk" > wear-signing-report.txt
           actual="$(grep -m1 'certificate SHA-256 digest:' signing-report.txt | sed -E 's/.*digest:[[:space:]]*//' | tr -d '[:space:]:')"
+          wear_actual="$(grep -m1 'certificate SHA-256 digest:' wear-signing-report.txt | sed -E 's/.*digest:[[:space:]]*//' | tr -d '[:space:]:')"
           [[ "$actual" =~ ^[[:xdigit:]]{64}$ ]]
-          test -n "$EXPECTED_CERT" && test -n "$actual"
+          [[ "$wear_actual" =~ ^[[:xdigit:]]{64}$ ]]
+          test -n "$EXPECTED_CERT" && test -n "$actual" && test -n "$wear_actual"
           echo "Built APK signing certificate: ${actual,,}"
           test "${actual,,}" = "${EXPECTED_CERT,,}" || {
             echo "Built APK certificate does not match JARVIS_SIGNING_CERT_SHA256" >&2
             exit 1
           }
+          test "${wear_actual,,}" = "${EXPECTED_CERT,,}" || {
+            echo "Built Wear APK certificate does not match JARVIS_SIGNING_CERT_SHA256" >&2
+            exit 1
+          }
+          test "${actual,,}" = "${wear_actual,,}"
           echo "Verified APK signing certificate"
           "$aapt" dump badging "$apk" > apk-badging.txt
+          "$aapt" dump badging "$wear_apk" > wear-apk-badging.txt
           grep -Fq "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'" apk-badging.txt
+          grep -Fq "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'" wear-apk-badging.txt
           echo "Verified APK package/version: com.aaron.jarvisvoice $version ($code)"
           "$aapt" dump xmltree "$apk" AndroidManifest.xml > apk-manifest.txt
           grep -Fq 'com.aaron.jarvisvoice.IntegrationsActivity' apk-manifest.txt
@@ -110,21 +132,39 @@ jobs:
           "$dexdump" -d "$RUNNER_TEMP/classes.dex" > "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/SettingsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/IntegrationsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/DeveloperClient;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/TurnRecoveryJournal;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/WearChannelListenerService;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'buildIntegrationsSection' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Open integrations & accounts' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Google, email, calendar, contacts and external services.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'settings_integrations_open' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Clear current chat' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Only the current conversation will be removed.' "$RUNNER_TEMP/classes-dexdump.txt"
+          "$aapt" dump resources "$apk" > apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/jarvis_wordmark_master' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/control_delete_red' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/ic_launcher_foreground' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/ic_jarvis_status' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:mipmap/ic_launcher_round' apk-resources.txt
           {
             echo "Package: com.aaron.jarvisvoice"
             echo "Version: $version ($code)"
             echo "SettingsActivity: present with top-level Integrations runtime UI"
             echo "IntegrationsActivity: present and manifest-declared"
             echo "Deep link: jarvis://integrations/google"
+            echo "Developer, delete-current-chat, realtime recovery, Wear bridge, and current branding: present"
             echo "Signer SHA-256: ${actual,,}"
           } > apk-inspection.txt
           echo "Verified compiled Integrations Settings UI, activity, and deep link"
           sha256sum "$apk" > "$apk.sha256"
-          git log -1 --format=%B "$GITHUB_SHA" > release-notes.txt
+          sha256sum "$apk" "$wear_apk" > SHA256SUMS.txt
+          notes_key="${version^^}"
+          notes_key="${notes_key//./_}"
+          notes_key="${notes_key//-/_}"
+          notes_file="docs/releases/CHANGES_V${notes_key}.md"
+          test -f "$notes_file"
+          cp "$notes_file" release-notes.txt
           python tools/generate_ota_manifest.py --apk "$apk" --version "$version" --version-code "$code" \
             --commit "$GITHUB_SHA" --notes-file release-notes.txt --output update-manifest.json
           python -c 'import hashlib,json,pathlib; p=pathlib.Path("'"$apk"'"); m=json.load(open("update-manifest.json")); assert m["sha256"]==hashlib.sha256(p.read_bytes()).hexdigest(); assert m["apkSize"]==p.stat().st_size; assert m["commitSha"]=="'"$GITHUB_SHA"'"'
@@ -134,11 +174,12 @@ jobs:
           set -Eeuo pipefail
           version="${GITHUB_REF_NAME#v}"; apk="jarvis-assistant-v${version}-release.apk"
           prerelease=""; [[ "$version" == *-* ]] && prerelease="--prerelease"
+          wear_apk="jarvis-wear-v${version}-release.apk"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt apk-inspection.txt --clobber
+            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt --clobber
             gh release edit "$GITHUB_REF_NAME" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           else
-            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" update-manifest.json signing-report.txt apk-inspection.txt \
+            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt \
               --verify-tag --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           fi
       - name: Publish validated channel feeds
@@ -171,8 +212,11 @@ jobs:
           path: |
             jarvis-assistant-*-release.apk
             jarvis-assistant-*-release.apk.sha256
+            jarvis-wear-*-release.apk
+            SHA256SUMS.txt
             update-manifest.json
             signing-report.txt
+            wear-signing-report.txt
             apk-inspection.txt
           if-no-files-found: error
           retention-days: 30

@@ -35,7 +35,7 @@ def config() -> object:
         proposal_only=True,
         candidate_timeout_seconds=60,
         deploy_health_timeout_seconds=30,
-        base_branch="main",
+        base_branch="jarvis/unified-production",
     )
 
 
@@ -349,6 +349,22 @@ def test_proposal_only_blocks_direct_deploy() -> None:
             config(),
             {},
         )
+
+
+def test_deployment_rejects_non_authoritative_product_line() -> None:
+    candidate = {
+        "candidate_id": 1,
+        "failure_id": 1,
+    }
+    cfg = config()
+    cfg.proposal_only = False
+    cfg.base_branch = "jarvis/integrations-accounts-v1"
+
+    with pytest.raises(
+        worker.WorkerError,
+        match="authoritative jarvis/unified-production",
+    ):
+        worker.deploy_candidate(candidate, cfg, {})
 
 
 def test_proposal_only_blocks_direct_rollback() -> None:

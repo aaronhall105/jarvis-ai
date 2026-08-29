@@ -11,6 +11,7 @@ import java.nio.ByteOrder;
 
 public final class RealtimeAudioEngine {
     public interface Listener {
+        default void onAudioReady() {}
         void onAudioFrame(byte[] pcm16);
         void onInputLevel(float level);
         void onAudioError(String message);
@@ -23,8 +24,10 @@ public final class RealtimeAudioEngine {
     private final Listener listener;
 
     private volatile boolean running;
+    private volatile boolean captureReady;
     private volatile AudioRecord recorder;
-    private Thread worker;
+    private volatile Thread worker;
+    private volatile int captureGeneration;
 
     public RealtimeAudioEngine(Listener listener) {
         if (!(listener instanceof Context)) {
@@ -47,19 +50,32 @@ public final class RealtimeAudioEngine {
 
     public synchronized void start() {
         if (running) return;
+
+        int generation = ++captureGeneration;
         running = true;
-        worker = new Thread(
-            this::captureLoop,
+        captureReady = false;
+
+        Thread next = new Thread(
+            () -> captureLoop(generation),
             "jarvis-live-audio"
         );
-        worker.start();
+        worker = next;
+        next.start();
     }
 
     public synchronized void stop() {
+        /*
+         * Invalidate this generation before touching the recorder.
+         * An old worker can therefore never publish callbacks or clear
+         * the state of a replacement capture.
+         */
+        ++captureGeneration;
         running = false;
+        captureReady = false;
 
         AudioRecord current = recorder;
         recorder = null;
+
         if (current != null) {
             try {
                 current.stop();
@@ -68,6 +84,7 @@ public final class RealtimeAudioEngine {
 
         Thread currentWorker = worker;
         worker = null;
+
         if (currentWorker != null) {
             currentWorker.interrupt();
         }
@@ -77,7 +94,19 @@ public final class RealtimeAudioEngine {
         return running;
     }
 
-    private void captureLoop() {
+    public boolean isCaptureReady() {
+        return captureReady;
+    }
+
+    private boolean owns(int generation) {
+        return CaptureEpochPolicy.mayPublish(
+            running,
+            generation,
+            captureGeneration
+        );
+    }
+
+    private void captureLoop(int generation) {
         AudioRecord localRecorder = null;
         AudioInputEffects localEffects = null;
 
@@ -130,6 +159,10 @@ public final class RealtimeAudioEngine {
                 );
             }
 
+            if (!owns(generation)) {
+                return;
+            }
+
             localEffects =
                 AudioInputEffects.attach(localRecorder);
 
@@ -138,13 +171,39 @@ public final class RealtimeAudioEngine {
                     localEffects.summary()
                 );
 
+            if (!owns(generation)) {
+                return;
+            }
+
             recorder = localRecorder;
             localRecorder.startRecording();
 
-            short[] frame = new short[FRAME_SAMPLES];
+            if (
+                localRecorder.getRecordingState()
+                    != AudioRecord.RECORDSTATE_RECORDING
+            ) {
+                throw new IllegalStateException(
+                    "Live microphone did not enter recording state"
+                );
+            }
+
+            if (!owns(generation)) {
+                return;
+            }
+
+            captureReady = true;
+
+            /*
+             * This is the authoritative capture-ready boundary.
+             * VoiceService may start its no-speech timeout only now.
+             */
+            listener.onAudioReady();
+
+            short[] frame =
+                new short[FRAME_SAMPLES];
 
             while (
-                running
+                owns(generation)
                     && !Thread.currentThread().isInterrupted()
             ) {
                 int count = localRecorder.read(
@@ -155,42 +214,76 @@ public final class RealtimeAudioEngine {
                 );
 
                 if (count <= 0) {
-                    if (!running) break;
+                    if (!owns(generation)) {
+                        break;
+                    }
                     continue;
                 }
 
-                byte[] pcm = shortsToLittleEndian(
-                    frame,
-                    count
+                if (!owns(generation)) {
+                    break;
+                }
+
+                byte[] pcm =
+                    shortsToLittleEndian(
+                        frame,
+                        count
+                    );
+
+                listener.onInputLevel(
+                    level(frame, count)
                 );
-                listener.onInputLevel(level(frame, count));
+
+                if (!owns(generation)) {
+                    break;
+                }
+
                 listener.onAudioFrame(pcm);
             }
+
         } catch (SecurityException denied) {
-            if (running) {
+            if (owns(generation)) {
                 listener.onAudioError(
                     "Microphone permission is required"
                 );
             }
+
         } catch (Throwable failure) {
-            if (running) {
+            if (owns(generation)) {
                 listener.onAudioError(
                     "Live microphone failed: "
                         + safeMessage(failure)
                 );
             }
+
         } finally {
-            running = false;
-            recorder = null;
+            /*
+             * Critically, a stale worker is forbidden from clearing
+             * state belonging to the replacement generation.
+             */
+            if (owns(generation)) {
+                running = false;
+                captureReady = false;
+
+                if (recorder == localRecorder) {
+                    recorder = null;
+                }
+
+                if (worker == Thread.currentThread()) {
+                    worker = null;
+                }
+            }
 
             if (localRecorder != null) {
                 try {
                     localRecorder.stop();
                 } catch (Throwable ignored) {}
             }
+
             if (localEffects != null) {
                 localEffects.release();
             }
+
             if (localRecorder != null) {
                 try {
                     localRecorder.release();
@@ -214,24 +307,34 @@ public final class RealtimeAudioEngine {
         return buffer.array();
     }
 
-    private static float level(short[] samples, int count) {
+    private static float level(
+        short[] samples,
+        int count
+    ) {
         if (count <= 0) return 0f;
 
         double squares = 0.0;
+
         for (int index = 0; index < count; index++) {
-            double sample = samples[index] / 32768.0;
+            double sample =
+                samples[index] / 32768.0;
             squares += sample * sample;
         }
 
-        double rms = Math.sqrt(squares / count);
+        double rms =
+            Math.sqrt(squares / count);
+
         return (float) Math.max(
             0.0,
             Math.min(1.0, rms * 5.0)
         );
     }
 
-    private static String safeMessage(Throwable failure) {
+    private static String safeMessage(
+        Throwable failure
+    ) {
         String message = failure.getMessage();
+
         return message == null || message.isBlank()
             ? failure.getClass().getSimpleName()
             : message;

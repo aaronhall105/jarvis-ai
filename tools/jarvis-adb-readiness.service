@@ -1,0 +1,18 @@
+[Unit]
+Description=Jarvis paired wireless ADB readiness monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/aaron/jarvis-wear/tools/adb_readiness.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/aaron/.android /home/aaron/.local/state/jarvis
+
+[Install]
+WantedBy=default.target

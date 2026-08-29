@@ -144,11 +144,7 @@ class DialogueManager:
 
     def _normalise_state(self, state: DialogueState) -> DialogueState:
         expiry = self._parse_time(state.goal_expires_at)
-        if (
-            state.active_goal
-            and expiry is not None
-            and expiry <= self._utc_now()
-        ):
+        if state.active_goal and expiry is not None and expiry <= self._utc_now():
             state.active_goal = None
             state.status = "idle"
             state.slots = {}
@@ -178,19 +174,21 @@ class DialogueManager:
             ).fetchone()
         if row is None:
             return self._new_state(conversation_id)
-        return self._normalise_state(
-            self._state_from_json(conversation_id, str(row["state_json"]))
-        )
+        return self._normalise_state(self._state_from_json(conversation_id, str(row["state_json"])))
 
     async def get(self, conversation_id: str) -> DialogueState:
         return await asyncio.to_thread(self._get_sync, conversation_id)
 
-    def _save_sync(self, state: DialogueState, event_type: str | None, payload: dict[str, Any]) -> None:
+    def _save_sync(
+        self, state: DialogueState, event_type: str | None, payload: dict[str, Any]
+    ) -> None:
         now = self._iso(self._utc_now())
         if not state.created_at:
             state.created_at = now
         state.updated_at = now
-        encoded = json.dumps(state.as_dict(), ensure_ascii=False, separators=(",", ":"), default=str)
+        encoded = json.dumps(
+            state.as_dict(), ensure_ascii=False, separators=(",", ":"), default=str
+        )
         event_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
         with self._connect() as connection:
             connection.execute(
@@ -281,7 +279,6 @@ class DialogueManager:
             f"goal_{outcome}",
             previous,
         )
-
 
     async def record_tone(
         self,
@@ -377,15 +374,20 @@ class DialogueManager:
                 entity_id = str(result.get("entity_id") or arguments.get("entity_id") or "")
                 name = str(result.get("name") or entity_id or "")
                 if entity_id or name:
-                    devices.append({
-                        "entity_id": entity_id,
-                        "name": name,
-                        "area_id": result.get("area_id"),
-                        "area_name": result.get("area_name"),
-                        "domain": result.get("domain"),
-                        "state": result.get("current_state") or result.get("target_state"),
-                    })
-                action = str(result.get("target_state") or arguments.get("action") or action or "") or None
+                    devices.append(
+                        {
+                            "entity_id": entity_id,
+                            "name": name,
+                            "area_id": result.get("area_id"),
+                            "area_name": result.get("area_name"),
+                            "domain": result.get("domain"),
+                            "state": result.get("current_state") or result.get("target_state"),
+                        }
+                    )
+                action = (
+                    str(result.get("target_state") or arguments.get("action") or action or "")
+                    or None
+                )
 
             elif tool in {"control_area_lights", "control_area_switches"}:
                 area = {
@@ -403,14 +405,16 @@ class DialogueManager:
                         or entity_id
                     )
                     if entity_id or name:
-                        devices.append({
-                            "entity_id": entity_id,
-                            "name": name,
-                            "area_id": result.get("area_id"),
-                            "area_name": result.get("area_name"),
-                            "domain": result.get("domain"),
-                            "state": entity.get("state") or result.get("target_state"),
-                        })
+                        devices.append(
+                            {
+                                "entity_id": entity_id,
+                                "name": name,
+                                "area_id": result.get("area_id"),
+                                "area_name": result.get("area_name"),
+                                "domain": result.get("domain"),
+                                "state": entity.get("state") or result.get("target_state"),
+                            }
+                        )
 
             elif tool in {"get_person_location", "get_person_state"}:
                 person = {
@@ -472,6 +476,7 @@ class DialogueManager:
                 "updated_at": self._iso(self._utc_now()),
             }
         if person:
+            person["observed_at"] = str(state.last_result.get("at") or "")
             state.focus = {
                 **state.focus,
                 "person": person,
@@ -595,10 +600,30 @@ class DialogueManager:
             rewritten_text=f"Turn {state_value} {' and '.join(names)}",
         )
 
-    async def focused_person(self, conversation_id: str) -> dict[str, Any] | None:
+    async def focused_person(
+        self,
+        conversation_id: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
         state = await self.get(conversation_id)
         person = state.focus.get("person")
-        return dict(person) if isinstance(person, dict) else None
+        if not isinstance(person, dict):
+            return None
+        if max_age_seconds is not None:
+            observed_at = str(person.get("observed_at") or "")
+            if not observed_at:
+                return None
+            try:
+                observed = datetime.fromisoformat(observed_at)
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None
+            age = (self._utc_now() - observed.astimezone(timezone.utc)).total_seconds()
+            if age < 0 or age > max(0.0, float(max_age_seconds)):
+                return None
+        return dict(person)
 
     async def context_for_model(self, conversation_id: str) -> str:
         state = await self.get(conversation_id)
@@ -612,11 +637,15 @@ class DialogueManager:
                 "intent": state.last_result.get("intent"),
                 "success": state.last_result.get("success"),
                 "response": state.last_result.get("response"),
-            } if state.last_result else {},
+            }
+            if state.last_result
+            else {},
             "last_error": state.last_error,
             "tone": state.tone,
         }
-        if not any((state.active_goal, state.focus, state.last_result, state.last_error, state.tone)):
+        if not any(
+            (state.active_goal, state.focus, state.last_result, state.last_error, state.tone)
+        ):
             return ""
         return (
             "Structured dialogue state for this conversation follows. It is trusted "

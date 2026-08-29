@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Header, HTTPException, Query, WebSocket
@@ -55,6 +56,7 @@ from app.memory_models import (
 )
 from app.registry import RegistryEngine
 from app.realtime_voice import RealtimeVoiceProxy
+from app.realtime_turn_ledger import RealtimeTurnLedger
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext, scope_conversation_id
@@ -66,6 +68,7 @@ from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
 settings = get_settings()
 configure_logging(settings.jarvis_log_level)
 logger = logging.getLogger("jarvis-core")
+data_directory = Path(os.getenv("JARVIS_DATA_DIR", "/app/data"))
 
 
 class _UvicornOAuthAccessFilter(logging.Filter):
@@ -94,16 +97,16 @@ tools = ToolEngine(home_assistant, registry)
 code_awareness = CodeAwarenessEngine.from_environment()
 tone_engine = ToneEngine()
 memory = MemoryEngine(
-    database_path="/app/data/jarvis_memory.db",
+    database_path=str(data_directory / "jarvis_memory.db"),
 )
 conversations = ConversationEngine(
-    database_path="/app/data/jarvis_conversations.db",
+    database_path=str(data_directory / "jarvis_conversations.db"),
 )
 dialogue = DialogueManager(
-    database_path="/app/data/jarvis_dialogue.db",
+    database_path=str(data_directory / "jarvis_dialogue.db"),
 )
 improvement = SelfImprovementEngine(
-    database_path="/app/data/jarvis_improvement.db",
+    database_path=str(data_directory / "jarvis_improvement.db"),
     enabled=settings.jarvis_self_improvement_enabled,
     auto_prepare=settings.jarvis_self_improvement_auto_prepare,
     repeat_threshold=settings.jarvis_self_improvement_repeat_threshold,
@@ -114,7 +117,7 @@ awareness = HouseAwarenessEngine(
     client=home_assistant,
     registry=registry,
     tools=tools,
-    database_path="/app/data/jarvis_house_awareness.db",
+    database_path=str(data_directory / "jarvis_house_awareness.db"),
     enabled=settings.jarvis_awareness_enabled,
     retention_days=settings.jarvis_awareness_retention_days,
     proactive_enabled=settings.jarvis_proactive_enabled,
@@ -124,7 +127,7 @@ awareness = HouseAwarenessEngine(
 )
 admin = AdminEngine(
     client=home_assistant,
-    database_path="/app/data/jarvis_admin.db",
+    database_path=str(data_directory / "jarvis_admin.db"),
     enabled=settings.jarvis_admin_mode_enabled,
     confirmation_ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
 )
@@ -132,10 +135,7 @@ external_agent = ExternalAgentRuntime(
     api_key=settings.openai_api_key,
     web_model=settings.jarvis_web_search_model,
     external_enabled=settings.jarvis_external_agent_enabled,
-    web_enabled=(
-        settings.jarvis_external_agent_enabled
-        and settings.jarvis_web_search_enabled
-    ),
+    web_enabled=(settings.jarvis_external_agent_enabled and settings.jarvis_web_search_enabled),
     home_assistant=home_assistant,
     tools=tools,
     admin=admin,
@@ -146,16 +146,13 @@ external_agent = ExternalAgentRuntime(
     google_oauth_client_secret=settings.jarvis_google_oauth_client_secret,
     google_oauth_redirect_uri=settings.jarvis_google_oauth_redirect_uri,
     google_android_return_uri=settings.jarvis_google_android_return_uri,
+    data_directory=data_directory,
 )
 followups = FollowUpEngine(
-    database_path="/app/data/jarvis_followups.db",
+    database_path=str(data_directory / "jarvis_followups.db"),
     conversations=conversations,
     states=tools,
-    external_evaluator=(
-        external_agent
-        if settings.jarvis_external_agent_enabled
-        else None
-    ),
+    external_evaluator=(external_agent if settings.jarvis_external_agent_enabled else None),
 )
 
 
@@ -169,10 +166,7 @@ async def _persist_external_monitor(
         conversation_id=conversation_id,
         kind="external_monitor",
         payload=dict(payload),
-        due_at=(
-            datetime.now(timezone.utc)
-            + timedelta(seconds=polling_interval_seconds)
-        ),
+        due_at=(datetime.now(timezone.utc) + timedelta(seconds=polling_interval_seconds)),
         idempotency_key=request_id,
     )
 
@@ -208,9 +202,7 @@ external_agent.set_monitor_creator(
     canceller=_cancel_external_monitor_for_conversation,
 )
 intents = IntentEngine(registry, tools)
-speech_corrections = SpeechCorrectionEngine(
-    "/app/data/jarvis_speech_corrections.db"
-)
+speech_corrections = SpeechCorrectionEngine(str(data_directory / "jarvis_speech_corrections.db"))
 ai = AIEngine(
     api_key=settings.openai_api_key,
     model=settings.openai_model,
@@ -234,7 +226,11 @@ _external_agent_state: dict[str, object] = {
 }
 
 
-realtime_voice = RealtimeVoiceProxy.from_environment()
+realtime_turn_ledger = RealtimeTurnLedger(data_directory / "jarvis_realtime_turns.db")
+
+realtime_voice = RealtimeVoiceProxy.from_environment(
+    turn_ledger=realtime_turn_ledger,
+)
 
 _voice_pe_ducked_media: dict[str, dict[str, float]] = {}
 _voice_pe_duck_lock = asyncio.Lock()
@@ -304,8 +300,7 @@ async def _registry_transcription_prompt(metadata: dict[str, object]) -> str:
     snapshot = await registry.ensure_loaded()
     area_id = str(metadata.get("area_id") or "")
     device_areas = {
-        str(device.get("id") or ""): str(device.get("area_id") or "")
-        for device in snapshot.devices
+        str(device.get("id") or ""): str(device.get("area_id") or "") for device in snapshot.devices
     }
     weighted: list[tuple[int, str]] = []
 
@@ -337,9 +332,7 @@ async def _registry_transcription_prompt(metadata: dict[str, object]) -> str:
         if domain not in {"light", "switch", "media_player", "climate", "script", "person"}:
             continue
         effective_area = str(
-            entity.get("area_id")
-            or device_areas.get(str(entity.get("device_id") or ""))
-            or ""
+            entity.get("area_id") or device_areas.get(str(entity.get("device_id") or "")) or ""
         )
         priority = 85 if effective_area == area_id else 50
         add(priority, entity.get("name"))
@@ -356,16 +349,12 @@ async def _registry_transcription_prompt(metadata: dict[str, object]) -> str:
         if key in seen:
             continue
         candidate_terms = ", ".join([*terms, term])
-        candidate_prompt = ". ".join(
-            part for part in [base, prefix + candidate_terms] if part
-        )
+        candidate_prompt = ". ".join(part for part in [base, prefix + candidate_terms] if part)
         if len(candidate_prompt) > 1024:
             break
         seen.add(key)
         terms.append(term)
-    prompt = ". ".join(
-        part for part in [base, prefix + ", ".join(terms)] if part
-    )
+    prompt = ". ".join(part for part in [base, prefix + ", ".join(terms)] if part)
     logger.info(
         "VOICE_TRANSCRIPTION_VOCAB area=%s user=%s terms=%s characters=%s",
         area_id or "none",
@@ -471,9 +460,17 @@ _FOLLOWUP_AFTER_PATTERN = re.compile(
     r"^\s*(?:check again|tell me|remind me)\s+in\s+(\d{1,4})\s*(seconds?|minutes?)\s*[.!?]*$",
     re.I,
 )
-_FOLLOWUP_CONDITION_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) (?:is |comes )?([a-z0-9_]+)\s*[.!?]*$", re.I)
-_FOLLOWUP_CHANGE_PATTERN = re.compile(r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) changes?\s*[.!?]*$", re.I)
-_FOLLOWUP_COMPLETION_PATTERN = re.compile(r"^\s*(?:let me know|tell me|get back to me) when (?:it(?:'s| is)|that) (?:is )?(?:finished|done|completes?|completed)\s*[.!?]*$", re.I)
+_FOLLOWUP_CONDITION_PATTERN = re.compile(
+    r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) (?:is |comes )?([a-z0-9_]+)\s*[.!?]*$",
+    re.I,
+)
+_FOLLOWUP_CHANGE_PATTERN = re.compile(
+    r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) changes?\s*[.!?]*$", re.I
+)
+_FOLLOWUP_COMPLETION_PATTERN = re.compile(
+    r"^\s*(?:let me know|tell me|get back to me) when (?:it(?:'s| is)|that) (?:is )?(?:finished|done|completes?|completed)\s*[.!?]*$",
+    re.I,
+)
 
 
 async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str, object] | None:
@@ -487,49 +484,142 @@ async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str
                 if job.get("kind") != "completion"
             ]
             if len(active) != 1:
-                return {'success':False, 'response':"I can’t identify one verified running job to watch.", 'intent':'followup_unavailable'}
+                return {
+                    "success": False,
+                    "response": "I can’t identify one verified running job to watch.",
+                    "intent": "followup_unavailable",
+                }
             source = active[0]
             job = await followups.create(
                 conversation_id=conversation_id,
-                kind='completion',
-                payload={'source_type':'followup_job', 'source_job_id':source['job_id']},
+                kind="completion",
+                payload={"source_type": "followup_job", "source_job_id": source["job_id"]},
                 due_at=datetime.now(timezone.utc),
             )
-            return {'success':True, 'response':"I’ll let you know here when that verified job finishes.", 'intent':'followup_completion', 'job':job}
+            return {
+                "success": True,
+                "response": "I’ll let you know here when that verified job finishes.",
+                "intent": "followup_completion",
+                "job": job,
+            }
         resolved = resolve_schedule(
             text,
-            timezone_name=os.getenv('JARVIS_TIMEZONE', 'Europe/London'),
+            timezone_name=os.getenv("JARVIS_TIMEZONE", "Europe/London"),
         )
         if resolved is not None:
-            job = await followups.create(conversation_id=conversation_id, kind='scheduled', payload={'message':'Your scheduled Jarvis follow-up is due.', 'timezone':resolved.timezone_name}, due_at=resolved.due_utc)
-            return {'success':True, 'response':f"I’ll remind you {resolved.description}.", 'intent':'followup_scheduled', 'job':job}
+            job = await followups.create(
+                conversation_id=conversation_id,
+                kind="scheduled",
+                payload={
+                    "message": "Your scheduled Jarvis follow-up is due.",
+                    "timezone": resolved.timezone_name,
+                },
+                due_at=resolved.due_utc,
+            )
+            return {
+                "success": True,
+                "response": f"I’ll remind you {resolved.description}.",
+                "intent": "followup_scheduled",
+                "job": job,
+            }
         condition = _FOLLOWUP_CONDITION_PATTERN.match(text)
         change = _FOLLOWUP_CHANGE_PATTERN.match(text)
         if change:
             entity_id = change.group(1)
-            states = {str(item.get('entity_id')): item for item in await tools.readable_entity_states(refresh=True)}
-            if entity_id not in states: return {'success':False, 'response':"I can’t monitor that because it is not a current Home Assistant entity.", 'intent':'followup_unavailable'}
-            job = await followups.create(conversation_id=conversation_id, kind='condition', payload={'entity_id':entity_id, 'comparison':'changed', 'baseline':str(states[entity_id].get('state'))}, due_at=datetime.now(timezone.utc))
-            return {'success':True, 'response':f"I’ll let you know here when {entity_id} changes.", 'intent':'followup_condition', 'job':job}
+            states = {
+                str(item.get("entity_id")): item
+                for item in await tools.readable_entity_states(refresh=True)
+            }
+            if entity_id not in states:
+                return {
+                    "success": False,
+                    "response": "I can’t monitor that because it is not a current Home Assistant entity.",
+                    "intent": "followup_unavailable",
+                }
+            job = await followups.create(
+                conversation_id=conversation_id,
+                kind="condition",
+                payload={
+                    "entity_id": entity_id,
+                    "comparison": "changed",
+                    "baseline": str(states[entity_id].get("state")),
+                },
+                due_at=datetime.now(timezone.utc),
+            )
+            return {
+                "success": True,
+                "response": f"I’ll let you know here when {entity_id} changes.",
+                "intent": "followup_condition",
+                "job": job,
+            }
         if condition:
             entity_id, wanted = condition.group(1), condition.group(2).lower()
-            wanted = {'online':'on', 'available':'on', 'finished':'completed', 'completed':'completed'}.get(wanted, wanted)
-            known = {str(item.get('entity_id')) for item in await tools.readable_entity_states(refresh=True)}
-            if entity_id not in known: return {'success':False, 'response':"I can’t monitor that because it is not a current Home Assistant entity.", 'intent':'followup_unavailable'}
-            job = await followups.create(conversation_id=conversation_id, kind='condition', payload={'entity_id':entity_id, 'state':wanted}, due_at=datetime.now(timezone.utc))
-            return {'success':True, 'response':f"I’ll let you know here when {entity_id} reports {wanted}.", 'intent':'followup_condition', 'job':job}
+            wanted = {
+                "online": "on",
+                "available": "on",
+                "finished": "completed",
+                "completed": "completed",
+            }.get(wanted, wanted)
+            known = {
+                str(item.get("entity_id"))
+                for item in await tools.readable_entity_states(refresh=True)
+            }
+            if entity_id not in known:
+                return {
+                    "success": False,
+                    "response": "I can’t monitor that because it is not a current Home Assistant entity.",
+                    "intent": "followup_unavailable",
+                }
+            job = await followups.create(
+                conversation_id=conversation_id,
+                kind="condition",
+                payload={"entity_id": entity_id, "state": wanted},
+                due_at=datetime.now(timezone.utc),
+            )
+            return {
+                "success": True,
+                "response": f"I’ll let you know here when {entity_id} reports {wanted}.",
+                "intent": "followup_condition",
+                "job": job,
+            }
         periodic = parse_periodic_followup(text)
         if periodic:
             entity_id, interval = periodic
-            states = {str(item.get('entity_id')): item for item in await tools.readable_entity_states(refresh=True)}
-            if entity_id not in states or interval < 10: return {'success':False, 'response':"I can’t safely monitor that request.", 'intent':'followup_unavailable'}
-            job = await followups.create(conversation_id=conversation_id, kind='periodic', payload={'entity_id':entity_id, 'baseline':str(states[entity_id].get('state')), 'interval_seconds':interval}, due_at=datetime.now(timezone.utc)+timedelta(seconds=interval))
-            return {'success':True, 'response':f"I’ll monitor {entity_id} and update you here if it changes.", 'intent':'followup_periodic', 'job':job}
+            states = {
+                str(item.get("entity_id")): item
+                for item in await tools.readable_entity_states(refresh=True)
+            }
+            if entity_id not in states or interval < 10:
+                return {
+                    "success": False,
+                    "response": "I can’t safely monitor that request.",
+                    "intent": "followup_unavailable",
+                }
+            job = await followups.create(
+                conversation_id=conversation_id,
+                kind="periodic",
+                payload={
+                    "entity_id": entity_id,
+                    "baseline": str(states[entity_id].get("state")),
+                    "interval_seconds": interval,
+                },
+                due_at=datetime.now(timezone.utc) + timedelta(seconds=interval),
+            )
+            return {
+                "success": True,
+                "response": f"I’ll monitor {entity_id} and update you here if it changes.",
+                "intent": "followup_periodic",
+                "job": job,
+            }
         return None
     amount, unit = int(match.group(1)), match.group(2).lower()
     seconds = amount * (60 if unit.startswith("minute") else 1)
     if seconds < 1 or seconds > 7 * 24 * 3600:
-        return {"success": False, "response": "I couldn’t safely schedule that delay.", "intent": "followup_invalid"}
+        return {
+            "success": False,
+            "response": "I couldn’t safely schedule that delay.",
+            "intent": "followup_invalid",
+        }
     job = await followups.create(
         conversation_id=conversation_id,
         kind="time",
@@ -563,9 +653,7 @@ def _event_loop_stack_monitor() -> None:
         if heartbeat <= 0.0 or thread_id is None:
             continue
 
-        stale_ms = (
-            time.monotonic() - heartbeat
-        ) * 1000.0
+        stale_ms = (time.monotonic() - heartbeat) * 1000.0
 
         if stale_ms < 300.0:
             in_stall = False
@@ -581,22 +669,16 @@ def _event_loop_stack_monitor() -> None:
         if frame is None:
             continue
 
-        stack = "".join(
-            traceback.format_stack(frame)
-        )
+        stack = "".join(traceback.format_stack(frame))
 
-        timestamp = datetime.now(
-            timezone.utc
-        ).isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()
 
         message = (
             "\n========== EVENT LOOP STALL STACK =========="
             f"\ntime={timestamp}"
             f"\nstale_ms={stale_ms:.1f}"
             f"\nthread_id={thread_id}"
-            "\n"
-            + stack
-            + "========== EVENT LOOP STALL STACK END ==========\n"
+            "\n" + stack + "========== EVENT LOOP STALL STACK END ==========\n"
         )
 
         try:
@@ -633,9 +715,7 @@ async def _event_loop_watchdog() -> None:
     _EVENT_LOOP_THREAD_ID = threading.get_ident()
     _EVENT_LOOP_HEARTBEAT_AT = time.monotonic()
 
-    logger.info(
-        "Event-loop stall monitor armed threshold_ms=300"
-    )
+    logger.info("Event-loop stall monitor armed threshold_ms=300")
 
     while True:
         await asyncio.sleep(0.050)
@@ -693,16 +773,11 @@ async def lifespan(_: FastAPI):
         try:
             await awareness.start()
 
-            proactive_engine.set_state_provider(
-                awareness.state_snapshot
-            )
-            vision_engine.set_state_provider(
-                awareness.state_snapshot
-            )
+            proactive_engine.set_state_provider(awareness.state_snapshot)
+            vision_engine.set_state_provider(awareness.state_snapshot)
 
             logger.info(
-                "Shared Home Assistant state cache wired to "
-                "Proactive and Vision Intelligence"
+                "Shared Home Assistant state cache wired to Proactive and Vision Intelligence"
             )
         except Exception:
             logger.exception("House Awareness failed to start")
@@ -788,12 +863,8 @@ async def health_ready() -> JSONResponse:
             "initialized": bool(_external_agent_state.get("initialized")),
             "error": _external_agent_state.get("error"),
             "healthy": external_health.get("healthy"),
-            "configured_provider_count": external_health.get(
-                "configured_provider_count"
-            ),
-            "available_provider_count": external_health.get(
-                "available_provider_count"
-            ),
+            "configured_provider_count": external_health.get("configured_provider_count"),
+            "available_provider_count": external_health.get("available_provider_count"),
         },
         "followup_worker": followup_health,
         "database": {
@@ -843,9 +914,7 @@ async def system_status() -> dict[str, object]:
             "error": "follow-up status unavailable",
         }
     try:
-        conversation_status: dict[str, object] = (
-            await conversations.health_snapshot()
-        )
+        conversation_status: dict[str, object] = await conversations.health_snapshot()
     except Exception as exc:
         logger.exception("Conversation database status failed")
         runtime_metrics.record_error("conversations", str(exc))
@@ -1167,9 +1236,7 @@ async def create_external_monitor(
     try:
         result = await external_agent.create_external_monitor(
             conversation_id=request.conversation_id,
-            principal_id=(
-                settings.jarvis_integrations_owner_principal or "integrations_api"
-            ),
+            principal_id=(settings.jarvis_integrations_owner_principal or "integrations_api"),
             provider=request.provider,
             capability_id=request.capability_id,
             query=request.query,
@@ -1255,14 +1322,9 @@ def _privileged_admin_token_valid(
 ) -> bool:
     """Validate the separate credential used for privileged AI authority."""
 
-    expected = (
-        settings.jarvis_privileged_admin_token
-        .strip()
-    )
+    expected = settings.jarvis_privileged_admin_token.strip()
 
-    supplied = (
-        token or ""
-    ).strip()
+    supplied = (token or "").strip()
 
     return bool(
         expected
@@ -1406,7 +1468,9 @@ async def improvement_audit(
 
 
 @app.post("/api/improvement/request")
-async def improvement_request(request: ImprovementCreateRequest, x_jarvis_admin_token: str | None = Header(default=None)):
+async def improvement_request(
+    request: ImprovementCreateRequest, x_jarvis_admin_token: str | None = Header(default=None)
+):
     _require_improvement_token(x_jarvis_admin_token)
     ok, candidate_id, status = await improvement.request_improvement(request.request, actor="api")
     if not ok:
@@ -1480,16 +1544,16 @@ async def improvement_archive_candidate(
     x_jarvis_admin_token: str | None = Header(default=None),
 ):
     _require_improvement_token(x_jarvis_admin_token)
-    ok, state = await improvement.set_candidate_archived(
-        candidate_id, True, actor="api"
-    )
+    ok, state = await improvement.set_candidate_archived(candidate_id, True, actor="api")
     if not ok:
         raise HTTPException(status_code=400, detail=state)
     return {"success": True, "status": state}
 
 
 @app.post("/api/improvement/candidates/{candidate_id}/restore")
-async def improvement_restore_candidate(candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)):
+async def improvement_restore_candidate(
+    candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)
+):
     _require_improvement_token(x_jarvis_admin_token)
     ok, state = await improvement.set_candidate_archived(candidate_id, False, actor="api")
     if not ok:
@@ -1538,7 +1602,9 @@ async def improvement_reject(
 
 
 @app.post("/api/improvement/candidates/{candidate_id}/rollback-ticket")
-async def improvement_rollback_ticket(candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)):
+async def improvement_rollback_ticket(
+    candidate_id: int, x_jarvis_admin_token: str | None = Header(default=None)
+):
     _require_improvement_token(x_jarvis_admin_token)
     result = await improvement.issue_rollback_ticket(candidate_id, actor="api")
     return asdict(result)
@@ -1697,9 +1763,7 @@ async def _execute_home_api_action(
         principal_id="core_api",
         request_id=request_id or str(uuid.uuid4()),
         target=target,
-        idempotency_key=(
-            f"{request_id}:{operation}:{target}" if request_id else None
-        ),
+        idempotency_key=(f"{request_id}:{operation}:{target}" if request_id else None),
     )
     data = execution.get("data")
     result = dict(data) if isinstance(data, dict) else {}
@@ -1751,7 +1815,6 @@ async def turn_area_lights_off(
             status_code=404,
             detail=str(exc),
         ) from exc
-
 
 
 @app.get("/api/tools/devices")
@@ -1842,8 +1905,7 @@ async def assistant_text(
             )
         else:
             response = str(
-                result.get("response_message")
-                or "The request could not be verified as completed."
+                result.get("response_message") or "The request could not be verified as completed."
             )
         return {
             "success": bool(result.get("success")),
@@ -1856,7 +1918,6 @@ async def assistant_text(
             status_code=400,
             detail=str(exc),
         ) from exc
-
 
 
 async def _execute_ai_request(
@@ -1895,24 +1956,30 @@ async def _execute_ai_request(
     )
     if followup_result is not None:
         response = str(followup_result["response"])
-        await conversations.add_user_message(conversation_id=storage_conversation_id, content=request.text)
-        await conversations.add_assistant_message(conversation_id=storage_conversation_id, content=response)
-        followup_result.update({
-            "model": "followup-engine",
-            "deterministic": True,
-            "tool_called": False,
-            "tool_rounds": 0,
-            "calls": [],
-            "memory_used": False,
-        })
+        await conversations.add_user_message(
+            conversation_id=storage_conversation_id,
+            content=request.text,
+        )
+        await conversations.add_assistant_message(
+            conversation_id=storage_conversation_id,
+            content=response,
+        )
+        followup_result.update(
+            {
+                "model": "followup-engine",
+                "deterministic": True,
+                "tool_called": False,
+                "tool_rounds": 0,
+                "calls": [],
+                "memory_used": False,
+            }
+        )
         result = followup_result
         result["conversation_id"] = external_conversation_id
         result["message_count"] = await conversations.message_count(storage_conversation_id)
         return result
 
-    proactive_reply = await proactive_engine.handle_reply(
-        request.text, actor.user_key
-    )
+    proactive_reply = await proactive_engine.handle_reply(request.text, actor.user_key)
     if proactive_reply is not None:
         response = str(proactive_reply["response"])
         await conversations.add_user_message(
@@ -1949,28 +2016,17 @@ async def _execute_ai_request(
 
     if room_person:
         try:
-            fresh_states = await tools.readable_entity_states(
-                refresh=True
-            )
-            room_evidence = (
-                await vision_engine.person_room_evidence()
-            )
+            fresh_states = await tools.readable_entity_states(refresh=True)
+            room_evidence = await vision_engine.person_room_evidence()
             room_result = resolve_person_room(
                 room_person,
                 fresh_states,
                 room_evidence,
             )
 
-            primary = room_result.get(
-                "primary_event"
-            )
-            evidence_events = room_evidence.get(
-                "events"
-            )
-            if (
-                isinstance(primary, dict)
-                or isinstance(evidence_events, list)
-            ):
+            primary = room_result.get("primary_event")
+            evidence_events = room_evidence.get("events")
+            if isinstance(primary, dict) or isinstance(evidence_events, list):
                 vision_payload = {
                     "primary_event": primary,
                     "events": (
@@ -1983,9 +2039,7 @@ async def _execute_ai_request(
                     ),
                 }
         except Exception:
-            logger.exception(
-                "Person room context lookup failed"
-            )
+            logger.exception("Person room context lookup failed")
             room_result = {
                 "handled": True,
                 "response": (
@@ -1995,13 +2049,8 @@ async def _execute_ai_request(
                 ),
             }
 
-    if (
-        room_result is not None
-        and bool(room_result.get("handled"))
-    ):
-        response = str(
-            room_result.get("response") or ""
-        ).strip()
+    if room_result is not None and bool(room_result.get("handled")):
+        response = str(room_result.get("response") or "").strip()
         await conversations.add_user_message(
             conversation_id=storage_conversation_id,
             content=request.text,
@@ -2018,11 +2067,13 @@ async def _execute_ai_request(
             "deterministic": True,
             "tool_called": True,
             "tool_rounds": 1,
-            "calls": [{
-                "tool": "person_room_context",
-                "success": True,
-                "message": response,
-            }],
+            "calls": [
+                {
+                    "tool": "person_room_context",
+                    "success": True,
+                    "message": response,
+                }
+            ],
             "memory_used": False,
             "usage": {
                 "input_tokens": 0,
@@ -2031,12 +2082,10 @@ async def _execute_ai_request(
             },
         }
     else:
-        improvement_command = (
-            await improvement.handle_command(
-                text=request.text,
-                actor=actor,
-                conversation_id=storage_conversation_id,
-            )
+        improvement_command = await improvement.handle_command(
+            text=request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
         )
 
         if improvement_command.handled:
@@ -2066,9 +2115,7 @@ async def _execute_ai_request(
                 },
             }
             if improvement_command.details is not None:
-                result["improvement"] = (
-                    improvement_command.details
-                )
+                result["improvement"] = improvement_command.details
         else:
             await improvement.capture_feedback_before_request(
                 conversation_id=storage_conversation_id,
@@ -2077,27 +2124,14 @@ async def _execute_ai_request(
             )
             if vision_engine.matches_query(request.text):
                 try:
-                    vision_payload = (
-                        await vision_engine.context_for_query(
-                            request.text
-                        )
-                    )
+                    vision_payload = await vision_engine.context_for_query(request.text)
                 except Exception:
-                    logger.exception(
-                        "Vision Intelligence context lookup failed"
-                    )
+                    logger.exception("Vision Intelligence context lookup failed")
                 else:
                     prompt = vision_payload.get("prompt")
-                    if (
-                        isinstance(prompt, str)
-                        and prompt.strip()
-                    ):
-                        trusted_context = dict(
-                            trusted_context or {}
-                        )
-                        trusted_context[
-                            "vision_context"
-                        ] = prompt
+                    if isinstance(prompt, str) and prompt.strip():
+                        trusted_context = dict(trusted_context or {})
+                        trusted_context["vision_context"] = prompt
 
             result = await ai.ask(
                 text=request.text,
@@ -2119,23 +2153,17 @@ async def _execute_ai_request(
     # Home Assistant should keep its own opaque conversation ID. Jarvis uses a
     # user-scoped ID internally so Aaron and Amber can never share history.
     result["conversation_id"] = external_conversation_id
-    result["message_count"] = await conversations.message_count(
-        storage_conversation_id
-    )
+    result["message_count"] = await conversations.message_count(storage_conversation_id)
     result["user"] = {
         "key": actor.user_key,
         "name": actor.display_name,
         "is_admin": actor.is_admin,
-        "privilege_verified": (
-            actor.privilege_verified
-        ),
+        "privilege_verified": (actor.privilege_verified),
     }
     timings = result.get("timings")
     if not isinstance(timings, dict):
         timings = {}
-    timings["jarvis_request_total_ms"] = round(
-        (time.monotonic() - request_started) * 1000
-    )
+    timings["jarvis_request_total_ms"] = round((time.monotonic() - request_started) * 1000)
     result["timings"] = timings
     runtime_metrics.increment("assistant_turns")
     if request.voice_mode:
@@ -2158,7 +2186,6 @@ async def _execute_ai_request(
     return result
 
 
-
 async def _realtime_brain_handler(
     text: str,
     metadata: dict[str, object],
@@ -2166,61 +2193,35 @@ async def _realtime_brain_handler(
 ) -> dict[str, object]:
     """Send one mobile voice turn through the normal Jarvis brain."""
 
-    conversation_id = str(
-        metadata.get("conversation_id") or ""
-    ).strip() or None
+    conversation_id = str(metadata.get("conversation_id") or "").strip() or None
 
-    user_id = str(
-        metadata.get("user_id") or ""
-    ).strip() or None
+    user_id = str(metadata.get("user_id") or "").strip() or None
 
-    user_name = str(
-        metadata.get("user_name") or ""
-    ).strip() or None
+    user_name = str(metadata.get("user_name") or "").strip() or None
 
-    device_id = str(
-        metadata.get("device_id") or ""
-    ).strip() or None
+    device_id = str(metadata.get("device_id") or "").strip() or None
 
-    area_id = str(
-        metadata.get("area_id") or ""
-    ).strip() or None
+    area_id = str(metadata.get("area_id") or "").strip() or None
 
-    endpoint_kind = str(
-        metadata.get("voice_endpoint_kind") or "android"
-    ).strip() or "android"
+    endpoint_kind = str(metadata.get("voice_endpoint_kind") or "android").strip() or "android"
 
-    session_id = str(
-        metadata.get("session_id") or ""
-    ).strip() or None
+    session_id = str(metadata.get("session_id") or "").strip() or None
 
     request = TextCommandRequest(
         text=text,
         conversation_id=conversation_id,
         request_id=(
-            str(
-                metadata.get("client_turn_id")
-                or metadata.get("request_id")
-                or uuid.uuid4()
-            )
+            str(metadata.get("client_turn_id") or metadata.get("request_id") or uuid.uuid4())
         ),
         user_id=user_id,
         user_name=user_name,
-        user_is_admin=bool(
-            metadata.get("user_is_admin", False)
-        ),
+        user_is_admin=bool(metadata.get("user_is_admin", False)),
         device_id=device_id,
         area_id=area_id,
-        satellite_id=(
-            device_id
-            if endpoint_kind == "voice_pe"
-            else None
-        ),
+        satellite_id=(device_id if endpoint_kind == "voice_pe" else None),
         voice_session_id=session_id,
         voice_endpoint_kind=(
-            "voice_pe_realtime"
-            if endpoint_kind == "voice_pe"
-            else "android_realtime"
+            "voice_pe_realtime" if endpoint_kind == "voice_pe" else "android_realtime"
         ),
         voice_mode=True,
     )
@@ -2249,9 +2250,7 @@ async def _realtime_brain_handler(
         request,
         on_text_delta=on_text_delta,
         trusted_context=trusted_context,
-        privilege_verified=(
-            realtime_privilege_verified
-        ),
+        privilege_verified=(realtime_privilege_verified),
     )
 
 
@@ -2274,23 +2273,15 @@ async def realtime_voice_websocket(
     )
 
 
-
-
 @app.post("/api/assistant/ai")
 async def assistant_ai(
     request: TextCommandRequest,
-    x_jarvis_admin_token: str | None = Header(
-        default=None
-    ),
+    x_jarvis_admin_token: str | None = Header(default=None),
 ) -> dict[str, object]:
     try:
         return await _execute_ai_request(
             request,
-            privilege_verified=(
-                _privileged_admin_token_valid(
-                    x_jarvis_admin_token
-                )
-            ),
+            privilege_verified=(_privileged_admin_token_valid(x_jarvis_admin_token)),
         )
     except AIEngineError as exc:
         raise HTTPException(
@@ -2302,22 +2293,14 @@ async def assistant_ai(
 @app.post("/api/assistant/ai/stream")
 async def assistant_ai_stream(
     request: TextCommandRequest,
-    x_jarvis_admin_token: str | None = Header(
-        default=None
-    ),
+    x_jarvis_admin_token: str | None = Header(default=None),
 ) -> StreamingResponse:
     """Stream Jarvis text deltas as newline-delimited JSON."""
 
-    privilege_verified = (
-        _privileged_admin_token_valid(
-            x_jarvis_admin_token
-        )
-    )
+    privilege_verified = _privileged_admin_token_valid(x_jarvis_admin_token)
 
     async def stream_events() -> AsyncIterator[str]:
-        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue(
-            maxsize=256
-        )
+        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue(maxsize=256)
 
         stream_started = time.monotonic()
         first_answer_event = asyncio.Event()
@@ -2339,9 +2322,7 @@ async def assistant_ai_stream(
             profile = tone_engine.analyse(request.text)
             if not tone_engine.should_emit_progress(request.text, profile):
                 return
-            await asyncio.sleep(
-                tone_engine.progress_delay_seconds(request.text, profile)
-            )
+            await asyncio.sleep(tone_engine.progress_delay_seconds(request.text, profile))
             if first_answer_event.is_set():
                 return
             phrase = tone_engine.progress_phrase(request.text, profile).strip()
@@ -2349,44 +2330,46 @@ async def assistant_ai_stream(
                 return
             if first_output_ms is None:
                 first_output_ms = round((time.monotonic() - stream_started) * 1000)
-            await queue.put({
-                "type": "progress",
-                "message": phrase,
-                "presentation": "spoken_thinking",
-            })
+            await queue.put(
+                {
+                    "type": "progress",
+                    "message": phrase,
+                    "presentation": "spoken_thinking",
+                }
+            )
 
         async def run_request() -> None:
             try:
                 result = await _execute_ai_request(
                     request,
                     on_text_delta=on_text_delta,
-                    privilege_verified=(
-                        privilege_verified
-                    ),
+                    privilege_verified=(privilege_verified),
                 )
                 first_answer_event.set()
                 timings = result.get("timings")
                 if not isinstance(timings, dict):
                     timings = {}
                 timings["stream_first_output_ms"] = first_output_ms
-                timings["stream_total_ms"] = round(
-                    (time.monotonic() - stream_started) * 1000
-                )
+                timings["stream_total_ms"] = round((time.monotonic() - stream_started) * 1000)
                 result["timings"] = timings
                 await queue.put({"type": "final", "result": result})
             except AIEngineError as exc:
                 first_answer_event.set()
-                await queue.put({
-                    "type": "error",
-                    "message": str(exc),
-                })
+                await queue.put(
+                    {
+                        "type": "error",
+                        "message": str(exc),
+                    }
+                )
             except Exception:
                 first_answer_event.set()
                 logger.exception("Unexpected Jarvis streaming failure")
-                await queue.put({
-                    "type": "error",
-                    "message": "Jarvis encountered an unexpected streaming error.",
-                })
+                await queue.put(
+                    {
+                        "type": "error",
+                        "message": "Jarvis encountered an unexpected streaming error.",
+                    }
+                )
             finally:
                 await queue.put(None)
 
@@ -2399,10 +2382,13 @@ async def assistant_ai_stream(
             name="jarvis_streaming_progress",
         )
 
-        yield json.dumps(
-            {"type": "start", "version": CORE_APPLICATION_VERSION, "release": JARVIS_RELEASE},
-            separators=(",", ":"),
-        ) + "\n"
+        yield (
+            json.dumps(
+                {"type": "start", "version": CORE_APPLICATION_VERSION, "release": JARVIS_RELEASE},
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
 
         try:
             while True:
@@ -2417,12 +2403,15 @@ async def assistant_ai_stream(
 
                 if event is None:
                     break
-                yield json.dumps(
-                    event,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=str,
-                ) + "\n"
+                yield (
+                    json.dumps(
+                        event,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        default=str,
+                    )
+                    + "\n"
+                )
         finally:
             if not progress_task.done():
                 progress_task.cancel()
@@ -2450,8 +2439,28 @@ async def assistant_ai_stream(
 @app.get("/api/conversations")
 async def list_conversations(
     limit: int = 50,
+    user_id: str | None = None,
+    user_name: str | None = None,
 ) -> dict[str, object]:
-    items = await conversations.list_conversations(limit=limit)
+    actor = UserContext.from_request(
+        user_id=user_id,
+        user_name=user_name,
+        user_is_admin=False,
+        device_id=None,
+        voice_mode=False,
+    )
+    prefix = f"usr:{actor.user_key}:"
+    stored_items = await conversations.list_conversations(
+        limit=limit,
+        conversation_id_prefix=prefix,
+    )
+    items = [
+        {
+            **item,
+            "conversation_id": str(item["conversation_id"])[len(prefix) :],
+        }
+        for item in stored_items
+    ]
     return {
         "count": len(items),
         "conversations": items,
@@ -2462,10 +2471,21 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: str,
     limit: int = 100,
+    user_id: str | None = None,
+    user_name: str | None = None,
 ) -> dict[str, object]:
-    conversation = await conversations.get_conversation(
-        conversation_id
+    actor = UserContext.from_request(
+        user_id=user_id,
+        user_name=user_name,
+        user_is_admin=False,
+        device_id=None,
+        voice_mode=False,
     )
+    external_conversation_id, storage_conversation_id = scope_conversation_id(
+        conversation_id,
+        actor.user_key,
+    )
+    conversation = await conversations.get_conversation(storage_conversation_id)
     if conversation is None:
         raise HTTPException(
             status_code=404,
@@ -2473,24 +2493,53 @@ async def get_conversation(
         )
 
     messages = await conversations.get_messages(
-        conversation_id=conversation_id,
+        conversation_id=storage_conversation_id,
         limit=limit,
     )
+    public_conversation = {
+        **conversation,
+        "conversation_id": external_conversation_id,
+    }
+    public_messages = [
+        {
+            **message,
+            "conversation_id": external_conversation_id,
+        }
+        for message in messages
+    ]
     return {
-        "conversation": conversation,
-        "messages": messages,
-        "message_count": len(messages),
+        "conversation": public_conversation,
+        "messages": public_messages,
+        "message_count": len(public_messages),
     }
 
 
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
+    user_id: str | None = None,
+    user_name: str | None = None,
 ) -> dict[str, object]:
-    deleted = await conversations.delete_conversation(
-        conversation_id
+    actor = UserContext.from_request(
+        user_id=user_id,
+        user_name=user_name,
+        user_is_admin=False,
+        device_id=None,
+        voice_mode=False,
     )
-    await dialogue.delete(conversation_id)
+    external_conversation_id, storage_conversation_id = scope_conversation_id(
+        conversation_id,
+        actor.user_key,
+    )
+    existing = await conversations.get_conversation(storage_conversation_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found.",
+        )
+    cancelled_followups = await followups.cancel_for_conversation(storage_conversation_id)
+    deleted = await conversations.delete_conversation(storage_conversation_id)
+    await dialogue.delete(storage_conversation_id)
     if not deleted:
         raise HTTPException(
             status_code=404,
@@ -2499,10 +2548,9 @@ async def delete_conversation(
 
     return {
         "success": True,
-        "conversation_id": conversation_id,
+        "conversation_id": external_conversation_id,
+        "cancelled_followups": cancelled_followups,
     }
-
-
 
 
 @app.get("/api/memory")
@@ -2590,9 +2638,7 @@ async def restore_memory(
     _require_memory_token(x_jarvis_memory_token)
     restored = await memory.restore(memory_id, owner_key=requester_key)
     if restored is None:
-        raise HTTPException(
-            status_code=404, detail="Retired memory not found or not editable."
-        )
+        raise HTTPException(status_code=404, detail="Retired memory not found or not editable.")
     return {"success": True, "memory": restored}
 
 
@@ -2612,6 +2658,7 @@ async def chat_page() -> FileResponse:
         media_type="text/html",
     )
 
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> str:
     status = await connection_test_with_timeout(home_assistant)
@@ -2619,20 +2666,16 @@ async def dashboard() -> str:
     try:
         summary = await registry.summary()
         registry_text = (
-            f'{summary["areas"]} areas · '
-            f'{summary["devices"]} devices · '
-            f'{summary["entities"]} entities'
+            f"{summary['areas']} areas · "
+            f"{summary['devices']} devices · "
+            f"{summary['entities']} entities"
         )
     except Exception:
         logger.exception("Unable to load dashboard registry summary")
         registry_text = "Registry unavailable"
 
     ha_class = "online" if status.connected else "offline"
-    ha_text = (
-        "Home Assistant connected"
-        if status.connected
-        else "Home Assistant disconnected"
-    )
+    ha_text = "Home Assistant connected" if status.connected else "Home Assistant disconnected"
 
     return f"""
     <!doctype html>
@@ -2707,14 +2750,17 @@ async def dashboard() -> str:
     </html>
     """
 
+
 # Jarvis v19 alpha8 proactive router
 from app.proactive_intelligence import (
     engine as proactive_engine,
     router as proactive_router,
 )
+
 app.include_router(proactive_router)
 
 # Jarvis v19 alpha9 Core-first vision intelligence
 from app.vision_intelligence import engine as vision_engine
 from app.vision_intelligence import router as vision_router
+
 app.include_router(vision_router)

@@ -1,0 +1,377 @@
+{
+  "schema_version": 1,
+  "authoritative_branch": "jarvis/unified-production",
+  "audited_at_utc": "2026-08-29",
+  "source_heads": {
+    "conversation-engine": "fe88f70ee2848d997e7d6fe7a05198d13c7864cf",
+    "jarvis/production-alpha14": "8fe2b11e4f9afc90018ee3cec2b8722e7ade53ef",
+    "jarvis/wear-v1": "5b21be44c1feae14580b8eb61fb811ed2bc1c90b",
+    "jarvis/unified-runtime-v1": "ce6a397651eb15effb364866a822302714581347",
+    "jarvis/alpha19-production-hardening": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1",
+    "jarvis/external-agent-platform": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1",
+    "jarvis/integrations-accounts-v1": "6799816b5615adf9b15cd8a42c0e1aed38de47cd",
+    "ota-feeds": "cc1992ecb434d9efd44bc05c70f23565cd6f23b0"
+  },
+  "deployed_core_before_reconciliation": {
+    "source_commit": "fa1273b7b550ef38a81f9bb86e1598d3139fc1c1",
+    "image_id": "sha256:476b865a7ae51444c7585a3dc154ba5bd59734abeb7a46433e91c73c4fafb968",
+    "source_match": "bridge/app matched the commit byte-for-byte",
+    "persistent_mounts": ["/app/config", "/app/data", "/app/logs"]
+  },
+  "components": {
+    "core": {
+      "baseline": "jarvis/integrations-accounts-v1",
+      "supplements": ["jarvis/unified-runtime-v1", "preserved production WIP audit"],
+      "required": [
+        "conversation engine",
+        "memory",
+        "durable follow-ups",
+        "grounded Home Assistant actions",
+        "presence evidence",
+        "proactive intelligence",
+        "vision and cameras",
+        "realtime turn ledger and recovery",
+        "runtime health and observability"
+      ]
+    },
+    "external_agent": {
+      "baseline": "jarvis/integrations-accounts-v1",
+      "required": [
+        "planner",
+        "connector framework",
+        "capability validation",
+        "verified action receipts",
+        "durable agent plans",
+        "web and research security"
+      ]
+    },
+    "integrations": {
+      "baseline": "jarvis/integrations-accounts-v1",
+      "required": [
+        "encrypted integration accounts",
+        "Google OAuth authorization-code flow",
+        "Gmail",
+        "Google Calendar",
+        "Google Contacts",
+        "durable email monitoring"
+      ]
+    },
+    "android": {
+      "baseline": "jarvis/unified-runtime-v1",
+      "supplements": ["jarvis/integrations-accounts-v1"],
+      "required": [
+        "production Jarvis branding",
+        "persistent chat history",
+        "delete current chat",
+        "Developer and Codex gateway",
+        "realtime delivery recovery",
+        "voice capture ownership",
+        "default assistant",
+        "overlay",
+        "wake word",
+        "top-level Integrations settings",
+        "IntegrationsActivity",
+        "Google OAuth deep link"
+      ]
+    },
+    "wear": {
+      "baseline": "jarvis/unified-runtime-v1",
+      "required": [
+        "Wear app module",
+        "Wear protocol module",
+        "watch voice endpoint",
+        "Tile",
+        "phone/watch audio routing",
+        "watch assistant integration"
+      ]
+    },
+    "web_chat": {
+      "baseline": "jarvis/unified-runtime-v1",
+      "required": ["persistent conversation tabs", "conversation-specific routing"]
+    },
+    "security": {
+      "baseline": "jarvis/integrations-accounts-v1",
+      "required": [
+        "OAuth CSRF and replay protection",
+        "credential redaction",
+        "SSRF and DNS rebinding defenses",
+        "principal and account isolation",
+        "fail-closed external writes",
+        "CodeQL regression coverage"
+      ]
+    }
+  },
+  "product_areas": {
+    "bridge_app_and_core_apis": {
+      "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1 plus reconciled unified-runtime realtime APIs",
+      "unique_capabilities": {
+        "jarvis/integrations-accounts-v1": ["current API surface", "identity scoping", "integration APIs", "external-agent runtime"],
+        "jarvis/unified-runtime-v1": ["realtime turn status and recovery endpoints"]
+      },
+      "missing_from_other_line": ["unified-runtime lacked integrations and the current connector platform", "integrations lacked the unified realtime ledger"],
+      "deployed_before": "integration source fa1273b; unified realtime ledger absent",
+      "reconciliation": "required and implemented"
+    },
+    "ai_engine": {
+      "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1 plus preserved production grounding hardening",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["external planner routing", "verified tool/action semantics"], "preserved production WIP audit": ["fresh verified person-focus follow-ups"]},
+      "missing_from_other_line": ["older lines lacked current external actions and Google semantics"],
+      "deployed_before": "fa1273b integration implementation without the reconciled focus freshness guard",
+      "reconciliation": "required and implemented"
+    },
+    "conversation_engine": {
+      "branches": ["conversation-engine", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "integration durable conversation store plus unified mobile/web conversation lifecycle",
+      "unique_capabilities": {"conversation-engine": ["foundational durable conversation API"], "jarvis/unified-runtime-v1": ["mobile and web conversation selection/deletion"], "jarvis/integrations-accounts-v1": ["identity-scoped durable messages"]},
+      "missing_from_other_line": ["integration Android did not expose unified history UX", "unified API list/delete was not principal-scoped"],
+      "deployed_before": "durable integration conversation store",
+      "reconciliation": "required and implemented with scoped list/get/delete and follow-up cancellation"
+    },
+    "realtime_voice": {
+      "branches": ["jarvis/production-alpha14", "jarvis/wear-v1", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "integration Core voice proxy reconciled with unified-runtime admission, fencing, and Wear endpoint behavior",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["turn admission", "provider epoch fencing", "response terminal states", "phone/watch endpoint normalization"], "jarvis/integrations-accounts-v1": ["current Core and identity integration"]},
+      "missing_from_other_line": ["integration lacked unified turn-ledger recovery", "unified lacked current integrations Core"],
+      "deployed_before": "integration realtime implementation without unified ledger",
+      "reconciliation": "required and implemented"
+    },
+    "realtime_turn_ledger_and_recovery": {
+      "branches": ["jarvis/unified-runtime-v1"],
+      "intended_source": "jarvis/unified-runtime-v1",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["SQLite turn ledger", "duplicate admission", "terminal recovery", "client turn status"]},
+      "missing_from_other_line": ["jarvis/integrations-accounts-v1"],
+      "deployed_before": "absent",
+      "reconciliation": "required and implemented"
+    },
+    "memory": {
+      "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["current user-scoped persistent memory"]},
+      "missing_from_other_line": ["no later unique memory implementation was found on unified-runtime or wear"],
+      "deployed_before": "current integration memory store",
+      "reconciliation": "retained without rollback"
+    },
+    "followup_engine": {
+      "branches": ["jarvis/production-alpha14", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["durable retries", "idempotent delivery keys", "external email monitors", "restart recovery"]},
+      "missing_from_other_line": ["unified-runtime lacked current external monitoring"],
+      "deployed_before": "current integration follow-up engine",
+      "reconciliation": "retained and extended to cancel atomically before conversation deletion"
+    },
+    "presence_and_home_assistant_grounding": {
+      "branches": ["jarvis/production-alpha14", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1", "preserved production WIP audit"],
+      "intended_source": "integration platform plus audited production grounding improvements",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["verified Home Assistant action receipts"], "preserved production WIP audit": ["live configured-person graph", "stale snapshot labels", "fresh evidence focus", "verified rollback outcomes"]},
+      "missing_from_other_line": ["unified-runtime did not contain the latest grounding hardening"],
+      "deployed_before": "fa1273b integration grounding",
+      "reconciliation": "required and implemented selectively"
+    },
+    "home_assistant_integration": {
+      "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1 with current Assist package retained",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["grounded reads", "verified writes", "mobile notification support"], "home_assistant package": ["streaming Assist bridge", "conversation closure", "smart audio gate"]},
+      "missing_from_other_line": ["no newer conflicting Home Assistant package was found on unified-runtime or wear"],
+      "deployed_before": "current package and integration Core",
+      "reconciliation": "retained and regression-tested"
+    },
+    "external_agent_platform": {
+      "branches": ["jarvis/external-agent-platform", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/external-agent-platform": ["platform foundation"], "jarvis/integrations-accounts-v1": ["integration accounts", "Google connectors", "durable external monitors"]},
+      "missing_from_other_line": ["unified-runtime and wear did not contain this platform"],
+      "deployed_before": "fa1273b verified platform",
+      "reconciliation": "retained without rollback"
+    },
+    "planner": {
+      "branches": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["capability-grounded plans", "approval policy", "argument validation", "receipt-derived results"]},
+      "missing_from_other_line": ["unified-runtime and wear"],
+      "deployed_before": "current verified planner",
+      "reconciliation": "retained"
+    },
+    "connector_framework": {
+      "branches": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["health evidence", "timeouts", "capability registry", "principal/account isolation"]},
+      "missing_from_other_line": ["unified-runtime and wear"],
+      "deployed_before": "current verified connector framework",
+      "reconciliation": "retained"
+    },
+    "google_oauth_and_integrations": {
+      "branches": ["jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["authorization-code OAuth", "PKCE/state", "callback replay protection", "refresh/revoke/reconnect", "truthful provider health"]},
+      "missing_from_other_line": ["every pre-integrations line"],
+      "deployed_before": "present; live Google credentials not configured",
+      "reconciliation": "retained"
+    },
+    "gmail": {
+      "branches": ["jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["search/read/draft/send/reply/forward/archive", "idempotent consequential writes", "provider receipts"]},
+      "missing_from_other_line": ["every pre-integrations line"],
+      "deployed_before": "implemented but Setup Required without live Google OAuth",
+      "reconciliation": "retained"
+    },
+    "google_calendar": {
+      "branches": ["jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["calendar/event/free-busy reads", "timezone-aware create/update/delete", "idempotent receipts"]},
+      "missing_from_other_line": ["every pre-integrations line"],
+      "deployed_before": "implemented but Setup Required without live Google OAuth",
+      "reconciliation": "retained"
+    },
+    "google_contacts": {
+      "branches": ["jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["verified email/phone lookup", "ambiguity and duplicate handling"]},
+      "missing_from_other_line": ["every pre-integrations line"],
+      "deployed_before": "implemented but Setup Required without live Google OAuth",
+      "reconciliation": "retained"
+    },
+    "web_research_and_browser_abstractions": {
+      "branches": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["safe fetch", "redirect and DNS checks", "provider-backed research evidence"]},
+      "missing_from_other_line": ["unified-runtime and wear"],
+      "deployed_before": "current integration implementation",
+      "reconciliation": "retained"
+    },
+    "security_auth_and_action_receipts": {
+      "branches": ["jarvis/alpha19-production-hardening", "jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["user/account scope", "OAuth redaction", "SSRF/rebinding defense", "encrypted credentials", "durable verified receipts", "CodeQL regex fixes"]},
+      "missing_from_other_line": ["unified-runtime lacked the current external security boundary"],
+      "deployed_before": "fa1273b verified controls",
+      "reconciliation": "retained and extended to conversation API scoping"
+    },
+    "proactive_intelligence": {
+      "branches": ["jarvis/production-alpha14", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["durable house-awareness events", "cooldown and target controls"]},
+      "missing_from_other_line": ["no later unique implementation was found on unified-runtime or wear"],
+      "deployed_before": "present",
+      "reconciliation": "retained"
+    },
+    "vision_and_cameras": {
+      "branches": ["jarvis/production-alpha14", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/integrations-accounts-v1",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["camera evidence routing", "vision request handling"]},
+      "missing_from_other_line": ["no later unique implementation was found on unified-runtime or wear"],
+      "deployed_before": "present",
+      "reconciliation": "retained"
+    },
+    "android_phone_app": {
+      "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/wear-v1", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/unified-runtime-v1 plus integrations Android additions",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["latest Main/Settings UI", "branding", "delete chat", "Developer mode", "persistent history", "turn recovery", "voice ownership", "Wear bridge"], "jarvis/integrations-accounts-v1": ["IntegrationsActivity", "account client", "Google return route", "top-level Integrations section"]},
+      "missing_from_other_line": ["alpha20 integrations release lost unified UI/runtime features", "unified-runtime lacked integrations UI"],
+      "deployed_before": "phone alpha20 was integrations-based and regressed unified UI features",
+      "reconciliation": "required and implemented"
+    },
+    "wear_os_app": {
+      "branches": ["jarvis/wear-v1", "jarvis/unified-runtime-v1"],
+      "intended_source": "jarvis/unified-runtime-v1",
+      "unique_capabilities": {"jarvis/wear-v1": ["initial watch app/protocol"], "jarvis/unified-runtime-v1": ["later phone/watch routing, startup buffering, epochs, audio reliability"]},
+      "missing_from_other_line": ["jarvis/integrations-accounts-v1 did not contain Wear modules"],
+      "deployed_before": "not part of the alpha20 integrations source tree",
+      "reconciliation": "required and implemented"
+    },
+    "developer_codex_gateway": {
+      "branches": ["jarvis/unified-runtime-v1"],
+      "intended_source": "jarvis/unified-runtime-v1",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["separate authenticated gateway", "session/thread routing", "approval handling", "Android Developer UI"]},
+      "missing_from_other_line": ["jarvis/integrations-accounts-v1"],
+      "deployed_before": "absent from integration Core image and alpha20 Android tree",
+      "reconciliation": "required and implemented"
+    },
+    "static_web_chat": {
+      "branches": ["conversation-engine", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/unified-runtime-v1 reconciled with scoped Core APIs",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["persistent conversation tabs", "conversation-specific routing"]},
+      "missing_from_other_line": ["integrations line used the older single-conversation page"],
+      "deployed_before": "older integration web chat",
+      "reconciliation": "required and implemented"
+    },
+    "ota_updater": {
+      "branches": ["jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1", "ota-feeds"],
+      "intended_source": "unified-production workflow and updater with ota-feeds as data-only publication branch",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["signed alpha19/alpha20 phone release pipeline"], "jarvis/unified-runtime-v1": ["current updater UI and version markers"], "ota-feeds": ["validated channel manifests"]},
+      "missing_from_other_line": ["prior workflows allowed release-line regression"],
+      "deployed_before": "alpha feed pointed to alpha20 integration-only Android artifact",
+      "reconciliation": "required; authoritative-ref and product-capability gates added"
+    },
+    "deployment_and_release_tooling": {
+      "branches": ["jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
+      "intended_source": "jarvis/unified-production only",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["stable phone signer verification and OTA publishing"], "jarvis/unified-runtime-v1": ["signed phone/Wear pair tooling"]},
+      "missing_from_other_line": ["no prior pipeline asserted the combined product baseline"],
+      "deployed_before": "manual Core deployment and feature-branch Android releases",
+      "reconciliation": "required; fail-closed authoritative source policy added"
+    },
+    "observability_and_health": {
+      "branches": ["jarvis/production-alpha14", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1"],
+      "intended_source": "integration health reporting plus unified realtime metrics",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["connector/account/provider health"], "jarvis/unified-runtime-v1": ["turn and provider recovery metrics"]},
+      "missing_from_other_line": ["each line lacked the other line's health domain"],
+      "deployed_before": "integration health without unified turn-ledger health",
+      "reconciliation": "required and implemented"
+    },
+    "tests": {
+      "branches": ["all audited product branches"],
+      "intended_source": "union of current non-obsolete regression coverage",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["OAuth/connectors/planner/security/action tests"], "jarvis/unified-runtime-v1": ["Android/Wear/realtime/developer tests"], "preserved production WIP audit": ["grounding freshness and verified action tests"]},
+      "missing_from_other_line": ["no branch alone tested the complete intended product"],
+      "deployed_before": "branch-local gates passed while cross-line Android regressions remained possible",
+      "reconciliation": "required; combined suites and baseline assertions added"
+    }
+  },
+  "release_assertions": {
+    "files": [
+      "bridge/app/realtime_turn_ledger.py",
+      "bridge/app/external_agent_runtime.py",
+      "bridge/app/google_integration.py",
+      "bridge/app/integration_accounts.py",
+      "bridge/app/connectors/audit.py",
+      "developer_gateway/app.py",
+      "tools/deploy_unified_core.sh",
+      "tools/verify_sqlite_integrity.py",
+      "android/jarvis-voice-client/wear/build.gradle.kts",
+      "android/jarvis-voice-client/wearprotocol/build.gradle.kts",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/IntegrationsActivity.java",
+      "android/jarvis-voice-client/app/src/main/res/drawable-xxxhdpi/control_delete_red.png"
+    ],
+    "markers": {
+      "bridge/app/realtime_voice.py": ["turn.status", "turn.accepted", "turn.interrupted"],
+      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime"],
+      "android/jarvis-voice-client/app/src/main/AndroidManifest.xml": [".IntegrationsActivity", "android:host=\"integrations\"", ".WearChannelListenerService", ".JarvisVoiceInteractionService"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.control_delete_red", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java": ["Voice and conversation", "Connections", "Integrations", "Developer", "Open integrations & accounts"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java": ["TurnRecoveryJournal", "TurnDeliveryFence", "turn.status"],
+      "bridge/app/static/chat.html": ["jarvis-chat-tabs-v1", "chat-tab"],
+      "tools/self_improvement_worker.py": ["AUTHORITATIVE_PRODUCTION_BRANCH", "Deployment is restricted to the authoritative"],
+      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build --no-deps jarvis-core", "PRAGMA quick_check"],
+      ".github/workflows/android-ota-release.yml": ["git fetch origin jarvis/unified-production", "verify_product_baseline.py", "jarvis-wear-v${version}-release.apk", "SHA256SUMS.txt", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
+      ".github/workflows/wear-v1-signed-pair.yml": ["branches: [jarvis/unified-production]", "./gradlew --no-daemon", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
+      ".github/workflows/codeql.yml": ["branches: [main, jarvis/unified-production]"]
+    },
+    "sha256": {
+      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png": "48f71005d585a8494463cf3b8c4db8ca1b8e82a7b4fb4942db67c0c1dcbe74af",
+      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_wordmark_master.png": "da33a713573cc452e9de9868053ae095eba241b8f5d5ed72ad8f939eb8b3c5fa",
+      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml": "b252ac194a15bd535680f3831b318ddef7db50bc695c59b0a563919c57cbcbf9"
+    }
+  },
+  "historical_branches": [
+    "conversation-engine",
+    "jarvis/production-alpha14",
+    "jarvis/wear-v1",
+    "jarvis/unified-runtime-v1",
+    "jarvis/alpha19-production-hardening",
+    "jarvis/external-agent-platform",
+    "jarvis/integrations-accounts-v1"
+  ]
+}

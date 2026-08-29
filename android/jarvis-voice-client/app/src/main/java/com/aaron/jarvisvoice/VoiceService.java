@@ -9,7 +9,6 @@ import android.app.Service;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
-import android.graphics.BitmapFactory;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -20,6 +19,10 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
+
+import com.aaron.jarvisvoice.protocol.AudioEndpointRouter;
+import com.aaron.jarvisvoice.protocol.VoiceEndpoint;
+import com.aaron.jarvisvoice.protocol.StartupAudioBuffer;
 
 public final class VoiceService extends Service implements
     JarvisRealtimeClient.Listener,
@@ -36,6 +39,7 @@ public final class VoiceService extends Service implements
     private AudioRouteMonitor alpha6AudioRouteMonitor;
 
     public static final String ACTION_START = "com.aaron.jarvisvoice.START";
+    public static final String ACTION_PREPARE_WATCH = "com.aaron.jarvisvoice.PREPARE_WATCH";
     public static final String ACTION_STOP = "com.aaron.jarvisvoice.STOP";
     public static final String ACTION_START_VOICE = "com.aaron.jarvisvoice.START_VOICE";
     public static final String ACTION_ARM_WAKE = "com.aaron.jarvisvoice.ARM_WAKE";
@@ -75,6 +79,15 @@ public final class VoiceService extends Service implements
     private JarvisRealtimeClient client;
     private RealtimeAudioEngine audio;
     private RealtimePlayback realtimePlayback;
+    private WearVoiceBridge wearVoiceBridge;
+    private AudioEndpointRouter audioEndpointRouter;
+    private VoiceEndpoint voiceEndpoint = VoiceEndpoint.PHONE;
+    private VoiceEndpoint clientEndpoint = VoiceEndpoint.PHONE;
+    private long endpointGeneration;
+    private final StartupAudioBuffer watchStartupAudio = new StartupAudioBuffer(
+        com.aaron.jarvisvoice.protocol.WearWireProtocol.SAMPLE_RATE * 2 * 2
+    );
+    private String clientConversationMode = "";
     private PlaybackController originalPlayback;
     private HomeAssistantTtsClient homeAssistantTts;
     private WakePhraseEngine wakePhraseEngine;
@@ -95,6 +108,8 @@ public final class VoiceService extends Service implements
     private boolean endConversationAfterReply;
     private boolean turnShouldSpeak;
     private boolean turnReceivedRealtimeAudio;
+    private boolean watchFirstAudioLogged;
+    private boolean watchFirstTextLogged;
     private boolean fallbackPending;
     private boolean fallbackSpeaking;
     private String pendingText = "";
@@ -110,6 +125,8 @@ public final class VoiceService extends Service implements
     private int wakeRearmGeneration;
     private int wakeUnhealthyChecks;
     private boolean wakeOnlyForeground;
+    private int phoneListeningTimeoutGeneration;
+    private boolean phoneListeningTimeoutArmed;
 
     private final Runnable wakeWatchdog =
         new Runnable() {
@@ -171,6 +188,26 @@ public final class VoiceService extends Service implements
         history = new ChatHistoryStore(this);
         audio = new RealtimeAudioEngine(this);
         realtimePlayback = new RealtimePlayback(this);
+        wearVoiceBridge = new WearVoiceBridge(this, new WearVoiceBridge.Listener() {
+            @Override public void onWatchPrepare() { main.post(VoiceService.this::prepareWatchTransport); }
+            @Override public void onWatchStart(long generation) { main.post(() -> beginWatchSession(generation)); }
+            @Override public void onWatchAudio(long generation, byte[] pcm) { main.post(() -> acceptWatchAudio(generation, pcm)); }
+            @Override public void onWatchText(long generation, String text) { main.post(() -> acceptWatchText(generation, text)); }
+            @Override public void onWatchClearChat(long generation) { main.post(() -> clearWatchChat(generation)); }
+            @Override public void onWatchCancel(long generation) { main.post(() -> cancelWatchSession(generation)); }
+            @Override public void onWatchSilenceTimeout(long generation) { main.post(() -> pauseWatchSession(generation, "Watch ready")); }
+            @Override public void onWatchDisconnected() { main.post(VoiceService.this::watchDisconnected); }
+        });
+        audioEndpointRouter = new AudioEndpointRouter(
+            new AudioEndpointRouter.Sink() {
+                @Override public void enqueue(byte[] pcm, long generation) { realtimePlayback.enqueue(pcm); }
+                @Override public void interrupt() { realtimePlayback.interrupt(); }
+            },
+            new AudioEndpointRouter.Sink() {
+                @Override public void enqueue(byte[] pcm, long generation) { wearVoiceBridge.audio(pcm, generation); }
+                @Override public void interrupt() { wearVoiceBridge.interrupt(); }
+            }
+        );
         originalPlayback = new PlaybackController(this, this);
         wakePhraseEngine = new WakePhraseEngine(this, this);
         standardSpeechEngine = new StandardSpeechEngine(this, this);
@@ -195,6 +232,7 @@ public final class VoiceService extends Service implements
         acquireWakeLock();
 
         switch (action) {
+            case ACTION_PREPARE_WATCH -> prepareWatchTransport();
             case ACTION_ARM_WAKE -> {
                 requestedVoiceActive = false;
                 ensureConnected();
@@ -235,6 +273,8 @@ public final class VoiceService extends Service implements
             case ACTION_ASSISTANT_DISMISS -> stopVoice(false);
             default -> {
                 ensureConnected();
+                if (ready) status("Ready");
+                else if (client != null) status("Connecting");
                 if (store.startWithVoice() && microphoneForeground) {
                     requestedVoiceActive = true;
                 }
@@ -242,7 +282,8 @@ public final class VoiceService extends Service implements
         }
 
         return (
-            store.backgroundConversations()
+            (!store.coreUrl().isBlank() && !store.mobileToken().isBlank())
+                || store.backgroundConversations()
                 || wakeWordUsesVoiceService()
                 || (
                     store.assistantWakeAlways()
@@ -315,8 +356,9 @@ public final class VoiceService extends Service implements
             return microphoneForegroundActive;
         }
 
-        int dataSyncType =
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+        int dataSyncType = Build.VERSION.SDK_INT >= 34
+            ? ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+            : ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
 
         if (wantsMicrophone && microphoneGranted) {
             try {
@@ -369,7 +411,7 @@ public final class VoiceService extends Service implements
         history.ensureActiveConversation();
         ready = false;
         voiceFoundation.opening("connecting to Jarvis Core");
-        closeClientAndAudio();
+        replaceClientAndAudio();
         if (!requestedVoiceActive && store.wakeEnabled()) {
             scheduleWakeRearm(
                 "wake stays active during Core connection"
@@ -377,6 +419,10 @@ public final class VoiceService extends Service implements
         }
         prepareOriginalVoice();
         VoiceCatalog.Entry selected = VoiceCatalog.fromId(store.voiceId());
+        clientConversationMode = voiceEndpoint == VoiceEndpoint.WATCH
+            ? ConversationMode.LIVE
+            : store.conversationMode();
+        clientEndpoint = voiceEndpoint;
         client = new JarvisRealtimeClient(
             this,
             store.coreUrl(),
@@ -386,9 +432,10 @@ public final class VoiceService extends Service implements
             store.userName(),
             VoiceCatalog.serverVoice(selected.id),
             VoiceCatalog.serverMode(selected.id),
-            store.conversationMode(),
+            clientConversationMode,
             store.vadEagerness(),
             store.conversationId(),
+            voiceEndpoint.name(),
             this
         );
         status("Connecting to Jarvis Core");
@@ -481,7 +528,7 @@ public final class VoiceService extends Service implements
         fallbackSpeaking = false;
         turnShouldSpeak = false;
         turnReceivedRealtimeAudio = false;
-        realtimePlayback.interrupt();
+        audioEndpointRouter.interrupt();
         originalPlayback.stop();
         if (homeAssistantTts != null) {
             homeAssistantTts.cancelActiveRun();
@@ -516,7 +563,19 @@ public final class VoiceService extends Service implements
         String text = rawText == null ? "" : rawText.trim();
         if (text.isEmpty()) return;
         prepareSpokenTurn(speak);
-        addMessage(ChatMessage.USER, text);
+
+        if (
+            !addMessageDurable(
+                ChatMessage.USER,
+                text
+            )
+        ) {
+            status(
+                "Could not save this message safely"
+            );
+            return;
+        }
+
         if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
         }
@@ -550,6 +609,20 @@ public final class VoiceService extends Service implements
     private void beginVoice() {
         if (!ready || stopping) return;
 
+        if (voiceEndpoint == VoiceEndpoint.WATCH && voiceActive) {
+            stopVoice(false);
+        }
+        voiceEndpoint = VoiceEndpoint.PHONE;
+        String configuredMode = ConversationMode.normalise(
+            store.conversationMode()
+        );
+        if (!configuredMode.equals(clientConversationMode)
+                || clientEndpoint != VoiceEndpoint.PHONE) {
+            requestedVoiceActive = true;
+            connect();
+            return;
+        }
+
         promoteForeground(ACTION_START_VOICE);
 
         if (!microphoneForegroundActive
@@ -565,6 +638,8 @@ public final class VoiceService extends Service implements
             return;
         }
         requestedVoiceActive = true;
+        endpointGeneration++;
+        audioEndpointRouter.begin(voiceEndpoint, endpointGeneration);
         voiceActive = true;
         VoiceSessionState.setActive(true);
         if (ConversationMode.STANDARD.equals(store.conversationMode())) {
@@ -586,7 +661,130 @@ public final class VoiceService extends Service implements
             if (!audio.isRunning()) audio.start();
             status("Live voice — listening continuously");
             broadcastState(true, true);
+            // The eight-second no-speech deadline is started by
+            // onAudioReady(), after AudioRecord is genuinely recording.
         }
+    }
+
+    private void beginWatchSession(long generation) {
+        Log.i(TAG, "WATCH_LATENCY session_start_received generation=" + generation
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        if (voiceEndpoint == VoiceEndpoint.WATCH && voiceActive
+                && generation == endpointGeneration) {
+            wearVoiceBridge.state("LISTENING", endpointGeneration);
+            return;
+        }
+        if (voiceEndpoint == VoiceEndpoint.WATCH && voiceActive) {
+            cancelCurrentResponse();
+            requestedVoiceActive = false;
+            voiceActive = false;
+            brainActive = false;
+            VoiceSessionState.setActive(false);
+            stopCaptureAndPlayback();
+        }
+        if (voiceActive) stopVoice(false);
+        voiceEndpoint = VoiceEndpoint.WATCH;
+        endpointGeneration = generation;
+        watchStartupAudio.begin(generation);
+        audioEndpointRouter.begin(voiceEndpoint, endpointGeneration);
+        if (store.coreUrl().isBlank() || store.mobileToken().isBlank()) {
+            wearVoiceBridge.error("Configure Jarvis on the phone first", endpointGeneration);
+            voiceEndpoint = VoiceEndpoint.PHONE;
+            requestedVoiceActive = false;
+            return;
+        }
+        requestedVoiceActive = true;
+        if (client == null || clientEndpoint != VoiceEndpoint.WATCH
+                || !ConversationMode.LIVE.equals(clientConversationMode)) {
+            connect();
+        }
+        if (ready) beginWatchVoice();
+    }
+
+    /** Starts the WATCH-authenticated Core handshake as soon as the channel wakes the hub. */
+    private void prepareWatchTransport() {
+        if (voiceActive || stopping || store.coreUrl().isBlank()
+                || store.mobileToken().isBlank()) return;
+        if (clientEndpoint == VoiceEndpoint.WATCH && client != null
+                && ConversationMode.LIVE.equals(clientConversationMode)) return;
+        voiceEndpoint = VoiceEndpoint.WATCH;
+        requestedVoiceActive = false;
+        Log.i(TAG, "WATCH_LATENCY core_prewarm_requested elapsed_ms="
+            + SystemClock.elapsedRealtime());
+        connect();
+    }
+
+    private void beginWatchVoice() {
+        if (!ready || stopping || voiceEndpoint != VoiceEndpoint.WATCH) return;
+        requestedVoiceActive = true;
+        voiceActive = true;
+        VoiceSessionState.setActive(true);
+        wakePhraseEngine.stop();
+        audio.stop();
+        standardSpeechEngine.stop();
+        voiceFoundation.listeningLive("watch voice session started");
+        JarvisRealtimeClient current = client;
+        if (current != null) {
+            for (byte[] frame : watchStartupAudio.drain(endpointGeneration)) current.sendAudio(frame);
+        }
+        wearVoiceBridge.state("LISTENING", endpointGeneration);
+        Log.i(TAG, "WATCH_LATENCY listening_ready generation=" + endpointGeneration
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        status("Watch listening");
+    }
+
+    private void acceptWatchAudio(long generation, byte[] pcm) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || generation != endpointGeneration) return;
+        if (!voiceActive || !ready || client == null) {
+            watchStartupAudio.offer(generation, pcm);
+            return;
+        }
+        client.sendAudio(pcm);
+    }
+
+    private void acceptWatchText(long generation, String rawText) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || !voiceActive
+                || generation != endpointGeneration) return;
+        String text = rawText == null ? "" : rawText.trim();
+        if (text.isEmpty()) return;
+        wearVoiceBridge.state("PROCESSING", generation);
+        Log.i(TAG, "WATCH_LATENCY typed_turn_received generation=" + generation
+            + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        queueOrSend(text, true);
+    }
+
+    private void clearWatchChat(long generation) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || generation != endpointGeneration) return;
+        deleteCurrentChat();
+        wearVoiceBridge.transcriptCleared(generation);
+    }
+
+    private void cancelWatchSession(long generation) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || generation != endpointGeneration) return;
+        pauseWatchSession(generation, "Stopped");
+    }
+
+    /** Ends microphone/turn ownership while deliberately retaining the WATCH Core transport. */
+    private void pauseWatchSession(long generation, String message) {
+        if (voiceEndpoint != VoiceEndpoint.WATCH || generation != endpointGeneration) return;
+        cancelCurrentResponse();
+        requestedVoiceActive = false;
+        voiceActive = false;
+        brainActive = false;
+        playbackActive = false;
+        VoiceSessionState.setActive(false);
+        stopCaptureAndPlayback();
+        watchStartupAudio.reset();
+        releaseAudioFocus();
+        wearVoiceBridge.state("READY", generation);
+        broadcastState(false, false);
+        status(message);
+    }
+
+    private void watchDisconnected() {
+        if (voiceEndpoint != VoiceEndpoint.WATCH) return;
+        cancelCurrentResponse();
+        stopVoice(false);
     }
 
     private void startStandardListening() {
@@ -610,6 +808,13 @@ public final class VoiceService extends Service implements
         }
 
         if (standardSpeechEngine.isRunning()) {
+            if (
+                !brainActive
+                    && !playbackActive
+                    && standardSpeechEngine.isCaptureReady()
+            ) {
+                armPhoneListeningTimeout();
+            }
             return;
         }
 
@@ -620,6 +825,83 @@ public final class VoiceService extends Service implements
                 : "Listening"
         );
         broadcastState(true, true);
+
+        /*
+         * Do not start the eight-second deadline here.
+         * SpeechRecognizer.startListening() only requests capture.
+         * onStandardReady() is the authoritative capture-ready
+         * boundary.
+         */
+    }
+
+    private boolean phoneCaptureReady() {
+        if (
+            ConversationMode.STANDARD.equals(
+                store.conversationMode()
+            )
+        ) {
+            return standardSpeechEngine != null
+                && standardSpeechEngine.isCaptureReady();
+        }
+
+        return audio != null
+            && audio.isCaptureReady();
+    }
+
+    private void armPhoneListeningTimeout() {
+        boolean captureReady = phoneCaptureReady();
+
+        if (
+            !PhoneListeningTimeoutPolicy.shouldArm(
+                voiceActive,
+                voiceEndpoint,
+                brainActive,
+                playbackActive,
+                captureReady
+            )
+        ) {
+            return;
+        }
+
+        if (phoneListeningTimeoutArmed) return;
+
+        phoneListeningTimeoutArmed = true;
+        int generation = ++phoneListeningTimeoutGeneration;
+
+        main.postDelayed(() -> {
+            if (
+                generation
+                    != phoneListeningTimeoutGeneration
+            ) {
+                return;
+            }
+
+            phoneListeningTimeoutArmed = false;
+
+            if (
+                !PhoneListeningTimeoutPolicy.shouldTimeout(
+                    voiceActive,
+                    voiceEndpoint,
+                    brainActive,
+                    playbackActive,
+                    phoneCaptureReady()
+                )
+            ) {
+                return;
+            }
+
+            Log.i(
+                TAG,
+                "VOICE_LISTEN_TIMEOUT no_meaningful_speech_ms="
+                    + PhoneListeningTimeoutPolicy.TIMEOUT_MS
+            );
+            stopVoice(false);
+        }, PhoneListeningTimeoutPolicy.TIMEOUT_MS);
+    }
+
+    private void cancelPhoneListeningTimeout() {
+        phoneListeningTimeoutArmed = false;
+        phoneListeningTimeoutGeneration++;
     }
 
 
@@ -747,7 +1029,7 @@ public final class VoiceService extends Service implements
         JarvisRealtimeClient current = client;
         if (current != null) current.cancelResponse();
 
-        realtimePlayback.interrupt();
+        audioEndpointRouter.interrupt();
         originalPlayback.stop();
         if (homeAssistantTts != null) homeAssistantTts.cancelActiveRun();
         if (speechFallback != null) speechFallback.cancel();
@@ -803,6 +1085,9 @@ public final class VoiceService extends Service implements
     }
 
     private void stopVoice(boolean stopService) {
+        cancelPhoneListeningTimeout();
+        VoiceEndpoint endingEndpoint = voiceEndpoint;
+        long endingGeneration = endpointGeneration;
         requestedVoiceActive = false;
         voiceActive = false;
         brainActive = false;
@@ -814,6 +1099,10 @@ public final class VoiceService extends Service implements
         VoiceSessionState.setActive(false);
         releaseAudioFocus();
         broadcastState(false, false);
+        if (endingEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.sessionClosed(endingGeneration);
+            voiceEndpoint = VoiceEndpoint.PHONE;
+        }
         if (stopService) {
             stopJarvis();
         } else if (store.wakeEnabled()) {
@@ -916,18 +1205,39 @@ public final class VoiceService extends Service implements
         if (speechFallback != null) speechFallback.cancel();
         fallbackPending = false;
         fallbackSpeaking = false;
-        realtimePlayback.interrupt();
+        audioEndpointRouter.interrupt();
         originalPlayback.stop();
         playbackActive = false;
         if (homeAssistantTts != null) homeAssistantTts.cancelActiveRun();
     }
 
+    private void replaceClientAndAudio() {
+        closeClientAndAudio(
+            true
+        );
+    }
+
     private void closeClientAndAudio() {
+        closeClientAndAudio(
+            false
+        );
+    }
+
+    private void closeClientAndAudio(
+        boolean replacement
+    ) {
         stopCaptureAndPlayback();
+
         if (client != null) {
-            client.close();
+            if (replacement) {
+                client.closeForReplacement();
+            } else {
+                client.close();
+            }
+
             client = null;
         }
+
         if (homeAssistantTts != null) {
             homeAssistantTts.close();
             homeAssistantTts = null;
@@ -963,11 +1273,16 @@ public final class VoiceService extends Service implements
         boolean unifiedBrain
     ) {
         ready = true;
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            Log.i(TAG, "WATCH_LATENCY core_session_ready generation=" + endpointGeneration
+                + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        }
         String mode = ConversationMode.label(conversationMode);
         status("Ready · " + mode + " · " + (unifiedBrain ? "Jarvis Core" : model));
         flushPendingText();
         if (requestedVoiceActive) {
-            beginVoice();
+            if (voiceEndpoint == VoiceEndpoint.WATCH) beginWatchVoice();
+            else beginVoice();
         } else if (store.wakeEnabled()) {
             scheduleWakeRearm("Core ready");
         } else {
@@ -977,6 +1292,22 @@ public final class VoiceService extends Service implements
 
     @Override public void onDisconnected(String reason) {
         ready = false;
+
+        /*
+         * The old transport no longer owns a provably running
+         * brain turn. JarvisRealtimeClient now reconciles that
+         * logical turn against Core's durable ledger before the
+         * replacement connection is exposed as ready.
+         */
+        brainActive = false;
+
+        /*
+         * A listening deadline belongs to the old capture epoch.
+         * Recovery must receive a fresh full deadline after the
+         * replacement transport/capture is actually ready.
+         */
+        cancelPhoneListeningTimeout();
+
         voiceFoundation.recovering(
             "connection lost: " + safe(reason, "unknown")
         );
@@ -984,6 +1315,11 @@ public final class VoiceService extends Service implements
         standardSpeechEngine.stop();
         status("Reconnecting: " + safe(reason, "connection lost"));
         broadcastState(voiceActive, false);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.error("Phone Jarvis unavailable", endpointGeneration);
+            stopVoice(false);
+            return;
+        }
         if (!voiceActive && store.wakeEnabled()) {
             scheduleWakeRearm(
                 "wake remains active while Core reconnects"
@@ -1078,13 +1414,19 @@ public final class VoiceService extends Service implements
     }
 
     @Override public void onUserTranscript(String text) {
-        if (text == null || text.isBlank()) return;
+        if (!PhoneListeningTimeoutPolicy.isMeaningfulTranscript(text)) return;
+        cancelPhoneListeningTimeout();
         if (ConversationEndPolicy.shouldEnd(text)) {
             endConversationAfterReply = true;
         }
         prepareSpokenTurn(true);
         brainActive = true;
         addMessage(ChatMessage.USER, text);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.userTranscript(text, endpointGeneration);
+            Log.i(TAG, "WATCH_LATENCY transcript_ready generation=" + endpointGeneration
+                + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        }
         status("Thinking");
     }
 
@@ -1107,7 +1449,15 @@ public final class VoiceService extends Service implements
         fallbackPending = false;
         if (speechFallback != null) speechFallback.cancel();
         playbackActive = true;
-        realtimePlayback.enqueue(pcm16);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.state("SPEAKING", endpointGeneration);
+            if (!watchFirstAudioLogged) {
+                watchFirstAudioLogged = true;
+                Log.i(TAG, "WATCH_LATENCY phone_first_audio generation=" + endpointGeneration
+                    + " bytes=" + pcm16.length + " elapsed_ms=" + SystemClock.elapsedRealtime());
+            }
+        }
+        audioEndpointRouter.enqueue(pcm16, endpointGeneration);
     }
 
     @Override public void onSpeechStarted() {
@@ -1127,7 +1477,13 @@ public final class VoiceService extends Service implements
 
 
     @Override public void onAudioDone() {
-        realtimePlayback.markDone();
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.audioDone(endpointGeneration);
+            playbackActive = false;
+            afterPlayback();
+        } else {
+            realtimePlayback.markDone();
+        }
     }
 
     @Override public void onBrainStarted(String command) {
@@ -1141,9 +1497,15 @@ public final class VoiceService extends Service implements
         );
         if (voiceActive) turnShouldSpeak = true;
         turnReceivedRealtimeAudio = false;
+        watchFirstAudioLogged = false;
+        watchFirstTextLogged = false;
         fallbackPending = false;
         fallbackSpeaking = false;
         if (speechFallback != null) speechFallback.cancel();
+        // A preceding generation-safe interruption deliberately deactivates
+        // the output router. A newly owned Core turn must explicitly arm it
+        // again or all valid follow-up audio is rejected as stale.
+        audioEndpointRouter.resume(voiceEndpoint, endpointGeneration);
         broadcastEvent(
             "thinking",
             "",
@@ -1152,6 +1514,11 @@ public final class VoiceService extends Service implements
             false
         );
         status("Thinking");
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.state("PROCESSING", endpointGeneration);
+            Log.i(TAG, "WATCH_LATENCY turn_started generation=" + endpointGeneration
+                + " elapsed_ms=" + SystemClock.elapsedRealtime());
+        }
         if (
             voiceActive
                 && ConversationMode.STANDARD.equals(store.conversationMode())
@@ -1171,6 +1538,14 @@ public final class VoiceService extends Service implements
             );
         }
         broadcastEvent("assistant_delta", ChatMessage.ASSISTANT, text, voiceActive, false);
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            if (!watchFirstTextLogged) {
+                watchFirstTextLogged = true;
+                Log.i(TAG, "WATCH_LATENCY first_assistant_delta generation=" + endpointGeneration
+                    + " elapsed_ms=" + SystemClock.elapsedRealtime());
+            }
+            wearVoiceBridge.assistantDelta(text, endpointGeneration);
+        }
     }
 
     @Override public void onBrainResponse(
@@ -1178,13 +1553,111 @@ public final class VoiceService extends Service implements
         boolean success,
         String conversationId
     ) {
+        handleBrainResponse(
+            0L,
+            text,
+            success,
+            conversationId,
+            false
+        );
+    }
+
+    @Override public boolean onBrainResponseDurably(
+        long clientTurnId,
+        String text,
+        boolean success,
+        String conversationId
+    ) {
+        return handleBrainResponse(
+            clientTurnId,
+            text,
+            success,
+            conversationId,
+            true
+        );
+    }
+
+    private boolean handleBrainResponse(
+        long clientTurnId,
+        String text,
+        boolean success,
+        String conversationId,
+        boolean durable
+    ) {
         brainActive = false;
-        String response = text == null ? "" : text.trim();
-        lastAssistantResponse = response;
-        currentAssistantSpeech = response;
+
+        String response =
+            text == null
+                ? ""
+                : text.trim();
+
+        lastAssistantResponse =
+            response;
+
+        currentAssistantSpeech =
+            response;
+
+        boolean alreadyPresent = false;
 
         if (!response.isEmpty()) {
-            addMessage(ChatMessage.ASSISTANT, response);
+            if (durable) {
+                ChatHistoryStore.DurableAddResult result =
+                    addRealtimeAssistantMessageDurable(
+                        clientTurnId,
+                        response
+                    );
+
+                if (
+                    result
+                        == ChatHistoryStore
+                            .DurableAddResult
+                            .FAILED
+                ) {
+                    status(
+                        "Could not save Jarvis response safely"
+                    );
+
+                    return false;
+                }
+
+                alreadyPresent =
+                    result
+                        == ChatHistoryStore
+                            .DurableAddResult
+                            .ALREADY_PRESENT;
+
+            } else {
+                addMessage(
+                    ChatMessage.ASSISTANT,
+                    response
+                );
+            }
+
+            if (
+                voiceEndpoint
+                        == VoiceEndpoint.WATCH
+                    && !alreadyPresent
+            ) {
+                wearVoiceBridge.assistantDone(
+                    response,
+                    endpointGeneration
+                );
+            }
+        }
+
+        /*
+         * A recovered response that is already present in
+         * durable chat history must not trigger duplicate UI,
+         * fallback speech or watch completion side effects.
+         */
+        if (alreadyPresent) {
+            status(
+                success
+                    ? "Jarvis response restored"
+                    : "Jarvis response restored with an error"
+            );
+
+            return true;
         }
 
         status(
@@ -1199,12 +1672,35 @@ public final class VoiceService extends Service implements
                 turnReceivedRealtimeAudio,
                 success,
                 response,
-                VoiceCatalog.isOriginal(store.voiceId())
+                VoiceCatalog.isOriginal(
+                    store.voiceId()
+                )
             );
 
-        if (useFallback && speechFallback != null) {
+        if (
+            useFallback
+                && voiceEndpoint
+                    == VoiceEndpoint.WATCH
+        ) {
+            wearVoiceBridge.error(
+                "Watch speech unavailable — try again",
+                endpointGeneration
+            );
+
+            stopVoice(false);
+            return true;
+        }
+
+        if (
+            useFallback
+                && speechFallback != null
+        ) {
             fallbackPending = true;
-            speechFallback.schedule(response, 900L);
+
+            speechFallback.schedule(
+                response,
+                900L
+            );
         }
 
         if (endConversationAfterReply) {
@@ -1222,13 +1718,17 @@ public final class VoiceService extends Service implements
                 },
                 1_600L
             );
+
         } else if (
-            !store.keepConversationOpen()
+            voiceEndpoint != VoiceEndpoint.WATCH
+                && !store.keepConversationOpen()
                 && voiceActive
                 && !playbackActive
                 && !fallbackPending
                 && !fallbackSpeaking
-                && !VoiceCatalog.isOriginal(store.voiceId())
+                && !VoiceCatalog.isOriginal(
+                    store.voiceId()
+                )
         ) {
             main.postDelayed(
                 () -> {
@@ -1243,10 +1743,20 @@ public final class VoiceService extends Service implements
                 350L
             );
         }
+
+        return true;
     }
 
     @Override public void onOriginalTts(String text) {
         if (!voiceActive || text == null || text.isBlank()) return;
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.error(
+                "This voice cannot stream to the watch",
+                endpointGeneration
+            );
+            stopVoice(false);
+            return;
+        }
         Log.i(
             TAG,
             "VOICE_OUTPUT_REQUESTED mode=home_assistant text_length="
@@ -1263,11 +1773,28 @@ public final class VoiceService extends Service implements
 
     @Override public void onTurnDone() {
         if (fallbackPending || fallbackSpeaking) return;
+
+        if (
+            ready
+                && client != null
+                && !pendingText.isBlank()
+        ) {
+            flushPendingText();
+
+            if (brainActive) {
+                return;
+            }
+        }
+
         if (endConversationAfterReply && !playbackActive) {
             finishConversation();
             return;
         }
         if (!voiceActive) return;
+        if (voiceEndpoint == VoiceEndpoint.WATCH && !playbackActive) {
+            wearVoiceBridge.state("LISTENING", endpointGeneration);
+            return;
+        }
         if (!store.keepConversationOpen() && !playbackActive) {
             stopVoice(false);
         } else if (ConversationMode.STANDARD.equals(store.conversationMode()) &&
@@ -1280,6 +1807,22 @@ public final class VoiceService extends Service implements
         brainActive = false;
         status("Error: " + safe(message, "unknown voice error"));
         broadcastEvent("error", ChatMessage.SYSTEM, safe(message, "Unknown voice error"), voiceActive, false);
+    }
+
+    @Override public void onAudioReady() {
+        if (
+            !voiceActive
+                || voiceEndpoint != VoiceEndpoint.PHONE
+                || !ConversationMode.LIVE.equals(
+                    store.conversationMode()
+                )
+        ) {
+            return;
+        }
+
+        if (!brainActive && !playbackActive) {
+            armPhoneListeningTimeout();
+        }
     }
 
     @Override public void onAudioFrame(byte[] pcm16) {
@@ -1318,6 +1861,7 @@ public final class VoiceService extends Service implements
         if (!playing && fallbackSpeaking) return;
         playbackActive = playing;
         if (playing) {
+            cancelPhoneListeningTimeout();
             float bargeInGain = BargeInAudioPolicy.outputGain(
                 usesPrivateAudioRoute(),
                 ConversationMode.STANDARD.equals(store.conversationMode())
@@ -1377,6 +1921,12 @@ public final class VoiceService extends Service implements
         }
         if (!voiceActive) return;
 
+        if (voiceEndpoint == VoiceEndpoint.WATCH) {
+            wearVoiceBridge.state("LISTENING", endpointGeneration);
+            status("Watch listening");
+            return;
+        }
+
         if (wakeOwnedVoiceSession) {
             followUpOwnerUntilMs =
                 SystemClock.elapsedRealtime()
@@ -1389,6 +1939,9 @@ public final class VoiceService extends Service implements
         } else {
             status("Live voice — listening continuously");
             broadcastState(true, true);
+            if (audio != null && audio.isCaptureReady()) {
+                armPhoneListeningTimeout();
+            }
         }
     }
 
@@ -1518,11 +2071,42 @@ public final class VoiceService extends Service implements
             "VOICE_BARGE_IN capture_ready playback=" + playbackActive
                 + " brain=" + brainActive
         );
+
         voiceFoundation.listeningStandard(
             "standard recogniser ready"
         );
+
         status("Listening");
         broadcastState(true, true);
+
+        /*
+         * Reset any obsolete deadline and give this actual
+         * recogniser capture the complete eight-second window.
+         */
+        cancelPhoneListeningTimeout();
+
+        if (
+            voiceActive
+                && voiceEndpoint == VoiceEndpoint.PHONE
+                && !brainActive
+                && !playbackActive
+        ) {
+            armPhoneListeningTimeout();
+        }
+    }
+
+    @Override public void onStandardSpeechStarted() {
+        /*
+         * Actual microphone speech owns the session now.
+         * The idle/no-speech deadline must never race a user
+         * who has already started talking.
+         */
+        cancelPhoneListeningTimeout();
+
+        Log.i(
+            TAG,
+            "VOICE_LISTEN_TIMEOUT cancelled_speech_started"
+        );
     }
 
     @Override public void onStandardPartial(
@@ -1537,6 +2121,13 @@ public final class VoiceService extends Service implements
         if (isLikelyPlaybackEcho(text)) {
             return;
         }
+
+        /*
+         * Some Android recognisers may deliver a useful partial
+         * immediately around the beginning-of-speech callback.
+         * Treat a real, non-echo partial as a second safety fence.
+         */
+        cancelPhoneListeningTimeout();
 
         if (hasInterruptibleTurn()) {
             boolean outputActive =
@@ -1581,6 +2172,12 @@ public final class VoiceService extends Service implements
         String text
     ) {
         if (!voiceActive) return;
+
+        /*
+         * Recognition has completed. Invalidate the deadline
+         * belonging to that capture before processing the result.
+         */
+        cancelPhoneListeningTimeout();
 
         String heard =
             text == null ? "" : text.trim();
@@ -1698,6 +2295,12 @@ public final class VoiceService extends Service implements
 
 
     @Override public void onStandardError(String message) {
+        /*
+         * The failed recogniser no longer owns a live capture.
+         * Its deadline must not survive into the replacement.
+         */
+        cancelPhoneListeningTimeout();
+
         Log.w(
             TAG,
             "VOICE_BARGE_IN capture_error message=" + message
@@ -1749,9 +2352,79 @@ public final class VoiceService extends Service implements
 
 
 
-    private void addMessage(String role, String text) {
-        history.add(role, text);
-        broadcastEvent("message", role, text, voiceActive, false);
+    private void addMessage(
+        String role,
+        String text
+    ) {
+        history.add(
+            role,
+            text
+        );
+
+        broadcastEvent(
+            "message",
+            role,
+            text,
+            voiceActive,
+            false
+        );
+    }
+
+    private boolean addMessageDurable(
+        String role,
+        String text
+    ) {
+        boolean persisted =
+            history.addDurable(
+                role,
+                text
+            );
+
+        if (!persisted) {
+            return false;
+        }
+
+        broadcastEvent(
+            "message",
+            role,
+            text,
+            voiceActive,
+            false
+        );
+
+        return true;
+    }
+
+    private ChatHistoryStore.DurableAddResult
+        addRealtimeAssistantMessageDurable(
+            long clientTurnId,
+            String text
+        ) {
+
+        ChatHistoryStore.DurableAddResult result =
+            history.addDurable(
+                "realtime-assistant-"
+                    + clientTurnId,
+                ChatMessage.ASSISTANT,
+                text
+            );
+
+        if (
+            result
+                == ChatHistoryStore
+                    .DurableAddResult
+                    .ADDED
+        ) {
+            broadcastEvent(
+                "message",
+                ChatMessage.ASSISTANT,
+                text,
+                voiceActive,
+                false
+            );
+        }
+
+        return result;
     }
 
     private void status(String message) {
@@ -1807,13 +2480,7 @@ public final class VoiceService extends Service implements
                     : ACTIVE_NOTIFICATION_CHANNEL_ID
             )
                 .setSmallIcon(R.drawable.ic_jarvis_status)
-                .setContentTitle("Jarvis")
-                .setLargeIcon(
-                    BitmapFactory.decodeResource(
-                        getResources(),
-                        R.drawable.jarvis_logo_ui
-                    )
-                )
+                .setContentTitle("J A R V I S")
                 .setContentText(
                     wakeOnly
                         ? "Wake word is active"
@@ -1955,6 +2622,10 @@ public final class VoiceService extends Service implements
         main.removeCallbacks(wakeWatchdog);
         VoiceSessionState.setActive(false);
         closeClientAndAudio();
+        if (wearVoiceBridge != null) {
+            wearVoiceBridge.close();
+            wearVoiceBridge = null;
+        }
         if (speechFallback != null) {
             speechFallback.shutdown();
             speechFallback = null;

@@ -39,7 +39,7 @@ def config() -> object:
         proposal_only=True,
         candidate_timeout_seconds=60,
         deploy_health_timeout_seconds=30,
-        base_branch="main",
+        base_branch="jarvis/unified-production",
     )
 
 

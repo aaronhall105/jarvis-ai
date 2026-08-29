@@ -10,8 +10,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 31
         targetSdk = 36
-        versionCode = 190200
-        versionName = "19.0.0-alpha20"
+        versionCode = 190230
+        versionName = "19.0.0-alpha21"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
 
@@ -55,6 +55,8 @@ android {
 }
 
 dependencies {
+    implementation(project(":wearprotocol"))
+    implementation("com.google.android.gms:play-services-wearable:20.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.work:work-runtime:2.11.0")
     implementation("androidx.activity:activity:1.12.3")

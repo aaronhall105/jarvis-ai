@@ -70,6 +70,23 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(module.normalise_conversation_mode("standard"), "standard")
         self.assertEqual(module.normalise_conversation_mode("other"), "live")
+        self.assertEqual(module.normalise_voice_endpoint("watch"), "WATCH")
+        self.assertEqual(module.normalise_voice_endpoint("anything"), "PHONE")
+        self.assertFalse(
+            module.quiet_controls_enabled(
+                True, {"client_kind": "mobile", "voice_endpoint": "WATCH"}
+            )
+        )
+        self.assertTrue(
+            module.quiet_controls_enabled(
+                True, {"client_kind": "mobile", "voice_endpoint": "PHONE"}
+            )
+        )
+        self.assertFalse(
+            module.quiet_controls_enabled(
+                True, {"client_kind": "voice_pe", "voice_endpoint": "PHONE"}
+            )
+        )
         self.assertEqual(module.normalise_eagerness("bad"), "high")
 
     def test_live_and_standard_session_contracts(self) -> None:
@@ -77,8 +94,8 @@ class ConfigurationTests(unittest.TestCase):
             enabled=True,
             api_key="secret",
             mobile_token="mobile",
-                        voice_pe_token="voice-pe-test-token",
-model="gpt-realtime",
+            voice_pe_token="voice-pe-test-token",
+            model="gpt-realtime",
             voice="marin",
             user_id="aaron",
             user_name="Aaron",
@@ -143,9 +160,15 @@ model="gpt-realtime",
 
     def test_session_requests_input_transcription_logprobs(self) -> None:
         config = module.RealtimeVoiceConfig(
-            enabled=True, api_key="secret", mobile_token="mobile",
-            voice_pe_token="voice-pe", model="gpt-realtime", voice="marin",
-            user_id="aaron", user_name="Aaron", user_is_admin=True,
+            enabled=True,
+            api_key="secret",
+            mobile_token="mobile",
+            voice_pe_token="voice-pe",
+            model="gpt-realtime",
+            voice="marin",
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
             transcription_prompt="Jarvis",
         )
         update = module.build_session_update(config, "marin", "live", "medium")
@@ -155,9 +178,9 @@ model="gpt-realtime",
         )
 
     def test_transcription_confidence_uses_geometric_mean(self) -> None:
-        confidence = module.input_transcription_confidence({
-            "logprobs": [{"token": "turn", "logprob": -0.1}, {"token": "tv", "logprob": -0.3}]
-        })
+        confidence = module.input_transcription_confidence(
+            {"logprobs": [{"token": "turn", "logprob": -0.1}, {"token": "tv", "logprob": -0.3}]}
+        )
         self.assertAlmostEqual(confidence, 0.8187, places=4)
         self.assertIsNone(module.input_transcription_confidence({"logprobs": []}))
 
@@ -166,8 +189,8 @@ model="gpt-realtime",
             enabled=True,
             api_key="api-secret",
             mobile_token="mobile-secret",
-                        voice_pe_token="voice-pe-test-token",
-model="gpt-realtime",
+            voice_pe_token="voice-pe-test-token",
+            model="gpt-realtime",
             voice="marin",
             user_id="aaron",
             user_name="Aaron",
@@ -182,36 +205,44 @@ model="gpt-realtime",
         self.assertNotIn("api-secret", encoded)
         self.assertNotIn("mobile-secret", encoded)
 
-
     def test_conversation_id_is_sanitised(self) -> None:
         value = module.normalise_conversation_id(" mobile-chat-1 / unsafe ", "fallback")
         self.assertEqual(value, "mobile-chat-1unsafe")
 
     def test_original_mobile_voice_uses_configured_elevenlabs(self) -> None:
-        proxy = module.RealtimeVoiceProxy(module.RealtimeVoiceConfig(
-            enabled=True,
-            api_key="secret",
-            mobile_token="mobile",
-            voice_pe_token="voice-pe",
-            model="gpt-realtime",
-            voice="marin",
-            user_id="aaron",
-            user_name="Aaron",
-            user_is_admin=True,
-            transcription_prompt="Aaron",
-            tts_provider="elevenlabs",
-            elevenlabs_api_key="configured",
-            elevenlabs_voice_id="configured",
-        ))
-        self.assertTrue(proxy._use_direct_elevenlabs({
-            "client_kind": "mobile",
-            "requested_voice": "original",
-        }))
-        self.assertFalse(proxy._use_direct_elevenlabs({
-            "client_kind": "mobile",
-            "requested_voice": "cedar",
-        }))
-
+        proxy = module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="secret",
+                mobile_token="mobile",
+                voice_pe_token="voice-pe",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Aaron",
+                tts_provider="elevenlabs",
+                elevenlabs_api_key="configured",
+                elevenlabs_voice_id="configured",
+            )
+        )
+        self.assertTrue(
+            proxy._use_direct_elevenlabs(
+                {
+                    "client_kind": "mobile",
+                    "requested_voice": "original",
+                }
+            )
+        )
+        self.assertFalse(
+            proxy._use_direct_elevenlabs(
+                {
+                    "client_kind": "mobile",
+                    "requested_voice": "cedar",
+                }
+            )
+        )
 
     def test_response_create_omits_unsupported_speed_parameter(self) -> None:
         event = module.speak_response_event(
@@ -232,8 +263,8 @@ class BrainTurnTests(unittest.IsolatedAsyncioTestCase):
                 enabled=True,
                 api_key="key",
                 mobile_token="token",
-                                voice_pe_token="voice-pe-test-token",
-model="gpt-realtime",
+                voice_pe_token="voice-pe-test-token",
+                model="gpt-realtime",
                 voice="marin",
                 user_id="aaron",
                 user_name="Aaron",
@@ -248,7 +279,11 @@ model="gpt-realtime",
             self.assertFalse(metadata["speak"])
             await on_delta("Amber ")
             await on_delta("is home")
-            return {"success": True, "response": "Amber is home", "conversation_id": "mobile-chat-1"}
+            return {
+                "success": True,
+                "response": "Amber is home",
+                "conversation_id": "mobile-chat-1",
+            }
 
         state = {"generation": 1, "suppress_audio": False}
         await proxy._run_brain_turn(
@@ -275,8 +310,8 @@ model="gpt-realtime",
                 enabled=True,
                 api_key="key",
                 mobile_token="token",
-                                voice_pe_token="voice-pe-test-token",
-model="gpt-realtime",
+                voice_pe_token="voice-pe-test-token",
+                model="gpt-realtime",
                 voice="marin",
                 user_id="aaron",
                 user_name="Aaron",
@@ -309,27 +344,37 @@ model="gpt-realtime",
 
 class CancellationStateMachineTests(unittest.IsolatedAsyncioTestCase):
     def _proxy(self):
-        return module.RealtimeVoiceProxy(module.RealtimeVoiceConfig(
-            enabled=True,
-            api_key="key",
-            mobile_token="token",
-            voice_pe_token="voice-pe",
-            model="gpt-realtime",
-            voice="marin",
-            user_id="aaron",
-            user_name="Aaron",
-            user_is_admin=True,
-            transcription_prompt="Jarvis",
-        ))
+        return module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="key",
+                mobile_token="token",
+                voice_pe_token="voice-pe",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Jarvis",
+            )
+        )
 
     async def test_cancel_stops_local_turn_and_upstream_response(self) -> None:
         proxy = self._proxy()
-        client = QueueClient([
-            {"type": "websocket.receive", "text": json.dumps({
-                "type": "cancel", "client_turn_id": 41,
-            })},
-            {"type": "websocket.disconnect"},
-        ])
+        client = QueueClient(
+            [
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "cancel",
+                            "client_turn_id": 41,
+                        }
+                    ),
+                },
+                {"type": "websocket.disconnect"},
+            ]
+        )
         upstream = FakeUpstream()
         cancelled = asyncio.Event()
 
@@ -351,8 +396,15 @@ class CancellationStateMachineTests(unittest.IsolatedAsyncioTestCase):
             "suppress_audio": False,
         }
         await proxy._client_to_openai(
-            client, upstream, lambda *_: None, {}, "realtime", "standard",
-            "marin", tasks, state,
+            client,
+            upstream,
+            lambda *_: None,
+            {},
+            "realtime",
+            "standard",
+            "marin",
+            tasks,
+            state,
         )
         self.assertTrue(cancelled.is_set())
         self.assertTrue(task.cancelled())
@@ -364,16 +416,25 @@ class CancellationStateMachineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_repeated_cancel_is_idempotent(self) -> None:
         proxy = self._proxy()
-        client = QueueClient([
-            {"type": "websocket.receive", "text": '{"type":"cancel"}'},
-            {"type": "websocket.receive", "text": '{"type":"cancel"}'},
-            {"type": "websocket.disconnect"},
-        ])
+        client = QueueClient(
+            [
+                {"type": "websocket.receive", "text": '{"type":"cancel"}'},
+                {"type": "websocket.receive", "text": '{"type":"cancel"}'},
+                {"type": "websocket.disconnect"},
+            ]
+        )
         upstream = FakeUpstream()
         state = {"generation": 2, "suppress_audio": False}
         await proxy._client_to_openai(
-            client, upstream, lambda *_: None, {}, "realtime", "standard",
-            "marin", set(), state,
+            client,
+            upstream,
+            lambda *_: None,
+            {},
+            "realtime",
+            "standard",
+            "marin",
+            set(),
+            state,
         )
         self.assertEqual(state["generation"], 4)
         self.assertEqual(
@@ -406,8 +467,15 @@ class CancellationStateMachineTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         await proxy._consume_openai_events(
-            client, stream(), lambda *_: None, {}, "realtime", "standard",
-            "marin", set(), state,
+            client,
+            stream(),
+            lambda *_: None,
+            {},
+            "realtime",
+            "standard",
+            "marin",
+            set(),
+            state,
         )
         self.assertEqual(client.messages, [])
 
@@ -463,10 +531,7 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
             {"type": "input_audio_buffer.speech_stopped"},
             {"type": "input_audio_buffer.speech_started"},
             {
-                "type": (
-                    "conversation.item."
-                    "input_audio_transcription.completed"
-                ),
+                "type": ("conversation.item.input_audio_transcription.completed"),
                 "transcript": "Aaron",
             },
         ]
@@ -479,9 +544,7 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
                 # 2026-08-09: the first bogus VAD segment lasted
                 # about 515 ms before the real utterance began.
                 if index == 0:
-                    state["voice_pe_speech_started_at"] = (
-                        module.time.monotonic() - 0.515
-                    )
+                    state["voice_pe_speech_started_at"] = module.time.monotonic() - 0.515
 
         state = {
             "generation": 0,
@@ -512,9 +575,7 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.get("voice_pe_speech_active"))
 
         transcript_messages = [
-            message
-            for message in client.messages
-            if message.get("type") == "user.transcript"
+            message for message in client.messages if message.get("type") == "user.transcript"
         ]
         self.assertEqual(transcript_messages, [])
 
@@ -537,10 +598,7 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
             {"type": "input_audio_buffer.speech_started"},
             {"type": "input_audio_buffer.speech_stopped"},
             {
-                "type": (
-                    "conversation.item."
-                    "input_audio_transcription.completed"
-                ),
+                "type": ("conversation.item.input_audio_transcription.completed"),
                 "transcript": "Lights on",
             },
         ]
@@ -578,9 +636,7 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(state.get("voice_pe_speech_active"))
 
         transcript_messages = [
-            message
-            for message in client.messages
-            if message.get("type") == "user.transcript"
+            message for message in client.messages if message.get("type") == "user.transcript"
         ]
         self.assertEqual(
             transcript_messages,
@@ -626,27 +682,31 @@ class VoicePeWakeArbiterTests(unittest.TestCase):
 
 class VoicePeWakeAdmissionTests(unittest.IsolatedAsyncioTestCase):
     async def test_losing_satellite_closes_before_provider_connection(self) -> None:
-        proxy = module.RealtimeVoiceProxy(module.RealtimeVoiceConfig(
-            enabled=True,
-            api_key="secret",
-            mobile_token="mobile",
-            voice_pe_token="voice-pe",
-            model="gpt-realtime",
-            voice="marin",
-            user_id="aaron",
-            user_name="Aaron",
-            user_is_admin=True,
-            transcription_prompt="Aaron",
-        ))
+        proxy = module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="secret",
+                mobile_token="mobile",
+                voice_pe_token="voice-pe",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Aaron",
+            )
+        )
         proxy.voice_pe_wake_arbiter.claim("living-room", "owner-session")
-        client = AuthClient({
-            "type": "auth",
-            "token": "voice-pe",
-            "client_kind": "voice_pe",
-            "device_id": "kitchen",
-            "area_id": "kitchen",
-            "conversation_id": "voice-pe-kitchen",
-        })
+        client = AuthClient(
+            {
+                "type": "auth",
+                "token": "voice-pe",
+                "client_kind": "voice_pe",
+                "device_id": "kitchen",
+                "area_id": "kitchen",
+                "conversation_id": "voice-pe-kitchen",
+            }
+        )
 
         async def brain(command: str, metadata: dict, on_delta):
             raise AssertionError("losing satellite must not reach the brain")

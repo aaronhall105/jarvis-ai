@@ -1,4 +1,5 @@
 import unittest
+import time
 
 from app.house_context import HouseContextEngine
 from app.registry import RegistrySnapshot
@@ -8,11 +9,31 @@ from app.user_context import UserContext
 class FakeClient:
     async def get_states(self):
         return [
-            {"entity_id": "person.aaron", "state": "home", "attributes": {"friendly_name": "Aaron"}},
-            {"entity_id": "person.amber", "state": "home", "attributes": {"friendly_name": "Amber"}},
-            {"entity_id": "light.living_room", "state": "on", "attributes": {"friendly_name": "Living Room Light"}},
-            {"entity_id": "media_player.tv", "state": "playing", "attributes": {"friendly_name": "Living Room TV"}},
-            {"entity_id": "sensor.phone_battery", "state": "42", "attributes": {"friendly_name": "Aaron Phone Battery", "unit_of_measurement": "%"}},
+            {
+                "entity_id": "person.aaron",
+                "state": "home",
+                "attributes": {"friendly_name": "Aaron"},
+            },
+            {
+                "entity_id": "person.amber",
+                "state": "home",
+                "attributes": {"friendly_name": "Amber"},
+            },
+            {
+                "entity_id": "light.living_room",
+                "state": "on",
+                "attributes": {"friendly_name": "Living Room Light"},
+            },
+            {
+                "entity_id": "media_player.tv",
+                "state": "playing",
+                "attributes": {"friendly_name": "Living Room TV"},
+            },
+            {
+                "entity_id": "sensor.phone_battery",
+                "state": "42",
+                "attributes": {"friendly_name": "Aaron Phone Battery", "unit_of_measurement": "%"},
+            },
         ]
 
 
@@ -25,12 +46,41 @@ class FakeRegistry:
         return self.snapshot
 
 
+class FailingClient:
+    async def get_states(self):
+        raise RuntimeError("Home Assistant unavailable")
+
+
+class FallbackRegistry:
+    def __init__(self):
+        self.client = FailingClient()
+        self.snapshot = RegistrySnapshot(
+            states=[
+                {
+                    "entity_id": "light.living_room",
+                    "state": "off",
+                    "attributes": {"friendly_name": "Living Room Light"},
+                }
+            ],
+            refreshed_at="bounded-fresh",
+        )
+
+    def snapshot_stale(self):
+        return False
+
+    def snapshot_age_seconds(self):
+        return 30.0
+
+
 class HouseContextTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = HouseContextEngine(FakeRegistry())
         self.actor = UserContext.from_request(
-            user_id="aaron", user_name="Aaron", user_is_admin=True,
-            device_id=None, voice_mode=True,
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=True,
         )
 
     async def test_presence_is_coarse(self):
@@ -43,6 +93,24 @@ class HouseContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Living Room Light: on", result.text)
         self.assertIn("Living Room TV: playing", result.text)
         self.assertNotIn("Aaron Phone Battery", result.text)
+
+    async def test_older_fallback_is_labelled_and_cannot_reverse_change_history(self):
+        engine = HouseContextEngine(FallbackRegistry())
+        newer_observation = time.monotonic()
+        engine._previous = {
+            "light.living_room": ("on", newer_observation),
+        }
+
+        result = await engine.context_for(
+            "What is the Living Room Light status?",
+            [],
+            self.actor,
+        )
+
+        self.assertIn("Last-known Home Assistant household context", result.text)
+        self.assertIn("historical evidence, not current state", result.text)
+        self.assertNotIn("changed from on to off", result.text)
+        self.assertEqual(("on", newer_observation), engine._previous["light.living_room"])
 
 
 if __name__ == "__main__":

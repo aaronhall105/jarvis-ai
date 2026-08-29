@@ -25,6 +25,7 @@ public final class SecureStore {
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
     private static final String IMPROVEMENT_ADMIN_TOKEN =
         "improvement_admin_token_v190140";
+    private static final String DEVELOPER_TOKEN = "developer_token_v190210";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -40,6 +41,7 @@ public final class SecureStore {
         migrateWakeReliabilityAlpha11();
         migrateVoiceOwnershipAlpha12();
         migrateRemoteCoreAlpha14();
+        migratePrivateDeveloperEndpointV13();
     }
 
     private void migrateAssistantDefaults() {
@@ -234,6 +236,57 @@ public final class SecureStore {
     public String remoteCoreUrl() {
         return preferences.getString("remote_core_url_v190140", "").trim();
     }
+
+    public AssistantMode assistantMode() {
+        return AssistantMode.from(preferences.getString("assistant_mode_v190210", "JARVIS"));
+    }
+
+    public void setAssistantMode(AssistantMode mode) {
+        preferences.edit().putString("assistant_mode_v190210", mode.name()).apply();
+    }
+
+    public String developerUrl() {
+        return preferences.getString("developer_url_v190210", "https://arvis.tail7378d0.ts.net/developer").trim();
+    }
+
+    private void migratePrivateDeveloperEndpointV13() {
+        if (preferences.getBoolean("developer_endpoint_migration_v190216", false)) return;
+        String secure = "https://arvis.tail7378d0.ts.net/developer";
+        String local = preferences.getString("developer_url_v190210", "").trim();
+        String remote = preferences.getString("remote_developer_url_v190210", "").trim();
+        SharedPreferences.Editor editor = preferences.edit();
+        if (local.isBlank() || local.contains("127.0.0.1:8765") || local.contains("192.168.1.40:8765")) {
+            editor.putString("developer_url_v190210", secure);
+        }
+        if (remote.isBlank()) editor.putString("remote_developer_url_v190210", secure);
+        editor.putBoolean("developer_endpoint_migration_v190216", true).apply();
+    }
+
+    public void setDeveloperUrl(String value) {
+        preferences.edit().putString("developer_url_v190210", trimTrailingSlash(value)).apply();
+    }
+
+    public String remoteDeveloperUrl() { return preferences.getString("remote_developer_url_v190210", "https://arvis.tail7378d0.ts.net/developer").trim(); }
+    public void setRemoteDeveloperUrl(String value) { preferences.edit().putString("remote_developer_url_v190210", trimTrailingSlash(value)).apply(); }
+
+    public String developerToken() { return decryptPreference(DEVELOPER_TOKEN); }
+
+    public void setDeveloperToken(String value) throws Exception {
+        if (value == null || value.isBlank()) preferences.edit().remove(DEVELOPER_TOKEN).apply();
+        else preferences.edit().putString(DEVELOPER_TOKEN, encrypt(value.trim())).apply();
+    }
+
+    public String developerWorkspace() {
+        String value = preferences.getString("developer_workspace_v190210", "jarvis-wear");
+        return "jarvis".equals(value) ? value : "jarvis-wear";
+    }
+
+    public void setDeveloperWorkspace(String value) {
+        preferences.edit().putString("developer_workspace_v190210", "jarvis".equals(value) ? value : "jarvis-wear").apply();
+    }
+
+    public String developerThreadId() { return preferences.getString("developer_thread_v190210", ""); }
+    public void setDeveloperThreadId(String value) { preferences.edit().putString("developer_thread_v190210", value == null ? "" : value).apply(); }
 
     public void setRemoteCoreUrl(String value) {
         String candidate = value == null ? "" : value.trim();
