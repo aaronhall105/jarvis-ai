@@ -7,6 +7,17 @@ from developer_gateway.app import app, authorised, codex_inputs, thread_options
 from developer_gateway.codex_client import canonical_workspace
 
 
+@pytest.fixture(autouse=True)
+def configured_workspaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspaces = {
+        "jarvis": tmp_path / "jarvis",
+        "jarvis-wear": tmp_path / "jarvis-wear",
+    }
+    for path in workspaces.values():
+        path.mkdir()
+    monkeypatch.setattr("developer_gateway.app.WORKSPACES", workspaces)
+
+
 def test_authentication_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("developer_gateway.app.TOKEN", "correct-token")
     assert authorised("Bearer correct-token")
