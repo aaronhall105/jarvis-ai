@@ -1,15 +1,15 @@
 {
-  "apkSize": 47673669,
-  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha19/jarvis-assistant-v19.0.0-alpha19-release.apk",
+  "apkSize": 47673672,
+  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha20/jarvis-assistant-v19.0.0-alpha20-release.apk",
   "channel": "alpha",
-  "commitSha": "fa1273b7b550ef38a81f9bb86e1598d3139fc1c1",
+  "commitSha": "6799816b5615adf9b15cd8a42c0e1aed38de47cd",
   "minRealtimeProtocol": 2,
   "minSdk": 31,
-  "publishedAt": "2026-08-28T15:19:11Z",
-  "releaseNotes": "feat: add integrations and Google accounts v1",
+  "publishedAt": "2026-08-29T06:35:42Z",
+  "releaseNotes": "fix(android): expose integrations in alpha20 settings\n\nJarvis 19.0.0-alpha20 adds a top-level expandable Integrations section to the existing com.aaron.jarvisvoice app and uses versionCode 190200 so devices reporting alpha19 can receive an in-place update.\n\nThe release retains the verified account/integration platform, Google OAuth architecture, Gmail, Google Calendar, Google Contacts, durable email monitoring, external-agent/account support, permission enforcement, action receipts, and security hardening. Google remains Setup required until OAuth credentials are configured securely in Jarvis Core.\n\nRuntime UI tests verify Settings routing, manifest/deep-link resolution, truthful provider states, and the alpha19-to-alpha20 OTA path. The release workflow now inspects the compiled APK manifest and bytecode before publication.",
   "schemaVersion": 1,
-  "sha256": "ce7ba2746b46c953bf84f50e7cfb01c1a184beb6fd903a3938b2d9411fa5e18e",
-  "tag": "v19.0.0-alpha19",
-  "versionCode": 190190,
-  "versionName": "19.0.0-alpha19"
+  "sha256": "80df1b6702c406824d6d53caa651f82071aafd049d5eecfd8c2849071a48f7d0",
+  "tag": "v19.0.0-alpha20",
+  "versionCode": 190200,
+  "versionName": "19.0.0-alpha20"
 }
