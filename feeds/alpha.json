@@ -1,15 +1,15 @@
 {
-  "apkSize": 49409661,
-  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha21/jarvis-assistant-v19.0.0-alpha21-release.apk",
+  "apkSize": 49122648,
+  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha22/jarvis-assistant-v19.0.0-alpha22-release.apk",
   "channel": "alpha",
-  "commitSha": "fb8ab636d4526e3f1dc1c044c312fa66fc8de772",
+  "commitSha": "9ffd08d27e3694cbe343e5478e60c1b47baad352",
   "minRealtimeProtocol": 2,
   "minSdk": 31,
-  "publishedAt": "2026-08-29T17:04:12Z",
-  "releaseNotes": "# Jarvis 19.0.0-alpha21 \u2014 unified production baseline\n\nThis release reconciles the divergent Jarvis product lines into one source baseline.\n\n## Included\n\n- Restores the latest Jarvis Android experience, branding, persistent chat history, delete-current-chat action, Developer/Codex mode, voice ownership fencing, endpoint routing, and durable realtime recovery.\n- Adds the top-level Integrations settings section and existing Integrations & Accounts activity to that current Android app.\n- Restores the Wear OS application, Tile, assistant endpoint, shared phone/watch protocol, and audio routing.\n- Preserves the verified External Agent Platform, planner, capability validation, action receipts, Google OAuth, Gmail, Calendar, Contacts, durable email monitoring, Home Assistant grounding, and security controls.\n- Adds a persistent Core realtime turn ledger, principal-scoped conversation APIs, conversation-deletion follow-up cancellation, and additional Home Assistant/presence verification hardening.\n- Locks future release workflows to `jarvis/unified-production` and adds deterministic product-baseline assertions.\n\nGoogle remains **Setup Required** until the Google Cloud OAuth client is configured securely in Jarvis Core. No Google password is entered into Jarvis.",
+  "publishedAt": "2026-08-29T23:11:53Z",
+  "releaseNotes": "# Jarvis 19.0.0-alpha22 \u2014 actual alpha17 app with unified product\n\nThis release restores the actual Android phone-app experience from alpha17\ncommit `3279a57ac8593cc2eba70d1678350dea25235a96` while retaining the current\nunified product and data schemas.\n\n## Included\n\n- Restores the exact alpha17 Jarvis logo, launcher resources, normal Jarvis\n  title, chat layout, composer, House activity, New chat and More options.\n- Restores the alpha17 Chat history, Improvements, Delete current chat,\n  Settings and message-action navigation.\n- Retains the current conversation-aware history schema and safe scoped\n  deletion so alpha21 data remains compatible.\n- Retains Developer/Codex mode, current realtime recovery, client turn IDs,\n  endpoint failover, voice interruption, default assistant, overlay, wake word,\n  Wear bridge and signed OTA updater.\n- Adds Integrations and Developer sections within the alpha17 Settings\n  presentation and retains the existing IntegrationsActivity and\n  `jarvis://integrations/google` callback route.\n- Keeps the unified Core, External Agent Platform, Home Assistant grounding,\n  Memory, durable follow-ups, action receipts, Google OAuth, Gmail, Calendar,\n  Contacts and security hardening unchanged.\n\nGoogle remains **Setup Required** until OAuth credentials are configured\nsecurely in Jarvis Core. No Google password is entered into Jarvis.",
   "schemaVersion": 1,
-  "sha256": "19bfda3cbec2200fbec0ab6511334e1de93b054e321d5822d757b7a03a128606",
-  "tag": "v19.0.0-alpha21",
-  "versionCode": 190230,
-  "versionName": "19.0.0-alpha21"
+  "sha256": "93a7cb55c4e77dd6a16de44bb2adb773adb32f140365a204f38dfa2f16b7568a",
+  "tag": "v19.0.0-alpha22",
+  "versionCode": 190240,
+  "versionName": "19.0.0-alpha22"
 }
