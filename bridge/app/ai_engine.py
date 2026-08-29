@@ -24,6 +24,7 @@ from openai import (
 
 from app.admin_engine import AdminEngine, AdminEngineError
 from app.code_awareness import CodeAwarenessEngine
+from app.command_text import normalized_command
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
 from app.house_context import HouseContextEngine
@@ -512,15 +513,20 @@ _NOTIFICATION_MESSAGE_PROMPT_PATTERN = re.compile(
     re.I,
 )
 
-_NOTIFICATION_CANCEL_PATTERN = re.compile(
-    r"^\s*(?:cancel|never mind|nevermind|don['’]?t send it|stop)\s*[.!?]*\s*$",
-    re.I,
+_NOTIFICATION_CANCEL_COMMANDS = frozenset(
+    {"cancel", "never mind", "nevermind", "don't send it", "dont send it", "stop"}
 )
 
-_FRUSTRATION_PATTERN = re.compile(
-    r"^\s*(?:what\s+the\s+(?:fuck|hell)|for\s+fuck['’]?s\s+sake|"
-    r"why\s+didn['’]?t\s+that\s+work|that\s+didn['’]?t\s+work)\s*[.!?]*\s*$",
-    re.I,
+_FRUSTRATION_COMMANDS = frozenset(
+    {
+        "what the fuck",
+        "what the hell",
+        "for fuck's sake",
+        "why didn't that work",
+        "why didnt that work",
+        "that didn't work",
+        "that didnt work",
+    }
 )
 
 _ANNOUNCEMENT_ACTION_PATTERN = re.compile(
@@ -5253,7 +5259,7 @@ class AIEngine:
                 content=raw_user_text,
             )
 
-            if _NOTIFICATION_CANCEL_PATTERN.fullmatch(raw_user_text):
+            if normalized_command(raw_user_text) in _NOTIFICATION_CANCEL_COMMANDS:
                 final_reply = "Okay, I won’t send it."
                 await self.conversations.add_assistant_message(
                     conversation_id=resolved_conversation_id,
@@ -5356,7 +5362,7 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
-        if _FRUSTRATION_PATTERN.fullmatch(raw_user_text):
+        if normalized_command(raw_user_text) in _FRUSTRATION_COMMANDS:
             failed_recipient = self._recent_failed_notification_recipient(history, actor)
             if failed_recipient is not None:
                 await self.conversations.add_user_message(

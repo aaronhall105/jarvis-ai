@@ -51,6 +51,17 @@ DEVELOPER_APPROVAL_POLICY = "on-request"
 DEVELOPER_SANDBOX = "workspace-write"
 
 
+def audit_log_value(value: object) -> str:
+    """Render untrusted audit metadata without log-control characters."""
+
+    return "".join(
+        character
+        if character.isalnum() or character in {"/", ".", "_", "-"}
+        else "_"
+        for character in str(value or "")[:64]
+    )
+
+
 def thread_options(path: Path) -> dict[str, str]:
     """Keep routine workspace work quiet while preserving approval for risky commands."""
     return {
@@ -290,10 +301,12 @@ async def developer_socket(socket: WebSocket) -> None:
                 "turn.interrupt",
                 "approval.respond",
             }:
+                operation_audit = audit_log_value(kind)
+                workspace_audit = audit_log_value(message.get("workspace", "session"))
                 log.info(
                     "Developer audit operation=%s workspace=%s",
-                    kind,
-                    str(message.get("workspace", "session"))[:32],
+                    operation_audit,
+                    workspace_audit,
                 )
             await socket.send_json({"type": "response", "request_id": request_id, "result": result})
     except (WebSocketDisconnect, asyncio.CancelledError):

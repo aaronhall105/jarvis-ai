@@ -7,16 +7,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from app.command_text import normalized_command
 
-_CANCEL_PATTERN = re.compile(
-    r"^\s*(?:cancel|cancel it|never mind|nevermind|forget it|don['’]?t do it|"
-    r"don['’]?t send it|stop)\s*[.!?]*\s*$",
-    re.I,
+_CANCEL_COMMANDS = frozenset(
+    {
+        "cancel",
+        "cancel it",
+        "never mind",
+        "nevermind",
+        "forget it",
+        "don't do it",
+        "dont do it",
+        "don't send it",
+        "dont send it",
+        "stop",
+    }
 )
 
-_AFFIRMATIVE_PATTERN = re.compile(
-    r"^\s*(?:yes|yeah|yep|correct|that one|the one you said|go ahead|do it)\s*[.!?]*\s*$",
-    re.I,
+_AFFIRMATIVE_COMMANDS = frozenset(
+    {"yes", "yeah", "yep", "correct", "that one", "the one you said", "go ahead", "do it"}
 )
 
 _CONTROL_PRONOUN_PATTERN = re.compile(
@@ -514,11 +523,12 @@ class DialogueManager:
         text: str,
     ) -> DialogueResolution:
         state = await self.get(conversation_id)
-        value = re.sub(r"\s+", " ", text).strip()
+        value = " ".join(str(text or "").split())
+        command = normalized_command(value)
         if not state.active_goal:
             return DialogueResolution()
 
-        if state.active_goal != "admin_change" and _CANCEL_PATTERN.fullmatch(value):
+        if state.active_goal != "admin_change" and command in _CANCEL_COMMANDS:
             return DialogueResolution(
                 handled=True,
                 kind="cancel_goal",
@@ -542,7 +552,7 @@ class DialogueManager:
         if state.active_goal == "device_control" and state.status == "awaiting_slot":
             action = str(state.slots.get("action") or "").lower()
             target = value
-            if _AFFIRMATIVE_PATTERN.fullmatch(value):
+            if command in _AFFIRMATIVE_COMMANDS:
                 target = str(state.slots.get("suggested_target") or "").strip()
             if action in {"on", "off"} and target:
                 return DialogueResolution(

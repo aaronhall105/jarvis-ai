@@ -889,25 +889,25 @@ async def system_status() -> dict[str, object]:
     realtime = realtime_voice.status()
     try:
         registry_status: dict[str, object] = await registry.summary()
-    except Exception as exc:
+    except Exception:
         logger.exception("Registry status failed")
-        runtime_metrics.record_error("registry", str(exc))
+        runtime_metrics.record_error("registry", "registry status unavailable")
         registry_status = {"error": "registry status unavailable"}
     runtime = runtime_metrics.snapshot()
     try:
         external_status: dict[str, object] = await external_agent.health_snapshot()
-    except Exception as exc:
+    except Exception:
         logger.exception("External agent status failed")
-        runtime_metrics.record_error("external_agent", str(exc))
+        runtime_metrics.record_error("external_agent", "external agent status unavailable")
         external_status = {
             "healthy": False,
             "error": "external agent status unavailable",
         }
     try:
         followup_status: dict[str, object] = await followups.health_snapshot()
-    except Exception as exc:
+    except Exception:
         logger.exception("Follow-up status failed")
-        runtime_metrics.record_error("followups", str(exc))
+        runtime_metrics.record_error("followups", "follow-up status unavailable")
         followup_status = {
             "healthy": False,
             "database_healthy": False,
@@ -915,9 +915,11 @@ async def system_status() -> dict[str, object]:
         }
     try:
         conversation_status: dict[str, object] = await conversations.health_snapshot()
-    except Exception as exc:
+    except Exception:
         logger.exception("Conversation database status failed")
-        runtime_metrics.record_error("conversations", str(exc))
+        runtime_metrics.record_error(
+            "conversations", "conversation database status unavailable"
+        )
         conversation_status = {
             "healthy": False,
             "reason": "conversation database status unavailable",

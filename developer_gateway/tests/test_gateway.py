@@ -3,7 +3,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from developer_gateway.app import app, authorised, codex_inputs, thread_options
+from developer_gateway.app import (
+    app,
+    audit_log_value,
+    authorised,
+    codex_inputs,
+    thread_options,
+)
 from developer_gateway.codex_client import canonical_workspace
 
 
@@ -40,6 +46,12 @@ def test_thread_policy_avoids_routine_prompts_but_keeps_workspace_sandbox(tmp_pa
         "approvalPolicy": "on-request",
         "sandbox": "workspace-write",
     }
+
+
+def test_audit_log_value_neutralises_log_injection() -> None:
+    assert audit_log_value("jarvis\nERROR forged\rentry") == "jarvis_ERROR_forged_entry"
+    assert "\n" not in audit_log_value("x\n" * 1000)
+    assert len(audit_log_value("x" * 10_000)) == 64
 
 
 class FakeCodex:

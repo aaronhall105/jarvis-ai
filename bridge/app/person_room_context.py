@@ -4,17 +4,42 @@ import re
 import time
 from typing import Any, Sequence
 
+from app.command_text import normalized_command
 
-ROOM_FOLLOW_UP = re.compile(
-    r"^\s*(?:in\s+)?what\s+room(?:\s+is\s+"
-    r"(?:aaron|amber|he|she|they))?|"
-    r"which\s+room(?:\s+is\s+"
-    r"(?:aaron|amber|he|she|they)\s+in)?|"
-    r"where\s+(?:in\s+the\s+)?(?:flat|house|home)"
-    r"(?:\s+is\s+(?:aaron|amber|he|she|they))?"
-    r"\s*[?!.]*\s*$",
-    re.IGNORECASE,
-)
+_PERSON_REFERENTS = frozenset({"aaron", "amber", "he", "she", "they"})
+
+
+def _is_room_follow_up(text: object) -> bool:
+    value = normalized_command(text)
+    if value is None:
+        return False
+    tokens = value.split()
+    if tokens[:1] == ["in"]:
+        tokens = tokens[1:]
+    if tokens[:2] == ["what", "room"]:
+        return len(tokens) == 2 or (
+            len(tokens) == 4 and tokens[2] == "is" and tokens[3] in _PERSON_REFERENTS
+        )
+    if tokens[:2] == ["which", "room"]:
+        return len(tokens) == 2 or (
+            len(tokens) == 5
+            and tokens[2] == "is"
+            and tokens[3] in _PERSON_REFERENTS
+            and tokens[4] == "in"
+        )
+    if tokens[:1] != ["where"]:
+        return False
+    remainder = tokens[1:]
+    if remainder[:2] == ["in", "the"]:
+        remainder = remainder[2:]
+    if not remainder or remainder[0] not in {"flat", "house", "home"}:
+        return False
+    remainder = remainder[1:]
+    return not remainder or (
+        len(remainder) == 2
+        and remainder[0] == "is"
+        and remainder[1] in _PERSON_REFERENTS
+    )
 
 EXPLICIT_PERSON = re.compile(
     r"\b(aaron|amber)\b",
@@ -37,7 +62,7 @@ def room_followup_person(
     text: str,
     history: Sequence[dict[str, str]],
 ) -> str:
-    if not ROOM_FOLLOW_UP.match(text or ""):
+    if not _is_room_follow_up(text):
         return ""
 
     explicit = EXPLICIT_PERSON.search(text or "")

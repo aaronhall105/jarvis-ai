@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.code_awareness import CodeAwarenessEngine
+from app.command_text import normalized_command
 from app.tool_outcomes import has_blocking_tool_failure
 from app.user_context import UserContext
 
@@ -41,68 +42,162 @@ _SECRET_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9_-]{32,}\b"),
 )
 
-_PREPARE_LAST_PATTERN = re.compile(
-    r"^\s*(?:please\s+)?(?:prepare|build|make|create)\s+(?:a\s+)?(?:safe\s+)?"
-    r"(?:fix|improvement|patch)\s+(?:for\s+)?(?:the\s+)?last\s+mistake\s*[.!?]*\s*$",
-    re.I,
-)
-_PREPARE_ID_PATTERN = re.compile(
-    r"^\s*(?:please\s+)?(?:prepare|build|make|create)\s+(?:a\s+)?(?:safe\s+)?"
-    r"(?:fix|improvement|patch)\s+(?:for\s+)?(?:failure|mistake|issue)\s+#?(\d+)\s*[.!?]*\s*$",
-    re.I,
-)
-_APPROVE_PATTERN = re.compile(
-    r"^\s*approve\s+improvement\s+#?(\d+)\s+(?:code\s+)?([0-9]{6})\s*[.!?]*\s*$",
-    re.I,
-)
-_DEPLOY_PATTERN = re.compile(
-    r"^\s*deploy\s+improvement\s+#?(\d+)\s+(?:code\s+)?([0-9]{6})\s*[.!?]*\s*$",
-    re.I,
-)
-_REJECT_PATTERN = re.compile(
-    r"^\s*(?:reject|discard|cancel)\s+improvement\s+#?(\d+)\s*[.!?]*\s*$",
-    re.I,
-)
-_ROLLBACK_TICKET_PATTERN = re.compile(
-    r"^\s*(?:prepare|authorize|issue|create)\s+(?:a\s+)?"
-    r"rollback\s+(?:ticket\s+)?(?:for\s+)?"
-    r"improvement\s+#?(\d+)\s*[.!?]*\s*$",
-    re.I,
-)
+_PREPARE_VERBS = frozenset({"prepare", "build", "make", "create"})
+_IMPROVEMENT_NOUNS = frozenset({"fix", "improvement", "patch"})
 
-_ROLLBACK_PATTERN = re.compile(
-    r"^\s*(?:roll\s*back|rollback|undo)\s+improvement\s+#?(\d+)\s+"
-    r"(?:code\s+)?([0-9]{6})\s*[.!?]*\s*$",
-    re.I,
-)
-_STATUS_PATTERN = re.compile(
-    r"^\s*(?:show|tell me|what(?:'s| is)|give me)?\s*(?:the\s+)?"
-    r"(?:self[- ]?improvement|improvement)\s+(?:status|summary|queue|report)\s*[.!?]*\s*$",
-    re.I,
-)
-_FAILURES_PATTERN = re.compile(
-    r"^\s*(?:show|list|what are|tell me)\s+(?:the\s+)?(?:pending\s+)?"
-    r"(?:mistakes|failures|issues)\s*(?:you(?:'ve| have)?\s+recorded)?\s*[.!?]*\s*$",
-    re.I,
-)
-_CANDIDATES_PATTERN = re.compile(
-    r"^\s*(?:show|list|what are|tell me)\s+(?:the\s+)?(?:pending\s+)?"
-    r"(?:improvements|candidates|fixes|patches)\s*[.!?]*\s*$",
-    re.I,
-)
-_STOP_PATTERN = re.compile(
-    r"^\s*(?:emergency\s+stop|disable|stop|pause)\s+(?:jarvis\s+)?"
-    r"self[- ]?improvement\s*[.!?]*\s*$",
-    re.I,
-)
-_RESUME_PATTERN = re.compile(
-    r"^\s*(?:enable|resume|start)\s+(?:jarvis\s+)?self[- ]?improvement\s*[.!?]*\s*$",
-    re.I,
-)
-_RECORD_PATTERN = re.compile(
-    r"^\s*(?:record|save|log)\s+(?:that|this)\s+as\s+(?:a\s+)?mistake\s*[.!?]*\s*$",
-    re.I,
-)
+
+def _numeric_token(value: str) -> int | None:
+    candidate = value.removeprefix("#")
+    return int(candidate) if candidate.isdigit() else None
+
+
+def _parse_prepare(tokens: list[str]) -> tuple[str, int | None, str | None] | None:
+    if tokens[:1] == ["please"]:
+        tokens = tokens[1:]
+    if not tokens or tokens[0] not in _PREPARE_VERBS:
+        return None
+    tokens = tokens[1:]
+    if tokens[:1] == ["a"]:
+        tokens = tokens[1:]
+    if tokens[:1] == ["safe"]:
+        tokens = tokens[1:]
+    if not tokens or tokens[0] not in _IMPROVEMENT_NOUNS:
+        return None
+    tokens = tokens[1:]
+    if tokens[:1] == ["for"]:
+        tokens = tokens[1:]
+    if tokens[:2] == ["the", "last"]:
+        tokens = tokens[1:]
+    if tokens == ["last", "mistake"]:
+        return ("prepare_last", None, None)
+    if len(tokens) == 2 and tokens[0] in {"failure", "mistake", "issue"}:
+        identifier = _numeric_token(tokens[1])
+        if identifier is not None:
+            return ("prepare_id", identifier, None)
+    return None
+
+
+def _parse_improvement_command(text: object) -> tuple[str, int | None, str | None] | None:
+    value = normalized_command(text, split_hyphens=True)
+    if value is None:
+        return None
+    tokens = value.split()
+
+    prepared = _parse_prepare(tokens)
+    if prepared is not None:
+        return prepared
+
+    if len(tokens) in {4, 5} and tokens[0] in {"approve", "deploy"}:
+        if tokens[1] != "improvement":
+            return None
+        identifier = _numeric_token(tokens[2])
+        code_tokens = tokens[3:]
+        if code_tokens[:1] == ["code"]:
+            code_tokens = code_tokens[1:]
+        if identifier is not None and len(code_tokens) == 1:
+            code = code_tokens[0]
+            if len(code) == 6 and code.isdigit():
+                return (tokens[0], identifier, code)
+
+    if len(tokens) == 3 and tokens[0] in {"reject", "discard", "cancel"}:
+        identifier = _numeric_token(tokens[2])
+        if tokens[1] == "improvement" and identifier is not None:
+            return ("reject", identifier, None)
+
+    rollback_action_length = 0
+    if tokens[:2] == ["roll", "back"]:
+        rollback_action_length = 2
+    elif tokens[:1] in (["rollback"], ["undo"]):
+        rollback_action_length = 1
+    if rollback_action_length:
+        remainder = tokens[rollback_action_length:]
+        if len(remainder) in {3, 4} and remainder[:1] == ["improvement"]:
+            identifier = _numeric_token(remainder[1])
+            code_tokens = remainder[2:]
+            if code_tokens[:1] == ["code"]:
+                code_tokens = code_tokens[1:]
+            if identifier is not None and len(code_tokens) == 1:
+                code = code_tokens[0]
+                if len(code) == 6 and code.isdigit():
+                    return ("rollback", identifier, code)
+
+    if tokens and tokens[0] in {"prepare", "authorize", "issue", "create"}:
+        remainder = tokens[1:]
+        if remainder[:1] == ["a"]:
+            remainder = remainder[1:]
+        if remainder[:1] == ["rollback"]:
+            remainder = remainder[1:]
+            if remainder[:1] == ["ticket"]:
+                remainder = remainder[1:]
+            if remainder[:1] == ["for"]:
+                remainder = remainder[1:]
+            if len(remainder) == 2 and remainder[0] == "improvement":
+                identifier = _numeric_token(remainder[1])
+                if identifier is not None:
+                    return ("rollback_ticket", identifier, None)
+
+    stop_prefixes = (("emergency", "stop"), ("disable",), ("stop",), ("pause",))
+    resume_prefixes = (("enable",), ("resume",), ("start",))
+    for command, prefixes in (("stop", stop_prefixes), ("resume", resume_prefixes)):
+        for prefix in prefixes:
+            remainder = (
+                tokens[len(prefix) :]
+                if tuple(tokens[: len(prefix)]) == prefix
+                else []
+            )
+            if remainder[:1] == ["jarvis"]:
+                remainder = remainder[1:]
+            if remainder == ["self", "improvement"]:
+                return (command, None, None)
+
+    status_prefixes = ((), ("show",), ("tell", "me"), ("what's",), ("what", "is"), ("give", "me"))
+    for status_prefix in status_prefixes:
+        remainder = (
+            tokens[len(status_prefix) :]
+            if tuple(tokens[: len(status_prefix)]) == status_prefix
+            else []
+        )
+        if remainder[:1] == ["the"]:
+            remainder = remainder[1:]
+        if remainder[:2] == ["self", "improvement"]:
+            remainder = remainder[2:]
+        elif remainder[:1] == ["improvement"]:
+            remainder = remainder[1:]
+        else:
+            continue
+        if len(remainder) == 1 and remainder[0] in {"status", "summary", "queue", "report"}:
+            return ("status", None, None)
+
+    for prefix in (("show",), ("list",), ("what", "are"), ("tell", "me")):
+        remainder = (
+            tokens[len(prefix) :]
+            if tuple(tokens[: len(prefix)]) == prefix
+            else []
+        )
+        if remainder[:1] == ["the"]:
+            remainder = remainder[1:]
+        if remainder[:1] == ["pending"]:
+            remainder = remainder[1:]
+        if remainder and remainder[0] in {"mistakes", "failures", "issues"}:
+            suffix = remainder[1:]
+            if not suffix or suffix in (["you", "recorded"], ["you've", "recorded"], ["you", "have", "recorded"]):
+                return ("failures", None, None)
+        if len(remainder) == 1 and remainder[0] in {"improvements", "candidates", "fixes", "patches"}:
+            return ("candidates", None, None)
+
+    if (
+        len(tokens) in {4, 5}
+        and tokens[0] in {"record", "save", "log"}
+        and tokens[1] in {"that", "this"}
+        and tokens[2] == "as"
+    ):
+        remainder = tokens[3:]
+        if remainder[:1] == ["a"]:
+            remainder = remainder[1:]
+        if remainder == ["mistake"]:
+            return ("record", None, None)
+
+    return None
 
 
 @dataclass(slots=True)
@@ -141,6 +236,13 @@ class SelfImprovementEngine:
         self.core_version = core_version
         self.disabled_file = self.database_path.parent / "self_improvement.disabled"
         self._initialise_database()
+
+    @staticmethod
+    def _required_lastrowid(cursor: sqlite3.Cursor) -> int:
+        value = cursor.lastrowid
+        if value is None:
+            raise RuntimeError("SQLite did not return an inserted row identifier")
+        return value
 
     @staticmethod
     def _utc_now() -> str:
@@ -573,7 +675,7 @@ class SelfImprovementEngine:
                     1 if failure_like else 0,
                 ),
             )
-            return int(cursor.lastrowid)
+            return self._required_lastrowid(cursor)
 
     async def observe_interaction(
         self,
@@ -583,14 +685,20 @@ class SelfImprovementEngine:
         raw_text: str,
         result: dict[str, Any],
     ) -> int:
-        calls = result.get("calls") if isinstance(result.get("calls"), list) else []
-        understanding = (
-            result.get("understanding")
-            if isinstance(result.get("understanding"), dict)
-            else {}
+        raw_calls = result.get("calls")
+        calls: list[dict[str, Any]] = (
+            [item for item in raw_calls if isinstance(item, dict)]
+            if isinstance(raw_calls, list)
+            else []
         )
-        timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
-        tone = result.get("tone") if isinstance(result.get("tone"), dict) else {}
+        raw_understanding = result.get("understanding")
+        understanding: dict[str, Any] = (
+            dict(raw_understanding) if isinstance(raw_understanding, dict) else {}
+        )
+        raw_timings = result.get("timings")
+        timings: dict[str, Any] = dict(raw_timings) if isinstance(raw_timings, dict) else {}
+        raw_tone = result.get("tone")
+        tone: dict[str, Any] = dict(raw_tone) if isinstance(raw_tone, dict) else {}
         success = bool(result.get("success"))
         intent = str(result.get("intent") or "unknown")
         response = str(result.get("response") or "")
@@ -813,7 +921,7 @@ class SelfImprovementEngine:
                     1 if explicit else 0,
                 ),
             )
-            return int(cursor.lastrowid), 1, "recorded"
+            return self._required_lastrowid(cursor), 1, "recorded"
 
     async def record_failure(
         self,
@@ -874,7 +982,7 @@ class SelfImprovementEngine:
                 """,
                 (failure_id, now, now),
             )
-            candidate_id = int(cursor.lastrowid)
+            candidate_id = self._required_lastrowid(cursor)
             connection.execute(
                 "UPDATE improvement_failures SET status = 'queued', updated_at = ? WHERE failure_id = ?",
                 (now, failure_id),
@@ -2215,26 +2323,10 @@ class SelfImprovementEngine:
         if not user_text:
             return ImprovementCommandResult(False)
 
-        is_improvement_command = any(
-            pattern.fullmatch(user_text)
-            for pattern in (
-                _PREPARE_LAST_PATTERN,
-                _PREPARE_ID_PATTERN,
-                _APPROVE_PATTERN,
-                _DEPLOY_PATTERN,
-                _REJECT_PATTERN,
-                _ROLLBACK_TICKET_PATTERN,
-                _ROLLBACK_PATTERN,
-                _STATUS_PATTERN,
-                _FAILURES_PATTERN,
-                _CANDIDATES_PATTERN,
-                _STOP_PATTERN,
-                _RESUME_PATTERN,
-                _RECORD_PATTERN,
-            )
-        )
-        if not is_improvement_command:
+        parsed_command = _parse_improvement_command(user_text)
+        if parsed_command is None:
             return ImprovementCommandResult(False)
+        command, identifier, approval_code = parsed_command
 
         if not actor.can_admin:
             return ImprovementCommandResult(
@@ -2246,7 +2338,7 @@ class SelfImprovementEngine:
 
         actor_name = actor.display_name
 
-        if _STOP_PATTERN.fullmatch(user_text):
+        if command == "stop":
             await self.set_enabled(False, actor_name)
             return ImprovementCommandResult(
                 True,
@@ -2255,7 +2347,7 @@ class SelfImprovementEngine:
                 "self_improvement_stopped",
             )
 
-        if _RESUME_PATTERN.fullmatch(user_text):
+        if command == "resume":
             await self.set_enabled(True, actor_name)
             return ImprovementCommandResult(
                 True,
@@ -2264,16 +2356,19 @@ class SelfImprovementEngine:
                 "self_improvement_resumed",
             )
 
-        if _STATUS_PATTERN.fullmatch(user_text):
-            status = await self.status()
-            state = "enabled" if status["enabled"] else "disabled"
+        if command == "status":
+            status_snapshot = await self.status()
+            state = "enabled" if status_snapshot["enabled"] else "disabled"
             response = (
-                f"Self-improvement is {state}. There are {status['open_failure_count']} open mistakes, "
-                f"{status['queued_candidates']} queued candidates and {status['awaiting_approval']} awaiting approval."
+                f"Self-improvement is {state}. There are {status_snapshot['open_failure_count']} open mistakes, "
+                f"{status_snapshot['queued_candidates']} queued candidates and "
+                f"{status_snapshot['awaiting_approval']} awaiting approval."
             )
-            return ImprovementCommandResult(True, True, response, "self_improvement_status", status)
+            return ImprovementCommandResult(
+                True, True, response, "self_improvement_status", status_snapshot
+            )
 
-        if _FAILURES_PATTERN.fullmatch(user_text):
+        if command == "failures":
             failures = await self.list_failures(limit=5)
             if not failures:
                 return ImprovementCommandResult(True, True, "I haven’t recorded any improvement failures yet.", "self_improvement_failures")
@@ -2289,7 +2384,7 @@ class SelfImprovementEngine:
                 {"failures": failures},
             )
 
-        if _CANDIDATES_PATTERN.fullmatch(user_text):
+        if command == "candidates":
             candidates = await self.list_candidates(limit=5)
             if not candidates:
                 return ImprovementCommandResult(True, True, "There are no improvement candidates yet.", "self_improvement_candidates")
@@ -2305,7 +2400,7 @@ class SelfImprovementEngine:
                 {"candidates": candidates},
             )
 
-        if _RECORD_PATTERN.fullmatch(user_text):
+        if command == "record":
             source = await self.last_interaction(conversation_id)
             if not source:
                 return ImprovementCommandResult(True, False, "There isn’t a previous Jarvis response to record.", "self_improvement_record_missing")
@@ -2323,72 +2418,63 @@ class SelfImprovementEngine:
                 {"failure_id": failure_id},
             )
 
-        if _PREPARE_LAST_PATTERN.fullmatch(user_text):
+        if command == "prepare_last":
             failure = await self.last_failure()
             if not failure:
                 return ImprovementCommandResult(True, False, "There isn’t a recorded mistake to prepare a fix for.", "self_improvement_prepare_missing")
-            ok, candidate_id, status = await self.queue_failure(int(failure["failure_id"]), actor_name)
+            ok, candidate_id, queue_status = await self.queue_failure(
+                int(failure["failure_id"]), actor_name
+            )
             if not ok:
-                return ImprovementCommandResult(True, False, status, "self_improvement_prepare_failed")
+                return ImprovementCommandResult(
+                    True, False, queue_status, "self_improvement_prepare_failed"
+                )
             return ImprovementCommandResult(
                 True,
                 True,
                 f"Improvement {candidate_id} is queued for isolated testing. The live Jarvis has not been changed.",
                 "self_improvement_queued",
-                {"failure_id": failure["failure_id"], "candidate_id": candidate_id, "status": status},
+                {
+                    "failure_id": failure["failure_id"],
+                    "candidate_id": candidate_id,
+                    "status": queue_status,
+                },
             )
 
-        match = _PREPARE_ID_PATTERN.fullmatch(user_text)
-        if match:
-            failure_id = int(match.group(1))
-            ok, candidate_id, status = await self.queue_failure(failure_id, actor_name)
+        if command == "prepare_id" and identifier is not None:
+            failure_id = identifier
+            ok, candidate_id, queue_status = await self.queue_failure(
+                failure_id, actor_name
+            )
             if not ok:
-                return ImprovementCommandResult(True, False, status, "self_improvement_prepare_failed")
+                return ImprovementCommandResult(
+                    True, False, queue_status, "self_improvement_prepare_failed"
+                )
             return ImprovementCommandResult(
                 True,
                 True,
                 f"Improvement {candidate_id} is queued for isolated testing. The live Jarvis has not been changed.",
                 "self_improvement_queued",
-                {"failure_id": failure_id, "candidate_id": candidate_id, "status": status},
+                {
+                    "failure_id": failure_id,
+                    "candidate_id": candidate_id,
+                    "status": queue_status,
+                },
             )
 
-        match = _APPROVE_PATTERN.fullmatch(user_text)
-        if match:
-            return await self.approve_candidate(int(match.group(1)), match.group(2), actor_name)
+        if command == "approve" and identifier is not None and approval_code is not None:
+            return await self.approve_candidate(identifier, approval_code, actor_name)
 
-        match = _DEPLOY_PATTERN.fullmatch(user_text)
-        if match:
-            return await self.request_deploy(int(match.group(1)), match.group(2), actor_name)
+        if command == "deploy" and identifier is not None and approval_code is not None:
+            return await self.request_deploy(identifier, approval_code, actor_name)
 
-        match = _REJECT_PATTERN.fullmatch(user_text)
-        if match:
-            return await self.reject_candidate(int(match.group(1)), actor_name)
+        if command == "reject" and identifier is not None:
+            return await self.reject_candidate(identifier, actor_name)
 
-        match = _ROLLBACK_TICKET_PATTERN.fullmatch(
-            user_text
-        )
-        if match:
-            return await self.issue_rollback_ticket(
-                int(
-                    match.group(
-                        1
-                    )
-                ),
-                actor_name,
-            )
+        if command == "rollback_ticket" and identifier is not None:
+            return await self.issue_rollback_ticket(identifier, actor_name)
 
-        match = _ROLLBACK_PATTERN.fullmatch(user_text)
-        if match:
-            return await self.request_rollback(
-                int(
-                    match.group(
-                        1
-                    )
-                ),
-                match.group(
-                    2
-                ),
-                actor_name,
-            )
+        if command == "rollback" and identifier is not None and approval_code is not None:
+            return await self.request_rollback(identifier, approval_code, actor_name)
 
         return ImprovementCommandResult(False)
