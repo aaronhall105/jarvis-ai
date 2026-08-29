@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from developer_gateway.app import (
     app,
-    audit_log_value,
     authorised,
     codex_inputs,
     thread_options,
@@ -48,12 +48,6 @@ def test_thread_policy_avoids_routine_prompts_but_keeps_workspace_sandbox(tmp_pa
     }
 
 
-def test_audit_log_value_neutralises_log_injection() -> None:
-    assert audit_log_value("jarvis\nERROR forged\rentry") == "jarvis_ERROR_forged_entry"
-    assert "\n" not in audit_log_value("x\n" * 1000)
-    assert len(audit_log_value("x" * 10_000)) == 64
-
-
 class FakeCodex:
     healthy = True
 
@@ -92,7 +86,11 @@ def test_websocket_rejects_bad_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         assert socket.receive_json()["type"] == "auth.error"
 
 
-def test_authenticated_client_can_start_and_resume_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_authenticated_client_can_start_and_resume_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="jarvis-developer")
     monkeypatch.setattr("developer_gateway.app.TOKEN", "correct-token")
     monkeypatch.setattr("developer_gateway.app.codex", FakeCodex())
     with TestClient(app) as client, client.websocket_connect("/api/developer") as socket:
@@ -111,6 +109,16 @@ def test_authenticated_client_can_start_and_resume_thread(monkeypatch: pytest.Mo
         )
         resumed = socket.receive_json()
         assert resumed["result"]["thread"]["id"] == "thread-safe"
+    audit_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "jarvis-developer" and "Developer audit" in record.getMessage()
+    ]
+    assert audit_messages == [
+        "Developer audit event=thread_start",
+        "Developer audit event=thread_resume",
+    ]
+    assert all("jarvis-wear" not in message for message in audit_messages)
 
 
 def test_authenticated_client_can_read_real_codex_rate_limits(

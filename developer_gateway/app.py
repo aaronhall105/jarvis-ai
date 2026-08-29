@@ -51,17 +51,6 @@ DEVELOPER_APPROVAL_POLICY = "on-request"
 DEVELOPER_SANDBOX = "workspace-write"
 
 
-def audit_log_value(value: object) -> str:
-    """Render untrusted audit metadata without log-control characters."""
-
-    return "".join(
-        character
-        if character.isalnum() or character in {"/", ".", "_", "-"}
-        else "_"
-        for character in str(value or "")[:64]
-    )
-
-
 def thread_options(path: Path) -> dict[str, str]:
     """Keep routine workspace work quiet while preserving approval for risky commands."""
     return {
@@ -239,16 +228,19 @@ async def developer_socket(socket: WebSocket) -> None:
                     await codex.request("thread/delete", {"threadId": thread_id})
                 )
                 owned_threads.discard(thread_id)
+                log.info("Developer audit event=thread_delete")
             elif kind == "thread.start":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 options = {**thread_options(path), "personality": "pragmatic"}
                 result = result_or_raise(await codex.request("thread/start", options))
                 owned_threads.add(str(result["thread"]["id"]))
+                log.info("Developer audit event=thread_start")
             elif kind == "thread.resume":
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 options = {**thread_options(path), "threadId": str(message["thread_id"])}
                 result = result_or_raise(await codex.request("thread/resume", options))
                 owned_threads.add(str(message["thread_id"]))
+                log.info("Developer audit event=thread_resume")
             elif kind == "thread.name":
                 if str(message["thread_id"]) not in owned_threads:
                     raise ValueError("Thread is not owned by this session")
@@ -272,6 +264,7 @@ async def developer_socket(socket: WebSocket) -> None:
                         {"threadId": str(message["thread_id"]), "cwd": str(path), "input": inputs},
                     )
                 )
+                log.info("Developer audit event=turn_start")
             elif kind == "turn.interrupt":
                 if str(message["thread_id"]) not in owned_threads:
                     raise ValueError("Thread is not owned by this session")
@@ -281,6 +274,7 @@ async def developer_socket(socket: WebSocket) -> None:
                         {"threadId": str(message["thread_id"]), "turnId": str(message["turn_id"])},
                     )
                 )
+                log.info("Developer audit event=turn_interrupt")
             elif kind == "approval.respond":
                 decision = str(message.get("decision"))
                 approval_id = int(message["codex_request_id"])
@@ -291,23 +285,9 @@ async def developer_socket(socket: WebSocket) -> None:
                 pending_approvals.remove(approval_id)
                 await codex.respond(approval_id, {"decision": decision})
                 result = {"accepted": True}
+                log.info("Developer audit event=approval_response")
             else:
                 raise ValueError("Unsupported developer operation")
-            if kind in {
-                "thread.start",
-                "thread.resume",
-                "thread.delete",
-                "turn.start",
-                "turn.interrupt",
-                "approval.respond",
-            }:
-                operation_audit = audit_log_value(kind)
-                workspace_audit = audit_log_value(message.get("workspace", "session"))
-                log.info(
-                    "Developer audit operation=%s workspace=%s",
-                    operation_audit,
-                    workspace_audit,
-                )
             await socket.send_json({"type": "response", "request_id": request_id, "result": result})
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
