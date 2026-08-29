@@ -1,15 +1,15 @@
 {
-  "apkSize": 47673672,
-  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha20/jarvis-assistant-v19.0.0-alpha20-release.apk",
+  "apkSize": 49409661,
+  "apkUrl": "https://github.com/aaronhall105/jarvis-ai/releases/download/v19.0.0-alpha21/jarvis-assistant-v19.0.0-alpha21-release.apk",
   "channel": "alpha",
-  "commitSha": "6799816b5615adf9b15cd8a42c0e1aed38de47cd",
+  "commitSha": "fb8ab636d4526e3f1dc1c044c312fa66fc8de772",
   "minRealtimeProtocol": 2,
   "minSdk": 31,
-  "publishedAt": "2026-08-29T06:35:42Z",
-  "releaseNotes": "fix(android): expose integrations in alpha20 settings\n\nJarvis 19.0.0-alpha20 adds a top-level expandable Integrations section to the existing com.aaron.jarvisvoice app and uses versionCode 190200 so devices reporting alpha19 can receive an in-place update.\n\nThe release retains the verified account/integration platform, Google OAuth architecture, Gmail, Google Calendar, Google Contacts, durable email monitoring, external-agent/account support, permission enforcement, action receipts, and security hardening. Google remains Setup required until OAuth credentials are configured securely in Jarvis Core.\n\nRuntime UI tests verify Settings routing, manifest/deep-link resolution, truthful provider states, and the alpha19-to-alpha20 OTA path. The release workflow now inspects the compiled APK manifest and bytecode before publication.",
+  "publishedAt": "2026-08-29T17:04:12Z",
+  "releaseNotes": "# Jarvis 19.0.0-alpha21 \u2014 unified production baseline\n\nThis release reconciles the divergent Jarvis product lines into one source baseline.\n\n## Included\n\n- Restores the latest Jarvis Android experience, branding, persistent chat history, delete-current-chat action, Developer/Codex mode, voice ownership fencing, endpoint routing, and durable realtime recovery.\n- Adds the top-level Integrations settings section and existing Integrations & Accounts activity to that current Android app.\n- Restores the Wear OS application, Tile, assistant endpoint, shared phone/watch protocol, and audio routing.\n- Preserves the verified External Agent Platform, planner, capability validation, action receipts, Google OAuth, Gmail, Calendar, Contacts, durable email monitoring, Home Assistant grounding, and security controls.\n- Adds a persistent Core realtime turn ledger, principal-scoped conversation APIs, conversation-deletion follow-up cancellation, and additional Home Assistant/presence verification hardening.\n- Locks future release workflows to `jarvis/unified-production` and adds deterministic product-baseline assertions.\n\nGoogle remains **Setup Required** until the Google Cloud OAuth client is configured securely in Jarvis Core. No Google password is entered into Jarvis.",
   "schemaVersion": 1,
-  "sha256": "80df1b6702c406824d6d53caa651f82071aafd049d5eecfd8c2849071a48f7d0",
-  "tag": "v19.0.0-alpha20",
-  "versionCode": 190200,
-  "versionName": "19.0.0-alpha20"
+  "sha256": "19bfda3cbec2200fbec0ab6511334e1de93b054e321d5822d757b7a03a128606",
+  "tag": "v19.0.0-alpha21",
+  "versionCode": 190230,
+  "versionName": "19.0.0-alpha21"
 }
