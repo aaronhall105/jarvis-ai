@@ -429,6 +429,10 @@
     "jarvis/unified-runtime-v1",
     "jarvis/alpha19-production-hardening",
     "jarvis/external-agent-platform",
-    "jarvis/integrations-accounts-v1"
+    "jarvis/integrations-accounts-v1",
+    "jarvis/preserve-alpha19-production-wip-20260827",
+    "jarvis/improvement-31",
+    "safety/pre-alpha14-20260816T132241Z",
+    "ota-feeds"
   ]
 }

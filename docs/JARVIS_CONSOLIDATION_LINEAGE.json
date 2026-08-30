@@ -27,10 +27,23 @@
     {"branch": "jarvis/unified-runtime-v1", "final_sha": "ce6a397651eb15effb364866a822302714581347", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "runtime, Android, Wear and Developer capabilities reconciled into unified-production"},
     {"branch": "jarvis/wear-v1", "final_sha": "5b21be44c1feae14580b8eb61fb811ed2bc1c90b", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "Wear foundation and later fixes reconciled into unified-production"},
     {"branch": "ota-feeds", "final_sha": "b96e355de8989350ebca37825f9efc4c2a93ba33", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "data-only manifests migrated to release-hosted channel assets"},
-    {"branch": "jarvis/preserve-alpha19-production-wip-20260827", "final_sha": "4acb17de42541dcbd9964c2adeff0d60efb6c47c", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production after selective grounding reconciliation"},
-    {"branch": "jarvis/improvement-31", "final_sha": "60b133e19024c72894448ffefa801d8632cba04a", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production"},
+    {"branch": "jarvis/preserve-alpha19-production-wip-20260827", "final_sha": "32bd273334ec5d0de9c5e0b534ad47644baaf089", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "local WIP snapshot archived after its grounding, scoped-conversation, durable-delivery and action-verification behavior was reconciled or superseded in unified-production"},
+    {"branch": "jarvis/improvement-31", "final_sha": "2a2212a248d93d682c393c1707928ce969310893", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "local realtime-fencing WIP archived; unified-production has the newer generation, provider-epoch, terminal-state and durable-turn fences"},
     {"branch": "safety/pre-alpha14-20260816T132241Z", "final_sha": "1e226fb8832d1a1e4088e4081af0dedcaddfc216", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "historical realtime finalization fix superseded by the current turn lifecycle"}
   ],
+  "archive_tags": {
+    "conversation-engine": "archive/2026-08-30/conversation-engine",
+    "jarvis/alpha19-production-hardening": "archive/2026-08-30/alpha19-production-hardening",
+    "jarvis/external-agent-platform": "archive/2026-08-30/external-agent-platform",
+    "jarvis/integrations-accounts-v1": "archive/2026-08-30/integrations-accounts-v1",
+    "jarvis/production-alpha14": "archive/2026-08-30/production-alpha14",
+    "jarvis/unified-runtime-v1": "archive/2026-08-30/unified-runtime-v1",
+    "jarvis/wear-v1": "archive/2026-08-30/wear-v1",
+    "ota-feeds": "archive/2026-08-30/ota-feeds",
+    "jarvis/preserve-alpha19-production-wip-20260827": "archive/2026-08-30/preserved-production-wip",
+    "jarvis/improvement-31": "archive/2026-08-30/improvement-31",
+    "safety/pre-alpha14-20260816T132241Z": "archive/2026-08-30/pre-alpha14-safety"
+  },
   "capabilities": [
     {"capability": "brain_and_core_api", "current_implementations": ["conversation-engine", "jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1"], "best_source": "reconciled unified Core", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app", "action": "KEEP"},
     {"capability": "conversation_engine", "current_implementations": ["conversation-engine", "jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1"], "best_source": "principal-scoped durable conversation API plus unified lifecycle", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app/conversation_engine.py", "action": "KEEP"},
