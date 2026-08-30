@@ -1,9 +1,10 @@
 import asyncio
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from app.device_resolver import DeviceResolver
-from app.home_assistant import HomeAssistantClient
+from app.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.presence import PresenceResolver
 from app.registry import RegistryEngine
 from app.tools.lights import LightsTool
@@ -513,7 +514,7 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": not failed,
             "area_id": area_id,
             "area_name": area_name,
             "domain": "switch",
@@ -546,6 +547,15 @@ class ToolEngine:
     async def inspect_presence(self, reference: str) -> dict[str, Any]:
         """Return fresh, structured person/tracker evidence only."""
         return await self.presence.inspect(reference)
+
+    async def person_configurations(self) -> list[dict[str, Any]]:
+        """Return HA's authoritative person-to-tracker configuration graph."""
+        result = await self.client.send_command({"type": "person/list"})
+        if not isinstance(result, list) or not all(
+            isinstance(item, Mapping) for item in result
+        ):
+            raise HomeAssistantError("Home Assistant returned an invalid person list response")
+        return [dict(item) for item in result]
 
     async def control_device(
         self,
@@ -935,7 +945,10 @@ class ToolEngine:
                 "changed": True,
                 "verified": False,
                 "command_accepted": True,
-                "response_message": f"{routine_name} started.",
+                "response_message": (
+                    f"Home Assistant accepted the request to start {routine_name}; "
+                    "completion is not confirmed."
+                ),
             }
 
         await self.client.call_service(
@@ -954,7 +967,8 @@ class ToolEngine:
             "conditions_respected": True,
             "command_accepted": True,
             "response_message": (
-                f"{routine_name} was triggered with its conditions respected."
+                f"Home Assistant accepted the request to trigger {routine_name} "
+                "with its conditions respected; completion is not confirmed."
             ),
         }
 
@@ -1045,15 +1059,29 @@ class ToolEngine:
             self._public_state(entity)
             for _, entity in ranked[:safe_limit]
         ]
+        top_score = ranked[0][0] if ranked else None
+        top_ties = sum(1 for score, _ in ranked if score == top_score) if ranked else 0
+        exact = bool(top_score is not None and top_score >= 130)
+        resolution = (
+            "zero"
+            if not entities
+            else "ambiguous"
+            if top_ties > 1
+            else "exact"
+            if exact
+            else "ranked"
+        )
 
         return {
             "success": True,
+            "resolution": resolution,
             "query": query,
             "domain": domain,
             "area_id": area_id,
             "state_filter": state_filter,
             "count": len(entities),
             "entities": entities,
+            "selected_entity": entities[0] if resolution == "exact" else None,
         }
 
     async def list_area_states(
@@ -1394,7 +1422,7 @@ class ToolEngine:
                 )
             )
             return {
-                "success": True,
+                "success": verified,
                 "shortcut": shortcut,
                 "script_entity_id": script_entity_id,
                 "state_entity_id": state_entity_id,
@@ -1553,7 +1581,7 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": verified is not False,
             "entity_id": entity_id,
             "name": name,
             "action": action,
@@ -1613,17 +1641,17 @@ class ToolEngine:
             service_data={"volume_level": safe_volume / 100},
         )
 
-        current_volume: int | None = previous_volume
-        verification_available = previous_volume is not None
+        current_volume: int | None = None
+        verification_available = False
         verified = False
         for delay in self.STATE_VERIFY_DELAYS:
             await asyncio.sleep(delay)
             refreshed = await self.get_entity_state(entity_id)
             current_entity = refreshed.get("entity") or {}
-            current_volume = self._volume_percent(current_entity)
-            if current_volume is None:
-                verification_available = False
+            observed_volume = self._volume_percent(current_entity)
+            if observed_volume is None:
                 continue
+            current_volume = observed_volume
             verification_available = True
             if abs(current_volume - safe_volume) <= 2:
                 verified = True
@@ -1633,8 +1661,9 @@ class ToolEngine:
             response_message = f"{name} volume is now {current_volume}%."
         elif not verification_available:
             response_message = (
-                f"The {safe_volume}% volume command was sent to {name}, but this "
-                "media player does not report its volume level."
+                f"Home Assistant accepted the {safe_volume}% volume command for {name}, "
+                "but it did not return a volume level after the command, so the "
+                "requested level is not confirmed."
             )
         else:
             response_message = (
@@ -1643,13 +1672,14 @@ class ToolEngine:
             )
 
         return {
-            "success": True,
+            "success": verified or not verification_available,
             "entity_id": entity_id,
             "name": name,
             "volume_percent": safe_volume,
             "changed": verified,
             "verified": verified,
             "verification_available": verification_available,
+            "command_accepted": True,
             "already_in_target_state": False,
             "previous_volume_percent": previous_volume,
             "current_volume_percent": current_volume,
@@ -1675,23 +1705,45 @@ class ToolEngine:
         if len(clean_title) > 100:
             raise ValueError("Notification title is too long")
 
-        completed: list[str] = []
-        for service in services:
-            await self.client.call_service(
-                "notify",
-                service,
-                service_data={
-                    "title": clean_title,
-                    "message": clean_message,
-                },
-            )
-            completed.append(f"notify.{service}")
-
         recipient_text = {
             "aaron": "your phone",
             "amber": "Amber's phone",
             "both": "both phones",
         }.get(recipient, recipient)
+        completed: list[str] = []
+        for service in services:
+            try:
+                await self.client.call_service(
+                    "notify",
+                    service,
+                    service_data={
+                        "title": clean_title,
+                        "message": clean_message,
+                    },
+                )
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "recipient": recipient,
+                    "services": completed,
+                    "failed_service": f"notify.{service}",
+                    "title": clean_title,
+                    "notification_message": clean_message,
+                    "verified": False,
+                    "delivery_confirmed": False,
+                    "command_sent": bool(completed),
+                    "outcome_unknown": True,
+                    "error": str(exc),
+                    "response_message": (
+                        f"Home Assistant accepted the notification for "
+                        f"{len(completed)} target(s), but the request for "
+                        f"{recipient_text} was interrupted. Delivery to the "
+                        "remaining target is unknown, so I will not claim it "
+                        "was fully sent."
+                    ),
+                }
+            completed.append(f"notify.{service}")
+
         return {
             "success": True,
             "recipient": recipient,
@@ -1701,7 +1753,10 @@ class ToolEngine:
             "verified": False,
             "delivery_confirmed": False,
             "command_accepted": True,
-            "response_message": f"Notification sent to {recipient_text}.",
+            "response_message": (
+                f"Home Assistant accepted the notification request for {recipient_text}; "
+                "device delivery is not confirmed."
+            ),
         }
 
     async def announce_message(
@@ -1740,5 +1795,8 @@ class ToolEngine:
             "verified": False,
             "heard_confirmed": False,
             "command_accepted": True,
-            "response_message": f"Announcement sent to the {target_name}.",
+            "response_message": (
+                f"Home Assistant accepted the announcement request for the {target_name}; "
+                "playback is not confirmed."
+            ),
         }

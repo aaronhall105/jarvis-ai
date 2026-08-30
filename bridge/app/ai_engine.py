@@ -1,5 +1,6 @@
 import asyncio
 import difflib
+import hashlib
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from openai import (
 )
 
 from app.admin_engine import AdminEngine, AdminEngineError
+from app.capability_registry import CapabilityRegistry
 from app.code_awareness import CodeAwarenessEngine
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
@@ -52,6 +54,8 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "send_mobile_notification",
     "announce_message",
     "propose_admin_change",
+    "apply_admin_change",
+    "cancel_admin_change",
 }
 
 
@@ -376,6 +380,18 @@ _PERSON_LOCATION_PATTERN = re.compile(
     re.I,
 )
 
+_PRESENCE_EVIDENCE_FOLLOWUP_PATTERN = re.compile(
+    r"^\s*(?:are you sure|how come|how do you know|why(?: does)?(?: home assistant| ha)? "
+    r"(?:say|think|report).+|what (?:device|tracker|source) (?:says|is saying|reports|"
+    r"is causing).+|which (?:device|tracker|source) (?:is causing|says|reports).+)\s*[?!.]*\s*$",
+    re.I,
+)
+
+_PRESENCE_EXPLICIT_REFERENT_PATTERN = re.compile(
+    r"\b(?:aaron|amber|i(?:'m| am)|me|my|mine)\b",
+    re.I,
+)
+
 _PERSON_ACTIVITY_INFERENCE_PATTERN = re.compile(
     r"^\s*(?:what(?:'s| is)\s+(?:she|he|they|aaron|amber)\s+doing|"
     r"(?:is|are)\s+(?:she|he|they|aaron|amber)\s+"
@@ -568,15 +584,55 @@ _SECRET_PATTERN = re.compile(
 _UNSUPPORTED_EXTERNAL_ACTION_PATTERN = re.compile(
     r"\b(?:submit|create|open)\s+(?:a\s+)?support\s+ticket\b|"
     r"\b(?:send|email|contact|message)\s+(?:support|customer service)\b|"
-    r"\b(?:book|reserve)\b",
+    r"\b(?:book|reserve|purchase|buy)\b|"
+    r"\b(?:send|post|publish|schedule)\b.{0,50}\b(?:email|message|instagram|"
+    r"facebook|tiktok|twitter|x|social|post)\b|"
+    r"\b(?:add|create|change|cancel)\b.{0,50}\b(?:calendar|appointment|event)\b",
+    re.I,
+)
+
+_EXTERNAL_ACTION_REQUEST_PATTERN = re.compile(
+    r"^\s*(?:(?:please|jarvis)\s+)?(?:submit|create|open|send|email|contact|message|"
+    r"book|reserve|purchase|buy|post|publish|schedule|add|change|cancel)\b|"
+    r"\b(?:can|could|would|will)\s+you\b.{0,80}\b(?:submit|create|open|send|email|"
+    r"contact|message|book|reserve|purchase|buy|post|publish|schedule|add|change|cancel)\b|"
+    r"\b(?:i\s+(?:want|need)\s+you\s+to|i(?:'d| would)\s+like\s+you\s+to)\b.{0,80}"
+    r"\b(?:submit|create|open|send|email|contact|message|book|reserve|purchase|buy|"
+    r"post|publish|schedule|add|change|cancel)\b",
+    re.I,
+)
+
+_UNSUPPORTED_LIVE_RESEARCH_PATTERN = re.compile(
+    r"\b(?:search|browse|look up|research)\b.{0,50}\b(?:the web|the internet|"
+    r"online|news|website|prices?|availability)\b|"
+    r"\bcheck\b.{0,50}\b(?:the web|the internet|online|news|website|prices?|"
+    r"availability)\b|"
+    r"\b(?:latest|current|today(?:'s)?)\s+(?:news|prices?|online results?)\b",
     re.I,
 )
 
 _UNBACKED_FUTURE_PROMISE_PATTERN = re.compile(
     r"\b(?:i(?:'ll| will)\s+(?:get back to you|check(?: again| later)?|let you know|"
-    r"monitor|update you)|i(?:'m| am)\s+monitoring)\b",
+    r"monitor|update you|remind you|notify you|send you (?:an?\s+)?update)|"
+    r"i(?:'m| am)\s+monitoring)\b",
     re.I,
 )
+
+_SUPPORTED_MESSAGE_ACTION_TOOLS = frozenset({"send_mobile_notification"})
+_LIVE_RESEARCH_TOOLS = frozenset({"web_search", "search_web", "browse_web"})
+
+
+def _completed_tool_call(
+    calls: Sequence[dict[str, Any]],
+    tool_names: frozenset[str],
+) -> bool:
+    for call in calls:
+        if str(call.get("tool") or "") not in tool_names:
+            continue
+        result = call.get("result") or {}
+        if result.get("success") is True or result.get("command_accepted") is True:
+            return True
+    return False
 
 
 def unsupported_external_capability_reply(
@@ -584,12 +640,38 @@ def unsupported_external_capability_reply(
     completed_calls: Sequence[dict[str, Any]],
 ) -> str | None:
     """Block execution claims for integrations that have no registered tool."""
-    if completed_calls or not _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text):
-        return None
-    return (
-        "I don’t have a connected support, email, or booking integration, so I can’t "
-        "create that external request from Jarvis."
+    external_action = bool(
+        _EXTERNAL_ACTION_REQUEST_PATTERN.search(text)
+        and _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text)
     )
+    if external_action:
+        generic_message = bool(re.search(r"\b(?:send|message)\b.{0,50}\bmessage\b", text, re.I))
+        explicitly_unsupported = bool(
+            re.search(
+                r"\b(?:support|customer service|email|calendar|appointment|event|"
+                r"instagram|facebook|tiktok|twitter|social|book|reserve|purchase|buy)\b",
+                text,
+                re.I,
+            )
+        )
+        if (
+            generic_message
+            and not explicitly_unsupported
+            and _completed_tool_call(completed_calls, _SUPPORTED_MESSAGE_ACTION_TOOLS)
+        ):
+            return None
+        return (
+            "I don’t have a connected provider for that external action, so I can’t "
+            "truthfully say it was sent, posted, booked, purchased, or scheduled."
+        )
+    if _UNSUPPORTED_LIVE_RESEARCH_PATTERN.search(text):
+        if _completed_tool_call(completed_calls, _LIVE_RESEARCH_TOOLS):
+            return None
+        return (
+            "Live web research is not configured in this Jarvis Core, so I can’t "
+            "verify current online information yet."
+        )
+    return None
 
 
 def unbacked_future_promise_reply(
@@ -597,11 +679,26 @@ def unbacked_future_promise_reply(
     completed_calls: Sequence[dict[str, Any]],
 ) -> str | None:
     """Never emit a future commitment unless an execution-backed job exists."""
-    if completed_calls or not _UNBACKED_FUTURE_PROMISE_PATTERN.search(reply):
+    persisted_job = any(
+        (call.get("result") or {}).get("success") is True
+        and bool(
+            (call.get("result") or {}).get("job_id")
+            or ((call.get("result") or {}).get("job") or {}).get("job_id")
+        )
+        and str(
+            (call.get("result") or {}).get("status")
+            or ((call.get("result") or {}).get("job") or {}).get("status")
+            or "pending"
+        ).casefold()
+        not in {"failed", "cancelled"}
+        for call in completed_calls
+        if str(call.get("tool") or "").startswith(("followup", "task", "schedule"))
+    )
+    if persisted_job or not _UNBACKED_FUTURE_PROMISE_PATTERN.search(reply):
         return None
     return (
-        "I can’t schedule or monitor that in the background from this Core yet, so I "
-        "won’t promise a later update."
+        "That response was not backed by a persisted follow-up job, so I won’t "
+        "promise a later update."
     )
 
 
@@ -933,6 +1030,13 @@ class RequestRouter:
             )
             or _STATE_NOUN_QUERY_PATTERN.search(value)
             or _PERSON_LOCATION_PATTERN.search(value)
+            or (
+                _PRESENCE_EVIDENCE_FOLLOWUP_PATTERN.search(value)
+                and (
+                    _PRESENCE_EXPLICIT_REFERENT_PATTERN.search(value)
+                    or cls._has_recent_state_context(history)
+                )
+            )
         )
         if state_question:
             return RoutingDecision(
@@ -1071,12 +1175,16 @@ class AIEngine:
         awareness: HouseAwarenessEngine,
         code_awareness: CodeAwarenessEngine | None = None,
         speech_corrections: SpeechCorrectionEngine | None = None,
+        capabilities: CapabilityRegistry | None = None,
     ) -> None:
         if not api_key.strip():
             raise AIEngineError("OPENAI_API_KEY is not configured.")
 
         if not model.strip():
             raise AIEngineError("The OpenAI model is not configured.")
+
+        if capabilities is None:
+            raise AIEngineError("The capability and action-receipt registry is required.")
 
         timeout_seconds = _env_int(
             "JARVIS_OPENAI_TIMEOUT_SECONDS",
@@ -1106,6 +1214,7 @@ class AIEngine:
         self.awareness = awareness
         self.code_awareness = code_awareness
         self.speech_corrections = speech_corrections
+        self.capabilities = capabilities
         self.router = RequestRouter()
         self.understanding = UnderstandingEngine(registry)
         self.house_context = HouseContextEngine(registry)
@@ -2001,6 +2110,27 @@ class AIEngine:
             },
         }
 
+    @classmethod
+    def _tool_outcome_unknown(
+        cls,
+        name: str,
+        arguments: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        failure = cls._tool_failure(
+            name=name,
+            arguments=arguments,
+            code="action_outcome_unknown",
+            message=message,
+        )
+        failure["result"].update(
+            {
+                "outcome_unknown": True,
+                "verified": False,
+            }
+        )
+        return failure
+
     @staticmethod
     def _parse_arguments(arguments_json: str) -> dict[str, Any]:
         try:
@@ -2039,6 +2169,19 @@ class AIEngine:
                 code="tool_not_authorised",
                 message="That tool was not authorised for this request.",
             )
+
+        capabilities = getattr(self, "capabilities", None)
+        if capabilities is not None:
+            capability = capabilities.capability_for_tool(name)
+            if capability is not None:
+                available, reason = capabilities.tool_available(name)
+                if not available:
+                    return self._tool_failure(
+                        name=name,
+                        arguments=arguments,
+                        code="capability_unavailable",
+                        message=reason or "That capability is currently unavailable.",
+                    )
 
         try:
             if (
@@ -2712,6 +2855,21 @@ class AIEngine:
             )
         except Exception as exc:
             logger.exception("Tool execution failed: %s", name)
+            capabilities = getattr(self, "capabilities", None)
+            capability = (
+                capabilities.capability_for_tool(name)
+                if capabilities is not None
+                else None
+            )
+            if capability is not None and capability.mode != "read":
+                return self._tool_outcome_unknown(
+                    name,
+                    arguments,
+                    (
+                        f"The {name} action was interrupted and may have been "
+                        "accepted, so it will not be reported as a definite failure."
+                    ),
+                )
             return self._tool_failure(
                 name,
                 arguments,
@@ -2826,20 +2984,6 @@ class AIEngine:
             alias = config.get("alias") or call.get("arguments", {}).get("config_key")
             return f"Loaded the configuration for {alias}."
 
-        if name == "list_admin_items":
-            items = result.get("items", [])
-            if not items:
-                return "I couldn’t find a matching automation or script."
-            return "; ".join(
-                f'{item.get("name", item.get("entity_id"))} ({item.get("config_key")})'
-                for item in items[:8]
-            ) + "."
-
-        if name == "get_admin_item_config":
-            config = result.get("config") or {}
-            alias = config.get("alias") or call.get("arguments", {}).get("config_key")
-            return f"Loaded the configuration for {alias}."
-
         if name == "save_memory":
             memory = result.get("memory", {})
             content = memory.get("content", "information")
@@ -2862,6 +3006,203 @@ class AIEngine:
             or result.get("message")
             or "The request was completed."
         )
+
+    async def _begin_action_receipt(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str | None = None,
+        action_slot: str = "write:0",
+    ) -> dict[str, Any] | None:
+        """Create the audit record before any external write can run."""
+        capabilities = getattr(self, "capabilities", None)
+        if capabilities is None:
+            if tool_name in _AUTHORITATIVE_ACTION_TOOLS or tool_name in {
+                "apply_admin_change",
+                "cancel_admin_change",
+                "save_memory",
+                "forget_memory",
+            }:
+                raise AIEngineError("The action receipt registry is unavailable.")
+            return None
+        capability = capabilities.capability_for_tool(tool_name)
+        if capability is None:
+            if tool_name in _AUTHORITATIVE_ACTION_TOOLS or tool_name == "apply_admin_change":
+                raise AIEngineError(f"The {tool_name} action is not registered.")
+            return None
+        if capability.mode == "read":
+            return None
+        if not (request_id or "").strip():
+            raise AIEngineError(
+                "A stable request ID is required before an external action can run."
+            )
+        live_availability = getattr(capabilities, "tool_available_now", None)
+        if live_availability is None:
+            available, reason = capabilities.tool_available(tool_name)
+        else:
+            available, reason = await live_availability(tool_name)
+        if not available:
+            raise AIEngineError(reason or f"The {tool_name} capability is unavailable.")
+        digest = hashlib.sha256(
+            (
+                f"{conversation_id}|{actor.user_key}|{request_id.strip()}|"
+                f"{action_slot}"
+            ).encode()
+        ).hexdigest()
+        action_id = f"request:{digest}"
+        return await capabilities.begin_tool_action(
+            tool_name,
+            arguments,
+            conversation_id=conversation_id,
+            actor_key=actor.user_key,
+            action_id=action_id,
+        )
+
+    async def _finish_action_receipt(
+        self,
+        receipt: dict[str, Any] | None,
+        result: dict[str, Any],
+        *,
+        tool_name: str,
+    ) -> dict[str, Any] | None:
+        if receipt is None:
+            return None
+        capabilities = getattr(self, "capabilities", None)
+        if capabilities is None:
+            return dict(receipt)
+        try:
+            completed = await capabilities.finish_tool_action(receipt, result)
+        except Exception:
+            # The action may already have happened. Never invite an unsafe HTTP
+            # retry by raising after the side effect; leave the durable receipt
+            # in its started state and expose that finalisation was incomplete.
+            logger.exception(
+                "Could not finalize action receipt tool=%s action=%s",
+                tool_name,
+                receipt.get("action_id"),
+            )
+            incomplete = dict(receipt)
+            incomplete["completion_recorded"] = False
+            return incomplete
+        if completed is not None:
+            completed = dict(completed)
+            completed["completion_recorded"] = True
+        return completed
+
+    async def _run_receipted_action(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        conversation_id: str,
+        actor: UserContext,
+        operation: Callable[[], Awaitable[dict[str, Any]]],
+        failure_message: str,
+        request_id: str | None = None,
+        action_slot: str = "write:0",
+    ) -> dict[str, Any]:
+        """Execute one deterministic write with a pre-action durable receipt."""
+        try:
+            receipt = await self._begin_action_receipt(
+                tool_name,
+                arguments,
+                conversation_id=conversation_id,
+                actor=actor,
+                request_id=request_id,
+                action_slot=action_slot,
+            )
+        except Exception as exc:
+            logger.exception("Could not begin action receipt tool=%s", tool_name)
+            return self._tool_failure(
+                name=tool_name,
+                arguments=arguments,
+                code="action_audit_unavailable",
+                message=f"The action was not run because its audit trail is unavailable: {exc}",
+            )
+
+        replay = self._action_replay_call(receipt, tool_name, arguments)
+        if replay is not None:
+            return replay
+
+        try:
+            result = dict(await operation())
+        except asyncio.CancelledError:
+            cancelled = self._tool_outcome_unknown(
+                tool_name,
+                arguments,
+                (
+                    "The action was interrupted and may have been accepted; "
+                    "its outcome is unknown."
+                ),
+            )
+            await self._finish_action_receipt(
+                receipt,
+                cancelled["result"],
+                tool_name=tool_name,
+            )
+            raise
+        except Exception:
+            logger.exception("Deterministic action failed tool=%s", tool_name)
+            failure = self._tool_outcome_unknown(
+                tool_name,
+                arguments,
+                (
+                    f"{failure_message} The provider may have accepted the action, "
+                    "so its outcome is unknown."
+                ),
+            )
+            result = dict(failure["result"])
+
+        completed = await self._finish_action_receipt(
+            receipt,
+            result,
+            tool_name=tool_name,
+        )
+        call: dict[str, Any] = {
+            "tool": tool_name,
+            "arguments": arguments,
+            "result": result,
+        }
+        if completed is not None:
+            call["action_receipt"] = completed
+            result["action_id"] = completed.get("action_id")
+        return call
+
+    def _action_replay_call(
+        self,
+        receipt: dict[str, Any] | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return a stored terminal result, or fail closed on an unfinished replay."""
+        if not receipt or not receipt.get("idempotent_replay"):
+            return None
+        stored_result = receipt.get("result")
+        if receipt.get("completed_at") and isinstance(stored_result, dict):
+            result = dict(stored_result)
+            result["action_id"] = receipt.get("action_id")
+            result["idempotent_replay"] = True
+            return {
+                "tool": tool_name,
+                "arguments": arguments,
+                "result": result,
+                "action_receipt": receipt,
+            }
+        failure = self._tool_failure(
+            name=tool_name,
+            arguments=arguments,
+            code="action_outcome_unknown",
+            message=(
+                "This request already has an unfinished action receipt, so the "
+                "action was not repeated."
+            ),
+        )
+        failure["action_receipt"] = receipt
+        failure["result"]["action_id"] = receipt.get("action_id")
+        return failure
 
     @staticmethod
     def _latest_matching_user_text(
@@ -3145,11 +3486,24 @@ class AIEngine:
         self,
         user_text: str,
         actor: UserContext,
+        conversation_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        if not _PERSON_LOCATION_PATTERN.search(user_text):
+        location_request = bool(_PERSON_LOCATION_PATTERN.search(user_text))
+        evidence_followup = bool(_PRESENCE_EVIDENCE_FOLLOWUP_PATTERN.search(user_text))
+        if not location_request and not evidence_followup:
             return None
 
         owner = self._owner_from_text(user_text, actor.display_name)
+        if evidence_followup and not _PRESENCE_EXPLICIT_REFERENT_PATTERN.search(user_text):
+            if not conversation_id:
+                return None
+            focused_person = await self.dialogue.focused_person(
+                conversation_id,
+                max_age_seconds=300,
+            )
+            if not focused_person or not focused_person.get("name"):
+                return None
+            owner = str(focused_person["name"])
         inspect_presence = getattr(self.tools, "inspect_presence", None)
         if inspect_presence is not None:
             evidence = await inspect_presence(owner)
@@ -3175,12 +3529,17 @@ class AIEngine:
             conflicts = list(evidence.get("conflicts") or [])
             if source:
                 source_name = str(source.get("name") or source.get("entity_id"))
-                reply = f"Home Assistant currently reports {owner} is {reported}, based on {source_name}."
+                reply = (
+                    f"Home Assistant currently reports {owner} is {reported}; "
+                    f"its source attribute points to {source_name}."
+                )
                 if conflicts:
-                    reply += (
-                        f" However, {source_name} currently reports {source.get('state')}; "
-                        "I can only confirm Home Assistant's reported state, not physical presence."
+                    conflict_text = ", ".join(
+                        f"{item.get('name') or item.get('entity_id')} currently reports "
+                        f"{item.get('state') if item.get('state') is not None else 'no live state'}"
+                        for item in conflicts
                     )
+                    reply += f" However, {conflict_text}. I can only confirm Home Assistant's reported state, not physical presence."
                 return reply, [call]
             return (
                 f"Home Assistant currently reports {owner} is {reported}, but it does not expose enough evidence to establish which tracker caused that state.",
@@ -3542,6 +3901,7 @@ class AIEngine:
         user_text: str,
         history: Sequence[dict[str, str]],
         actor: UserContext,
+        conversation_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
         # Common personal-state questions should be deterministic, fast and must
         # not enter a clarification loop. More complex state questions continue
@@ -3555,7 +3915,62 @@ class AIEngine:
         phone_reply = await self._direct_phone_battery_reply(user_text, history, actor)
         if phone_reply is not None:
             return phone_reply
-        return await self._direct_person_location_reply(user_text, actor)
+        return await self._direct_person_location_reply(user_text, actor, conversation_id)
+
+    async def _grounded_capability_reply(
+        self,
+        text: str,
+        decision: RoutingDecision,
+    ) -> str:
+        """Describe only capabilities whose providers pass the runtime check."""
+        fallback = decision.deterministic_reply or "I couldn’t verify that capability."
+        capabilities = getattr(self, "capabilities", None)
+        if capabilities is None:
+            return fallback
+        try:
+            snapshot = await capabilities.snapshot()
+        except Exception:
+            logger.exception("Could not build grounded capability response")
+            return "I couldn’t verify my live capability status just now."
+
+        available = {
+            str(item.get("capability_id") or "")
+            for item in snapshot.get("capabilities", [])
+            if item.get("available") is True
+        }
+        if decision.intent == RequestIntent.CAPABILITY_OVERVIEW:
+            descriptions: list[str] = []
+            if "homeassistant.control" in available:
+                descriptions.append("control exposed lights and switches")
+            if "homeassistant.media" in available or "homeassistant.routine" in available:
+                descriptions.append("operate configured TV, media and routine targets")
+            if "homeassistant.notify" in available:
+                descriptions.append("request phone notifications and household announcements")
+            if "homeassistant.read" in available:
+                descriptions.append("read fresh device, sensor, battery and presence states")
+            if descriptions:
+                return "Right now I can " + ", ".join(descriptions) + "."
+            provider = next(
+                (
+                    item
+                    for item in snapshot.get("providers", [])
+                    if item.get("provider_id") == "homeassistant"
+                ),
+                {},
+            )
+            reason = str(provider.get("reason") or "Home Assistant is unavailable.")
+            return f"I don’t currently have a healthy Home Assistant capability: {reason}"
+
+        required = "homeassistant.control"
+        if _NOTIFICATION_ACTION_PATTERN.search(text) or _ANNOUNCEMENT_ACTION_PATTERN.search(text):
+            required = "homeassistant.notify"
+        elif _MEDIA_ACTION_PATTERN.search(text):
+            required = "homeassistant.media"
+        elif _ROUTINE_RUN_PATTERN.search(text):
+            required = "homeassistant.routine"
+        if required not in available:
+            return "That Home Assistant capability is not currently available."
+        return fallback
 
     def _response_kwargs(
         self,
@@ -4268,6 +4683,9 @@ class AIEngine:
         second_score = ranked[1][0] if len(ranked) > 1 else 0.0
         if best_score < 0.74:
             return None
+        if len(ranked) > 1 and abs(best_score - second_score) < 0.000001:
+            # Equal exact/fuzzy matches are genuinely ambiguous, even at 1.0.
+            return None
         if best_score < 0.95 and best_score - second_score < 0.08:
             return None
         logger.info(
@@ -4288,6 +4706,10 @@ class AIEngine:
     async def _try_direct_power_control(
         self,
         text: str,
+        *,
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
         """Fast, deterministic control for one or more exact lights/switches."""
         parsed = self._parse_simple_power_command(text)
@@ -4305,13 +4727,18 @@ class AIEngine:
             "living room tv",
         }:
             shortcut = "tv_on" if turn_on else "tv_off"
-            result = await self.tools.run_media_shortcut(shortcut)
+            call = await self._run_receipted_action(
+                "run_media_shortcut",
+                {"shortcut": shortcut},
+                conversation_id=conversation_id,
+                actor=actor,
+                operation=lambda: self.tools.run_media_shortcut(shortcut),
+                failure_message="I couldn’t control the TV.",
+                request_id=request_id,
+            )
+            result = call["result"]
             reply = "Done." if result.get("success") else "I couldn't do that."
-            return reply, [{
-                "tool": "run_media_shortcut",
-                "arguments": {"shortcut": shortcut},
-                "result": result,
-            }]
+            return reply, [call]
         if (
             re.search(r"\blights\b", target_text, re.I)
             and "floodlight" not in normalised_target
@@ -4342,20 +4769,40 @@ class AIEngine:
         if not matched:
             return None
 
+        target_state = "on" if turn_on else "off"
+
+        async def run_device(
+            action_index: int,
+            device: dict[str, Any],
+        ) -> dict[str, Any]:
+            entity_id = str(device["entity_id"])
+            name = str(device.get("name") or entity_id or "Device")
+            area = str(device.get("area_name") or "").strip()
+            display_name = f"{area} {name}" if area and area.casefold() not in name.casefold() else name
+            return await self._run_receipted_action(
+                "control_device",
+                {"entity_id": entity_id, "action": target_state},
+                conversation_id=conversation_id,
+                actor=actor,
+                operation=lambda: self.tools.control_device(
+                    entity_id=entity_id,
+                    turn_on=turn_on,
+                ),
+                failure_message=f"I couldn’t control {display_name}.",
+                request_id=request_id,
+                action_slot=f"write:{action_index}",
+            )
+
         raw_results = await asyncio.gather(
             *(
-                self.tools.control_device(
-                    entity_id=str(device["entity_id"]),
-                    turn_on=turn_on,
-                )
-                for device in matched
+                run_device(action_index, device)
+                for action_index, device in enumerate(matched)
             ),
             return_exceptions=True,
         )
 
         calls: list[dict[str, Any]] = []
         messages: list[str] = []
-        target_state = "on" if turn_on else "off"
         for device, raw_result in zip(matched, raw_results):
             name = str(device.get("name") or device.get("entity_id") or "Device")
             area = str(device.get("area_name") or "").strip()
@@ -4371,17 +4818,19 @@ class AIEngine:
                     "response_message": f"I couldn’t control {display_name}.",
                     "error": str(raw_result),
                 }
+                call = {
+                    "tool": "control_device",
+                    "arguments": {
+                        "entity_id": str(device.get("entity_id") or ""),
+                        "action": target_state,
+                    },
+                    "result": result,
+                }
             else:
-                result = raw_result
+                call = raw_result
+                result = call["result"]
 
-            calls.append({
-                "tool": "control_device",
-                "arguments": {
-                    "entity_id": str(device.get("entity_id") or ""),
-                    "action": target_state,
-                },
-                "result": result,
-            })
+            calls.append(call)
 
             if result.get("already_in_target_state") is True:
                 messages.append(f"{display_name} is already {target_state}.")
@@ -4404,6 +4853,7 @@ class AIEngine:
         actor: UserContext | None = None,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
         trusted_context: dict[str, Any] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         actor = actor or UserContext.from_request(
             user_id=None,
@@ -4532,34 +4982,30 @@ class AIEngine:
             recipient = str(action.get("recipient") or "")
             message = str(action.get("message") or "").strip()
             title = str(action.get("title") or "Jarvis")
-            try:
-                result = await self.tools.send_mobile_notification(
+            arguments = {
+                "recipient": recipient,
+                "title": title,
+                "message": message,
+            }
+            call = await self._run_receipted_action(
+                "send_mobile_notification",
+                arguments,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                operation=lambda: self.tools.send_mobile_notification(
                     recipient=recipient,
                     message=message,
                     title=title,
-                )
-            except Exception:
-                logger.exception(
-                    "Central dialogue notification follow-up failed recipient=%s",
-                    recipient,
-                )
-                result = {
-                    "success": False,
-                    "response_message": "I couldn’t send that notification.",
-                }
+                ),
+                failure_message="I couldn’t send that notification.",
+                request_id=request_id,
+            )
+            result = call["result"]
             success = bool(result.get("success"))
             final_reply = _clean_reply(
                 str(result.get("response_message") or "Notification sent.")
             )
-            calls = [{
-                "tool": "send_mobile_notification",
-                "arguments": {
-                    "recipient": recipient,
-                    "title": title,
-                    "message": message,
-                },
-                "result": result,
-            }]
+            calls = [call]
             if success:
                 await self.dialogue.clear_goal(
                     resolved_conversation_id,
@@ -4815,29 +5261,30 @@ class AIEngine:
                     "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
                 }
 
-            try:
-                result = await self.tools.send_mobile_notification(
+            arguments = {
+                "recipient": pending_notification_recipient,
+                "title": "Jarvis",
+                "message": message,
+            }
+            call = await self._run_receipted_action(
+                "send_mobile_notification",
+                arguments,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                operation=lambda: self.tools.send_mobile_notification(
                     recipient=pending_notification_recipient,
                     message=message,
                     title="Jarvis",
-                )
-            except Exception:
-                logger.exception(
-                    "Direct notification follow-up failed recipient=%s",
-                    pending_notification_recipient,
-                )
-                final_reply = "I couldn’t send that notification."
-                success = False
-                result = {
-                    "success": False,
-                    "response_message": final_reply,
-                }
-            else:
-                final_reply = _clean_reply(
-                    str(result.get("response_message") or "Notification sent.")
-                )
-                success = bool(result.get("success"))
-
+                ),
+                failure_message="I couldn’t send that notification.",
+                request_id=request_id,
+            )
+            result = call["result"]
+            final_reply = _clean_reply(
+                str(result.get("response_message") or "I couldn’t send that notification.")
+            )
+            success = bool(result.get("success"))
+            calls = [call]
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
                 content=final_reply,
@@ -4850,17 +5297,7 @@ class AIEngine:
                 "deterministic": True,
                 "tool_called": True,
                 "tool_rounds": 1,
-                "calls": [
-                    {
-                        "tool": "send_mobile_notification",
-                        "arguments": {
-                            "recipient": pending_notification_recipient,
-                            "title": "Jarvis",
-                            "message": message,
-                        },
-                        "result": result,
-                    }
-                ],
+                "calls": calls,
                 "memory_used": False,
                 "conversation_id": resolved_conversation_id,
                 "understanding": understanding.as_dict(),
@@ -4957,34 +5394,30 @@ class AIEngine:
                         "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
                     }
 
-                try:
-                    result = await self.tools.send_mobile_notification(
+                arguments = {
+                    "recipient": recipient,
+                    "title": "Jarvis",
+                    "message": message,
+                }
+                call = await self._run_receipted_action(
+                    "send_mobile_notification",
+                    arguments,
+                    conversation_id=resolved_conversation_id,
+                    actor=actor,
+                    operation=lambda: self.tools.send_mobile_notification(
                         recipient=recipient,
                         message=message,
                         title="Jarvis",
-                    )
-                except Exception:
-                    logger.exception(
-                        "Central dialogue inline notification failed recipient=%s",
-                        recipient,
-                    )
-                    result = {
-                        "success": False,
-                        "response_message": "I couldn’t send that notification.",
-                    }
+                    ),
+                    failure_message="I couldn’t send that notification.",
+                    request_id=request_id,
+                )
+                result = call["result"]
                 success = bool(result.get("success"))
                 final_reply = _clean_reply(
                     str(result.get("response_message") or "Notification sent.")
                 )
-                calls = [{
-                    "tool": "send_mobile_notification",
-                    "arguments": {
-                        "recipient": recipient,
-                        "title": "Jarvis",
-                        "message": message,
-                    },
-                    "result": result,
-                }]
+                calls = [call]
                 await self.conversations.add_assistant_message(
                     conversation_id=resolved_conversation_id,
                     content=final_reply,
@@ -5184,22 +5617,43 @@ class AIEngine:
             }
 
         if pending_admin is not None and _ADMIN_CONFIRM_PATTERN.fullmatch(user_text):
-            result = await self.admin.apply_pending(resolved_conversation_id)
-            final_reply = _clean_reply(str(result.get("response_message") or ""))
+            arguments = {
+                "proposal_id": pending_admin.get("proposal_id"),
+                "domain": pending_admin.get("domain"),
+                "config_key": pending_admin.get("config_key"),
+            }
+            call = await self._run_receipted_action(
+                "apply_admin_change",
+                arguments,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                operation=lambda: self.admin.apply_pending(resolved_conversation_id),
+                failure_message="I couldn’t apply that Home Assistant change.",
+                request_id=request_id,
+            )
+            result = call["result"]
+            error = result.get("error") or {}
+            final_reply = _clean_reply(
+                str(
+                    result.get("response_message")
+                    or error.get("message")
+                    or "I couldn’t apply that Home Assistant change."
+                )
+            )
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
                 content=final_reply,
             )
             await self.dialogue.clear_goal(
                 resolved_conversation_id,
-                outcome="completed",
+                outcome="completed" if result.get("success") else "failed",
             )
             await self.dialogue.record_result(
                 resolved_conversation_id,
                 intent="admin_confirm",
                 success=bool(result.get("success")),
                 response=final_reply,
-                calls=[{"tool": "apply_admin_change", "result": result}],
+                calls=[call],
             )
             return {
                 "success": bool(result.get("success")),
@@ -5209,14 +5663,30 @@ class AIEngine:
                 "deterministic": True,
                 "tool_called": True,
                 "tool_rounds": 1,
-                "calls": [{"tool": "apply_admin_change", "result": result}],
+                "calls": [call],
                 "memory_used": False,
                 "conversation_id": resolved_conversation_id,
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
         if pending_admin is not None and _ADMIN_CANCEL_PATTERN.fullmatch(user_text):
-            result = await self.admin.cancel_pending(resolved_conversation_id)
+            arguments = {
+                "proposal_id": pending_admin.get("proposal_id"),
+                "domain": pending_admin.get("domain"),
+                "config_key": pending_admin.get("config_key"),
+            }
+            call = await self._run_receipted_action(
+                "cancel_admin_change",
+                arguments,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                operation=lambda: self.admin.cancel_pending(
+                    resolved_conversation_id
+                ),
+                failure_message="I couldn’t cancel that Home Assistant change.",
+                request_id=request_id,
+            )
+            result = call["result"]
             final_reply = _clean_reply(str(result.get("response_message") or ""))
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
@@ -5231,7 +5701,7 @@ class AIEngine:
                 intent="admin_cancel",
                 success=bool(result.get("success")),
                 response=final_reply,
-                calls=[{"tool": "cancel_admin_change", "result": result}],
+                calls=[call],
             )
             return {
                 "success": bool(result.get("success")),
@@ -5241,7 +5711,7 @@ class AIEngine:
                 "deterministic": True,
                 "tool_called": True,
                 "tool_rounds": 1,
-                "calls": [{"tool": "cancel_admin_change", "result": result}],
+                "calls": [call],
                 "memory_used": False,
                 "conversation_id": resolved_conversation_id,
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
@@ -5322,7 +5792,12 @@ class AIEngine:
             RequestIntent.CONTROL_NOW,
             RequestIntent.CONTROL_FOLLOW_UP,
         }:
-            direct_control = await self._try_direct_power_control(user_text)
+            direct_control = await self._try_direct_power_control(
+                user_text,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                request_id=request_id,
+            )
             if direct_control is not None:
                 final_reply, direct_calls = direct_control
                 final_reply = _clean_reply(final_reply)
@@ -5370,7 +5845,12 @@ class AIEngine:
                 }
 
         if decision.intent == RequestIntent.STATE_QUERY:
-            direct_state = await self._try_direct_state_reply(user_text, history, actor)
+            direct_state = await self._try_direct_state_reply(
+                user_text,
+                history,
+                actor,
+                resolved_conversation_id,
+            )
             if direct_state is not None:
                 final_reply, direct_calls = direct_state
                 final_reply = _clean_reply(final_reply)
@@ -5418,7 +5898,16 @@ class AIEngine:
                 }
 
         if decision.deterministic_reply:
-            final_reply = _clean_reply(decision.deterministic_reply)
+            deterministic_reply = decision.deterministic_reply
+            if decision.intent in {
+                RequestIntent.CAPABILITY_OVERVIEW,
+                RequestIntent.CAPABILITY_GUIDANCE,
+            }:
+                deterministic_reply = await self._grounded_capability_reply(
+                    user_text,
+                    decision,
+                )
+            final_reply = _clean_reply(deterministic_reply)
             await self.conversations.add_assistant_message(
                 conversation_id=resolved_conversation_id,
                 content=final_reply,
@@ -5658,6 +6147,7 @@ class AIEngine:
         working_input = list(input_items)
         completed_calls: list[dict[str, Any]] = []
         seen_call_signatures: set[tuple[str, str]] = set()
+        write_action_count = 0
         tool_rounds = 0
         total_input_tokens = 0
         total_output_tokens = 0
@@ -5751,14 +6241,63 @@ class AIEngine:
                     )
                 else:
                     seen_call_signatures.add(signature)
-                    completed = await self._execute_function(
-                        name=name,
-                        arguments_json=arguments_json,
-                        user_text=user_text,
-                        authorised_tools=authorised_tools,
-                        conversation_id=resolved_conversation_id,
-                        actor=actor,
-                    )
+                    action_receipt: dict[str, Any] | None = None
+                    try:
+                        parsed_arguments = self._parse_arguments(arguments_json)
+                    except AIEngineError as exc:
+                        completed = self._tool_failure(
+                            name=name,
+                            arguments={},
+                            code="invalid_arguments",
+                            message=str(exc),
+                        )
+                    else:
+                        try:
+                            action_receipt = await self._begin_action_receipt(
+                                name,
+                                parsed_arguments,
+                                conversation_id=resolved_conversation_id,
+                                actor=actor,
+                                request_id=request_id,
+                                action_slot=f"write:{write_action_count}",
+                            )
+                        except Exception as exc:
+                            logger.exception("Could not create action receipt tool=%s", name)
+                            completed = self._tool_failure(
+                                name=name,
+                                arguments=parsed_arguments,
+                                code="action_audit_unavailable",
+                                message=f"The action audit trail is unavailable: {exc}",
+                            )
+                        else:
+                            if action_receipt is not None:
+                                write_action_count += 1
+                            replay = self._action_replay_call(
+                                action_receipt,
+                                name,
+                                parsed_arguments,
+                            )
+                            if replay is not None:
+                                completed = replay
+                            else:
+                                completed = await self._execute_function(
+                                    name=name,
+                                    arguments_json=arguments_json,
+                                    user_text=user_text,
+                                    authorised_tools=authorised_tools,
+                                    conversation_id=resolved_conversation_id,
+                                    actor=actor,
+                                )
+                                receipt = await self._finish_action_receipt(
+                                    action_receipt,
+                                    completed.get("result") or {},
+                                    tool_name=name,
+                                )
+                                if receipt is not None:
+                                    completed["action_receipt"] = receipt
+                                    completed.setdefault("result", {})[
+                                        "action_id"
+                                    ] = receipt.get("action_id")
 
                 completed_calls.append(completed)
                 output_items.append(

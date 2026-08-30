@@ -70,12 +70,63 @@ def test_unavailable_external_capability_cannot_be_claimed() -> None:
     assert "don’t have a connected" in reply
     assert unsupported_external_capability_reply(
         "Can you submit a support ticket?", [{"tool": "support_ticket"}]
+    ) is not None
+
+
+def test_supported_notification_is_not_overridden_by_capability_guard() -> None:
+    assert unsupported_external_capability_reply(
+        "Send Amber a message saying dinner is ready",
+        [
+            {
+                "tool": "send_mobile_notification",
+                "result": {"success": True, "verified": False, "command_accepted": True},
+            }
+        ],
+    ) is None
+
+
+def test_external_action_advice_is_not_mistaken_for_execution() -> None:
+    assert unsupported_external_capability_reply("What book should I buy?", []) is None
+
+
+def test_unrelated_ha_read_does_not_satisfy_live_web_request() -> None:
+    assert unsupported_external_capability_reply(
+        "Check current prices online",
+        [{"tool": "get_entity_state", "result": {"success": True}}],
+    ) is not None
+
+
+def test_current_ha_state_is_not_mistaken_for_web_research() -> None:
+    assert unsupported_external_capability_reply(
+        "Check current bedroom temperature",
+        [{"tool": "get_entity_state", "result": {"success": True}}],
     ) is None
 
 
 def test_unbacked_future_commitment_is_blocked() -> None:
     assert unbacked_future_promise_reply("I'll get back to you later.", []) is not None
-    assert unbacked_future_promise_reply("I'll get back to you later.", [{"tool": "task"}]) is None
+    assert unbacked_future_promise_reply(
+        "I'll get back to you later.",
+        [{"tool": "task", "result": {"success": True}}],
+    ) is not None
+    assert unbacked_future_promise_reply(
+        "I'll remind you tomorrow.",
+        [
+            {
+                "tool": "followup_schedule",
+                "result": {"success": True, "job_id": "job-1", "status": "pending"},
+            }
+        ],
+    ) is None
+    assert unbacked_future_promise_reply(
+        "I'll notify you when it is done.",
+        [
+            {
+                "tool": "followup_schedule",
+                "result": {"success": False, "job_id": "job-2", "status": "failed"},
+            }
+        ],
+    ) is not None
 
 
 def test_motion_sensor_question_remains_live_state() -> None:

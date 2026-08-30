@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -20,9 +21,11 @@ class RegistrySnapshot:
 
 
 class RegistryEngine:
-    def __init__(self, client: HomeAssistantClient) -> None:
+    def __init__(self, client: HomeAssistantClient, max_age_seconds: float = 300.0) -> None:
         self.client = client
         self.snapshot = RegistrySnapshot()
+        self.max_age_seconds = max(5.0, float(max_age_seconds))
+        self._refreshed_monotonic = 0.0
         self._lock = asyncio.Lock()
 
     async def refresh(self) -> RegistrySnapshot:
@@ -47,6 +50,7 @@ class RegistryEngine:
                 states=states or [],
                 refreshed_at=datetime.now(timezone.utc).isoformat(),
             )
+            self._refreshed_monotonic = time.monotonic()
 
             logger.info(
                 "Registry loaded: %d areas, %d devices, %d entities",
@@ -58,10 +62,19 @@ class RegistryEngine:
             return self.snapshot
 
     async def ensure_loaded(self) -> RegistrySnapshot:
-        if self.snapshot.refreshed_at is None:
+        if self.snapshot.refreshed_at is None or self.snapshot_stale():
             return await self.refresh()
 
         return self.snapshot
+
+    def snapshot_age_seconds(self) -> float | None:
+        if not self._refreshed_monotonic:
+            return None
+        return max(0.0, time.monotonic() - self._refreshed_monotonic)
+
+    def snapshot_stale(self) -> bool:
+        age = self.snapshot_age_seconds()
+        return age is None or age > self.max_age_seconds
 
     async def summary(self) -> dict[str, Any]:
         snapshot = await self.ensure_loaded()
@@ -85,6 +98,8 @@ class RegistryEngine:
             "states": len(snapshot.states),
             "domains": dict(domain_counts.most_common()),
             "refreshed_at": snapshot.refreshed_at,
+            "age_seconds": self.snapshot_age_seconds(),
+            "stale": self.snapshot_stale(),
         }
 
     async def areas(self) -> list[dict[str, Any]]:

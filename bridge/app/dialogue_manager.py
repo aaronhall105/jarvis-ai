@@ -472,6 +472,7 @@ class DialogueManager:
                 "updated_at": self._iso(self._utc_now()),
             }
         if person:
+            person["observed_at"] = str(state.last_result.get("at") or "")
             state.focus = {
                 **state.focus,
                 "person": person,
@@ -595,10 +596,30 @@ class DialogueManager:
             rewritten_text=f"Turn {state_value} {' and '.join(names)}",
         )
 
-    async def focused_person(self, conversation_id: str) -> dict[str, Any] | None:
+    async def focused_person(
+        self,
+        conversation_id: str,
+        *,
+        max_age_seconds: float | None = None,
+    ) -> dict[str, Any] | None:
         state = await self.get(conversation_id)
         person = state.focus.get("person")
-        return dict(person) if isinstance(person, dict) else None
+        if not isinstance(person, dict):
+            return None
+        if max_age_seconds is not None:
+            observed_at = str(person.get("observed_at") or "")
+            if not observed_at:
+                return None
+            try:
+                observed = datetime.fromisoformat(observed_at)
+                if observed.tzinfo is None:
+                    observed = observed.replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None
+            age = (self._utc_now() - observed.astimezone(timezone.utc)).total_seconds()
+            if age < 0 or age > max(0.0, float(max_age_seconds)):
+                return None
+        return dict(person)
 
     async def context_for_model(self, conversation_id: str) -> str:
         state = await self.get(conversation_id)

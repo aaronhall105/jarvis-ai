@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 import sqlite3
 import uuid
@@ -13,6 +14,9 @@ from app.home_assistant import (
     HomeAssistantError,
     HomeAssistantHTTPError,
 )
+
+
+logger = logging.getLogger("jarvis-core.admin")
 
 
 class AdminEngineError(RuntimeError):
@@ -864,19 +868,55 @@ class AdminEngine:
             "response_message": f"Cancelled the proposed change to {proposal.name}.",
         }
 
+    @classmethod
+    def _config_matches(
+        cls,
+        domain: str,
+        actual: dict[str, Any],
+        expected: dict[str, Any],
+    ) -> bool:
+        """Require every canonical requested field to survive HA readback."""
+
+        def contains(actual_value: Any, expected_value: Any) -> bool:
+            if isinstance(expected_value, dict):
+                return isinstance(actual_value, dict) and all(
+                    key in actual_value and contains(actual_value[key], value)
+                    for key, value in expected_value.items()
+                )
+            if isinstance(expected_value, list):
+                return (
+                    isinstance(actual_value, list)
+                    and len(actual_value) == len(expected_value)
+                    and all(
+                        contains(actual_item, expected_item)
+                        for actual_item, expected_item in zip(
+                            actual_value,
+                            expected_value,
+                        )
+                    )
+                )
+            return actual_value == expected_value
+
+        return contains(
+            cls._normalise_config(domain, actual),
+            cls._normalise_config(domain, expected),
+        )
+
     async def _rollback(
         self,
         proposal: PendingAdminChange,
         previous: dict[str, Any] | None,
-    ) -> None:
+    ) -> bool:
         endpoint = self._endpoint(proposal.domain, proposal.config_key)
         if previous is None:
-            try:
-                await self.client.rest_request("DELETE", endpoint)
-            except HomeAssistantError:
-                pass
-            return
+            await self.client.rest_request("DELETE", endpoint)
+            return await self.get_config(proposal.domain, proposal.config_key) is None
         await self.client.rest_request("POST", endpoint, json_data=previous)
+        restored = await self.get_config(proposal.domain, proposal.config_key)
+        return bool(
+            restored is not None
+            and self._config_matches(proposal.domain, restored, previous)
+        )
 
     async def apply_pending(self, conversation_id: str) -> dict[str, Any]:
         if not self.enabled:
@@ -919,68 +959,117 @@ class AdminEngine:
         )
         endpoint = self._endpoint(proposal.domain, proposal.config_key)
 
+        write_accepted = False
         try:
             await self.client.rest_request("POST", endpoint, json_data=config)
+            write_accepted = True
             await asyncio.sleep(0.8)
             stored = await self.get_config(proposal.domain, proposal.config_key)
             if stored is None:
                 raise AdminEngineError("Home Assistant did not return the saved configuration.")
-            expected_name = str(config.get("alias") or proposal.name).strip().lower()
-            stored_name = str(stored.get("alias") or proposal.name).strip().lower()
-            if expected_name and stored_name != expected_name:
+            if not self._config_matches(proposal.domain, stored, config):
                 raise AdminEngineError("The saved configuration could not be verified.")
         except Exception as exc:
+            rollback_verified = False
+            rollback_error: str | None = None
             try:
-                await self._rollback(proposal, previous)
-            except Exception:
-                pass
+                rollback_verified = await self._rollback(proposal, previous)
+            except Exception as rollback_exc:
+                rollback_error = str(rollback_exc)
             message = str(exc)
+            try:
+                await asyncio.to_thread(
+                    self._mark_status_sync,
+                    proposal.proposal_id,
+                    "failed",
+                    message,
+                    None,
+                )
+                await asyncio.to_thread(
+                    self._audit_sync,
+                    proposal,
+                    "failed",
+                    {
+                        "error": message,
+                        "write_accepted": write_accepted,
+                        "rollback_attempted": True,
+                        "rollback_verified": rollback_verified,
+                        "rollback_error": rollback_error,
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Could not persist failed admin outcome proposal=%s",
+                    proposal.proposal_id,
+                )
+            if rollback_verified:
+                response_message = (
+                    f"I couldn’t apply the change to {proposal.name}, and verified "
+                    f"that the previous configuration was restored. {message}"
+                )
+            else:
+                response_message = (
+                    f"I couldn’t verify the change to {proposal.name}, and I could "
+                    "not verify the rollback. The current Home Assistant configuration "
+                    f"must be checked before retrying. {message}"
+                )
+            return {
+                "success": False,
+                "verified": False,
+                "proposal_id": proposal.proposal_id,
+                "command_accepted": write_accepted,
+                "rollback_attempted": True,
+                "rollback_verified": rollback_verified,
+                "rollback_error": rollback_error,
+                "outcome_unknown": not rollback_verified,
+                "response_message": response_message,
+            }
+
+        runtime_loaded = False
+        runtime_error: str | None = None
+        try:
+            for delay in (0.4, 0.8, 1.2):
+                await asyncio.sleep(delay)
+                items = await self.list_items(proposal.domain, proposal.config_key, 20)
+                if any(
+                    str(item.get("config_key") or "") == proposal.config_key
+                    for item in items.get("items", [])
+                ):
+                    runtime_loaded = True
+                    break
+        except Exception as exc:
+            runtime_error = str(exc)
+            logger.exception(
+                "Admin configuration was saved but runtime load check failed proposal=%s",
+                proposal.proposal_id,
+            )
+
+        applied_at = self._iso(self._utc_now())
+        local_recorded = True
+        try:
             await asyncio.to_thread(
                 self._mark_status_sync,
                 proposal.proposal_id,
-                "failed",
-                message,
+                "applied",
                 None,
+                applied_at,
             )
             await asyncio.to_thread(
                 self._audit_sync,
                 proposal,
-                "failed",
-                {"error": message, "rollback_attempted": True},
+                "applied",
+                {
+                    "stored_verified": True,
+                    "runtime_loaded": runtime_loaded,
+                    "runtime_error": runtime_error,
+                },
             )
-            return {
-                "success": False,
-                "proposal_id": proposal.proposal_id,
-                "response_message": (
-                    f"I couldn’t apply the change to {proposal.name}. The previous configuration was preserved. {message}"
-                ),
-            }
-
-        runtime_loaded = False
-        for delay in (0.4, 0.8, 1.2):
-            await asyncio.sleep(delay)
-            items = await self.list_items(proposal.domain, proposal.config_key, 20)
-            if any(
-                str(item.get("config_key") or "") == proposal.config_key
-                for item in items.get("items", [])
-            ):
-                runtime_loaded = True
-                break
-
-        applied_at = self._iso(self._utc_now())
-        await asyncio.to_thread(
-            self._mark_status_sync,
-            proposal.proposal_id,
-            "applied",
-            None,
-            applied_at,
-        )
-        await asyncio.to_thread(
-            self._audit_sync,
-            proposal,
-            "applied",
-            {"stored_verified": True, "runtime_loaded": runtime_loaded},
-        )
+        except Exception:
+            local_recorded = False
+            logger.exception(
+                "HA admin change verified but local audit update failed proposal=%s",
+                proposal.proposal_id,
+            )
         verb = "Created" if proposal.operation == "create" else "Updated"
         response_message = (
             f"{verb}, validated and loaded {proposal.name}."
@@ -992,10 +1081,14 @@ class AdminEngine:
         )
         return {
             "success": True,
+            "verified": True,
+            "stored_verified": True,
             "proposal_id": proposal.proposal_id,
             "domain": proposal.domain,
             "config_key": proposal.config_key,
             "runtime_loaded": runtime_loaded,
+            "runtime_error": runtime_error,
+            "local_audit_recorded": local_recorded,
             "response_message": response_message,
         }
 

@@ -1,4 +1,5 @@
 import unittest
+import time
 
 from app.house_context import HouseContextEngine
 from app.registry import RegistrySnapshot
@@ -25,6 +26,32 @@ class FakeRegistry:
         return self.snapshot
 
 
+class FailingClient:
+    async def get_states(self):
+        raise RuntimeError("Home Assistant unavailable")
+
+
+class FallbackRegistry:
+    def __init__(self):
+        self.client = FailingClient()
+        self.snapshot = RegistrySnapshot(
+            states=[
+                {
+                    "entity_id": "light.living_room",
+                    "state": "off",
+                    "attributes": {"friendly_name": "Living Room Light"},
+                }
+            ],
+            refreshed_at="bounded-fresh",
+        )
+
+    def snapshot_stale(self):
+        return False
+
+    def snapshot_age_seconds(self):
+        return 30.0
+
+
 class HouseContextTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = HouseContextEngine(FakeRegistry())
@@ -43,6 +70,24 @@ class HouseContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Living Room Light: on", result.text)
         self.assertIn("Living Room TV: playing", result.text)
         self.assertNotIn("Aaron Phone Battery", result.text)
+
+    async def test_older_fallback_is_labelled_and_cannot_reverse_change_history(self):
+        engine = HouseContextEngine(FallbackRegistry())
+        newer_observation = time.monotonic()
+        engine._previous = {
+            "light.living_room": ("on", newer_observation),
+        }
+
+        result = await engine.context_for(
+            "What is the Living Room Light status?",
+            [],
+            self.actor,
+        )
+
+        self.assertIn("Last-known Home Assistant household context", result.text)
+        self.assertIn("historical evidence, not current state", result.text)
+        self.assertNotIn("changed from on to off", result.text)
+        self.assertEqual(("on", newer_observation), engine._previous["light.living_room"])
 
 
 if __name__ == "__main__":

@@ -104,6 +104,7 @@ class ConversationEngine:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    idempotency_key TEXT,
                     FOREIGN KEY (conversation_id)
                         REFERENCES conversations(conversation_id)
                         ON DELETE CASCADE
@@ -121,6 +122,19 @@ class ConversationEngine:
                 ON conversations (
                     updated_at DESC
                 );
+                """
+            )
+            columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(messages)").fetchall()
+            }
+            if "idempotency_key" not in columns:
+                connection.execute("ALTER TABLE messages ADD COLUMN idempotency_key TEXT")
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_idempotency
+                ON messages(conversation_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
                 """
             )
 
@@ -273,9 +287,15 @@ class ConversationEngine:
         conversation_id: str,
         role: str,
         content: str,
+        idempotency_key: str | None = None,
     ) -> ConversationMessage:
         resolved_role = role.strip().lower()
         resolved_content = content.strip()
+        resolved_idempotency_key = (
+            idempotency_key.strip()
+            if idempotency_key is not None and idempotency_key.strip()
+            else None
+        )
 
         if resolved_role not in VALID_ROLES:
             raise ValueError(
@@ -305,23 +325,42 @@ class ConversationEngine:
                     f"{conversation_id}"
                 )
 
-            cursor = connection.execute(
-                """
-                INSERT INTO messages (
-                    conversation_id,
-                    role,
-                    content,
-                    created_at
+            try:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO messages (
+                        conversation_id, role, content, created_at, idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        resolved_role,
+                        resolved_content,
+                        now,
+                        resolved_idempotency_key,
+                    ),
                 )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    conversation_id,
-                    resolved_role,
-                    resolved_content,
-                    now,
-                ),
-            )
+                message_id = int(cursor.lastrowid)
+            except sqlite3.IntegrityError:
+                if resolved_idempotency_key is None:
+                    raise
+                existing = connection.execute(
+                    """
+                    SELECT message_id, role, content, created_at
+                    FROM messages
+                    WHERE conversation_id=? AND idempotency_key=?
+                    """,
+                    (conversation_id, resolved_idempotency_key),
+                ).fetchone()
+                if existing is None:
+                    raise
+                return ConversationMessage(
+                    message_id=int(existing["message_id"]),
+                    conversation_id=conversation_id,
+                    role=str(existing["role"]),
+                    content=str(existing["content"]),
+                    created_at=str(existing["created_at"]),
+                )
 
             connection.execute(
                 """
@@ -334,8 +373,6 @@ class ConversationEngine:
                     conversation_id,
                 ),
             )
-
-            message_id = int(cursor.lastrowid)
 
         return ConversationMessage(
             message_id=message_id,
@@ -356,6 +393,7 @@ class ConversationEngine:
             conversation_id,
             role,
             content,
+            None,
         )
 
         return asdict(message)
@@ -371,6 +409,25 @@ class ConversationEngine:
             content=content,
         )
 
+    async def add_user_message_once(
+        self,
+        conversation_id: str,
+        content: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Append one request message exactly once across transport retries."""
+        resolved_key = idempotency_key.strip()
+        if not resolved_key:
+            raise ValueError("An idempotency key is required for one-time delivery.")
+        message = await asyncio.to_thread(
+            self._add_message_sync,
+            conversation_id,
+            "user",
+            content,
+            resolved_key,
+        )
+        return asdict(message)
+
     async def add_assistant_message(
         self,
         conversation_id: str,
@@ -381,6 +438,25 @@ class ConversationEngine:
             role="assistant",
             content=content,
         )
+
+    async def add_assistant_message_once(
+        self,
+        conversation_id: str,
+        content: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Append one background result exactly once across worker retries."""
+        resolved_key = idempotency_key.strip()
+        if not resolved_key:
+            raise ValueError("An idempotency key is required for one-time delivery.")
+        message = await asyncio.to_thread(
+            self._add_message_sync,
+            conversation_id,
+            "assistant",
+            content,
+            resolved_key,
+        )
+        return asdict(message)
 
     def _get_messages_sync(
         self,
@@ -471,25 +547,48 @@ class ConversationEngine:
     def _list_conversations_sync(
         self,
         limit: int,
+        conversation_id_prefix: str | None = None,
     ) -> list[Conversation]:
         safe_limit = max(1, min(limit, 100))
 
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT
-                    conversation_id,
-                    title,
-                    summary,
-                    source,
-                    created_at,
-                    updated_at
-                FROM conversations
-                ORDER BY updated_at DESC
-                LIMIT ?
-                """,
-                (safe_limit,),
-            ).fetchall()
+            if conversation_id_prefix is None:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        title,
+                        summary,
+                        source,
+                        created_at,
+                        updated_at
+                    FROM conversations
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (safe_limit,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        conversation_id,
+                        title,
+                        summary,
+                        source,
+                        created_at,
+                        updated_at
+                    FROM conversations
+                    WHERE substr(conversation_id, 1, ?) = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (
+                        len(conversation_id_prefix),
+                        conversation_id_prefix,
+                        safe_limit,
+                    ),
+                ).fetchall()
 
         return [
             Conversation(**dict(row))
@@ -499,10 +598,12 @@ class ConversationEngine:
     async def list_conversations(
         self,
         limit: int = 50,
+        conversation_id_prefix: str | None = None,
     ) -> list[dict[str, Any]]:
         conversations = await asyncio.to_thread(
             self._list_conversations_sync,
             limit,
+            conversation_id_prefix,
         )
 
         return [

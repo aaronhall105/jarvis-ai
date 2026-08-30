@@ -429,8 +429,34 @@
     const input = document.getElementById("messageInput");
     const sendButton = document.getElementById("sendButton");
     const statusText = document.getElementById("statusText");
+    const conversationStorageKey = "jarvis.chat.conversationId";
 
     let requestInProgress = false;
+    let pollPromise = null;
+    let conversationId = loadConversationId();
+    const renderedMessageIds = new Set();
+    const pendingMessages = [];
+
+    function loadConversationId() {
+        try {
+            return localStorage.getItem(conversationStorageKey) || null;
+        } catch {
+            return null;
+        }
+    }
+
+    function saveConversationId(value) {
+        conversationId = value || null;
+        try {
+            if (conversationId) {
+                localStorage.setItem(conversationStorageKey, conversationId);
+            } else {
+                localStorage.removeItem(conversationStorageKey);
+            }
+        } catch {
+            // The current page still retains the ID when storage is unavailable.
+        }
+    }
 
     function removeWelcome() {
         if (welcome && welcome.isConnected) {
@@ -442,11 +468,14 @@
         messages.scrollTop = messages.scrollHeight;
     }
 
-    function addMessage(role, text, extraClass = "") {
+    function addMessage(role, text, extraClass = "", messageId = null) {
         removeWelcome();
 
         const wrapper = document.createElement("div");
         wrapper.className = `message ${role} ${extraClass}`.trim();
+        if (messageId !== null) {
+            wrapper.dataset.messageId = String(messageId);
+        }
 
         const bubble = document.createElement("div");
         bubble.className = "bubble";
@@ -457,6 +486,85 @@
         scrollToBottom();
 
         return wrapper;
+    }
+
+    function addOptimisticMessage(role, text) {
+        const pending = {role, content: text};
+        pendingMessages.push(pending);
+        addMessage(role, text);
+        return pending;
+    }
+
+    function discardPendingMessage(pending) {
+        const index = pendingMessages.indexOf(pending);
+        if (index !== -1) {
+            pendingMessages.splice(index, 1);
+        }
+    }
+
+    function renderServerMessage(message) {
+        const messageId = String(message.message_id ?? "");
+        if (!messageId || renderedMessageIds.has(messageId)) {
+            return;
+        }
+
+        const role = message.role === "user" ? "user" : "assistant";
+        const content = String(message.content || "");
+        const pendingIndex = pendingMessages.findIndex((pending) => (
+            pending.role === role && pending.content === content
+        ));
+
+        if (pendingIndex !== -1) {
+            pendingMessages.splice(pendingIndex, 1);
+        } else {
+            addMessage(role, content, "", messageId);
+        }
+        renderedMessageIds.add(messageId);
+    }
+
+    async function pollConversation() {
+        if (!conversationId || requestInProgress || document.hidden) {
+            return false;
+        }
+        if (pollPromise) {
+            return pollPromise;
+        }
+
+        const requestedConversationId = conversationId;
+        pollPromise = (async () => {
+            const response = await fetch(
+                `/api/conversations/${encodeURIComponent(requestedConversationId)}?limit=200`,
+                {headers: {"Accept": "application/json"}},
+            );
+
+            if (response.status === 404) {
+                if (conversationId === requestedConversationId) {
+                    saveConversationId(null);
+                }
+                return false;
+            }
+            if (!response.ok) {
+                return false;
+            }
+
+            const payload = await response.json();
+            if (
+                requestInProgress ||
+                conversationId !== requestedConversationId ||
+                !Array.isArray(payload.messages)
+            ) {
+                return false;
+            }
+            payload.messages.forEach(renderServerMessage);
+            return true;
+        })().catch((error) => {
+            console.debug("Conversation polling is temporarily unavailable.", error);
+            return false;
+        }).finally(() => {
+            pollPromise = null;
+        });
+
+        return pollPromise;
     }
 
     function addTypingIndicator() {
@@ -556,7 +664,20 @@
             return;
         }
 
-        addMessage("user", message);
+        // Rehydrate a retained chat before adding a new optimistic turn so an
+        // older identical message cannot be mistaken for this new one.
+        if (conversationId && renderedMessageIds.size === 0) {
+            await pollConversation();
+            if (requestInProgress) {
+                return;
+            }
+        }
+
+        const requestId = typeof crypto.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        const pendingUserMessage = addOptimisticMessage("user", message);
 
         input.value = "";
         resizeInput();
@@ -571,6 +692,8 @@
                 },
                 body: JSON.stringify({
                     text: message,
+                    conversation_id: conversationId || undefined,
+                    request_id: requestId,
                 }),
             });
 
@@ -585,6 +708,7 @@
             removeTypingIndicator();
 
             if (!response.ok) {
+                discardPendingMessage(pendingUserMessage);
                 const detail =
                     payload.detail ||
                     `Jarvis returned HTTP ${response.status}.`;
@@ -598,7 +722,14 @@
                 return;
             }
 
-            addMessage(
+            if (
+                typeof payload.conversation_id === "string" &&
+                payload.conversation_id.trim()
+            ) {
+                saveConversationId(payload.conversation_id.trim());
+            }
+
+            addOptimisticMessage(
                 "assistant",
                 payload.response ||
                     "The request completed without a response.",
@@ -608,6 +739,7 @@
                 addToolActivity(payload.calls);
             }
         } catch (error) {
+            discardPendingMessage(pendingUserMessage);
             removeTypingIndicator();
 
             addMessage(
@@ -620,6 +752,7 @@
         } finally {
             setBusy(false);
             input.focus();
+            void pollConversation();
         }
     }
 
@@ -646,6 +779,17 @@
         });
     });
 
+    window.setInterval(() => {
+        void pollConversation();
+    }, 4000);
+
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) {
+            void pollConversation();
+        }
+    });
+
+    void pollConversation();
     input.focus();
 </script>
 </body>

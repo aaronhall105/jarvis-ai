@@ -4,7 +4,9 @@ import unittest
 from typing import Any
 
 from app.ai_engine import AIEngine
+from app.home_assistant import HomeAssistantError
 from app.presence import PresenceResolver
+from app.tool_engine import ToolEngine
 from app.user_context import UserContext
 
 
@@ -16,6 +18,28 @@ class Reader:
     async def readable_entity_states(self, *, refresh: bool = True) -> list[dict[str, Any]]:
         self.refreshes += int(refresh)
         return self.entities
+
+
+class ConfiguredReader(Reader):
+    def __init__(
+        self,
+        entities: list[dict[str, Any]],
+        configurations: object,
+    ) -> None:
+        super().__init__(entities)
+        self.configurations = configurations
+
+    async def person_configurations(self) -> object:
+        return self.configurations
+
+
+class PersonListClient:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+
+    async def send_command(self, command: dict[str, Any]) -> object:
+        assert command == {"type": "person/list"}
+        return self.payload
 
 
 def entity(entity_id: str, name: str, state: str, **attributes: Any) -> dict[str, Any]:
@@ -122,6 +146,114 @@ class PresenceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["source"])
         self.assertEqual("device_tracker.old_phone", result["source_entity_id"])
 
+    async def test_exact_person_config_id_outranks_an_earlier_name_match(self) -> None:
+        result = await PresenceResolver(
+            ConfiguredReader(
+                [
+                    entity("person.aaron", "Aaron", "home"),
+                    entity("device_tracker.wrong", "Wrong tracker", "not_home"),
+                    entity("device_tracker.right", "Right tracker", "home"),
+                ],
+                [
+                    {
+                        "id": "someone_else",
+                        "name": "Aaron",
+                        "device_trackers": ["device_tracker.wrong"],
+                    },
+                    {
+                        "id": "aaron",
+                        "name": "Different display name",
+                        "device_trackers": ["device_tracker.right"],
+                    },
+                ],
+            )
+        ).inspect("Aaron")
+
+        self.assertEqual("exact_id", result["person_configuration_resolution"])
+        self.assertTrue(result["person_configuration_matched"])
+        self.assertEqual(
+            ["device_tracker.right"],
+            [tracker["entity_id"] for tracker in result["trackers"]],
+        )
+
+    async def test_unique_person_config_name_is_a_safe_fallback(self) -> None:
+        result = await PresenceResolver(
+            ConfiguredReader(
+                [
+                    entity("person.aaron", "Aaron", "home"),
+                    entity("device_tracker.phone", "Phone", "home"),
+                ],
+                [
+                    {
+                        "id": "opaque-config-id",
+                        "name": "Aaron",
+                        "device_trackers": ["device_tracker.phone"],
+                    }
+                ],
+            )
+        ).inspect("Aaron")
+
+        self.assertEqual("unique_name", result["person_configuration_resolution"])
+        self.assertEqual("device_tracker.phone", result["trackers"][0]["entity_id"])
+
+    async def test_ambiguous_person_config_name_never_selects_a_tracker(self) -> None:
+        result = await PresenceResolver(
+            ConfiguredReader(
+                [
+                    entity("person.aaron", "Aaron", "home"),
+                    entity("device_tracker.one", "Phone one", "home"),
+                    entity("device_tracker.two", "Phone two", "home"),
+                ],
+                [
+                    {
+                        "id": "first",
+                        "name": "Aaron",
+                        "device_trackers": ["device_tracker.one"],
+                    },
+                    {
+                        "id": "second",
+                        "name": "Aaron",
+                        "device_trackers": ["device_tracker.two"],
+                    },
+                ],
+            )
+        ).inspect("Aaron")
+
+        self.assertEqual("ambiguous", result["person_configuration_resolution"])
+        self.assertFalse(result["person_configuration_matched"])
+        self.assertEqual([], result["trackers"])
+
+    async def test_malformed_person_list_payloads_are_rejected(self) -> None:
+        for payload in (
+            {"id": "aaron"},
+            "not-a-list",
+            [{"id": "aaron"}, "not-a-person-record"],
+        ):
+            with self.subTest(payload=payload):
+                tools = ToolEngine.__new__(ToolEngine)
+                tools.client = PersonListClient(payload)
+                with self.assertRaises(HomeAssistantError):
+                    await tools.person_configurations()
+
+    async def test_malformed_person_graph_cannot_break_live_presence(self) -> None:
+        for payload in (
+            {"id": "aaron"},
+            "not-a-list",
+            [{"id": "aaron"}, "not-a-person-record"],
+        ):
+            with self.subTest(payload=payload):
+                result = await PresenceResolver(
+                    ConfiguredReader(
+                        [entity("person.aaron", "Aaron", "home")],
+                        payload,
+                    )
+                ).inspect("Aaron")
+
+                self.assertTrue(result["success"])
+                self.assertFalse(result["person_graph_exposed"])
+                self.assertEqual("unavailable", result["person_configuration_resolution"])
+                self.assertEqual([], result["trackers"])
+
     async def test_direct_reply_reports_a_real_conflict_without_inventing_cause(self) -> None:
         class Tools:
             async def inspect_presence(self, reference: str) -> dict[str, Any]:
@@ -154,6 +286,91 @@ class PresenceGroundingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("physical presence", text)
         self.assertNotIn("generic presence", text.casefold())
         self.assertEqual("inspect_presence", calls[0]["tool"])
+
+    async def test_certainty_followup_without_person_focus_does_not_default_to_actor(
+        self,
+    ) -> None:
+        inspected: list[str] = []
+
+        class Tools:
+            async def inspect_presence(self, reference: str) -> dict[str, Any]:
+                inspected.append(reference)
+                return {"success": False, "resolution": "not_found"}
+
+        class Dialogue:
+            async def focused_person(
+                self,
+                conversation_id: str,
+                *,
+                max_age_seconds: float | None = None,
+            ) -> dict[str, Any] | None:
+                return None
+
+        engine = AIEngine.__new__(AIEngine)
+        engine.tools = Tools()
+        engine.dialogue = Dialogue()
+        actor = UserContext.from_request(
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=False,
+        )
+
+        result = await engine._direct_person_location_reply(
+            "Are you sure?",
+            actor,
+            "conversation",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual([], inspected)
+
+    async def test_certainty_followup_uses_recent_verified_person_focus(self) -> None:
+        inspected: list[str] = []
+
+        class Tools:
+            async def inspect_presence(self, reference: str) -> dict[str, Any]:
+                inspected.append(reference)
+                return {
+                    "success": True,
+                    "person": entity("person.amber", "Amber", "home"),
+                    "source": None,
+                    "source_entity_id": None,
+                    "conflicts": [],
+                }
+
+        class Dialogue:
+            async def focused_person(
+                self,
+                conversation_id: str,
+                *,
+                max_age_seconds: float | None = None,
+            ) -> dict[str, Any] | None:
+                self.requested_max_age = max_age_seconds
+                return {"name": "Amber", "state": "home"}
+
+        dialogue = Dialogue()
+        engine = AIEngine.__new__(AIEngine)
+        engine.tools = Tools()
+        engine.dialogue = dialogue
+        actor = UserContext.from_request(
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=False,
+        )
+
+        result = await engine._direct_person_location_reply(
+            "Are you sure?",
+            actor,
+            "conversation",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(["Amber"], inspected)
+        self.assertEqual(300, dialogue.requested_max_age)
 
 
 if __name__ == "__main__":

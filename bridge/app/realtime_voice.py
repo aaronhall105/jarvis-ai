@@ -4075,6 +4075,8 @@ class RealtimeVoiceProxy:
                 trusted_local_context(self.config.timezone)
             )
             turn_metadata["speak"] = bool(speak)
+            if client_turn_id > 0:
+                turn_metadata["client_turn_id"] = client_turn_id
             raw_result = await brain_handler(command, turn_metadata, on_delta)
             if hasattr(raw_result, "model_dump"):
                 raw_result = raw_result.model_dump()
