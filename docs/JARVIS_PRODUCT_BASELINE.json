@@ -380,7 +380,7 @@
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java": ["TurnRecoveryJournal", "TurnDeliveryFence", "turn.status"],
       "bridge/app/static/chat.html": ["jarvis-chat-tabs-v1", "chat-tab"],
       "tools/self_improvement_worker.py": ["AUTHORITATIVE_PRODUCTION_BRANCH", "Deployment is restricted to the authoritative"],
-      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check"],
+      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check", "final persistent-data cutover", ".pre-cutover-"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["releases/download/jarvis-", "update-manifest.json"],
       ".github/workflows/android-ota-release.yml": ["git fetch origin jarvis/unified-production", "verify_product_baseline.py", "jarvis-wear-v${version}-release.apk", "product-release-manifest.json", "jarvis-$1-feed", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
       ".github/workflows/codeql.yml": ["branches: [jarvis/unified-production]"]
