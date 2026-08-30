@@ -2,10 +2,12 @@
 
 Historical release notes are retained for traceability.
 
-The current unified release candidate is [Jarvis v19.0.0-alpha22](CHANGES_V19_0_0_ALPHA22.md).
+The current unified release candidate is [Jarvis v19.0.0-alpha23](CHANGES_V19_0_0_ALPHA23.md).
 
 ## Archived releases
 
+- [Jarvis v19.0.0-alpha22](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha22)
+- [Jarvis v19.0.0-alpha21](CHANGES_V19_0_0_ALPHA21.md)
 - [Jarvis v19.0.0-alpha20](CHANGES_V19_0_0_ALPHA20.md)
 - [Jarvis v19.0.0-alpha19](CHANGES_V19_0_0_ALPHA19.md)
 - [Jarvis v19.0.0-alpha16](CHANGES_V19_0_0_ALPHA16.md)

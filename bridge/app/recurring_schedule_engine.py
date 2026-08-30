@@ -8,7 +8,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -45,6 +45,8 @@ class ToolProtocol(Protocol):
     registry: RegistryProtocol
 
     async def controllable_devices(self) -> list[dict[str, Any]]: ...
+
+    async def runnable_routines(self, limit: int = 100) -> list[dict[str, Any]]: ...
 
     async def send_mobile_notification(
         self,
@@ -233,7 +235,7 @@ class RecurringScheduleEngine:
         self.notify_completion = bool(notify_completion)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         try:
-            self._timezone = ZoneInfo(timezone_name)
+            self._timezone: tzinfo = ZoneInfo(timezone_name)
             self.timezone_name = timezone_name
         except ZoneInfoNotFoundError:
             self._timezone = timezone.utc
@@ -505,12 +507,8 @@ class RecurringScheduleEngine:
             "notify_completion": self.notify_completion,
             "last_cycle_at": self._last_cycle_at,
             "last_error": self._last_error,
-            "schedule_counts": {
-                str(row["status"]): int(row["count"]) for row in rows
-            },
-            "run_counts": {
-                str(row["status"]): int(row["count"]) for row in run_rows
-            },
+            "schedule_counts": {str(row["status"]): int(row["count"]) for row in rows},
+            "run_counts": {str(row["status"]): int(row["count"]) for row in run_rows},
         }
 
     async def list_schedules(
@@ -583,7 +581,7 @@ class RecurringScheduleEngine:
                 f"""
                 SELECT r.* FROM schedule_runs r
                 JOIN recurring_schedules s ON s.schedule_id = r.schedule_id
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY r.scheduled_for DESC, r.run_id DESC
                 LIMIT ?
                 """,
@@ -703,8 +701,7 @@ class RecurringScheduleEngine:
                 value[: match.start()] + " " + value[match.end() :]
             )
             description = (
-                f"{self._weekday_description(weekdays)} at "
-                f"{self._spoken_time(hour, minute)}"
+                f"{self._weekday_description(weekdays)} at {self._spoken_time(hour, minute)}"
             )
             return ParsedRecurrence(
                 RecurrenceSpec(
@@ -738,8 +735,7 @@ class RecurringScheduleEngine:
                 value[: match.start()] + " " + value[match.end() :]
             )
             description = (
-                f"{self._weekday_description(weekdays)} at "
-                f"{self._spoken_time(hour, minute)}"
+                f"{self._weekday_description(weekdays)} at {self._spoken_time(hour, minute)}"
             )
             return ParsedRecurrence(
                 RecurrenceSpec(
@@ -1014,9 +1010,7 @@ class RecurringScheduleEngine:
         if status == "active":
             spec = self._spec_from_schedule(schedule)
             anchor = (
-                self._parse_iso(str(schedule["anchor_at"]))
-                if schedule.get("anchor_at")
-                else None
+                self._parse_iso(str(schedule["anchor_at"])) if schedule.get("anchor_at") else None
             )
             next_run = self._next_run_after(spec, self._utc_now(), anchor_utc=anchor)
             next_run_text: str | None = self._iso(next_run)
@@ -1111,8 +1105,7 @@ class RecurringScheduleEngine:
             local_hour=hour,
             local_minute=minute,
             description=(
-                f"{self._weekday_description(spec.weekdays)} at "
-                f"{self._spoken_time(hour, minute)}"
+                f"{self._weekday_description(spec.weekdays)} at {self._spoken_time(hour, minute)}"
             ),
         )
         next_run = self._next_run_after(updated_spec, self._utc_now())
@@ -1227,6 +1220,7 @@ class RecurringScheduleEngine:
             await self._advance_schedule(schedule, after_utc=now)
             return
 
+        execution_error: str | None
         available, availability_error = await self._validate_action_available(
             str(schedule["action_type"]),
             dict(schedule.get("action_payload") or {}),
@@ -1234,7 +1228,7 @@ class RecurringScheduleEngine:
         if not available:
             result = {"success": False, "verified": False, "message": availability_error}
             status = "failed"
-            error = availability_error or "The scheduled action is unavailable."
+            execution_error = availability_error or "The scheduled action is unavailable."
         else:
             try:
                 result = await self.action_engine._execute_action(
@@ -1245,17 +1239,21 @@ class RecurringScheduleEngine:
                 if result.get("verified") is False:
                     success = False
                 status = "completed" if success else "failed"
-                error = None if success else str(
-                    result.get("response_message")
-                    or result.get("message")
-                    or result.get("error")
-                    or "The recurring action could not be verified."
+                execution_error = (
+                    None
+                    if success
+                    else str(
+                        result.get("response_message")
+                        or result.get("message")
+                        or result.get("error")
+                        or "The recurring action could not be verified."
+                    )
                 )
             except Exception as exc:  # pragma: no cover - defensive execution guard
                 logger.exception("Recurring schedule %s failed", schedule_id)
                 result = {"success": False, "error": str(exc)}
                 status = "failed"
-                error = str(exc)
+                execution_error = str(exc)
 
         finished = self._utc_now()
         finished_text = self._iso(finished)
@@ -1270,7 +1268,7 @@ class RecurringScheduleEngine:
                     status,
                     finished_text,
                     json.dumps(result, ensure_ascii=False, default=str),
-                    error,
+                    execution_error,
                     run_id,
                 ),
             )
@@ -1286,7 +1284,7 @@ class RecurringScheduleEngine:
                 (
                     scheduled_text,
                     json.dumps(result, ensure_ascii=False, default=str),
-                    error,
+                    execution_error,
                     status,
                     finished_text,
                     schedule_id,
@@ -1301,14 +1299,14 @@ class RecurringScheduleEngine:
                 "run_id": run_id,
                 "scheduled_for": scheduled_text,
                 "result": result,
-                "error": error,
+                "error": execution_error,
             },
         )
         await self._notify_result(
             schedule=schedule,
             status=status,
             result=result,
-            error=error,
+            error=execution_error,
             scheduled_for=scheduled_for,
         )
         await self._advance_schedule(schedule, after_utc=finished)
@@ -1320,11 +1318,7 @@ class RecurringScheduleEngine:
         after_utc: datetime,
     ) -> None:
         spec = self._spec_from_schedule(schedule)
-        anchor = (
-            self._parse_iso(str(schedule["anchor_at"]))
-            if schedule.get("anchor_at")
-            else None
-        )
+        anchor = self._parse_iso(str(schedule["anchor_at"])) if schedule.get("anchor_at") else None
         next_run = self._next_run_after(spec, after_utc, anchor_utc=anchor)
         with self._connection() as connection:
             connection.execute(
@@ -1356,18 +1350,15 @@ class RecurringScheduleEngine:
             return
         schedule_id = int(schedule["schedule_id"])
         summary = str(schedule.get("action_summary") or "recurring action")
-        local_time = scheduled_for.astimezone(self._timezone).strftime(
-            "%A %-d %B at %-I:%M %p"
-        ).lower()
+        local_time = (
+            scheduled_for.astimezone(self._timezone).strftime("%A %-d %B at %-I:%M %p").lower()
+        )
         if status == "completed":
             message = f"Schedule {schedule_id} ran: {summary} ({local_time})."
         else:
             message = f"Schedule {schedule_id} failed: {summary} ({local_time})."
         result_message = str(
-            result.get("response_message")
-            or result.get("message")
-            or error
-            or ""
+            result.get("response_message") or result.get("message") or error or ""
         ).strip()
         if result_message:
             message += f" {result_message}"
@@ -1468,22 +1459,22 @@ class RecurringScheduleEngine:
                     response="You have no active recurring schedule.",
                     intent="schedule_next",
                 )
-            item = items[0]
+            next_schedule = items[0]
             return TaskCommandResult(
                 handled=True,
                 response=(
-                    f"Your next recurring schedule is schedule {item['schedule_id']}: "
-                    f"{item['action_summary']} {self._next_run_phrase(item)}."
+                    f"Your next recurring schedule is schedule {next_schedule['schedule_id']}: "
+                    f"{next_schedule['action_summary']} {self._next_run_phrase(next_schedule)}."
                 ),
                 intent="schedule_next",
-                details={"schedule": item},
+                details={"schedule": next_schedule},
             )
 
         match = _SCHEDULE_STATUS_PATTERN.match(value)
         if match:
             schedule_id = int(match.group("schedule_id"))
-            item = await self.get_owned_schedule(schedule_id, owner_key=actor.user_key)
-            if item is None:
+            status_schedule = await self.get_owned_schedule(schedule_id, owner_key=actor.user_key)
+            if status_schedule is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
@@ -1492,18 +1483,16 @@ class RecurringScheduleEngine:
                 )
             return TaskCommandResult(
                 handled=True,
-                response=self._describe_schedule(item),
+                response=self._describe_schedule(status_schedule),
                 intent="schedule_status",
-                details={"schedule": item},
+                details={"schedule": status_schedule},
             )
 
         match = _SCHEDULE_HISTORY_PATTERN.match(value)
         if match:
-            schedule_id = int(
-                match.group("schedule_id") or match.group("schedule_id_alt")
-            )
-            item = await self.get_owned_schedule(schedule_id, owner_key=actor.user_key)
-            if item is None:
+            schedule_id = int(match.group("schedule_id") or match.group("schedule_id_alt"))
+            history_schedule = await self.get_owned_schedule(schedule_id, owner_key=actor.user_key)
+            if history_schedule is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
@@ -1520,9 +1509,7 @@ class RecurringScheduleEngine:
             else:
                 parts = []
                 for run in runs[:5]:
-                    when = self._parse_iso(str(run["scheduled_for"])).astimezone(
-                        self._timezone
-                    )
+                    when = self._parse_iso(str(run["scheduled_for"])).astimezone(self._timezone)
                     parts.append(
                         f"{run['status']} on {when.strftime('%A %-d %B at %-I:%M %p').lower()}"
                     )
@@ -1531,7 +1518,7 @@ class RecurringScheduleEngine:
                 handled=True,
                 response=response,
                 intent="schedule_history",
-                details={"schedule": item, "runs": runs},
+                details={"schedule": history_schedule, "runs": runs},
             )
 
         for pattern, operation, verb, action_word in (
@@ -1558,18 +1545,21 @@ class RecurringScheduleEngine:
                     ),
                     intent=f"schedule_{verb}",
                 )
-            item = await self.get_schedule(schedule_id)
-            assert item is not None
+            managed_schedule = await self.get_schedule(schedule_id)
+            assert managed_schedule is not None
             extra = (
-                f" Its next run is {self._next_run_phrase(item)}."
+                f" Its next run is {self._next_run_phrase(managed_schedule)}."
                 if verb == "resumed"
                 else ""
             )
             return TaskCommandResult(
                 handled=True,
-                response=f"{verb.title()} schedule {schedule_id}: {item['action_summary']}.{extra}",
+                response=(
+                    f"{verb.title()} schedule {schedule_id}: "
+                    f"{managed_schedule['action_summary']}.{extra}"
+                ),
                 intent=f"schedule_{verb}",
-                details={"schedule": item},
+                details={"schedule": managed_schedule},
             )
 
         match = _CHANGE_TIME_PATTERN.match(value)
@@ -1588,7 +1578,7 @@ class RecurringScheduleEngine:
                     intent="schedule_edit",
                 )
             try:
-                item = await self.change_schedule_time(
+                changed_schedule = await self.change_schedule_time(
                     schedule_id,
                     owner_key=actor.user_key,
                     actor=actor.user_key,
@@ -1602,7 +1592,7 @@ class RecurringScheduleEngine:
                     response=str(exc),
                     intent="schedule_edit",
                 )
-            if item is None:
+            if changed_schedule is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
@@ -1614,10 +1604,10 @@ class RecurringScheduleEngine:
                 response=(
                     f"Changed schedule {schedule_id} to "
                     f"{self._spoken_time(clock[0], clock[1])}. Its next run is "
-                    f"{self._next_run_phrase(item)}."
+                    f"{self._next_run_phrase(changed_schedule)}."
                 ),
                 intent="schedule_edit",
-                details={"schedule": item},
+                details={"schedule": changed_schedule},
             )
 
         parsed = self._parse_recurrence(value)

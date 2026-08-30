@@ -95,10 +95,13 @@ async def test_concept_retrieval_does_not_bypass_private_visibility(tmp_path: Pa
         sensitivity="sensitive",
     )
 
-    assert await engine.search(
-        "Do I have any health conditions?",
-        owner_key="amber",
-    ) == []
+    assert (
+        await engine.search(
+            "Do I have any health conditions?",
+            owner_key="amber",
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio
@@ -114,10 +117,13 @@ async def test_unrelated_memory_is_not_returned_for_health_question(tmp_path: Pa
         sensitivity="normal",
     )
 
-    assert await engine.search(
-        "Do I have any health conditions?",
-        owner_key="amber",
-    ) == []
+    assert (
+        await engine.search(
+            "Do I have any health conditions?",
+            owner_key="amber",
+        )
+        == []
+    )
 
 
 @pytest.mark.asyncio

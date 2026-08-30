@@ -4,7 +4,15 @@
 
 ## Lineage decision
 
-No prior feature branch contained the complete product. The verified integrations line has the authoritative Core, External Agent Platform, Google connectors, security controls, planner, and action-receipt architecture. The unified-runtime line has the authoritative phone UI, Wear application, Developer/Codex experience, branding, endpoint routing, voice ownership fencing, and realtime recovery work. The unified product deliberately combines those lineages instead of treating either branch as globally newer.
+No prior feature branch contained the complete product. The verified integrations
+line has the authoritative Core, External Agent Platform, Google connectors,
+security controls, planner, and action-receipt architecture. The supplied phone
+and Watch hashes were traced to GitHub Actions artifact `9714544550`, run
+`33251557799`, built from `jarvis/unified-production` commit
+`1eb4c5913a3e69213ec45ad726bebb45779e3c01`. That existing source—not a
+version-name guess or visual recreation—is the authoritative client baseline.
+It already includes the unified-runtime Developer, routing, voice, recovery and
+Wear work plus the Integrations UI.
 
 The pre-reconciliation production container was built from `fa1273b7b550ef38a81f9bb86e1598d3139fc1c1`. Its tracked `bridge/app` files matched that commit byte-for-byte. It therefore had the integrations platform but not the later realtime turn ledger or unified-runtime web/Android/Wear features. Its `/app/config`, `/app/data`, and `/app/logs` mounts are persistent and must not be recreated during deployment.
 
@@ -32,7 +40,8 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 ### Android
 
 - Package `com.aaron.jarvisvoice` and established production signer
-- Latest approved launcher, wordmark, and status branding
+- Exact launcher, wordmark, controls and navigation lineage proven by the
+  supplied ground-truth phone APK
 - Persistent chat history and delete-current-chat behavior
 - Standard and Live voice, interruption, wake word, overlay, and default assistant
 - Durable realtime delivery/recovery and current endpoint failover
@@ -49,10 +58,18 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 
 ## Release policy
 
-Release and deployment workflows must fail closed unless the source commit is the current head of `origin/jarvis/unified-production`. The product-baseline gate validates mandatory files, resources, manifest routes, runtime markers, and workflow restrictions. Historical feature branches remain recovery references only and must not be used to build releases.
+Release and deployment workflows must fail closed unless the source commit is
+the current head of `origin/jarvis/unified-production`. One product release
+records identical Jarvis/Core/phone/Watch source SHAs. OTA channel manifests
+are GitHub Release assets rather than a development branch. The
+product-baseline gate validates ground-truth source files, mandatory resources,
+manifest routes, runtime markers, and workflow restrictions.
 
 ## Historical branch retention
 
 The audited heads recorded in the machine-readable manifest must remain available until the unified Core, phone APK, Wear APK, OTA feed, GitHub CI, and on-device update have all been verified. After that point, archival tags should preserve each recorded head before any remote branch is deleted. The old `conversation-engine`, `jarvis/production-alpha14`, `jarvis/wear-v1`, `jarvis/unified-runtime-v1`, `jarvis/alpha19-production-hardening`, `jarvis/external-agent-platform`, and `jarvis/integrations-accounts-v1` branches are then candidates for deletion from active development, but their history is not to be removed as part of this reconciliation.
 
-The machine-readable authority for this policy is [`JARVIS_PRODUCT_BASELINE.json`](JARVIS_PRODUCT_BASELINE.json).
+The machine-readable authorities are
+[`JARVIS_PRODUCT_BASELINE.json`](JARVIS_PRODUCT_BASELINE.json) and the explicit
+capability/branch decision matrix
+[`JARVIS_CONSOLIDATION_LINEAGE.json`](JARVIS_CONSOLIDATION_LINEAGE.json).

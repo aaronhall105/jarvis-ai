@@ -26,8 +26,8 @@ public final class UpdateManager {
     }
 
     public static String feedUrl(UpdateChannel channel) {
-        return "https://raw.githubusercontent.com/" + OWNER + "/ota-feeds/feeds/"
-            + channel.name().toLowerCase(Locale.ROOT) + ".json";
+        return "https://github.com/" + OWNER + "/releases/download/jarvis-"
+            + channel.name().toLowerCase(Locale.ROOT) + "-feed/update-manifest.json";
     }
 
     public UpdateRelease check() throws IOException {

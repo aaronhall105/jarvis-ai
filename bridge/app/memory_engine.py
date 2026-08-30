@@ -171,16 +171,18 @@ class MemoryEngine:
     @staticmethod
     def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
         return {
-            str(row["name"])
-            for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
 
     @staticmethod
     def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-        return connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (table,),
-        ).fetchone() is not None
+        return (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
 
     @classmethod
     def _create_table(cls, connection: sqlite3.Connection) -> None:
@@ -269,7 +271,9 @@ class MemoryEngine:
                 owner, subject_key, category, subject, content, sensitivity
             )
             if sensitivity == "sensitive" and visibility == "household":
-                visibility = "subject_and_owner" if subject_key in self.HOUSEHOLD_USERS else "private"
+                visibility = (
+                    "subject_and_owner" if subject_key in self.HOUSEHOLD_USERS else "private"
+                )
             connection.execute(
                 """
                 INSERT INTO memories (
@@ -279,9 +283,18 @@ class MemoryEngine:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    row["id"], owner, subject_key, visibility, sensitivity,
-                    category, subject, content, row["search_text"],
-                    row["created_at"], row["updated_at"], owner,
+                    row["id"],
+                    owner,
+                    subject_key,
+                    visibility,
+                    sensitivity,
+                    category,
+                    subject,
+                    content,
+                    row["search_text"],
+                    row["created_at"],
+                    row["updated_at"],
+                    owner,
                 ),
             )
         connection.execute("DROP TABLE memories_legacy")
@@ -296,9 +309,7 @@ class MemoryEngine:
         }
         for name, definition in additions.items():
             if name not in columns:
-                connection.execute(
-                    f"ALTER TABLE memories ADD COLUMN {name} {definition}"
-                )
+                connection.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
 
     def _add_v4_schema(self, connection: sqlite3.Connection) -> None:
         columns = self._table_columns(connection, "memories")
@@ -311,9 +322,7 @@ class MemoryEngine:
         }
         for name, definition in additions.items():
             if name not in columns:
-                connection.execute(
-                    f"ALTER TABLE memories ADD COLUMN {name} {definition}"
-                )
+                connection.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
         connection.execute(
             """UPDATE memories SET last_confirmed_at = updated_at
                WHERE last_confirmed_at IS NULL"""
@@ -342,14 +351,11 @@ class MemoryEngine:
             content = str(row["content"] or "")
             category = str(row["category"] or "general")
             existing_subject = self._subject_key(str(row["subject_key"] or ""))
-            subject_key = existing_subject or self._infer_subject_key(
-                subject, content, owner
-            )
+            subject_key = existing_subject or self._infer_subject_key(subject, content, owner)
             sensitivity_value = str(row["sensitivity"] or "").strip().lower()
             sensitivity = (
                 sensitivity_value
-                if existing_subject
-                and sensitivity_value in self.VALID_SENSITIVITIES
+                if existing_subject and sensitivity_value in self.VALID_SENSITIVITIES
                 else self._infer_sensitivity(category, subject, content)
             )
             visibility_value = str(row["visibility"] or "").strip().lower()
@@ -362,9 +368,7 @@ class MemoryEngine:
                 visibility = visibility_value
             if sensitivity == "sensitive" and visibility == "household":
                 visibility = (
-                    "subject_and_owner"
-                    if subject_key in self.HOUSEHOLD_USERS
-                    else "private"
+                    "subject_and_owner" if subject_key in self.HOUSEHOLD_USERS else "private"
                 )
             updated_by = self._owner(str(row["updated_by"] or owner))
             search_text = self._build_search_text(
@@ -378,8 +382,13 @@ class MemoryEngine:
                 WHERE id = ?
                 """,
                 (
-                    owner, subject_key, visibility, sensitivity,
-                    updated_by, search_text, row["id"],
+                    owner,
+                    subject_key,
+                    visibility,
+                    sensitivity,
+                    updated_by,
+                    search_text,
+                    row["id"],
                 ),
             )
             migrated += 1
@@ -410,15 +419,9 @@ class MemoryEngine:
                 version = 0
             if version < self.SCHEMA_VERSION:
                 migrated = self._migrate_v2_rows(connection)
-                self._meta_set(
-                    connection, "last_migrated_rows", str(migrated)
-                )
-                self._meta_set(
-                    connection, "last_migrated_at", self._utc_now()
-                )
-                self._meta_set(
-                    connection, "schema_version", str(self.SCHEMA_VERSION)
-                )
+                self._meta_set(connection, "last_migrated_rows", str(migrated))
+                self._meta_set(connection, "last_migrated_at", self._utc_now())
+                self._meta_set(connection, "schema_version", str(self.SCHEMA_VERSION))
             connection.commit()
 
     @classmethod
@@ -520,13 +523,9 @@ class MemoryEngine:
                 )
         if visibility == "household":
             if sensitivity == "sensitive":
-                raise MemoryError(
-                    "Sensitive personal information cannot be shared household-wide."
-                )
+                raise MemoryError("Sensitive personal information cannot be shared household-wide.")
             if subject_key != cls.HOUSEHOLD_SUBJECT:
-                raise MemoryError(
-                    "Household memories must use subject_key 'household'."
-                )
+                raise MemoryError("Household memories must use subject_key 'household'.")
         return visibility
 
     @classmethod
@@ -543,10 +542,7 @@ class MemoryEngine:
             and requester in cls.HOUSEHOLD_USERS
         ):
             return True
-        return (
-            visibility == "household"
-            and requester in cls.HOUSEHOLD_USERS
-        )
+        return visibility == "household" and requester in cls.HOUSEHOLD_USERS
 
     @classmethod
     def _can_edit(cls, row: sqlite3.Row, requester_key: str) -> bool:
@@ -701,9 +697,7 @@ class MemoryEngine:
             resolved_subject = self._infer_subject_key(subject, content, owner)
         resolved_sensitivity = str(sensitivity or "").strip().lower()
         if resolved_sensitivity not in self.VALID_SENSITIVITIES:
-            resolved_sensitivity = self._infer_sensitivity(
-                category, subject, content
-            )
+            resolved_sensitivity = self._infer_sensitivity(category, subject, content)
         resolved_visibility = str(visibility or "").strip().lower()
         if not resolved_visibility:
             resolved_visibility = self._inferred_visibility(
@@ -848,10 +842,7 @@ class MemoryEngine:
                    ORDER BY updated_at DESC LIMIT ?""",
                 (self._utc_now(), safe_limit),
             ).fetchall()
-        return [
-            row for row in rows
-            if self._can_view(row, requester_key)
-        ]
+        return [row for row in rows if self._can_view(row, requester_key)]
 
     async def list_memories(
         self,
@@ -866,43 +857,53 @@ class MemoryEngine:
                 requester,
                 limit=max(500, safe_limit * 4),
             )
-        return [
-            self._row_to_dict(row, requester)
-            for row in rows[:safe_limit]
-        ]
+        return [self._row_to_dict(row, requester) for row in rows[:safe_limit]]
 
     @classmethod
     def _query_concepts(cls, query: str) -> set[str]:
         return {
-            name
-            for name, pattern in cls._QUERY_CONCEPT_PATTERNS.items()
-            if pattern.search(query)
+            name for name, pattern in cls._QUERY_CONCEPT_PATTERNS.items() if pattern.search(query)
         }
 
     @classmethod
     def _memory_concepts(cls, row: sqlite3.Row) -> set[str]:
-        text = " ".join(
-            str(row[key] or "")
-            for key in ("category", "subject", "content")
-        )
+        text = " ".join(str(row[key] or "") for key in ("category", "subject", "content"))
         return {
-            name
-            for name, pattern in cls._MEMORY_CONCEPT_PATTERNS.items()
-            if pattern.search(text)
+            name for name, pattern in cls._MEMORY_CONCEPT_PATTERNS.items() if pattern.search(text)
         }
 
     @staticmethod
     def _search_terms(query: str) -> list[str]:
         stop_words = {
-            "a", "an", "and", "are", "about", "any", "do", "does",
-            "for", "have", "i", "in", "is", "it", "me", "my", "of",
-            "on", "please", "remember", "tell", "that", "the", "to",
-            "what", "who", "you",
+            "a",
+            "an",
+            "and",
+            "are",
+            "about",
+            "any",
+            "do",
+            "does",
+            "for",
+            "have",
+            "i",
+            "in",
+            "is",
+            "it",
+            "me",
+            "my",
+            "of",
+            "on",
+            "please",
+            "remember",
+            "tell",
+            "that",
+            "the",
+            "to",
+            "what",
+            "who",
+            "you",
         }
-        terms = [
-            term for term in query.split()
-            if len(term) >= 3 and term not in stop_words
-        ]
+        terms = [term for term in query.split() if len(term) >= 3 and term not in stop_words]
         return terms or query.split()
 
     @classmethod
@@ -973,14 +974,9 @@ class MemoryEngine:
             ranked.append((score, str(row["updated_at"]), row))
 
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        results = [
-            self._row_to_dict(row, requester)
-            for _, _, row in ranked[:safe_limit]
-        ]
+        results = [self._row_to_dict(row, requester) for _, _, row in ranked[:safe_limit]]
         runtime_metrics.increment("memory_searches")
-        runtime_metrics.increment(
-            "memory_search_hits" if results else "memory_search_misses"
-        )
+        runtime_metrics.increment("memory_search_hits" if results else "memory_search_misses")
         runtime_metrics.set_gauge("memory_last_result_count", len(results))
         return results
 
@@ -1016,9 +1012,7 @@ class MemoryEngine:
         subject = self._clean_text(subject)
         async with self._lock:
             with self._connect() as connection:
-                row = self._matching_deletable_row(
-                    connection, requester, category, subject
-                )
+                row = self._matching_deletable_row(connection, requester, category, subject)
                 if row is None:
                     return False
                 now = self._utc_now()
@@ -1108,14 +1102,16 @@ class MemoryEngine:
             snapshot = json.loads(str(revision["snapshot_json"]))
             if not self._can_view(snapshot, requester):
                 continue
-            visible.append({
-                "revision_id": int(revision["revision_id"]),
-                "memory_id": int(revision["memory_id"]),
-                "operation": str(revision["operation"]),
-                "changed_at": str(revision["changed_at"]),
-                "changed_by": str(revision["changed_by"]),
-                "snapshot": snapshot,
-            })
+            visible.append(
+                {
+                    "revision_id": int(revision["revision_id"]),
+                    "memory_id": int(revision["memory_id"]),
+                    "operation": str(revision["operation"]),
+                    "changed_at": str(revision["changed_at"]),
+                    "changed_by": str(revision["changed_by"]),
+                    "snapshot": snapshot,
+                }
+            )
         return visible
 
     async def count(self, owner_key: str = "aaron") -> int:
@@ -1155,8 +1151,8 @@ class MemoryEngine:
             else:
                 access = "shared with the household"
             lines.append(
-                f'- [{memory["category"]}; {scope}; {access}] '
-                f'{memory["subject"]}: {memory["content"]}'
+                f"- [{memory['category']}; {scope}; {access}] "
+                f"{memory['subject']}: {memory['content']}"
             )
         return "\n".join(lines)
 
@@ -1165,11 +1161,7 @@ class MemoryEngine:
         accessible = await self.count(requester)
         async with self._lock:
             with self._connect() as connection:
-                total = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM memories"
-                    ).fetchone()[0]
-                )
+                total = int(connection.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
                 shared = int(
                     connection.execute(
                         """
@@ -1192,16 +1184,10 @@ class MemoryEngine:
                     ).fetchone()[0]
                 )
                 revisions = int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM memory_history"
-                    ).fetchone()[0]
+                    connection.execute("SELECT COUNT(*) FROM memory_history").fetchone()[0]
                 )
-                migrated = self._meta_get(
-                    connection, "last_migrated_rows"
-                ) or "0"
-                integrity = str(
-                    connection.execute("PRAGMA quick_check").fetchone()[0]
-                )
+                migrated = self._meta_get(connection, "last_migrated_rows") or "0"
+                integrity = str(connection.execute("PRAGMA quick_check").fetchone()[0])
         return {
             "status": "ready" if integrity == "ok" else "degraded",
             "integrity": integrity,

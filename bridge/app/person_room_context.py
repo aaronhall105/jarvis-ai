@@ -36,10 +36,9 @@ def _is_room_follow_up(text: object) -> bool:
         return False
     remainder = remainder[1:]
     return not remainder or (
-        len(remainder) == 2
-        and remainder[0] == "is"
-        and remainder[1] in _PERSON_REFERENTS
+        len(remainder) == 2 and remainder[0] == "is" and remainder[1] in _PERSON_REFERENTS
     )
+
 
 EXPLICIT_PERSON = re.compile(
     r"\b(aaron|amber)\b",
@@ -103,9 +102,7 @@ def household_presence(
                 entity.get("search_text"),
             )
         )
-        state = str(
-            entity.get("state") or "unknown"
-        ).strip().lower()
+        state = str(entity.get("state") or "unknown").strip().lower()
 
         for person in result:
             if person in combined:
@@ -135,14 +132,9 @@ def resolve_person_room(
             "not_home",
             "away",
         }:
-            response = (
-                f"{display} isn't currently marked as home."
-            )
+            response = f"{display} isn't currently marked as home."
         else:
-            response = (
-                f"I can't confirm {display}'s current "
-                "home status."
-            )
+            response = f"I can't confirm {display}'s current home status."
         return {
             "handled": True,
             "response": response,
@@ -151,18 +143,11 @@ def resolve_person_room(
             "primary_event": None,
         }
 
-    rooms = [
-        str(room).strip()
-        for room in evidence.get("rooms", [])
-        if str(room).strip()
-    ]
+    rooms = [str(room).strip() for room in evidence.get("rooms", []) if str(room).strip()]
 
     unique_rooms: list[str] = []
     for room in rooms:
-        if room.casefold() not in {
-            item.casefold()
-            for item in unique_rooms
-        }:
+        if room.casefold() not in {item.casefold() for item in unique_rooms}:
             unique_rooms.append(room)
 
     source = str(evidence.get("source") or "")
@@ -174,8 +159,7 @@ def resolve_person_room(
         return {
             "handled": True,
             "response": (
-                f"{display} is at home, but the cameras "
-                "haven't provided a reliable room match."
+                f"{display} is at home, but the cameras haven't provided a reliable room match."
             ),
             "person": key,
             "presence": presence,
@@ -198,16 +182,11 @@ def resolve_person_room(
 
     room = unique_rooms[0]
     evidence_phrase = (
-        "a live camera check"
-        if source == "live_snapshots"
-        else "the latest camera detection"
+        "a live camera check" if source == "live_snapshots" else "the latest camera detection"
     )
 
     if other_state not in {"home"}:
-        response = (
-            f"{display} appears to be in the {room}, "
-            f"based on {evidence_phrase}."
-        )
+        response = f"{display} appears to be in the {room}, based on {evidence_phrase}."
     else:
         response = (
             f"The cameras show someone in the {room}, "
@@ -255,9 +234,7 @@ def recent_person_rooms(
         matching.append(event)
 
     matching.sort(
-        key=lambda event: float(
-            event.get("start_time") or 0.0
-        ),
+        key=lambda event: float(event.get("start_time") or 0.0),
         reverse=True,
     )
 
@@ -271,7 +248,5 @@ def recent_person_rooms(
         "source": "recent_events",
         "rooms": rooms,
         "events": matching,
-        "primary_event": (
-            matching[0] if matching else None
-        ),
+        "primary_event": (matching[0] if matching else None),
     }

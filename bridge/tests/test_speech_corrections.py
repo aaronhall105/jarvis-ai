@@ -8,9 +8,7 @@ from app.speech_corrections import SpeechCorrectionEngine
 class SpeechCorrectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
-        self.engine = SpeechCorrectionEngine(
-            str(Path(self.directory.name) / "corrections.db")
-        )
+        self.engine = SpeechCorrectionEngine(str(Path(self.directory.name) / "corrections.db"))
 
     async def asyncTearDown(self):
         self.directory.cleanup()
@@ -65,9 +63,7 @@ class SpeechCorrectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.engine.prompt_terms("guest"), ("tv",))
 
     async def test_privacy_listing_and_forgetting_are_user_scoped(self):
-        await self.engine.learn_explicit(
-            "When I say telly, I mean TV", "aaron", {"tv"}
-        )
+        await self.engine.learn_explicit("When I say telly, I mean TV", "aaron", {"tv"})
         self.assertEqual(
             await self.engine.list_for_user("aaron"),
             ({"heard_as": "telly", "means": "tv"},),

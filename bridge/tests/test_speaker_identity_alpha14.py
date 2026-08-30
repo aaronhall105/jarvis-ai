@@ -12,13 +12,17 @@ class FakeSpeakerIdentityClient:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def start_enrollment(self, *, speaker_id: str, display_name: str, is_admin: bool, replace: bool):
-        self.calls.append({
-            "speaker_id": speaker_id,
-            "display_name": display_name,
-            "is_admin": is_admin,
-            "replace": replace,
-        })
+    def start_enrollment(
+        self, *, speaker_id: str, display_name: str, is_admin: bool, replace: bool
+    ):
+        self.calls.append(
+            {
+                "speaker_id": speaker_id,
+                "display_name": display_name,
+                "is_admin": is_admin,
+                "replace": replace,
+            }
+        )
         return {
             "session_id": "session-1",
             "phrases": ["The quick brown fox jumps over the lazy dog."],
@@ -58,9 +62,10 @@ class SpeakerIdentityAlpha14SecurityTests(unittest.TestCase):
         self.assertFalse(client.calls[0]["is_admin"])
 
     def test_existing_authenticated_admin_can_reenroll_admin_profile(self) -> None:
-        client = self._run_name_step({"user_id": "aaron", "user_is_admin": False, "speaker_household_admin": True})
+        client = self._run_name_step(
+            {"user_id": "aaron", "user_is_admin": False, "speaker_household_admin": True}
+        )
         self.assertTrue(client.calls[0]["is_admin"])
-
 
     def test_recognized_voice_id_admin_does_not_become_core_admin(self) -> None:
         client = FakeSpeakerIdentityClient()
@@ -81,7 +86,6 @@ class SpeakerIdentityAlpha14SecurityTests(unittest.TestCase):
         self.assertEqual(metadata["user_id"], "aaron")
         self.assertFalse(metadata["user_is_admin"])
         self.assertTrue(metadata["speaker_household_admin"])
-
 
     def test_unknown_identity_clears_household_admin_state(self) -> None:
         client = FakeSpeakerIdentityClient()

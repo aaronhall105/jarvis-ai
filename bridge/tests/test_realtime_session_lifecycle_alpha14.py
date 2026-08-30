@@ -131,9 +131,7 @@ async def test_due_renewal_waits_for_active_turn_terminal_audio_boundary() -> No
         renewal_lead_seconds=10.0,
     )
 
-    waiter = asyncio.create_task(
-        proxy._wait_for_safe_provider_renewal(state, lease)
-    )
+    waiter = asyncio.create_task(proxy._wait_for_safe_provider_renewal(state, lease))
     await asyncio.sleep(0)
     assert waiter.done() is False
     assert state["provider_renewal_pending"] is True
@@ -151,7 +149,9 @@ async def test_old_epoch_delayed_audio_is_discarded() -> None:
 
     await proxy._openai_to_client(
         client,
-        _events({"type": "response.output_audio.delta", "delta": base64.b64encode(b"old").decode()}),
+        _events(
+            {"type": "response.output_audio.delta", "delta": base64.b64encode(b"old").decode()}
+        ),
         _unused_brain,
         {},
         "realtime",
@@ -252,9 +252,7 @@ async def test_new_epoch_turn_works_with_monotonic_generation() -> None:
 
     async def record_terminal_order(payload: dict[str, Any]) -> None:
         if payload.get("type") == "turn.done":
-            terminal_state_when_done_sent.append(
-                state["turn_terminal_event"].is_set()
-            )
+            terminal_state_when_done_sent.append(state["turn_terminal_event"].is_set())
         await original_send_json(payload)
 
     client.send_json = record_terminal_order  # type: ignore[method-assign]
@@ -305,7 +303,15 @@ async def test_old_and_new_epoch_events_cannot_duplicate_output() -> None:
         {"type": "response.done", "response": {"id": "response-1", "status": "completed"}},
     )
     await proxy._openai_to_client(
-        client, old_events, _unused_brain, {}, "realtime", "live", "marin", set(), state,
+        client,
+        old_events,
+        _unused_brain,
+        {},
+        "realtime",
+        "live",
+        "marin",
+        set(),
+        state,
         provider_epoch=10,
     )
 
@@ -317,12 +323,24 @@ async def test_old_and_new_epoch_events_cannot_duplicate_output() -> None:
                 "metadata": {"jarvis_generation": "21", "jarvis_client_turn_id": "42"},
             },
         },
-        {"type": "response.output_audio_transcript.delta", "response_id": "response-2", "delta": "new"},
+        {
+            "type": "response.output_audio_transcript.delta",
+            "response_id": "response-2",
+            "delta": "new",
+        },
         {"type": "response.output_audio.delta", "response_id": "response-2", "delta": encoded},
         {"type": "response.done", "response": {"id": "response-2", "status": "completed"}},
     )
     await proxy._openai_to_client(
-        client, new_events, _unused_brain, {}, "realtime", "live", "marin", set(), state,
+        client,
+        new_events,
+        _unused_brain,
+        {},
+        "realtime",
+        "live",
+        "marin",
+        set(),
+        state,
         provider_epoch=11,
     )
 
@@ -340,7 +358,9 @@ async def test_home_assistant_mode_still_suppresses_provider_audio() -> None:
 
     await proxy._openai_to_client(
         client,
-        _events({"type": "response.output_audio.delta", "delta": base64.b64encode(b"audio").decode()}),
+        _events(
+            {"type": "response.output_audio.delta", "delta": base64.b64encode(b"audio").decode()}
+        ),
         _unused_brain,
         {},
         "home_assistant",
@@ -456,11 +476,7 @@ async def test_command_racing_renewal_boundary_is_queued_for_new_provider() -> N
 
     class TextClient(RecordingClient):
         async def receive(self) -> dict[str, str]:
-            return {
-                "text": json.dumps(
-                    {"type": "text", "text": "hello", "client_turn_id": 91}
-                )
-            }
+            return {"text": json.dumps({"type": "text", "text": "hello", "client_turn_id": 91})}
 
     reader = asyncio.create_task(
         proxy._client_to_openai(
@@ -513,9 +529,7 @@ async def test_audio_racing_renewal_boundary_never_reaches_old_provider() -> Non
     await asyncio.sleep(0)
 
     assert upstream.messages == []
-    assert state["queued_client_messages"] == [
-        {"bytes": b"new-session-audio"}
-    ]
+    assert state["queued_client_messages"] == [{"bytes": b"new-session-audio"}]
     reader.cancel()
     await asyncio.gather(reader, return_exceptions=True)
 

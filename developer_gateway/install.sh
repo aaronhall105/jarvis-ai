@@ -40,7 +40,10 @@ if [[ ! -s "$config_dir/developer-token" ]]; then
     openssl rand -hex 32 > "$config_dir/developer-token"
 fi
 chmod 600 "$config_dir/developer-token"
-install -m 600 "$repo_root/developer_gateway/jarvis-developer.service" "$unit_dir/jarvis-developer.service"
+sed "s|__JARVIS_ROOT__|$repo_root|g" \
+    "$repo_root/developer_gateway/jarvis-developer.service" \
+    > "$unit_dir/jarvis-developer.service"
+chmod 600 "$unit_dir/jarvis-developer.service"
 systemctl --user daemon-reload
 systemctl --user enable jarvis-developer.service
 systemctl --user restart jarvis-developer.service

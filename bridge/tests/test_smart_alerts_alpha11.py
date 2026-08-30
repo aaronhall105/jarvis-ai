@@ -39,17 +39,13 @@ class Alpha11SmartAlertTests(unittest.TestCase):
                 "entity_id": "sensor.phone_battery_cycle_count",
                 "state": "0",
                 "attributes": {
-                    "friendly_name": (
-                        "Aaron's Phone Battery cycle count"
-                    ),
+                    "friendly_name": ("Aaron's Phone Battery cycle count"),
                     "device_class": "battery",
                     "unit_of_measurement": "%",
                 },
             },
         )
-        self.assertFalse(
-            any(event.category == "batteries" for event in events)
-        )
+        self.assertFalse(any(event.category == "batteries" for event in events))
 
     def test_battery_power_is_ignored(self):
         events = self.evaluate(
@@ -64,16 +60,12 @@ class Alpha11SmartAlertTests(unittest.TestCase):
                 "entity_id": "sensor.phone_battery_power",
                 "state": "0",
                 "attributes": {
-                    "friendly_name": (
-                        "Aaron's Phone Battery power"
-                    ),
+                    "friendly_name": ("Aaron's Phone Battery power"),
                     "unit_of_measurement": "W",
                 },
             },
         )
-        self.assertFalse(
-            any(event.category == "batteries" for event in events)
-        )
+        self.assertFalse(any(event.category == "batteries" for event in events))
 
     def test_real_battery_alerts_only_on_threshold_crossing(self):
         previous = {
@@ -91,21 +83,12 @@ class Alpha11SmartAlertTests(unittest.TestCase):
         }
 
         events = self.evaluate(previous, current)
-        batteries = [
-            event
-            for event in events
-            if event.category == "batteries"
-        ]
+        batteries = [event for event in events if event.category == "batteries"]
         self.assertEqual(1, len(batteries))
         self.assertEqual("battery_low", batteries[0].kind)
 
         repeated = self.evaluate(current, current)
-        self.assertFalse(
-            any(
-                event.category == "batteries"
-                for event in repeated
-            )
-        )
+        self.assertFalse(any(event.category == "batteries" for event in repeated))
 
     def test_critical_battery_can_follow_low_battery(self):
         previous = {
@@ -146,12 +129,7 @@ class Alpha11SmartAlertTests(unittest.TestCase):
                         },
                     },
                 )
-                self.assertFalse(
-                    any(
-                        event.kind == "oven_left_on"
-                        for event in events
-                    )
-                )
+                self.assertFalse(any(event.kind == "oven_left_on" for event in events))
 
     def test_physical_oven_still_alerts(self):
         events = self.evaluate(
@@ -167,12 +145,7 @@ class Alpha11SmartAlertTests(unittest.TestCase):
                 },
             },
         )
-        self.assertTrue(
-            any(
-                event.kind == "oven_left_on"
-                for event in events
-            )
-        )
+        self.assertTrue(any(event.kind == "oven_left_on" for event in events))
 
     def test_battery_never_speaks(self):
         event = {
@@ -201,18 +174,22 @@ class Alpha11SmartAlertTests(unittest.TestCase):
         )
 
     def test_battery_notifications_replace_each_other(self):
-        first = proactive_notification_tag({
-            "category": "batteries",
-            "kind": "battery_low",
-            "target_user": "aaron",
-            "entity_id": "sensor.phone_battery",
-        })
-        second = proactive_notification_tag({
-            "category": "batteries",
-            "kind": "battery_critical",
-            "target_user": "aaron",
-            "entity_id": "sensor.watch_battery",
-        })
+        first = proactive_notification_tag(
+            {
+                "category": "batteries",
+                "kind": "battery_low",
+                "target_user": "aaron",
+                "entity_id": "sensor.phone_battery",
+            }
+        )
+        second = proactive_notification_tag(
+            {
+                "category": "batteries",
+                "kind": "battery_critical",
+                "target_user": "aaron",
+                "entity_id": "sensor.watch_battery",
+            }
+        )
         self.assertEqual(first, second)
 
 

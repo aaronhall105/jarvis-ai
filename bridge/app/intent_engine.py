@@ -113,9 +113,7 @@ class IntentEngine:
         ]
 
         if not matches:
-            raise IntentError(
-                "I could not determine which Home Assistant area you meant."
-            )
+            raise IntentError("I could not determine which Home Assistant area you meant.")
 
         matches.sort(
             key=lambda item: len(item[0]),
@@ -127,21 +125,13 @@ class IntentEngine:
     def resolve_action(self, text: str) -> str:
         normalised = self._normalise(text)
 
-        if any(
-            phrase in normalised
-            for phrase in self.TURN_OFF_TERMS
-        ):
+        if any(phrase in normalised for phrase in self.TURN_OFF_TERMS):
             return "turn_off"
 
-        if any(
-            phrase in normalised
-            for phrase in self.TURN_ON_TERMS
-        ):
+        if any(phrase in normalised for phrase in self.TURN_ON_TERMS):
             return "turn_on"
 
-        raise IntentError(
-            "I could not determine whether you wanted the device on or off."
-        )
+        raise IntentError("I could not determine whether you wanted the device on or off.")
 
     def resolve_domain(self, text: str) -> str:
         normalised = self._normalise(text)
@@ -150,9 +140,7 @@ class IntentEngine:
         if words.intersection(self.LIGHT_TERMS):
             return "light"
 
-        raise IntentError(
-            "I currently understand light-control requests only."
-        )
+        raise IntentError("I currently understand light-control requests only.")
 
     async def parse(self, text: str) -> ParsedIntent:
         if not text or not text.strip():
@@ -187,15 +175,9 @@ class IntentEngine:
                 turn_on=False,
             )
         else:
-            raise IntentError(
-                f"Unsupported intent: {parsed.intent}"
-            )
+            raise IntentError(f"Unsupported intent: {parsed.intent}")
 
-        action_text = (
-            "turned on"
-            if parsed.intent.endswith("turn_on")
-            else "turned off"
-        )
+        action_text = "turned on" if parsed.intent.endswith("turn_on") else "turned off"
 
         entity_count = len(result.get("entities", []))
 

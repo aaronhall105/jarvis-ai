@@ -107,8 +107,7 @@ class RuntimeMetrics:
             counters = dict(self._counters)
             gauges = dict(self._gauges)
             latencies = {
-                key: self._summary(list(values))
-                for key, values in self._latencies.items()
+                key: self._summary(list(values)) for key, values in self._latencies.items()
             }
             last_error = dict(self._last_error) if self._last_error else None
         return {
@@ -145,14 +144,20 @@ def configuration_report(settings: Any, realtime_status: Any) -> dict[str, Any]:
                 "Realtime voice is enabled but neither mobile nor Voice PE authentication is fully configured"
             )
         if realtime_status.get("last_error"):
-            warnings.append("Realtime voice has a recorded provider/session error; inspect /api/system/status")
+            warnings.append(
+                "Realtime voice has a recorded provider/session error; inspect /api/system/status"
+            )
 
     environment = str(getattr(settings, "jarvis_environment", "development") or "development")
     if environment.casefold() == "production":
         if not str(getattr(settings, "jarvis_memory_admin_token", "") or "").strip():
-            warnings.append("JARVIS_MEMORY_ADMIN_TOKEN is unset; memory administration REST endpoints stay disabled")
+            warnings.append(
+                "JARVIS_MEMORY_ADMIN_TOKEN is unset; memory administration REST endpoints stay disabled"
+            )
         if not str(getattr(settings, "jarvis_self_improvement_admin_token", "") or "").strip():
-            warnings.append("JARVIS_SELF_IMPROVEMENT_ADMIN_TOKEN is unset; improvement administration REST endpoints stay disabled")
+            warnings.append(
+                "JARVIS_SELF_IMPROVEMENT_ADMIN_TOKEN is unset; improvement administration REST endpoints stay disabled"
+            )
         if not str(getattr(settings, "jarvis_integrations_admin_token", "") or "").strip():
             warnings.append(
                 "JARVIS_INTEGRATIONS_ADMIN_TOKEN is unset; connector, receipt, "
@@ -162,9 +167,7 @@ def configuration_report(settings: Any, realtime_status: Any) -> dict[str, Any]:
     if bool(getattr(settings, "jarvis_external_agent_enabled", False)) and not bool(
         getattr(settings, "jarvis_web_search_enabled", False)
     ):
-        warnings.append(
-            "External agent mode is enabled but live web search is disabled"
-        )
+        warnings.append("External agent mode is enabled but live web search is disabled")
 
     return {
         "valid": not errors,

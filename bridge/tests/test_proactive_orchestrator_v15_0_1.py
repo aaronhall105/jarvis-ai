@@ -54,7 +54,9 @@ class Tools:
             },
         }
 
-    async def send_mobile_notification(self, recipient: str, message: str, title: str = "Jarvis") -> dict[str, Any]:
+    async def send_mobile_notification(
+        self, recipient: str, message: str, title: str = "Jarvis"
+    ) -> dict[str, Any]:
         result = {"success": True, "recipient": recipient, "message": message, "title": title}
         self.notifications.append(result)
         return result
@@ -65,7 +67,9 @@ class Tools:
         return result
 
 
-def make_event(event_id: int, event_type: str, entity_id: str, summary: str, **extra: Any) -> dict[str, Any]:
+def make_event(
+    event_id: int, event_type: str, entity_id: str, summary: str, **extra: Any
+) -> dict[str, Any]:
     return {
         "event_id": event_id,
         "event_type": event_type,
@@ -132,8 +136,12 @@ async def test_person_or_motion_occupancy_can_create_one_critical_alert(tmp_path
     tools.entity_states[entity_id] = "on"
     awareness.events.extend(
         [
-            make_event(1, "occupancy_detected", entity_id, "Person detected.", area_name="Front Door"),
-            make_event(2, "occupancy_detected", entity_id, "Person detected.", area_name="Front Door"),
+            make_event(
+                1, "occupancy_detected", entity_id, "Person detected.", area_name="Front Door"
+            ),
+            make_event(
+                2, "occupancy_detected", entity_id, "Person detected.", area_name="Front Door"
+            ),
         ]
     )
     orchestrator = make(tmp_path, awareness, tools, clock)
@@ -207,13 +215,17 @@ async def test_arrival_resolves_all_away_occupancy_alerts(tmp_path: Path) -> Non
     orchestrator = make(tmp_path, awareness, tools, clock)
     await orchestrator.process_once()
 
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
     awareness.events.append(
         make_event(2, "person_arrived", "person.aaron", "Aaron arrived home.", importance=75)
     )
     await orchestrator.process_once()
 
-    occupancy = [a for a in await orchestrator.list_alerts() if a["event_type"] == "occupancy_while_away"]
+    occupancy = [
+        a for a in await orchestrator.list_alerts() if a["event_type"] == "occupancy_while_away"
+    ]
     assert occupancy[0]["status"] == "resolved"
 
 
@@ -250,7 +262,9 @@ async def test_one_shot_delivered_alerts_are_not_counted_active(tmp_path: Path) 
     clock = Clock()
     awareness = Awareness()
     tools = Tools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
     awareness.events.append(
         make_event(1, "person_arrived", "person.amber", "Amber arrived home.", importance=75)
     )

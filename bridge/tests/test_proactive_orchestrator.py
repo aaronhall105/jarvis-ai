@@ -135,8 +135,12 @@ async def test_washing_finished_announces_when_someone_is_home(tmp_path: Path) -
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
-    awareness.events.append(event(1, "washing_finished", "The washing machine finished.", 80, "sensor.washer"))
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
+    awareness.events.append(
+        event(1, "washing_finished", "The washing machine finished.", 80, "sensor.washer")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -153,7 +157,9 @@ async def test_washing_finished_notifies_aaron_when_nobody_is_home(tmp_path: Pat
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    awareness.events.append(event(1, "washing_finished", "The washing machine finished.", 80, "sensor.washer"))
+    awareness.events.append(
+        event(1, "washing_finished", "The washing machine finished.", 80, "sensor.washer")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -163,12 +169,18 @@ async def test_washing_finished_notifies_aaron_when_nobody_is_home(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_critical_safety_alert_uses_speaker_and_both_phones_during_quiet_hours(tmp_path: Path) -> None:
+async def test_critical_safety_alert_uses_speaker_and_both_phones_during_quiet_hours(
+    tmp_path: Path,
+) -> None:
     clock = Clock(datetime(2026, 7, 26, 23, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
-    awareness.events.append(event(1, "safety_alert", "Smoke alarm reported an alert.", 100, "binary_sensor.smoke"))
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
+    awareness.events.append(
+        event(1, "safety_alert", "Smoke alarm reported an alert.", 100, "binary_sensor.smoke")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -209,15 +221,21 @@ async def test_opening_alert_waits_for_duration_and_cancels_when_closed(tmp_path
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
     tools.entity_states["binary_sensor.front_door"] = "on"
-    awareness.events.append(event(1, "opening_opened", "Front Door opened.", 50, "binary_sensor.front_door"))
+    awareness.events.append(
+        event(1, "opening_opened", "Front Door opened.", 50, "binary_sensor.front_door")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
     assert tools.announcements == []
 
-    awareness.events.append(event(2, "opening_closed", "Front Door closed.", 35, "binary_sensor.front_door"))
+    awareness.events.append(
+        event(2, "opening_closed", "Front Door closed.", 35, "binary_sensor.front_door")
+    )
     tools.entity_states["binary_sensor.front_door"] = "off"
     clock.advance(31)
     await orchestrator.process_once()
@@ -232,9 +250,13 @@ async def test_opening_still_open_after_delay_generates_high_alert(tmp_path: Pat
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
     tools.entity_states["binary_sensor.front_door"] = "on"
-    awareness.events.append(event(1, "opening_opened", "Front Door opened.", 50, "binary_sensor.front_door"))
+    awareness.events.append(
+        event(1, "opening_opened", "Front Door opened.", 50, "binary_sensor.front_door")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -250,8 +272,12 @@ async def test_normal_alert_is_held_during_quiet_hours(tmp_path: Path) -> None:
     clock = Clock(datetime(2026, 7, 26, 23, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}]
-    awareness.events.append(event(1, "person_arrived", "Amber arrived home.", 75, "person.amber", person_key="amber"))
+    tools.states = [
+        {"domain": "person", "entity_id": "person.aaron", "name": "Aaron", "state": "home"}
+    ]
+    awareness.events.append(
+        event(1, "person_arrived", "Amber arrived home.", 75, "person.amber", person_key="amber")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -267,7 +293,9 @@ async def test_acknowledgement_cancels_escalation(tmp_path: Path) -> None:
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    awareness.events.append(event(1, "safety_alert", "Water leak detected.", 100, "binary_sensor.leak"))
+    awareness.events.append(
+        event(1, "safety_alert", "Water leak detected.", 100, "binary_sensor.leak")
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -288,7 +316,11 @@ async def test_snooze_command_redelivers_after_delay(tmp_path: Path) -> None:
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    awareness.events.append(event(1, "battery_low", "Aaron phone battery fell to 10%.", 65, "sensor.aaron_phone_battery"))
+    awareness.events.append(
+        event(
+            1, "battery_low", "Aaron phone battery fell to 10%.", 65, "sensor.aaron_phone_battery"
+        )
+    )
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 
     await orchestrator.process_once()
@@ -306,7 +338,14 @@ async def test_camera_offline_timer_is_not_reset_by_each_scan(tmp_path: Path) ->
     clock = Clock(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc))
     awareness = FakeAwareness()
     tools = FakeTools()
-    tools.states = [{"domain": "camera", "entity_id": "camera.front_door", "name": "Front Door Camera", "state": "unavailable"}]
+    tools.states = [
+        {
+            "domain": "camera",
+            "entity_id": "camera.front_door",
+            "name": "Front Door Camera",
+            "state": "unavailable",
+        }
+    ]
     tools.entity_states["camera.front_door"] = "unavailable"
     orchestrator = make_orchestrator(tmp_path, awareness, tools, clock)
 

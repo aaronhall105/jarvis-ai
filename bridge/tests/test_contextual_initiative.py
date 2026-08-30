@@ -23,9 +23,16 @@ class ContextualInitiativeTests(unittest.TestCase):
 
     def test_low_confidence_noncritical_event_is_not_spoken(self) -> None:
         candidate = Candidate(
-            "cameras", "object", "camera.hallway", "Object detected",
-            "Something may be in the hallway.", "single uncertain detection", 82,
-            confidence=0.42, evidence=("detector:0.42",), room="Hallway",
+            "cameras",
+            "object",
+            "camera.hallway",
+            "Object detected",
+            "Something may be in the hallway.",
+            "single uncertain detection",
+            82,
+            confidence=0.42,
+            evidence=("detector:0.42",),
+            room="Hallway",
         )
         event = asyncio.run(self.engine.record(candidate))
         self.assertTrue(event["decision"]["suppress_speech"])
@@ -36,23 +43,41 @@ class ContextualInitiativeTests(unittest.TestCase):
         self.assertEqual(["detector:0.42"], event["evidence"])
 
     def test_critical_event_bypasses_confidence_suppression(self) -> None:
-        event = asyncio.run(self.engine.record(Candidate(
-            "security", "smoke_detected", "binary_sensor.smoke", "Smoke",
-            "Smoke detected.", "verified safety sensor", 100, confidence=0.4,
-        )))
+        event = asyncio.run(
+            self.engine.record(
+                Candidate(
+                    "security",
+                    "smoke_detected",
+                    "binary_sensor.smoke",
+                    "Smoke",
+                    "Smoke detected.",
+                    "verified safety sensor",
+                    100,
+                    confidence=0.4,
+                )
+            )
+        )
         self.assertFalse(event["decision"]["suppress_speech"])
         self.assertTrue(event["decision"]["critical"])
 
     def test_room_routes_to_room_speaker_with_single_device_fallback(self) -> None:
         self.engine.speaker_entity = "assist_satellite.only_preview"
         self.engine.speaker_map = {"living_room": "assist_satellite.living_room"}
-        living = asyncio.run(self.engine.record(Candidate(
-            "presence", "arrival", "person.aaron", "Arrival", "Aaron is home.",
-            "presence changed", 82, room="Living Room",
-        )))
-        self.assertEqual(
-            "assist_satellite.living_room", living["decision"]["speaker"]
+        living = asyncio.run(
+            self.engine.record(
+                Candidate(
+                    "presence",
+                    "arrival",
+                    "person.aaron",
+                    "Arrival",
+                    "Aaron is home.",
+                    "presence changed",
+                    82,
+                    room="Living Room",
+                )
+            )
         )
+        self.assertEqual("assist_satellite.living_room", living["decision"]["speaker"])
 
     def test_spoken_initiative_uses_native_start_conversation(self) -> None:
         self.engine.speaker_entity = "assist_satellite.living_room"
@@ -65,16 +90,21 @@ class ContextualInitiativeTests(unittest.TestCase):
             return {}
 
         self.engine.ha_service = fake_service
-        event = asyncio.run(self.engine.record(Candidate(
-            "appliances", "cycle_finished", "sensor.washer", "Washer",
-            "The washing machine has finished.", "verified state transition", 85,
-        )))
-        conversation_call = next(
-            call for call in calls if call[1] == "start_conversation"
+        event = asyncio.run(
+            self.engine.record(
+                Candidate(
+                    "appliances",
+                    "cycle_finished",
+                    "sensor.washer",
+                    "Washer",
+                    "The washing machine has finished.",
+                    "verified state transition",
+                    85,
+                )
+            )
         )
-        self.assertEqual(
-            "assist_satellite.living_room", conversation_call[2]["entity_id"]
-        )
+        conversation_call = next(call for call in calls if call[1] == "start_conversation")
+        self.assertEqual("assist_satellite.living_room", conversation_call[2]["entity_id"])
         self.assertEqual(
             "The washing machine has finished.",
             conversation_call[2]["start_message"],
@@ -83,14 +113,19 @@ class ContextualInitiativeTests(unittest.TestCase):
 
     def test_reply_window_is_deterministic_and_feedback_suppresses_future_speech(self) -> None:
         candidate = Candidate(
-            "cameras", "package", "camera.front", "Package", "A package arrived.",
-            "camera track", 85, confidence=0.95, room="Front Door",
+            "cameras",
+            "package",
+            "camera.front",
+            "Package",
+            "A package arrived.",
+            "camera track",
+            85,
+            confidence=0.95,
+            room="Front Door",
         )
         event = asyncio.run(self.engine.record(candidate))
         self.engine.update(event["id"], reply_until=int(time.time()) + 12)
-        reply = asyncio.run(self.engine.handle_reply(
-            "don't announce that again", "aaron"
-        ))
+        reply = asyncio.run(self.engine.handle_reply("don't announce that again", "aaron"))
         self.assertTrue(reply["handled"])
         with self.engine.connection() as connection:
             connection.execute(
@@ -98,15 +133,18 @@ class ContextualInitiativeTests(unittest.TestCase):
                 (int(time.time()) - 31, event["id"]),
             )
         later = asyncio.run(self.engine.record(candidate))
-        self.assertEqual(
-            "disabled_by_user_feedback", later["decision"]["suppressed_reason"]
-        )
+        self.assertEqual("disabled_by_user_feedback", later["decision"]["suppressed_reason"])
 
     def test_learning_creates_proposal_but_never_auto_approves(self) -> None:
         self.engine.learning_threshold = 3
         candidate = Candidate(
-            "appliances", "cycle_finished", "sensor.washer", "Washer finished",
-            "The washer finished.", "state transition", 82,
+            "appliances",
+            "cycle_finished",
+            "sensor.washer",
+            "Washer finished",
+            "The washer finished.",
+            "state transition",
+            82,
         )
         for _ in range(3):
             event = asyncio.run(self.engine.record(candidate))
@@ -133,9 +171,25 @@ class ContextualInitiativeTests(unittest.TestCase):
         )
         connection.execute(
             "INSERT INTO proactive_events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            ("old", "fp", "system", "old", "sensor.old", "Old", "Old event",
-             "legacy", 80, "all", json.dumps(["dismiss"]), "active", 1, 1,
-             None, None, None),
+            (
+                "old",
+                "fp",
+                "system",
+                "old",
+                "sensor.old",
+                "Old",
+                "Old event",
+                "legacy",
+                80,
+                "all",
+                json.dumps(["dismiss"]),
+                "active",
+                1,
+                1,
+                None,
+                None,
+                None,
+            ),
         )
         connection.commit()
         connection.close()
@@ -159,21 +213,26 @@ class ContextualInitiativeTests(unittest.TestCase):
         connection.close()
 
         engine = ProactiveEngine(str(path), enabled=False)
-        event = asyncio.run(engine.record(Candidate(
-            "system", "health", "sensor.health", "Health", "System healthy.",
-            "verified", 85,
-        )))
+        event = asyncio.run(
+            engine.record(
+                Candidate(
+                    "system",
+                    "health",
+                    "sensor.health",
+                    "Health",
+                    "System healthy.",
+                    "verified",
+                    85,
+                )
+            )
+        )
         self.assertIsNotNone(event)
         with engine.connection() as connection:
             self.assertEqual(
-                1, connection.execute(
-                    "SELECT COUNT(*) FROM proactive_suppressions"
-                ).fetchone()[0]
+                1, connection.execute("SELECT COUNT(*) FROM proactive_suppressions").fetchone()[0]
             )
             columns = {
-                row[1] for row in connection.execute(
-                    "PRAGMA table_info(initiative_suppressions)"
-                )
+                row[1] for row in connection.execute("PRAGMA table_info(initiative_suppressions)")
             }
         self.assertIn("fingerprint", columns)
 

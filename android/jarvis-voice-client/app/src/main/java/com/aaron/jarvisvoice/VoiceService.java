@@ -2480,7 +2480,7 @@ public final class VoiceService extends Service implements
                     : ACTIVE_NOTIFICATION_CHANNEL_ID
             )
                 .setSmallIcon(R.drawable.ic_jarvis_status)
-                .setContentTitle("Jarvis")
+                .setContentTitle("J A R V I S")
                 .setContentText(
                     wakeOnly
                         ? "Wake word is active"

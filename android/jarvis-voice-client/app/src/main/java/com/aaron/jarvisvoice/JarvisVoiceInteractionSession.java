@@ -22,7 +22,6 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -129,17 +128,9 @@ public final class JarvisVoiceInteractionSession extends VoiceInteractionSession
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
 
-        ImageView logo = new ImageView(context);
-        logo.setImageResource(R.drawable.jarvis_logo_ui);
-        logo.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-        logo.setAdjustViewBounds(true);
-        LinearLayout.LayoutParams logoParams =
-            new LinearLayout.LayoutParams(dp(28), dp(28));
-        logoParams.rightMargin = dp(10);
-        header.addView(logo, logoParams);
-
-        TextView title = text("Jarvis", 19, BLACK);
+        TextView title = text("J A R V I S", 17, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setLetterSpacing(0.12f);
         header.addView(
             title,
             new LinearLayout.LayoutParams(

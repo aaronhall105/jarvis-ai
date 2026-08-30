@@ -44,4 +44,12 @@ public final class UpdateReleaseTest {
         assertThrows(IllegalArgumentException.class, () -> UpdateRelease.parse(valid("19.0.0-alpha16", 190160, "beta")));
         assertThrows(IllegalArgumentException.class, () -> UpdateChannel.parse("nightly"));
     }
+
+    @Test public void channelFeedsUseReleaseAssetsNotADevelopmentBranch() {
+        assertEquals(
+            "https://github.com/aaronhall105/jarvis-ai/releases/download/jarvis-alpha-feed/update-manifest.json",
+            UpdateManager.feedUrl(UpdateChannel.ALPHA)
+        );
+        assertFalse(UpdateManager.feedUrl(UpdateChannel.ALPHA).contains("ota-feeds"));
+    }
 }

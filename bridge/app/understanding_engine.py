@@ -14,23 +14,120 @@ logger = logging.getLogger("jarvis-core.understanding")
 
 
 _HOME_WORDS = {
-    "light", "lights", "lamp", "lamps", "switch", "switches", "plug", "plugs",
-    "tv", "television", "speaker", "speakers", "media", "volume", "battery",
-    "temperature", "thermostat", "camera", "door", "window", "lock", "alarm",
-    "home", "away", "room", "living", "bedroom", "bathroom", "kitchen",
-    "hallway", "phone", "watch", "washing", "machine", "oven", "fridge",
-    "netflix", "youtube", "iplayer", "prime", "automation", "script", "routine",
-    "notify", "notification", "announce", "announcement", "sensor", "occupancy",
+    "light",
+    "lights",
+    "lamp",
+    "lamps",
+    "switch",
+    "switches",
+    "plug",
+    "plugs",
+    "tv",
+    "television",
+    "speaker",
+    "speakers",
+    "media",
+    "volume",
+    "battery",
+    "temperature",
+    "thermostat",
+    "camera",
+    "door",
+    "window",
+    "lock",
+    "alarm",
+    "home",
+    "away",
+    "room",
+    "living",
+    "bedroom",
+    "bathroom",
+    "kitchen",
+    "hallway",
+    "phone",
+    "watch",
+    "washing",
+    "machine",
+    "oven",
+    "fridge",
+    "netflix",
+    "youtube",
+    "iplayer",
+    "prime",
+    "automation",
+    "script",
+    "routine",
+    "notify",
+    "notification",
+    "announce",
+    "announcement",
+    "sensor",
+    "occupancy",
 }
 
 _ROUTER_WORDS = {
-    "where", "what", "which", "who", "when", "why", "how", "is", "are", "was",
-    "were", "do", "does", "did", "can", "could", "would", "should", "will",
-    "turn", "switch", "power", "open", "close", "start", "stop", "pause", "resume",
-    "play", "mute", "unmute", "set", "check", "tell", "show", "send", "run",
-    "create", "change", "edit", "update", "remember", "forget", "on", "off",
-    "up", "down", "my", "me", "mine", "her", "his", "their", "it", "them",
-    "this", "that", "there", "here", "now", "today", "tomorrow",
+    "where",
+    "what",
+    "which",
+    "who",
+    "when",
+    "why",
+    "how",
+    "is",
+    "are",
+    "was",
+    "were",
+    "do",
+    "does",
+    "did",
+    "can",
+    "could",
+    "would",
+    "should",
+    "will",
+    "turn",
+    "switch",
+    "power",
+    "open",
+    "close",
+    "start",
+    "stop",
+    "pause",
+    "resume",
+    "play",
+    "mute",
+    "unmute",
+    "set",
+    "check",
+    "tell",
+    "show",
+    "send",
+    "run",
+    "create",
+    "change",
+    "edit",
+    "update",
+    "remember",
+    "forget",
+    "on",
+    "off",
+    "up",
+    "down",
+    "my",
+    "me",
+    "mine",
+    "her",
+    "his",
+    "their",
+    "it",
+    "them",
+    "this",
+    "that",
+    "there",
+    "here",
+    "now",
+    "today",
+    "tomorrow",
 }
 
 _MANUAL_PHRASES: tuple[tuple[re.Pattern[str], str, float], ...] = (
@@ -56,8 +153,20 @@ _MANUAL_PHRASES: tuple[tuple[re.Pattern[str], str, float], ...] = (
 )
 
 _PROTECTED_TOKENS = {
-    "yes", "no", "ok", "okay", "thanks", "thank", "please", "poo",
-    "samba", "jarvis", "alexa", "google", "siri", "homeassistant",
+    "yes",
+    "no",
+    "ok",
+    "okay",
+    "thanks",
+    "thank",
+    "please",
+    "poo",
+    "samba",
+    "jarvis",
+    "alexa",
+    "google",
+    "siri",
+    "homeassistant",
 }
 
 _WRITE_ACTION_RE = re.compile(
@@ -124,9 +233,19 @@ class UnderstandingEngine:
             return self._lexicon_cache
 
         phrases: set[str] = {
-            "living room", "front door", "home assistant", "prime video",
-            "bbc iplayer", "android tv", "smart watch", "washing machine",
-            "Aaron's phone", "Amber's phone", "Aaron", "Amber", "Jarvis",
+            "living room",
+            "front door",
+            "home assistant",
+            "prime video",
+            "bbc iplayer",
+            "android tv",
+            "smart watch",
+            "washing machine",
+            "Aaron's phone",
+            "Amber's phone",
+            "Aaron",
+            "Amber",
+            "Jarvis",
         }
         anchor_tokens: set[str] = {"aaron", "amber", "jarvis"}
         device_tokens: set[str] = set()
@@ -300,8 +419,10 @@ class UnderstandingEngine:
         house_relevant = bool(
             set(re.findall(r"[a-z]+", lowered)) & _HOME_WORDS
             or any(phrase in lowered for phrase in phrase_keys if len(phrase) >= 4)
-            or (re.search(r"\b(?:it|them|that|those|there|she|he)\b", lowered) and
-                bool(set(re.findall(r"[a-z]+", recent)) & _HOME_WORDS))
+            or (
+                re.search(r"\b(?:it|them|that|those|there|she|he)\b", lowered)
+                and bool(set(re.findall(r"[a-z]+", recent)) & _HOME_WORDS)
+            )
         )
 
         confidence = min(confidence_scores) if confidence_scores else 1.0
@@ -312,8 +433,7 @@ class UnderstandingEngine:
             original_token, best, score = ambiguous_corrections[0]
             needs_clarification = True
             clarification = (
-                f"Did you mean {self._display_candidate(best)} when you said "
-                f"{original_token!r}?"
+                f"Did you mean {self._display_candidate(best)} when you said {original_token!r}?"
             )
             confidence = min(confidence, score)
 
@@ -321,9 +441,7 @@ class UnderstandingEngine:
         # still flow to the model, which may ask one natural clarification if needed.
         if write_action and corrections and confidence < 0.86:
             needs_clarification = True
-            clarification = clarification or (
-                f"Did you mean: “{interpreted.rstrip('.?!')}”?"
-            )
+            clarification = clarification or (f"Did you mean: “{interpreted.rstrip('.?!')}”?")
 
         logger.info(
             "Understanding original=%r interpreted=%r confidence=%.3f corrections=%s "

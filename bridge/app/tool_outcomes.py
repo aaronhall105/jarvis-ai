@@ -37,11 +37,7 @@ _BLOCKING_READ_ONLY_FAILURE_MARKERS = (
 
 
 def _tool_name(call: dict[str, Any]) -> str:
-    return str(
-        call.get("tool")
-        or call.get("name")
-        or ""
-    ).strip()
+    return str(call.get("tool") or call.get("name") or "").strip()
 
 
 def _result(call: dict[str, Any]) -> dict[str, Any]:
@@ -88,10 +84,7 @@ def is_tolerable_read_only_failure(
         default=str,
     ).casefold()
 
-    return not any(
-        marker in rendered
-        for marker in _BLOCKING_READ_ONLY_FAILURE_MARKERS
-    )
+    return not any(marker in rendered for marker in _BLOCKING_READ_ONLY_FAILURE_MARKERS)
 
 
 def request_tool_success(
@@ -120,11 +113,7 @@ def request_tool_success(
     if not calls:
         return True
 
-    failed = [
-        call
-        for call in calls
-        if call_failed(call)
-    ]
+    failed = [call for call in calls if call_failed(call)]
 
     if not failed:
         return True
@@ -142,17 +131,13 @@ def request_tool_success(
         return False
 
     useful_evidence = any(
-        call_succeeded(call)
-        and _tool_name(call) in read_only_tools
-        for call in calls
+        call_succeeded(call) and _tool_name(call) in read_only_tools for call in calls
     )
 
     if not useful_evidence:
         return False
 
-    return bool(
-        str(final_reply or "").strip()
-    )
+    return bool(str(final_reply or "").strip())
 
 
 def has_blocking_tool_failure(
@@ -170,11 +155,7 @@ def has_blocking_tool_failure(
     tolerable read-only inspection miss.
     """
 
-    failed = [
-        call
-        for call in calls
-        if call_failed(call)
-    ]
+    failed = [call for call in calls if call_failed(call)]
 
     if not failed:
         return False

@@ -7,7 +7,7 @@ from app.followup_schedule import parse_periodic_followup
 
 
 def test_private_key_redaction_is_linear_and_fails_closed_for_truncated_keys() -> None:
-    adversarial = "-----BEGIN PRIVATE KEY-----" * 40_000
+    adversarial = "-----BEGIN PRIVATE KEY-----" * 40_000  # gitleaks:allow
     started = time.monotonic()
     redacted = redact_text(adversarial, max_length=20_000)
     elapsed = time.monotonic() - started

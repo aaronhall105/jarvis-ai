@@ -46,7 +46,11 @@ class FakeTools:
                 "sensor.aaron_phone_battery", "Aaron Phone Battery", "55", "sensor", unit="%"
             ),
             "sensor.living_room_temperature": self._entity(
-                "sensor.living_room_temperature", "Living Room Temperature", "20", "sensor", unit="°C"
+                "sensor.living_room_temperature",
+                "Living Room Temperature",
+                "20",
+                "sensor",
+                unit="°C",
             ),
             "person.amber": self._entity("person.amber", "Amber", "home", "person"),
             "person.aaron": self._entity("person.aaron", "Aaron", "home", "person"),
@@ -125,7 +129,11 @@ class FakeTools:
             if score:
                 ranked.append((score, dict(item)))
         ranked.sort(key=lambda value: value[0], reverse=True)
-        return {"success": True, "count": len(ranked[:limit]), "entities": [x[1] for x in ranked[:limit]]}
+        return {
+            "success": True,
+            "count": len(ranked[:limit]),
+            "entities": [x[1] for x in ranked[:limit]],
+        }
 
     @staticmethod
     def _normalise(value: str) -> str:
@@ -275,9 +283,7 @@ class ConditionalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runs[0]["status"], "skipped")
 
     async def test_debounce_requires_condition_to_remain_true(self) -> None:
-        await self.create_door_rule(
-            "When the front door opens for 5 seconds, then notify me"
-        )
+        await self.create_door_rule("When the front door opens for 5 seconds, then notify me")
         self.tools.set_state("binary_sensor.front_door", "on")
         self.assertEqual(await self.engine.process_once(), 0)
         self.clock.advance(seconds=4)
@@ -286,9 +292,7 @@ class ConditionalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.engine.process_once(), 1)
 
     async def test_debounce_candidate_is_cancelled_if_state_reverts(self) -> None:
-        await self.create_door_rule(
-            "When the front door opens for 5 seconds, then notify me"
-        )
+        await self.create_door_rule("When the front door opens for 5 seconds, then notify me")
         self.tools.set_state("binary_sensor.front_door", "on")
         await self.engine.process_once()
         self.tools.set_state("binary_sensor.front_door", "off")
@@ -456,7 +460,6 @@ class ConditionalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result.handled)
 
-
     async def test_timed_condition_executes_when_state_is_true(self) -> None:
         result = await self.engine.handle_command(
             "At 7 pm, turn the TV off only if it is still on",
@@ -519,7 +522,6 @@ class ConditionalActionEngineTests(unittest.IsolatedAsyncioTestCase):
                 ("device_control", {"entity_id": "switch.bedside_fan", "turn_on": True}),
             ],
         )
-
 
 
 if __name__ == "__main__":

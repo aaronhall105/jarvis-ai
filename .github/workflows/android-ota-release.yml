@@ -41,7 +41,7 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$version"
           grep -Fq "versionName = \"$version\"" android/jarvis-voice-client/app/build.gradle.kts
           grep -Fq "RELEASE = \"$version\"" android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisVersion.java
-          grep -Eq '^JARVIS_RELEASE = "19\.0\.0-alpha[0-9]+"$' bridge/app/version.py
+          grep -Fq "JARVIS_RELEASE = \"$version\"" bridge/app/version.py
           test "$(git rev-list -n1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
           python tools/verify_product_baseline.py --skip-ref
           git diff --check
@@ -55,8 +55,11 @@ jobs:
         env: {PYTHONPATH: bridge}
         run: |
           python -m pytest -q bridge/tests tools/tests developer_gateway/tests
-          python -m ruff check --select E9,F63,F7,F82 bridge/app bridge/tests developer_gateway tools
-          python -m bandit -q -lll tools/generate_ota_manifest.py
+          python -m ruff check bridge/app bridge/tests developer_gateway tools
+          python -m ruff format --check bridge/app bridge/tests developer_gateway tools
+          python -m mypy bridge/app developer_gateway tools/generate_ota_manifest.py \
+            tools/generate_product_release_manifest.py tools/verify_product_baseline.py
+          python -m bandit -q -lll tools/generate_ota_manifest.py tools/generate_product_release_manifest.py
       - name: Android and Wear unit tests and lint
         working-directory: android/jarvis-voice-client
         run: >-
@@ -121,48 +124,61 @@ jobs:
           grep -Fq "package: name='com.aaron.jarvisvoice' versionCode='$code' versionName='$version'" wear-apk-badging.txt
           echo "Verified APK package/version: com.aaron.jarvisvoice $version ($code)"
           "$aapt" dump xmltree "$apk" AndroidManifest.xml > apk-manifest.txt
+          "$aapt" dump xmltree "$wear_apk" AndroidManifest.xml > wear-apk-manifest.txt
           grep -Fq 'com.aaron.jarvisvoice.IntegrationsActivity' apk-manifest.txt
           grep -Fq 'android:scheme' apk-manifest.txt
           grep -Fq '="jarvis"' apk-manifest.txt
           grep -Fq '="integrations"' apk-manifest.txt
           grep -Fq '="/google"' apk-manifest.txt
           unzip -p "$apk" classes.dex > "$RUNNER_TEMP/classes.dex"
+          unzip -p "$wear_apk" classes.dex > "$RUNNER_TEMP/wear-classes.dex"
           dexdump="$ANDROID_HOME/build-tools/$build_tools/dexdump"
           test -x "$dexdump"
           "$dexdump" -d "$RUNNER_TEMP/classes.dex" > "$RUNNER_TEMP/classes-dexdump.txt"
+          "$dexdump" -d "$RUNNER_TEMP/wear-classes.dex" > "$RUNNER_TEMP/wear-classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/SettingsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/IntegrationsActivity;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/DeveloperClient;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/TurnRecoveryJournal;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/WearChannelListenerService;'\''' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'buildIntegrationsCard' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'buildIntegrationsSection' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Open integrations & accounts' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Google, email, calendar, contacts and external services.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'settings_integrations_open' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'House activity' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'New chat' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'More options' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'J A R V I S' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'What can I help with?' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Clear current chat' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Only the current conversation will be removed.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Chat history' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Improvements' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'Delete current chat' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'Delete this chat?' "$RUNNER_TEMP/classes-dexdump.txt"
-          grep -Fq 'Message Jarvis' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/wear/JarvisWearActivity;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/wear/JarvisTileService;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/wear/WearAssistantService;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/wear/WearVoiceService;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/wear/WearChannelManager;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
+          grep -Fq 'Class descriptor  : '\''Lcom/aaron/jarvisvoice/protocol/WearWireProtocol;'\''' "$RUNNER_TEMP/wear-classes-dexdump.txt"
           "$aapt" dump resources "$apk" > apk-resources.txt
-          grep -Fq 'com.aaron.jarvisvoice:drawable/jarvis_logo_ui' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/jarvis_wordmark_master' apk-resources.txt
+          grep -Fq 'com.aaron.jarvisvoice:drawable/control_delete_red' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:drawable/ic_launcher_foreground' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:drawable/ic_jarvis_status' apk-resources.txt
           grep -Fq 'com.aaron.jarvisvoice:mipmap/ic_launcher_round' apk-resources.txt
           {
             echo "Package: com.aaron.jarvisvoice"
             echo "Version: $version ($code)"
-            echo "Phone UI baseline: actual alpha17 source commit 3279a57ac8593cc2eba70d1678350dea25235a96"
-            echo "MainActivity: alpha17 logo, navigation, menu, composer, history, improvements, and delete-chat UX present"
-            echo "SettingsActivity: alpha17 presentation with current Integrations and Developer sections"
+            echo "SettingsActivity: present with top-level Integrations runtime UI"
             echo "IntegrationsActivity: present and manifest-declared"
             echo "Deep link: jarvis://integrations/google"
-            echo "Developer, realtime recovery, assistant, wake, and Wear bridge: present"
+            echo "Developer, delete-current-chat, realtime recovery, Wear bridge, and current branding: present"
             echo "Signer SHA-256: ${actual,,}"
           } > apk-inspection.txt
+          {
+            echo "Package: com.aaron.jarvisvoice"
+            echo "Version: $version ($code)"
+            echo "JarvisWearActivity, Tile, assistant, voice, channel manager, and shared WearWireProtocol: present"
+            echo "Phone and Watch source commit: $GITHUB_SHA"
+            echo "Signer SHA-256: ${wear_actual,,}"
+          } > wear-apk-inspection.txt
           echo "Verified compiled Integrations Settings UI, activity, and deep link"
           sha256sum "$apk" > "$apk.sha256"
           sha256sum "$apk" "$wear_apk" > SHA256SUMS.txt
@@ -175,6 +191,10 @@ jobs:
           python tools/generate_ota_manifest.py --apk "$apk" --version "$version" --version-code "$code" \
             --commit "$GITHUB_SHA" --notes-file release-notes.txt --output update-manifest.json
           python -c 'import hashlib,json,pathlib; p=pathlib.Path("'"$apk"'"); m=json.load(open("update-manifest.json")); assert m["sha256"]==hashlib.sha256(p.read_bytes()).hexdigest(); assert m["apkSize"]==p.stat().st_size; assert m["commitSha"]=="'"$GITHUB_SHA"'"'
+          python tools/generate_product_release_manifest.py \
+            --phone "$apk" --watch "$wear_apk" --version "$version" \
+            --version-code "$code" --source-sha "$GITHUB_SHA" \
+            --signer-sha256 "${actual,,}" --output product-release-manifest.json
       - name: Publish immutable release assets
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
@@ -183,36 +203,37 @@ jobs:
           prerelease=""; [[ "$version" == *-* ]] && prerelease="--prerelease"
           wear_apk="jarvis-wear-v${version}-release.apk"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt --clobber
+            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json product-release-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt wear-apk-inspection.txt --clobber
             gh release edit "$GITHUB_REF_NAME" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           else
-            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt \
-              --verify-tag --title "Jarvis $version" --notes-file release-notes.txt $prerelease
+            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json product-release-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt wear-apk-inspection.txt \
+              --verify-tag --target "$GITHUB_SHA" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
           fi
-      - name: Publish validated channel feeds
+      - name: Publish validated release-hosted channel feeds
+        env: {GH_TOKEN: '${{ github.token }}'}
         run: |
           set -Eeuo pipefail
           channel="$(python -c 'import json; print(json.load(open("update-manifest.json"))["channel"])')"
-          git fetch origin ota-feeds:ota-feeds || git branch ota-feeds
-          worktree="$RUNNER_TEMP/ota-feeds"
-          git worktree add "$worktree" ota-feeds
-          mkdir -p "$worktree/feeds"
           promote() {
-            local target="$1" existing="$worktree/feeds/$1.json"
-            if [[ ! -f "$existing" ]] || python - "$existing" update-manifest.json <<'PY'
+            local target="$1" tag="jarvis-$1-feed" previous="$RUNNER_TEMP/$1-previous.json"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release download "$tag" --pattern update-manifest.json --output "$previous"
+              python - "$previous" update-manifest.json <<'PY'
           import json, sys
           old, new = (json.load(open(path)) for path in sys.argv[1:])
-          raise SystemExit(0 if new["versionCode"] > old["versionCode"] else 1)
+          if new["versionCode"] <= old["versionCode"]:
+              raise SystemExit("OTA channel refuses a reused or decreasing versionCode")
           PY
-            then cp update-manifest.json "$existing"; fi
+              gh release upload "$tag" update-manifest.json --clobber
+            else
+              gh release create "$tag" update-manifest.json --target "$GITHUB_SHA" --prerelease \
+                --title "Jarvis ${target^} OTA channel" \
+                --notes "Machine-readable OTA channel generated only by approved unified-production release tags."
+            fi
           }
           promote "$channel"
           if [[ "$channel" == stable ]]; then promote beta; promote alpha; fi
           if [[ "$channel" == beta ]]; then promote alpha; fi
-          git -C "$worktree" add feeds
-          if git -C "$worktree" diff --cached --quiet; then echo "Feeds already point to newer validated builds"; exit 0; fi
-          git -C "$worktree" -c user.name=github-actions -c user.email=41898282+github-actions[bot]@users.noreply.github.com commit -m "Publish OTA $GITHUB_REF_NAME"
-          git -C "$worktree" push origin ota-feeds
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-ota-${{ github.ref_name }}
@@ -222,8 +243,10 @@ jobs:
             jarvis-wear-*-release.apk
             SHA256SUMS.txt
             update-manifest.json
+            product-release-manifest.json
             signing-report.txt
             wear-signing-report.txt
             apk-inspection.txt
+            wear-apk-inspection.txt
           if-no-files-found: error
           retention-days: 30

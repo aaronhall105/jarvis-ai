@@ -140,11 +140,7 @@ def _parse_improvement_command(text: object) -> tuple[str, int | None, str | Non
     resume_prefixes = (("enable",), ("resume",), ("start",))
     for command, prefixes in (("stop", stop_prefixes), ("resume", resume_prefixes)):
         for prefix in prefixes:
-            remainder = (
-                tokens[len(prefix) :]
-                if tuple(tokens[: len(prefix)]) == prefix
-                else []
-            )
+            remainder = tokens[len(prefix) :] if tuple(tokens[: len(prefix)]) == prefix else []
             if remainder[:1] == ["jarvis"]:
                 remainder = remainder[1:]
             if remainder == ["self", "improvement"]:
@@ -169,20 +165,25 @@ def _parse_improvement_command(text: object) -> tuple[str, int | None, str | Non
             return ("status", None, None)
 
     for prefix in (("show",), ("list",), ("what", "are"), ("tell", "me")):
-        remainder = (
-            tokens[len(prefix) :]
-            if tuple(tokens[: len(prefix)]) == prefix
-            else []
-        )
+        remainder = tokens[len(prefix) :] if tuple(tokens[: len(prefix)]) == prefix else []
         if remainder[:1] == ["the"]:
             remainder = remainder[1:]
         if remainder[:1] == ["pending"]:
             remainder = remainder[1:]
         if remainder and remainder[0] in {"mistakes", "failures", "issues"}:
             suffix = remainder[1:]
-            if not suffix or suffix in (["you", "recorded"], ["you've", "recorded"], ["you", "have", "recorded"]):
+            if not suffix or suffix in (
+                ["you", "recorded"],
+                ["you've", "recorded"],
+                ["you", "have", "recorded"],
+            ):
                 return ("failures", None, None)
-        if len(remainder) == 1 and remainder[0] in {"improvements", "candidates", "fixes", "patches"}:
+        if len(remainder) == 1 and remainder[0] in {
+            "improvements",
+            "candidates",
+            "fixes",
+            "patches",
+        }:
             return ("candidates", None, None)
 
     if (
@@ -263,9 +264,7 @@ class SelfImprovementEngine:
     ) -> None:
         existing = {
             str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(improvement_candidates)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(improvement_candidates)").fetchall()
         }
 
         columns = {
@@ -292,19 +291,13 @@ class SelfImprovementEngine:
             if name in existing:
                 continue
 
-            connection.execute(
-                "ALTER TABLE improvement_candidates "
-                f"ADD COLUMN {name} {data_type}"
-            )
+            connection.execute(f"ALTER TABLE improvement_candidates ADD COLUMN {name} {data_type}")
 
     @staticmethod
     def _utc_after(
         seconds: int,
     ) -> str:
-        return (
-            datetime.now(timezone.utc)
-            + timedelta(seconds=seconds)
-        ).isoformat()
+        return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
     @staticmethod
     def _timestamp_expired(
@@ -312,29 +305,20 @@ class SelfImprovementEngine:
         *,
         missing_is_expired: bool,
     ) -> bool:
-        raw = str(
-            value or ""
-        ).strip()
+        raw = str(value or "").strip()
 
         if not raw:
             return missing_is_expired
 
         try:
-            parsed = datetime.fromisoformat(
-                raw
-            )
+            parsed = datetime.fromisoformat(raw)
         except ValueError:
             return True
 
         if parsed.tzinfo is None:
-            parsed = parsed.replace(
-                tzinfo=timezone.utc
-            )
+            parsed = parsed.replace(tzinfo=timezone.utc)
 
-        return (
-            parsed.astimezone(timezone.utc)
-            <= datetime.now(timezone.utc)
-        )
+        return parsed.astimezone(timezone.utc) <= datetime.now(timezone.utc)
 
     @staticmethod
     def _ticket_digest(
@@ -342,15 +326,7 @@ class SelfImprovementEngine:
         salt: str,
         code: str,
     ) -> str:
-        return hashlib.sha256(
-            (
-                f"{candidate_id}:"
-                f"{salt}:"
-                f"{code}"
-            ).encode(
-                "utf-8"
-            )
-        ).hexdigest()
+        return hashlib.sha256((f"{candidate_id}:{salt}:{code}").encode("utf-8")).hexdigest()
 
     def _initialise_database(self) -> None:
         now = self._utc_now()
@@ -456,9 +432,7 @@ class SelfImprovementEngine:
                 );
                 """
             )
-            self._ensure_candidate_transaction_columns(
-                connection
-            )
+            self._ensure_candidate_transaction_columns(connection)
 
             connection.execute(
                 """
@@ -554,7 +528,9 @@ class SelfImprovementEngine:
             return "admin_mode"
         if any(word in text for word in ("angry", "frustrated", "tone", "lol", "happy")):
             return "tone"
-        if "awareness" in intent or any(word in text for word in ("what changed", "while i was out")):
+        if "awareness" in intent or any(
+            word in text for word in ("what changed", "while i was out")
+        ):
             return "house_awareness"
         if "stream" in intent or "stream" in text:
             return "streaming"
@@ -738,19 +714,14 @@ class SelfImprovementEngine:
             failure_like=failure_like,
         )
 
-        if blocking_failed_tool or (
-            not success
-            and intent not in benign_false_intents
-        ):
+        if blocking_failed_tool or (not success and intent not in benign_false_intents):
             source = await self.get_interaction(interaction_id)
             if source:
                 await self.record_failure(
                     source=source,
                     correction=None,
                     explicit=False,
-                    summary=(
-                        f"Jarvis request failed: {self.redact_text(raw_text)[:180]}"
-                    ),
+                    summary=(f"Jarvis request failed: {self.redact_text(raw_text)[:180]}"),
                 )
         elif latency >= self.latency_failure_ms:
             source = await self.get_interaction(interaction_id)
@@ -799,9 +770,7 @@ class SelfImprovementEngine:
             + ("AND interaction_id < ? " if before_id else "")
             + "ORDER BY interaction_id DESC LIMIT 1"
         )
-        params: tuple[Any, ...] = (
-            (conversation_id, before_id) if before_id else (conversation_id,)
-        )
+        params: tuple[Any, ...] = (conversation_id, before_id) if before_id else (conversation_id,)
         with self._connect() as connection:
             row = connection.execute(query, params).fetchone()
         return self._interaction_from_row(row) if row else None
@@ -825,10 +794,7 @@ class SelfImprovementEngine:
             source=source,
             correction=raw_text,
             explicit=True,
-            summary=(
-                "User correction after Jarvis response: "
-                f"{self.redact_text(raw_text)[:220]}"
-            ),
+            summary=(f"User correction after Jarvis response: {self.redact_text(raw_text)[:220]}"),
         )
 
     def _upsert_failure_sync(
@@ -948,8 +914,10 @@ class SelfImprovementEngine:
                 "status": status,
             },
         )
-        if await self.enabled() and self.auto_prepare and (
-            explicit or occurrences >= self.repeat_threshold
+        if (
+            await self.enabled()
+            and self.auto_prepare
+            and (explicit or occurrences >= self.repeat_threshold)
         ):
             await self.queue_failure(failure_id, actor="automatic")
         return failure_id
@@ -993,19 +961,27 @@ class SelfImprovementEngine:
         clean = self.redact_text(text).strip()
         if len(clean) < 3:
             return False, None, "Improvement request is too short."
-        source = {"raw_text": clean, "interpreted_text": clean,
-                  "intent": "improvement_request", "success": True,
-                  "response": "Requested from Improvement Center.",
-                  "tool_calls": [], "understanding": {"requested_improvement": clean},
-                  "timings": {}, "user_key": actor}
+        source = {
+            "raw_text": clean,
+            "interpreted_text": clean,
+            "intent": "improvement_request",
+            "success": True,
+            "response": "Requested from Improvement Center.",
+            "tool_calls": [],
+            "understanding": {"requested_improvement": clean},
+            "timings": {},
+            "user_key": actor,
+        }
         failure_id = await self.record_failure(
-            source=source, correction=clean, explicit=True,
-            summary=f"Requested improvement: {clean}")
+            source=source,
+            correction=clean,
+            explicit=True,
+            summary=f"Requested improvement: {clean}",
+        )
         if await self.enabled() and self.auto_prepare:
-            return await asyncio.to_thread(
-                self._queue_failure_sync, failure_id
-            )
+            return await asyncio.to_thread(self._queue_failure_sync, failure_id)
         return await self.queue_failure(failure_id, actor)
+
     async def retry_candidate(
         self,
         candidate_id: int,
@@ -1021,9 +997,7 @@ class SelfImprovementEngine:
         if str(candidate.get("status") or "") != "failed":
             return False, None, "Only failed improvements can be retried."
 
-        failure = await self.get_failure(
-            int(candidate.get("failure_id") or 0)
-        )
+        failure = await self.get_failure(int(candidate.get("failure_id") or 0))
         if failure is None:
             return False, None, "Original improvement request was not found."
 
@@ -1039,11 +1013,9 @@ class SelfImprovementEngine:
 
         for prefix in ("Requested improvement: ", "Retry requested: "):
             if original.startswith(prefix):
-                original = original[len(prefix):].strip()
+                original = original[len(prefix) :].strip()
 
-        previous_error = self.redact_text(
-            str(candidate.get("error") or "Unknown failure.")
-        )
+        previous_error = self.redact_text(str(candidate.get("error") or "Unknown failure."))
 
         source = {
             "raw_text": original,
@@ -1056,9 +1028,7 @@ class SelfImprovementEngine:
                 "requested_improvement": original,
                 "retry_of_candidate_id": candidate_id,
                 "previous_failure": previous_error,
-                "instruction": (
-                    "Correct the previous failure and rerun all validation."
-                ),
+                "instruction": ("Correct the previous failure and rerun all validation."),
             },
             "timings": {},
             "user_key": actor,
@@ -1138,7 +1108,9 @@ class SelfImprovementEngine:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._failure_from_row(row) for row in rows]
 
-    async def list_failures(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_failures(
+        self, limit: int = 20, status: str | None = None
+    ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_failures_sync, limit, status)
 
     def _get_failure_sync(self, failure_id: int) -> dict[str, Any] | None:
@@ -1164,7 +1136,9 @@ class SelfImprovementEngine:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._candidate_from_row(row) for row in rows]
 
-    async def list_candidates(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_candidates(
+        self, limit: int = 20, status: str | None = None
+    ) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_candidates_sync, limit, status)
 
     async def list_archived_candidates(self, limit: int = 50):
@@ -1189,7 +1163,12 @@ class SelfImprovementEngine:
             ).fetchone()
             if row is None:
                 return False, "missing"
-            if archived and str(row["status"]) not in {"rejected","failed","rolled_back","deployed"}:
+            if archived and str(row["status"]) not in {
+                "rejected",
+                "failed",
+                "rolled_back",
+                "deployed",
+            }:
                 return False, "invalid_state"
             connection.execute(
                 "UPDATE improvement_candidates SET archived_at = ?, updated_at = ? WHERE candidate_id = ?",
@@ -1198,13 +1177,12 @@ class SelfImprovementEngine:
         return True, "archived" if archived else "restored"
 
     async def set_candidate_archived(self, candidate_id: int, archived: bool, actor: str):
-        result = await asyncio.to_thread(
-            self._set_candidate_archived_sync, candidate_id, archived
-        )
+        result = await asyncio.to_thread(self._set_candidate_archived_sync, candidate_id, archived)
         if result[0]:
             await self.audit(
                 "candidate_archived" if archived else "candidate_restored",
-                actor=actor, candidate_id=candidate_id,
+                actor=actor,
+                candidate_id=candidate_id,
             )
         return result
 
@@ -1281,12 +1259,7 @@ class SelfImprovementEngine:
         candidate: dict[str, Any],
         supplied: str,
     ) -> bool:
-        expected = str(
-            candidate.get(
-                "approval_code"
-            )
-            or ""
-        )
+        expected = str(candidate.get("approval_code") or "")
 
         return bool(
             expected
@@ -1309,9 +1282,7 @@ class SelfImprovementEngine:
         now = self._utc_now()
 
         with self._connect() as connection:
-            connection.execute(
-                "BEGIN IMMEDIATE"
-            )
+            connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
                 """
@@ -1319,9 +1290,7 @@ class SelfImprovementEngine:
                 FROM improvement_candidates
                 WHERE candidate_id = ?
                 """,
-                (
-                    candidate_id,
-                ),
+                (candidate_id,),
             ).fetchone()
 
             if row is None:
@@ -1332,15 +1301,9 @@ class SelfImprovementEngine:
                     None,
                 )
 
-            candidate = dict(
-                row
-            )
+            candidate = dict(row)
 
-            if str(
-                candidate.get(
-                    "status"
-                )
-            ) not in {
+            if str(candidate.get("status")) not in {
                 "awaiting_approval",
                 "candidate_ready",
             }:
@@ -1363,9 +1326,7 @@ class SelfImprovementEngine:
                 )
 
             if self._timestamp_expired(
-                candidate.get(
-                    "approval_code_expires_at"
-                ),
+                candidate.get("approval_code_expires_at"),
                 missing_is_expired=False,
             ):
                 return (
@@ -1375,13 +1336,9 @@ class SelfImprovementEngine:
                     None,
                 )
 
-            deploy_code = (
-                f"{secrets.randbelow(900000) + 100000:06d}"
-            )
+            deploy_code = f"{secrets.randbelow(900000) + 100000:06d}"
 
-            salt = secrets.token_hex(
-                16
-            )
+            salt = secrets.token_hex(16)
 
             digest = self._ticket_digest(
                 candidate_id,
@@ -1389,9 +1346,7 @@ class SelfImprovementEngine:
                 deploy_code,
             )
 
-            expires_at = self._utc_after(
-                15 * 60
-            )
+            expires_at = self._utc_after(15 * 60)
 
             cursor = connection.execute(
                 """
@@ -1454,9 +1409,7 @@ class SelfImprovementEngine:
         now = self._utc_now()
 
         with self._connect() as connection:
-            connection.execute(
-                "BEGIN IMMEDIATE"
-            )
+            connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
                 """
@@ -1464,9 +1417,7 @@ class SelfImprovementEngine:
                 FROM improvement_candidates
                 WHERE candidate_id = ?
                 """,
-                (
-                    candidate_id,
-                ),
+                (candidate_id,),
             ).fetchone()
 
             if row is None:
@@ -1475,32 +1426,22 @@ class SelfImprovementEngine:
                     "missing",
                 )
 
-            candidate = dict(
-                row
-            )
+            candidate = dict(row)
 
-            if str(
-                candidate.get(
-                    "status"
-                )
-            ) != "approved":
+            if str(candidate.get("status")) != "approved":
                 return (
                     False,
                     "invalid_state",
                 )
 
-            if candidate.get(
-                "deploy_ticket_consumed_at"
-            ):
+            if candidate.get("deploy_ticket_consumed_at"):
                 return (
                     False,
                     "ticket_used",
                 )
 
             if self._timestamp_expired(
-                candidate.get(
-                    "deploy_ticket_expires_at"
-                ),
+                candidate.get("deploy_ticket_expires_at"),
                 missing_is_expired=True,
             ):
                 return (
@@ -1508,19 +1449,9 @@ class SelfImprovementEngine:
                     "ticket_expired",
                 )
 
-            salt = str(
-                candidate.get(
-                    "deploy_ticket_salt"
-                )
-                or ""
-            )
+            salt = str(candidate.get("deploy_ticket_salt") or "")
 
-            expected = str(
-                candidate.get(
-                    "deploy_ticket_hash"
-                )
-                or ""
-            )
+            expected = str(candidate.get("deploy_ticket_hash") or "")
 
             if not salt or not expected:
                 return (
@@ -1544,24 +1475,9 @@ class SelfImprovementEngine:
                 )
 
             if not (
-                str(
-                    candidate.get(
-                        "base_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "candidate_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "validated_patch_sha256"
-                    )
-                    or ""
-                ).strip()
+                str(candidate.get("base_commit") or "").strip()
+                and str(candidate.get("candidate_commit") or "").strip()
+                and str(candidate.get("validated_patch_sha256") or "").strip()
             ):
                 return (
                     False,
@@ -1624,23 +1540,16 @@ class SelfImprovementEngine:
 
         if not success:
             messages = {
-                "missing": (
-                    f"I can’t find improvement {candidate_id}."
-                ),
+                "missing": (f"I can’t find improvement {candidate_id}."),
                 "invalid_state": (
-                    f"Improvement {candidate_id} cannot "
-                    "be approved in its current state."
+                    f"Improvement {candidate_id} cannot be approved in its current state."
                 ),
-                "bad_code": (
-                    "That approval code is incorrect."
-                ),
+                "bad_code": ("That approval code is incorrect."),
                 "review_code_expired": (
-                    "That approval code has expired. "
-                    "The candidate must be reviewed again."
+                    "That approval code has expired. The candidate must be reviewed again."
                 ),
                 "race": (
-                    "The candidate changed while approval "
-                    "was being recorded. Nothing was deployed."
+                    "The candidate changed while approval was being recorded. Nothing was deployed."
                 ),
             }
 
@@ -1659,9 +1568,7 @@ class SelfImprovementEngine:
             actor=actor,
             candidate_id=candidate_id,
             details={
-                "deploy_ticket_expires_at": (
-                    expires_at
-                ),
+                "deploy_ticket_expires_at": (expires_at),
             },
         )
 
@@ -1698,34 +1605,22 @@ class SelfImprovementEngine:
 
         if not success:
             messages = {
-                "missing": (
-                    f"I can’t find improvement {candidate_id}."
-                ),
+                "missing": (f"I can’t find improvement {candidate_id}."),
                 "invalid_state": (
                     f"Improvement {candidate_id} must be "
                     "approved before deployment can be requested."
                 ),
-                "ticket_used": (
-                    "That deployment ticket has already been used."
-                ),
+                "ticket_used": ("That deployment ticket has already been used."),
                 "ticket_expired": (
-                    "That deployment ticket has expired. "
-                    "Approve the candidate again after review."
+                    "That deployment ticket has expired. Approve the candidate again after review."
                 ),
-                "ticket_missing": (
-                    "This candidate has no valid deployment ticket."
-                ),
-                "bad_code": (
-                    "That deployment code is incorrect."
-                ),
+                "ticket_missing": ("This candidate has no valid deployment ticket."),
+                "bad_code": ("That deployment code is incorrect."),
                 "binding_missing": (
                     "The candidate is not bound to an exact "
                     "validated commit, so deployment was refused."
                 ),
-                "race": (
-                    "The candidate changed while the deployment "
-                    "request was being recorded."
-                ),
+                "race": ("The candidate changed while the deployment request was being recorded."),
             }
 
             return ImprovementCommandResult(
@@ -1761,7 +1656,12 @@ class SelfImprovementEngine:
     async def reject_candidate(self, candidate_id: int, actor: str) -> ImprovementCommandResult:
         candidate = await self.get_candidate(candidate_id)
         if not candidate:
-            return ImprovementCommandResult(True, False, f"I can’t find improvement {candidate_id}.", "improvement_reject_missing")
+            return ImprovementCommandResult(
+                True,
+                False,
+                f"I can’t find improvement {candidate_id}.",
+                "improvement_reject_missing",
+            )
         if str(candidate.get("status")) in {"deployed", "deploying", "rolled_back"}:
             return ImprovementCommandResult(
                 True,
@@ -1771,7 +1671,9 @@ class SelfImprovementEngine:
             )
         await asyncio.to_thread(self._set_candidate_status_sync, candidate_id, "rejected")
         await self.audit("candidate_rejected", actor=actor, candidate_id=candidate_id)
-        return ImprovementCommandResult(True, True, f"Improvement {candidate_id} has been rejected.", "improvement_rejected")
+        return ImprovementCommandResult(
+            True, True, f"Improvement {candidate_id} has been rejected.", "improvement_rejected"
+        )
 
     def _issue_rollback_ticket_sync(
         self,
@@ -1785,9 +1687,7 @@ class SelfImprovementEngine:
         now = self._utc_now()
 
         with self._connect() as connection:
-            connection.execute(
-                "BEGIN IMMEDIATE"
-            )
+            connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
                 """
@@ -1795,9 +1695,7 @@ class SelfImprovementEngine:
                 FROM improvement_candidates
                 WHERE candidate_id = ?
                 """,
-                (
-                    candidate_id,
-                ),
+                (candidate_id,),
             ).fetchone()
 
             if row is None:
@@ -1808,16 +1706,9 @@ class SelfImprovementEngine:
                     None,
                 )
 
-            candidate = dict(
-                row
-            )
+            candidate = dict(row)
 
-            if str(
-                candidate.get(
-                    "status"
-                )
-                or ""
-            ) != "deployed":
+            if str(candidate.get("status") or "") != "deployed":
                 return (
                     False,
                     "invalid_state",
@@ -1826,24 +1717,9 @@ class SelfImprovementEngine:
                 )
 
             if not (
-                str(
-                    candidate.get(
-                        "base_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "candidate_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "validated_patch_sha256"
-                    )
-                    or ""
-                ).strip()
+                str(candidate.get("base_commit") or "").strip()
+                and str(candidate.get("candidate_commit") or "").strip()
+                and str(candidate.get("validated_patch_sha256") or "").strip()
             ):
                 return (
                     False,
@@ -1852,13 +1728,9 @@ class SelfImprovementEngine:
                     None,
                 )
 
-            rollback_code = (
-                f"{secrets.randbelow(900000) + 100000:06d}"
-            )
+            rollback_code = f"{secrets.randbelow(900000) + 100000:06d}"
 
-            salt = secrets.token_hex(
-                16
-            )
+            salt = secrets.token_hex(16)
 
             digest = self._ticket_digest(
                 candidate_id,
@@ -1866,9 +1738,7 @@ class SelfImprovementEngine:
                 rollback_code,
             )
 
-            expires_at = self._utc_after(
-                15 * 60
-            )
+            expires_at = self._utc_after(15 * 60)
 
             cursor = connection.execute(
                 """
@@ -1923,9 +1793,7 @@ class SelfImprovementEngine:
 
         if not success:
             messages = {
-                "missing": (
-                    f"I can’t find improvement {candidate_id}."
-                ),
+                "missing": (f"I can’t find improvement {candidate_id}."),
                 "invalid_state": (
                     f"Improvement {candidate_id} must be "
                     "currently deployed before a rollback "
@@ -1936,10 +1804,7 @@ class SelfImprovementEngine:
                     "an exact validated commit, so rollback "
                     "authorization was refused."
                 ),
-                "race": (
-                    "The candidate changed while rollback "
-                    "authorization was being created."
-                ),
+                "race": ("The candidate changed while rollback authorization was being created."),
             }
 
             return ImprovementCommandResult(
@@ -1989,9 +1854,7 @@ class SelfImprovementEngine:
         now = self._utc_now()
 
         with self._connect() as connection:
-            connection.execute(
-                "BEGIN IMMEDIATE"
-            )
+            connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
                 """
@@ -1999,9 +1862,7 @@ class SelfImprovementEngine:
                 FROM improvement_candidates
                 WHERE candidate_id = ?
                 """,
-                (
-                    candidate_id,
-                ),
+                (candidate_id,),
             ).fetchone()
 
             if row is None:
@@ -2010,33 +1871,22 @@ class SelfImprovementEngine:
                     "missing",
                 )
 
-            candidate = dict(
-                row
-            )
+            candidate = dict(row)
 
-            if str(
-                candidate.get(
-                    "status"
-                )
-                or ""
-            ) != "deployed":
+            if str(candidate.get("status") or "") != "deployed":
                 return (
                     False,
                     "invalid_state",
                 )
 
-            if candidate.get(
-                "rollback_ticket_consumed_at"
-            ):
+            if candidate.get("rollback_ticket_consumed_at"):
                 return (
                     False,
                     "ticket_used",
                 )
 
             if self._timestamp_expired(
-                candidate.get(
-                    "rollback_ticket_expires_at"
-                ),
+                candidate.get("rollback_ticket_expires_at"),
                 missing_is_expired=True,
             ):
                 return (
@@ -2044,19 +1894,9 @@ class SelfImprovementEngine:
                     "ticket_expired",
                 )
 
-            salt = str(
-                candidate.get(
-                    "rollback_ticket_salt"
-                )
-                or ""
-            )
+            salt = str(candidate.get("rollback_ticket_salt") or "")
 
-            expected = str(
-                candidate.get(
-                    "rollback_ticket_hash"
-                )
-                or ""
-            )
+            expected = str(candidate.get("rollback_ticket_hash") or "")
 
             if not salt or not expected:
                 return (
@@ -2080,24 +1920,9 @@ class SelfImprovementEngine:
                 )
 
             if not (
-                str(
-                    candidate.get(
-                        "base_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "candidate_commit"
-                    )
-                    or ""
-                ).strip()
-                and str(
-                    candidate.get(
-                        "validated_patch_sha256"
-                    )
-                    or ""
-                ).strip()
+                str(candidate.get("base_commit") or "").strip()
+                and str(candidate.get("candidate_commit") or "").strip()
+                and str(candidate.get("validated_patch_sha256") or "").strip()
             ):
                 return (
                     False,
@@ -2156,36 +1981,20 @@ class SelfImprovementEngine:
 
         if not success:
             messages = {
-                "missing": (
-                    f"I can’t find improvement {candidate_id}."
-                ),
-                "invalid_state": (
-                    f"Improvement {candidate_id} is not "
-                    "currently deployed."
-                ),
-                "ticket_used": (
-                    "That rollback ticket has already been used."
-                ),
+                "missing": (f"I can’t find improvement {candidate_id}."),
+                "invalid_state": (f"Improvement {candidate_id} is not currently deployed."),
+                "ticket_used": ("That rollback ticket has already been used."),
                 "ticket_expired": (
-                    "That rollback ticket has expired. "
-                    "Create a new rollback ticket first."
+                    "That rollback ticket has expired. Create a new rollback ticket first."
                 ),
-                "ticket_missing": (
-                    "This deployed candidate has no valid "
-                    "rollback ticket."
-                ),
-                "bad_code": (
-                    "That rollback code is incorrect."
-                ),
+                "ticket_missing": ("This deployed candidate has no valid rollback ticket."),
+                "bad_code": ("That rollback code is incorrect."),
                 "binding_missing": (
                     "The deployed candidate is not bound to "
                     "an exact validated commit, so rollback "
                     "was refused."
                 ),
-                "race": (
-                    "The candidate changed while the rollback "
-                    "request was being recorded."
-                ),
+                "race": ("The candidate changed while the rollback request was being recorded."),
             }
 
             return ImprovementCommandResult(
@@ -2234,9 +2043,13 @@ class SelfImprovementEngine:
             "candidate_count": len(candidates),
             "queued_candidates": sum(1 for item in candidates if item.get("status") == "queued"),
             "awaiting_approval": sum(
-                1 for item in candidates if item.get("status") in {"candidate_ready", "awaiting_approval"}
+                1
+                for item in candidates
+                if item.get("status") in {"candidate_ready", "awaiting_approval"}
             ),
-            "deploy_requested": sum(1 for item in candidates if item.get("status") == "deploy_requested"),
+            "deploy_requested": sum(
+                1 for item in candidates if item.get("status") == "deploy_requested"
+            ),
             "deployed": sum(1 for item in candidates if item.get("status") == "deployed"),
             "worker_heartbeat": heartbeat or None,
             "database_path": str(self.database_path),
@@ -2290,6 +2103,7 @@ class SelfImprovementEngine:
                         self._json(details or {}),
                     ),
                 )
+
         await asyncio.to_thread(_write)
 
     def _mark_recent_failure_confirmed_resolved_sync(self, conversation_id: str) -> None:
@@ -2371,10 +2185,14 @@ class SelfImprovementEngine:
         if command == "failures":
             failures = await self.list_failures(limit=5)
             if not failures:
-                return ImprovementCommandResult(True, True, "I haven’t recorded any improvement failures yet.", "self_improvement_failures")
+                return ImprovementCommandResult(
+                    True,
+                    True,
+                    "I haven’t recorded any improvement failures yet.",
+                    "self_improvement_failures",
+                )
             parts = [
-                f"{item['failure_id']}: {item['summary']} ({item['status']})"
-                for item in failures
+                f"{item['failure_id']}: {item['summary']} ({item['status']})" for item in failures
             ]
             return ImprovementCommandResult(
                 True,
@@ -2387,7 +2205,12 @@ class SelfImprovementEngine:
         if command == "candidates":
             candidates = await self.list_candidates(limit=5)
             if not candidates:
-                return ImprovementCommandResult(True, True, "There are no improvement candidates yet.", "self_improvement_candidates")
+                return ImprovementCommandResult(
+                    True,
+                    True,
+                    "There are no improvement candidates yet.",
+                    "self_improvement_candidates",
+                )
             parts = []
             for item in candidates:
                 summary = str(item.get("summary") or f"failure {item.get('failure_id')}")
@@ -2403,7 +2226,12 @@ class SelfImprovementEngine:
         if command == "record":
             source = await self.last_interaction(conversation_id)
             if not source:
-                return ImprovementCommandResult(True, False, "There isn’t a previous Jarvis response to record.", "self_improvement_record_missing")
+                return ImprovementCommandResult(
+                    True,
+                    False,
+                    "There isn’t a previous Jarvis response to record.",
+                    "self_improvement_record_missing",
+                )
             failure_id = await self.record_failure(
                 source=source,
                 correction=user_text,
@@ -2421,7 +2249,12 @@ class SelfImprovementEngine:
         if command == "prepare_last":
             failure = await self.last_failure()
             if not failure:
-                return ImprovementCommandResult(True, False, "There isn’t a recorded mistake to prepare a fix for.", "self_improvement_prepare_missing")
+                return ImprovementCommandResult(
+                    True,
+                    False,
+                    "There isn’t a recorded mistake to prepare a fix for.",
+                    "self_improvement_prepare_missing",
+                )
             ok, candidate_id, queue_status = await self.queue_failure(
                 int(failure["failure_id"]), actor_name
             )
@@ -2443,9 +2276,7 @@ class SelfImprovementEngine:
 
         if command == "prepare_id" and identifier is not None:
             failure_id = identifier
-            ok, candidate_id, queue_status = await self.queue_failure(
-                failure_id, actor_name
-            )
+            ok, candidate_id, queue_status = await self.queue_failure(failure_id, actor_name)
             if not ok:
                 return ImprovementCommandResult(
                     True, False, queue_status, "self_improvement_prepare_failed"

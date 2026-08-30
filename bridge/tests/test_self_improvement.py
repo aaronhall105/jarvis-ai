@@ -246,9 +246,7 @@ def _insert_transaction_candidate(
             ),
         )
 
-        failure_id = int(
-            failure.lastrowid
-        )
+        failure_id = int(failure.lastrowid)
 
         candidate = connection.execute(
             """
@@ -272,38 +270,20 @@ def _insert_transaction_candidate(
                 "awaiting_approval",
                 code,
                 engine._utc_after(3600),  # noqa: SLF001
-                (
-                    "base-commit"
-                    if with_binding
-                    else None
-                ),
-                (
-                    "candidate-commit"
-                    if with_binding
-                    else None
-                ),
-                (
-                    "patch-sha"
-                    if with_binding
-                    else None
-                ),
+                ("base-commit" if with_binding else None),
+                ("candidate-commit" if with_binding else None),
+                ("patch-sha" if with_binding else None),
             ),
         )
 
-        return int(
-            candidate.lastrowid
-        )
+        return int(candidate.lastrowid)
 
 
 @pytest.mark.asyncio
 async def test_approval_transaction_cannot_skip_approval(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = (
-        _insert_transaction_candidate(
-            engine
-        )
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     result = await engine.request_deploy(
         candidate_id,
@@ -312,31 +292,19 @@ async def test_approval_transaction_cannot_skip_approval(
     )
 
     assert result.success is False
-    assert (
-        result.intent
-        == "improvement_deploy_invalid_state"
-    )
+    assert result.intent == "improvement_deploy_invalid_state"
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
-    assert (
-        candidate["status"]
-        == "awaiting_approval"
-    )
+    assert candidate["status"] == "awaiting_approval"
 
 
 @pytest.mark.asyncio
 async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = (
-        _insert_transaction_candidate(
-            engine
-        )
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     approved = await engine.approve_candidate(
         candidate_id,
@@ -347,20 +315,11 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
     assert approved.success is True
     assert approved.details is not None
 
-    deploy_code = str(
-        approved.details[
-            "deploy_code"
-        ]
-    )
+    deploy_code = str(approved.details["deploy_code"])
 
-    assert (
-        len(deploy_code) == 6
-        and deploy_code.isdigit()
-    )
+    assert len(deploy_code) == 6 and deploy_code.isdigit()
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
     assert candidate["status"] == "approved"
@@ -368,10 +327,7 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
     assert candidate["deploy_ticket_hash"]
     assert candidate["deploy_ticket_salt"]
     assert candidate["deploy_ticket_expires_at"]
-    assert (
-        candidate["deploy_ticket_consumed_at"]
-        is None
-    )
+    assert candidate["deploy_ticket_consumed_at"] is None
 
     old_code = await engine.request_deploy(
         candidate_id,
@@ -380,10 +336,7 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
     )
 
     assert old_code.success is False
-    assert (
-        old_code.intent
-        == "improvement_deploy_bad_code"
-    )
+    assert old_code.intent == "improvement_deploy_bad_code"
 
     requested = await engine.request_deploy(
         candidate_id,
@@ -393,19 +346,11 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
 
     assert requested.success is True
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
-    assert (
-        candidate["status"]
-        == "deploy_requested"
-    )
-    assert (
-        candidate["deploy_ticket_consumed_at"]
-        is not None
-    )
+    assert candidate["status"] == "deploy_requested"
+    assert candidate["deploy_ticket_consumed_at"] is not None
     assert candidate["deploy_ticket_hash"] is None
     assert candidate["deploy_ticket_salt"] is None
     assert candidate["deploy_lease_id"] is None
@@ -418,11 +363,7 @@ async def test_approval_transaction_rotates_to_one_time_deploy_ticket(
 async def test_approval_transaction_expired_ticket_fails_closed(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = (
-        _insert_transaction_candidate(
-            engine
-        )
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     approved = await engine.approve_candidate(
         candidate_id,
@@ -433,11 +374,7 @@ async def test_approval_transaction_expired_ticket_fails_closed(
     assert approved.success is True
     assert approved.details is not None
 
-    deploy_code = str(
-        approved.details[
-            "deploy_code"
-        ]
-    )
+    deploy_code = str(approved.details["deploy_code"])
 
     with engine._connect() as connection:  # noqa: SLF001
         connection.execute(
@@ -459,14 +396,9 @@ async def test_approval_transaction_expired_ticket_fails_closed(
     )
 
     assert result.success is False
-    assert (
-        result.intent
-        == "improvement_deploy_ticket_expired"
-    )
+    assert result.intent == "improvement_deploy_ticket_expired"
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
     assert candidate["status"] == "approved"
@@ -476,11 +408,9 @@ async def test_approval_transaction_expired_ticket_fails_closed(
 async def test_approval_transaction_requires_validated_commit_binding(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = (
-        _insert_transaction_candidate(
-            engine,
-            with_binding=False,
-        )
+    candidate_id = _insert_transaction_candidate(
+        engine,
+        with_binding=False,
     )
 
     approved = await engine.approve_candidate(
@@ -494,23 +424,14 @@ async def test_approval_transaction_requires_validated_commit_binding(
 
     result = await engine.request_deploy(
         candidate_id,
-        str(
-            approved.details[
-                "deploy_code"
-            ]
-        ),
+        str(approved.details["deploy_code"]),
         "Aaron",
     )
 
     assert result.success is False
-    assert (
-        result.intent
-        == "improvement_deploy_binding_missing"
-    )
+    assert result.intent == "improvement_deploy_binding_missing"
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
     assert candidate["status"] == "approved"
@@ -547,9 +468,7 @@ def _mark_transaction_candidate_deployed(
 async def test_rollback_transaction_requires_deployed_state(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = _insert_transaction_candidate(
-        engine
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     result = await engine.issue_rollback_ticket(
         candidate_id,
@@ -558,31 +477,19 @@ async def test_rollback_transaction_requires_deployed_state(
 
     assert result.success is False
 
-    assert (
-        result.intent
-        == "improvement_rollback_ticket_invalid_state"
-    )
+    assert result.intent == "improvement_rollback_ticket_invalid_state"
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
-    assert (
-        candidate[
-            "status"
-        ]
-        == "awaiting_approval"
-    )
+    assert candidate["status"] == "awaiting_approval"
 
 
 @pytest.mark.asyncio
 async def test_rollback_transaction_rotates_and_consumes_ticket_once(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = _insert_transaction_candidate(
-        engine
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     _mark_transaction_candidate_deployed(
         engine,
@@ -597,21 +504,13 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
     assert issued.success is True
     assert issued.details is not None
 
-    rollback_code = str(
-        issued.details[
-            "rollback_code"
-        ]
-    )
+    rollback_code = str(issued.details["rollback_code"])
 
-    assert len(
-        rollback_code
-    ) == 6
+    assert len(rollback_code) == 6
 
     assert rollback_code.isdigit()
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
     assert candidate["status"] == "deployed"
@@ -620,19 +519,9 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
     assert candidate["rollback_ticket_salt"]
     assert candidate["rollback_ticket_expires_at"]
 
-    assert (
-        candidate[
-            "rollback_ticket_hash"
-        ]
-        != rollback_code
-    )
+    assert candidate["rollback_ticket_hash"] != rollback_code
 
-    assert (
-        candidate[
-            "rollback_ticket_consumed_at"
-        ]
-        is None
-    )
+    assert candidate["rollback_ticket_consumed_at"] is None
 
     wrong = await engine.request_rollback(
         candidate_id,
@@ -642,10 +531,7 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
 
     assert wrong.success is False
 
-    assert (
-        wrong.intent
-        == "improvement_rollback_bad_code"
-    )
+    assert wrong.intent == "improvement_rollback_bad_code"
 
     requested = await engine.request_rollback(
         candidate_id,
@@ -655,36 +541,19 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
 
     assert requested.success is True
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
 
-    assert (
-        candidate[
-            "status"
-        ]
-        == "rollback_requested"
-    )
+    assert candidate["status"] == "rollback_requested"
 
-    assert (
-        candidate[
-            "rollback_ticket_consumed_at"
-        ]
-        is not None
-    )
+    assert candidate["rollback_ticket_consumed_at"] is not None
 
     assert candidate["rollback_ticket_hash"] is None
     assert candidate["rollback_ticket_salt"] is None
     assert candidate["rollback_ticket_expires_at"] is None
 
-    assert (
-        candidate[
-            "deploy_phase"
-        ]
-        == "manual_rollback_requested"
-    )
+    assert candidate["deploy_phase"] == "manual_rollback_requested"
 
     # Simulate only the state value being restored by an
     # administrator. The consumed ticket must still be dead.
@@ -695,9 +564,7 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
             SET status = 'deployed'
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         )
 
     replay = await engine.request_rollback(
@@ -708,19 +575,14 @@ async def test_rollback_transaction_rotates_and_consumes_ticket_once(
 
     assert replay.success is False
 
-    assert (
-        replay.intent
-        == "improvement_rollback_ticket_used"
-    )
+    assert replay.intent == "improvement_rollback_ticket_used"
 
 
 @pytest.mark.asyncio
 async def test_rollback_transaction_expired_ticket_fails_closed(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = _insert_transaction_candidate(
-        engine
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     _mark_transaction_candidate_deployed(
         engine,
@@ -735,11 +597,7 @@ async def test_rollback_transaction_expired_ticket_fails_closed(
     assert issued.success is True
     assert issued.details is not None
 
-    rollback_code = str(
-        issued.details[
-            "rollback_code"
-        ]
-    )
+    rollback_code = str(issued.details["rollback_code"])
 
     with engine._connect() as connection:  # noqa: SLF001
         connection.execute(
@@ -762,33 +620,21 @@ async def test_rollback_transaction_expired_ticket_fails_closed(
 
     assert result.success is False
 
-    assert (
-        result.intent
-        == "improvement_rollback_ticket_expired"
-    )
+    assert result.intent == "improvement_rollback_ticket_expired"
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
     assert candidate["status"] == "deployed"
 
-    assert (
-        candidate[
-            "rollback_ticket_consumed_at"
-        ]
-        is None
-    )
+    assert candidate["rollback_ticket_consumed_at"] is None
 
 
 @pytest.mark.asyncio
 async def test_rollback_transaction_reissue_invalidates_old_code(
     engine: SelfImprovementEngine,
 ) -> None:
-    candidate_id = _insert_transaction_candidate(
-        engine
-    )
+    candidate_id = _insert_transaction_candidate(engine)
 
     _mark_transaction_candidate_deployed(
         engine,
@@ -803,11 +649,7 @@ async def test_rollback_transaction_reissue_invalidates_old_code(
     assert first.success is True
     assert first.details is not None
 
-    first_code = str(
-        first.details[
-            "rollback_code"
-        ]
-    )
+    first_code = str(first.details["rollback_code"])
 
     second = await engine.issue_rollback_ticket(
         candidate_id,
@@ -817,11 +659,7 @@ async def test_rollback_transaction_reissue_invalidates_old_code(
     assert second.success is True
     assert second.details is not None
 
-    second_code = str(
-        second.details[
-            "rollback_code"
-        ]
-    )
+    second_code = str(second.details["rollback_code"])
 
     assert first_code != second_code
 
@@ -833,10 +671,7 @@ async def test_rollback_transaction_reissue_invalidates_old_code(
 
     assert old_result.success is False
 
-    assert (
-        old_result.intent
-        == "improvement_rollback_bad_code"
-    )
+    assert old_result.intent == "improvement_rollback_bad_code"
 
     new_result = await engine.request_rollback(
         candidate_id,
@@ -846,18 +681,11 @@ async def test_rollback_transaction_reissue_invalidates_old_code(
 
     assert new_result.success is True
 
-    candidate = await engine.get_candidate(
-        candidate_id
-    )
+    candidate = await engine.get_candidate(candidate_id)
 
     assert candidate is not None
 
-    assert (
-        candidate[
-            "status"
-        ]
-        == "rollback_requested"
-    )
+    assert candidate["status"] == "rollback_requested"
 
 
 @pytest.mark.asyncio
@@ -868,10 +696,7 @@ async def test_mixed_read_only_inspection_miss_is_not_recorded_as_failure(
     interaction_id = await engine.observe_interaction(
         conversation_id="usr:aaron:failure99",
         actor=actor,
-        raw_text=(
-            "Inspect your own live code and tell me "
-            "your current Git status."
-        ),
+        raw_text=("Inspect your own live code and tell me your current Git status."),
         result={
             "success": True,
             "response": (
@@ -915,9 +740,7 @@ async def test_mixed_read_only_inspection_miss_is_not_recorded_as_failure(
         },
     )
 
-    interaction = await engine.get_interaction(
-        interaction_id
-    )
+    interaction = await engine.get_interaction(interaction_id)
 
     assert interaction is not None
     assert interaction["success"] is True

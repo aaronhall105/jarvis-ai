@@ -261,12 +261,8 @@ class RoutineEngine:
             "max_steps": self.max_steps,
             "running_count": len(self._running_ids),
             "last_error": self._last_error,
-            "routine_counts": {
-                str(row["status"]): int(row["count"]) for row in routine_rows
-            },
-            "run_counts": {
-                str(row["status"]): int(row["count"]) for row in run_rows
-            },
+            "routine_counts": {str(row["status"]): int(row["count"]) for row in routine_rows},
+            "run_counts": {str(row["status"]): int(row["count"]) for row in run_rows},
         }
 
     async def list_routines(
@@ -290,7 +286,7 @@ class RoutineEngine:
             rows = connection.execute(
                 f"""
                 SELECT * FROM routines
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY updated_at DESC, routine_id DESC
                 LIMIT ?
                 """,
@@ -330,10 +326,7 @@ class RoutineEngine:
         exact = [item for item in routines if item.get("normalised_name") == key]
         if len(exact) == 1:
             return exact[0]
-        partial = [
-            item for item in routines
-            if key in str(item.get("normalised_name") or "")
-        ]
+        partial = [item for item in routines if key in str(item.get("normalised_name") or "")]
         if len(partial) == 1:
             return partial[0]
         if len(partial) > 1:
@@ -358,7 +351,7 @@ class RoutineEngine:
             rows = connection.execute(
                 f"""
                 SELECT * FROM routine_runs
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY started_at DESC, run_id DESC
                 LIMIT ?
                 """,
@@ -580,10 +573,14 @@ class RoutineEngine:
             if result.get("verified") is False and result.get("command_accepted") is not True:
                 success = False
             status = "completed" if success else "failed"
-            error = None if success else str(
-                result.get("response_message")
-                or result.get("error")
-                or "The routine did not complete."
+            error = (
+                None
+                if success
+                else str(
+                    result.get("response_message")
+                    or result.get("error")
+                    or "The routine did not complete."
+                )
             )
         except Exception as exc:
             logger.exception("Routine execution failed")
@@ -662,9 +659,7 @@ class RoutineEngine:
         if outcome.get("disabled"):
             return f"{name} is disabled."
         message = str(
-            result.get("response_message")
-            or result.get("error")
-            or "The routine failed."
+            result.get("response_message") or result.get("error") or "The routine failed."
         )
         return f"{name} did not complete. {message}"
 
@@ -768,8 +763,7 @@ class RoutineEngine:
                 )
             if duplicate:
                 response = (
-                    f"You already have routine {routine['routine_id']} called "
-                    f"{routine['name']}."
+                    f"You already have routine {routine['routine_id']} called {routine['name']}."
                 )
             else:
                 response = (
@@ -803,9 +797,7 @@ class RoutineEngine:
                 handled=True,
                 response=(
                     f"You have {len(routines)} saved routine"
-                    f"{'s' if len(routines) != 1 else ''}. "
-                    + "; ".join(descriptions)
-                    + "."
+                    f"{'s' if len(routines) != 1 else ''}. " + "; ".join(descriptions) + "."
                 ),
                 intent="routine_list",
                 details={"routines": routines},
@@ -814,32 +806,36 @@ class RoutineEngine:
         match = _SHOW_PATTERN.match(value)
         if match:
             routine_id = int(match.group("routine_id"))
-            routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
-            if routine is None:
+            shown_routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
+            if shown_routine is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
                     response=f"I couldn’t find routine {routine_id}.",
                     intent="routine_show",
                 )
-            steps = self._step_summaries(routine)
-            response = self._describe(routine)
+            steps = self._step_summaries(shown_routine)
+            response = self._describe(shown_routine)
             if steps:
-                response += " Steps: " + "; ".join(
-                    f"{index}, {summary}" for index, summary in enumerate(steps, start=1)
-                ) + "."
+                response += (
+                    " Steps: "
+                    + "; ".join(
+                        f"{index}, {summary}" for index, summary in enumerate(steps, start=1)
+                    )
+                    + "."
+                )
             return TaskCommandResult(
                 handled=True,
                 response=response,
                 intent="routine_show",
-                details={"routine": routine, "steps": steps},
+                details={"routine": shown_routine, "steps": steps},
             )
 
         match = _HISTORY_PATTERN.match(value)
         if match:
             routine_id = int(match.group("routine_id") or match.group("routine_id_alt"))
-            routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
-            if routine is None:
+            history_routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
+            if history_routine is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
@@ -852,11 +848,11 @@ class RoutineEngine:
                 limit=10,
             )
             if not runs:
-                response = f"{routine['name']} has not run yet."
+                response = f"{history_routine['name']} has not run yet."
             else:
                 latest = runs[0]
                 response = (
-                    f"{routine['name']} has run {len(runs)} time"
+                    f"{history_routine['name']} has run {len(runs)} time"
                     f"{'s' if len(runs) != 1 else ''} in the available history. "
                     f"The latest run {latest['status']}."
                 )
@@ -864,7 +860,7 @@ class RoutineEngine:
                 handled=True,
                 response=response,
                 intent="routine_history",
-                details={"routine": routine, "runs": runs},
+                details={"routine": history_routine, "runs": runs},
             )
 
         match = _RUN_ID_PATTERN.match(value)
@@ -878,11 +874,11 @@ class RoutineEngine:
                     response=f"I couldn’t find routine {routine_id}.",
                     intent="routine_run",
                 )
-            routine = outcome["routine"]
+            outcome_routine = outcome["routine"]
             return TaskCommandResult(
                 handled=True,
                 success=bool(outcome.get("success")),
-                response=self._outcome_response(str(routine["name"]), outcome),
+                response=self._outcome_response(str(outcome_routine["name"]), outcome),
                 intent="routine_run",
                 details=outcome,
             )
@@ -890,9 +886,9 @@ class RoutineEngine:
         match = _DELETE_PATTERN.match(value)
         if match:
             routine_id = int(match.group("routine_id"))
-            routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
+            deleted_routine = await self.get_owned_routine(routine_id, owner_key=actor.user_key)
             updated = await self.delete_routine(routine_id, owner_key=actor.user_key)
-            if not updated or routine is None:
+            if not updated or deleted_routine is None:
                 return TaskCommandResult(
                     handled=True,
                     success=False,
@@ -901,9 +897,9 @@ class RoutineEngine:
                 )
             return TaskCommandResult(
                 handled=True,
-                response=f"Deleted routine {routine_id}: {routine['name']}.",
+                response=f"Deleted routine {routine_id}: {deleted_routine['name']}.",
                 intent="routine_delete",
-                details={"routine": routine},
+                details={"routine": deleted_routine},
             )
 
         match = _DISABLE_PATTERN.match(value)
@@ -915,7 +911,8 @@ class RoutineEngine:
                 success=updated,
                 response=(
                     f"Disabled routine {routine_id}."
-                    if updated else f"I couldn’t disable routine {routine_id}."
+                    if updated
+                    else f"I couldn’t disable routine {routine_id}."
                 ),
                 intent="routine_disable",
             )
@@ -929,7 +926,8 @@ class RoutineEngine:
                 success=updated,
                 response=(
                     f"Enabled routine {routine_id}."
-                    if updated else f"I couldn’t enable routine {routine_id}."
+                    if updated
+                    else f"I couldn’t enable routine {routine_id}."
                 ),
                 intent="routine_enable",
             )
@@ -964,7 +962,9 @@ class RoutineEngine:
         # Recurring, timed and conditional commands must continue to their own
         # deterministic engines. Only plain immediate compound actions become
         # ad-hoc scenes here.
-        if re.match(r"^(?:when|whenever|if|every|each|at|tomorrow|in\s+\d|after\s+\d)\b", value, re.I):
+        if re.match(
+            r"^(?:when|whenever|if|every|each|at|tomorrow|in\s+\d|after\s+\d)\b", value, re.I
+        ):
             return TaskCommandResult(handled=False)
 
         plan = await self.action_engine._resolve_action(

@@ -6,13 +6,9 @@ import re
 class SpeechRenderPolicy:
     """Prepare fast, natural and complete spoken responses."""
 
-    _BOUNDARY = re.compile(
-        r'(?<=[.!?])["”’\')\]]*(?:\s+|$)'
-    )
+    _BOUNDARY = re.compile(r'(?<=[.!?])["”’\')\]]*(?:\s+|$)')
 
-    _SOFT_BOUNDARY = re.compile(
-        r"[,;:]\s+"
-    )
+    _SOFT_BOUNDARY = re.compile(r"[,;:]\s+")
 
     @classmethod
     def normalise(
@@ -54,9 +50,7 @@ class SpeechRenderPolicy:
         ]
 
         if sentence_boundaries:
-            return text[
-                : sentence_boundaries[0]
-            ].strip()
+            return text[: sentence_boundaries[0]].strip()
 
         if len(text) < preferred_chars:
             return ""
@@ -68,17 +62,9 @@ class SpeechRenderPolicy:
         ]
 
         if soft_boundaries:
-            suitable = [
-                boundary
-                for boundary in soft_boundaries
-                if boundary <= preferred_chars
-            ]
+            suitable = [boundary for boundary in soft_boundaries if boundary <= preferred_chars]
 
-            end = (
-                suitable[-1]
-                if suitable
-                else soft_boundaries[0]
-            )
+            end = suitable[-1] if suitable else soft_boundaries[0]
 
             return text[:end].strip()
 
@@ -114,13 +100,9 @@ class SpeechRenderPolicy:
         differences do not cause the first section to be repeated.
         """
 
-        complete = cls.normalise(
-            complete_response
-        )
+        complete = cls.normalise(complete_response)
 
-        prefix = cls.normalise(
-            spoken_prefix
-        ).rstrip("…")
+        prefix = cls.normalise(spoken_prefix).rstrip("…")
 
         if not complete:
             return ""
@@ -128,12 +110,8 @@ class SpeechRenderPolicy:
         if not prefix:
             return complete
 
-        if complete.casefold().startswith(
-            prefix.casefold()
-        ):
-            remainder = complete[
-                len(prefix):
-            ].lstrip(" ,;:-")
+        if complete.casefold().startswith(prefix.casefold()):
+            remainder = complete[len(prefix) :].lstrip(" ,;:-")
 
             return remainder.strip()
 
@@ -142,14 +120,10 @@ class SpeechRenderPolicy:
         probe = prefix[:80].casefold()
 
         if probe:
-            position = complete.casefold().find(
-                probe
-            )
+            position = complete.casefold().find(probe)
 
             if position == 0:
-                remainder = complete[
-                    min(len(prefix), len(complete)):
-                ].lstrip(" ,;:-")
+                remainder = complete[min(len(prefix), len(complete)) :].lstrip(" ,;:-")
 
                 return remainder.strip()
 
@@ -168,15 +142,11 @@ class SpeechRenderPolicy:
             return text
 
         boundaries = [
-            match.end()
-            for match in cls._BOUNDARY.finditer(text)
-            if match.end() <= maximum_chars
+            match.end() for match in cls._BOUNDARY.finditer(text) if match.end() <= maximum_chars
         ]
 
         if boundaries:
-            end = boundaries[
-                min(1, len(boundaries) - 1)
-            ]
+            end = boundaries[min(1, len(boundaries) - 1)]
 
             excerpt = text[:end].strip()
         else:
@@ -186,14 +156,9 @@ class SpeechRenderPolicy:
                 maximum_chars,
             )
 
-            excerpt = text[
-                : cut if cut >= 80 else maximum_chars
-            ].rstrip(" ,;:")
+            excerpt = text[: cut if cut >= 80 else maximum_chars].rstrip(" ,;:")
 
         if excerpt and excerpt[-1] not in ".!?":
             excerpt += "."
 
-        return (
-            excerpt
-            + " The full reply is in the chat."
-        )
+        return excerpt + " The full reply is in the chat."

@@ -194,9 +194,7 @@ class CapabilityGroundingEngine:
         readable = await self.tools.readable_entity_states(refresh=True)
         raw_states = await self.tools.client.get_states()
         raw_lookup = {
-            str(item.get("entity_id") or ""): item
-            for item in raw_states
-            if item.get("entity_id")
+            str(item.get("entity_id") or ""): item for item in raw_states if item.get("entity_id")
         }
         controllable = {
             str(item.get("entity_id")): item
@@ -319,9 +317,7 @@ class CapabilityGroundingEngine:
 
         contextual = self._history_candidate(history, inventory)
         if contextual is not None and (
-            _PRONOUN_TARGET.search(text)
-            or not positive
-            or contextual in positive[:4]
+            _PRONOUN_TARGET.search(text) or not positive or contextual in positive[:4]
         ):
             return contextual, positive
 
@@ -334,11 +330,7 @@ class CapabilityGroundingEngine:
         actions = list(entity.implemented_actions)
         if actions == ["turn_on", "turn_off"]:
             return "on and off"
-        labels = [
-            _ACTION_LABELS[action]
-            for action in actions
-            if action in _ACTION_LABELS
-        ]
+        labels = [_ACTION_LABELS[action] for action in actions if action in _ACTION_LABELS]
         if not labels:
             return "no verified controls"
         if len(labels) == 1:
@@ -432,11 +424,7 @@ class CapabilityGroundingEngine:
             await asyncio.sleep(delay)
             states = await self.tools.client.get_states()
             state = next(
-                (
-                    item
-                    for item in states
-                    if str(item.get("entity_id") or "") == entity.entity_id
-                ),
+                (item for item in states if str(item.get("entity_id") or "") == entity.entity_id),
                 None,
             )
             if state is None:

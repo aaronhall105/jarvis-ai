@@ -74,9 +74,7 @@ class UserContext:
             user_key=normalise_user_key(user_id, display_name),
             display_name=display_name,
             is_admin=bool(user_is_admin),
-            privilege_verified=bool(
-                privilege_verified
-            ),
+            privilege_verified=bool(privilege_verified),
             device_id=(device_id or "").strip() or None,
             voice_mode=bool(voice_mode),
             area_id=(area_id or "").strip() or None,
@@ -86,8 +84,4 @@ class UserContext:
     def can_admin(self) -> bool:
         """Only Aaron's authenticated administrator account may change HA config."""
 
-        return bool(
-            self.user_key == "aaron"
-            and self.is_admin
-            and self.privilege_verified
-        )
+        return bool(self.user_key == "aaron" and self.is_admin and self.privilege_verified)

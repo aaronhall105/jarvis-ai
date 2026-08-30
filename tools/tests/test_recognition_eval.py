@@ -12,28 +12,30 @@ SPEC.loader.exec_module(MODULE)
 
 
 def test_scores_word_wake_command_interruption_and_latency() -> None:
-    result = MODULE.evaluate([
-        {
-            "case_id": "quiet-near",
-            "expected_text": "turn on the TV",
-            "transcript": "turn on the TV",
-            "wake_detected": True,
-            "command_correct": True,
-            "speech_end_to_transcript_ms": 500,
-            "speech_end_to_first_audio_ms": 1200,
-        },
-        {
-            "case_id": "tv-far-stop",
-            "expected_text": "stop",
-            "transcript": "stock",
-            "wake_detected": True,
-            "command_correct": False,
-            "interruption_expected": True,
-            "interruption_correct": True,
-            "speech_end_to_transcript_ms": 900,
-            "speech_end_to_first_audio_ms": 1800,
-        },
-    ])
+    result = MODULE.evaluate(
+        [
+            {
+                "case_id": "quiet-near",
+                "expected_text": "turn on the TV",
+                "transcript": "turn on the TV",
+                "wake_detected": True,
+                "command_correct": True,
+                "speech_end_to_transcript_ms": 500,
+                "speech_end_to_first_audio_ms": 1200,
+            },
+            {
+                "case_id": "tv-far-stop",
+                "expected_text": "stop",
+                "transcript": "stock",
+                "wake_detected": True,
+                "command_correct": False,
+                "interruption_expected": True,
+                "interruption_correct": True,
+                "speech_end_to_transcript_ms": 900,
+                "speech_end_to_first_audio_ms": 1800,
+            },
+        ]
+    )
     assert result.summary["word_error_rate"] == 0.2
     assert result.summary["wake_success_rate"] == 1.0
     assert result.summary["command_success_rate"] == 0.5

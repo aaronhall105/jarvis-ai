@@ -70,9 +70,7 @@ def friendly(state: dict[str, Any]) -> str:
     name = str(attributes.get("friendly_name") or "").strip()
     if name:
         return name
-    return str(state.get("entity_id") or "Unknown").split(".", 1)[-1].replace(
-        "_", " "
-    ).title()
+    return str(state.get("entity_id") or "Unknown").split(".", 1)[-1].replace("_", " ").title()
 
 
 def number(value: Any) -> float | None:
@@ -118,14 +116,18 @@ class Rules:
         self.door_seconds = max(60, door_seconds)
         self.oven_seconds = max(300, oven_seconds)
         self.high_power_w = max(250.0, high_power_w)
-        self.battery_low_percent = float(env(
-            "JARVIS_PROACTIVE_BATTERY_LOW_PERCENT",
-            default="15",
-        ))
-        self.battery_critical_percent = float(env(
-            "JARVIS_PROACTIVE_BATTERY_CRITICAL_PERCENT",
-            default="5",
-        ))
+        self.battery_low_percent = float(
+            env(
+                "JARVIS_PROACTIVE_BATTERY_LOW_PERCENT",
+                default="15",
+            )
+        )
+        self.battery_critical_percent = float(
+            env(
+                "JARVIS_PROACTIVE_BATTERY_CRITICAL_PERCENT",
+                default="5",
+            )
+        )
         self.oven_entities = {
             item.strip()
             for item in env(
@@ -176,118 +178,125 @@ class Rules:
                     f"{name} reports moisture or a leak.",
                 ),
             }[safety]
-            result.append(Candidate(
-                "security",
-                safety,
-                entity_id,
-                title,
-                message,
-                f"{entity_id} changed from {old or 'unknown'} to {state}",
-                100,
-                "all",
-                ("dismiss",),
-            ))
+            result.append(
+                Candidate(
+                    "security",
+                    safety,
+                    entity_id,
+                    title,
+                    message,
+                    f"{entity_id} changed from {old or 'unknown'} to {state}",
+                    100,
+                    "all",
+                    ("dismiss",),
+                )
+            )
 
         if entity_domain == "person":
             if state == "home" and old not in {"", "home"}:
-                result.append(Candidate(
-                    "presence",
-                    "arrival",
-                    entity_id,
-                    "Arrival detected",
-                    f"{name} has arrived home.",
-                    f"{entity_id} changed from {old or 'unknown'} to home",
-                    72,
-                    "all",
-                    ("dismiss",),
-                ))
+                result.append(
+                    Candidate(
+                        "presence",
+                        "arrival",
+                        entity_id,
+                        "Arrival detected",
+                        f"{name} has arrived home.",
+                        f"{entity_id} changed from {old or 'unknown'} to home",
+                        72,
+                        "all",
+                        ("dismiss",),
+                    )
+                )
             return result
 
         door = entity_domain == "binary_sensor" and any(
             word in lowered for word in ("door", "window", "contact", "opening")
         )
         if door and state in {"on", "open", "true"} and age >= self.door_seconds:
-            result.append(Candidate(
-                "security",
-                "door_open",
-                entity_id,
-                "Door or window left open",
-                f"{name} has been open for {max(1, age // 60)} minutes.",
-                f"{entity_id} remained {state} for {age} seconds",
-                90 if away else 86,
-            ))
+            result.append(
+                Candidate(
+                    "security",
+                    "door_open",
+                    entity_id,
+                    "Door or window left open",
+                    f"{name} has been open for {max(1, age // 60)} minutes.",
+                    f"{entity_id} remained {state} for {age} seconds",
+                    90 if away else 86,
+                )
+            )
 
-        person_detected = (
-            any(word in lowered for word in ("person", "occupancy"))
-            and any(word in lowered for word in (
-                "camera", "front door", "front_door", "frigate", "motion"
-            ))
+        person_detected = any(word in lowered for word in ("person", "occupancy")) and any(
+            word in lowered for word in ("camera", "front door", "front_door", "frigate", "motion")
         )
         if (
             person_detected
             and state in {"on", "person", "detected", "true"}
             and old not in {"on", "person", "detected", "true"}
         ):
-            result.append(Candidate(
-                "cameras",
-                "person_detected",
-                entity_id,
-                "Person detected",
-                f"{name} detected a person"
-                + (" while nobody appears to be home." if away else "."),
-                f"{entity_id} changed from {old or 'unknown'} to {state}; "
-                f"everyone_away={away}",
-                98 if away else 82,
-                "all",
-                ("view_camera", "dismiss", "remind_later"),
-            ))
+            result.append(
+                Candidate(
+                    "cameras",
+                    "person_detected",
+                    entity_id,
+                    "Person detected",
+                    f"{name} detected a person"
+                    + (" while nobody appears to be home." if away else "."),
+                    f"{entity_id} changed from {old or 'unknown'} to {state}; everyone_away={away}",
+                    98 if away else 82,
+                    "all",
+                    ("view_camera", "dismiss", "remind_later"),
+                )
+            )
 
-        appliance = any(word in lowered for word in (
-            "washing machine", "washing_machine", "washer", "dryer", "dishwasher"
-        ))
+        appliance = any(
+            word in lowered
+            for word in ("washing machine", "washing_machine", "washer", "dryer", "dishwasher")
+        )
         running = {"on", "running", "washing", "drying", "cleaning"}
         finished = {"off", "idle", "standby", "done", "finished", "complete"}
         if appliance and old in running and state in finished:
             label = (
-                "washing machine" if "wash" in lowered else
-                "dryer" if "dryer" in lowered else
-                "dishwasher"
+                "washing machine"
+                if "wash" in lowered
+                else "dryer"
+                if "dryer" in lowered
+                else "dishwasher"
             )
-            result.append(Candidate(
-                "appliances",
-                "cycle_finished",
-                entity_id,
-                "Appliance finished",
-                f"The {label} has finished.",
-                f"{entity_id} changed from {old} to {state}",
-                82,
-            ))
+            result.append(
+                Candidate(
+                    "appliances",
+                    "cycle_finished",
+                    entity_id,
+                    "Appliance finished",
+                    f"The {label} has finished.",
+                    f"{entity_id} changed from {old} to {state}",
+                    82,
+                )
+            )
 
         oven = is_real_oven_entity(
             current,
             explicit_entities=self.oven_entities,
         )
-        if (
-            oven
-            and state in {"on", "heating", "preheating"}
-            and age >= self.oven_seconds
-        ):
+        if oven and state in {"on", "heating", "preheating"} and age >= self.oven_seconds:
             actions = (
                 ("turn_off", "remind_later", "dismiss")
                 if entity_domain in SAFE_TURN_OFF
                 else ("remind_later", "dismiss")
             )
-            result.append(Candidate(
-                "appliances",
-                "oven_left_on",
-                entity_id,
-                "Oven still on",
-                f"{name} has remained on for {max(1, age // 60)} minutes.",
-                f"{entity_id} remained {state} for {age} seconds",
-                94,
-                "all",
-                actions,
-            ))
+            result.append(
+                Candidate(
+                    "appliances",
+                    "oven_left_on",
+                    entity_id,
+                    "Oven still on",
+                    f"{name} has remained on for {max(1, age // 60)} minutes.",
+                    f"{entity_id} remained {state} for {age} seconds",
+                    94,
+                    "all",
+                    actions,
+                )
+            )
 
         battery = battery_transition(
             previous,
@@ -297,25 +306,19 @@ class Rules:
         )
         if battery:
             kind, importance, level = battery
-            target = (
-                "amber" if "amber" in lowered else
-                "aaron" if "aaron" in lowered else
-                "all"
+            target = "amber" if "amber" in lowered else "aaron" if "aaron" in lowered else "all"
+            result.append(
+                Candidate(
+                    "batteries",
+                    kind,
+                    entity_id,
+                    ("Battery critically low" if kind == "battery_critical" else "Battery low"),
+                    f"{name} is at {int(level)}%.",
+                    f"{entity_id} crossed the {int(level)}% battery threshold",
+                    importance,
+                    target,
+                )
             )
-            result.append(Candidate(
-                "batteries",
-                kind,
-                entity_id,
-                (
-                    "Battery critically low"
-                    if kind == "battery_critical"
-                    else "Battery low"
-                ),
-                f"{name} is at {int(level)}%.",
-                f"{entity_id} crossed the {int(level)}% battery threshold",
-                importance,
-                target,
-            ))
 
         power = entity_domain == "sensor" and any(
             word in lowered for word in ("power", "current consumption", "current_consumption")
@@ -327,32 +330,35 @@ class Rules:
                 if unit == "kw":
                     watts *= 1000
                 if watts >= self.high_power_w:
-                    result.append(Candidate(
-                        "energy",
-                        "high_power",
-                        entity_id,
-                        "High energy use",
-                        f"{name} is using about {round(watts)} watts.",
-                        f"{entity_id} exceeded {self.high_power_w:.0f} W",
-                        84,
-                    ))
+                    result.append(
+                        Candidate(
+                            "energy",
+                            "high_power",
+                            entity_id,
+                            "High energy use",
+                            f"{name} is using about {round(watts)} watts.",
+                            f"{entity_id} exceeded {self.high_power_w:.0f} W",
+                            84,
+                        )
+                    )
 
         if (
             state == "unavailable"
             and old not in {"", "unavailable"}
-            and entity_domain in {
-                "camera", "binary_sensor", "climate", "lock", "alarm_control_panel"
-            }
+            and entity_domain
+            in {"camera", "binary_sensor", "climate", "lock", "alarm_control_panel"}
         ):
-            result.append(Candidate(
-                "system",
-                "critical_unavailable",
-                entity_id,
-                "Device unavailable",
-                f"{name} has become unavailable.",
-                f"{entity_id} changed from {old} to unavailable",
-                85,
-            ))
+            result.append(
+                Candidate(
+                    "system",
+                    "critical_unavailable",
+                    entity_id,
+                    "Device unavailable",
+                    f"{name} has become unavailable.",
+                    f"{entity_id} changed from {old} to unavailable",
+                    85,
+                )
+            )
         return result
 
 
@@ -399,15 +405,15 @@ class ProactiveEngine:
         self.cooldown = max(30, cooldown)
         self.poll_seconds = max(5, poll_seconds)
         self.speaker_entity = speaker_entity.strip()
-        self.reply_window_seconds = max(5, min(60, int(env(
-            "JARVIS_PROACTIVE_REPLY_WINDOW_SECONDS", default="12"
-        ))))
-        self.daily_speech_budget = max(1, min(50, int(env(
-            "JARVIS_PROACTIVE_DAILY_SPEECH_BUDGET", default="8"
-        ))))
-        self.learning_threshold = max(3, min(30, int(env(
-            "JARVIS_PROACTIVE_LEARNING_THRESHOLD", default="5"
-        ))))
+        self.reply_window_seconds = max(
+            5, min(60, int(env("JARVIS_PROACTIVE_REPLY_WINDOW_SECONDS", default="12")))
+        )
+        self.daily_speech_budget = max(
+            1, min(50, int(env("JARVIS_PROACTIVE_DAILY_SPEECH_BUDGET", default="8")))
+        )
+        self.learning_threshold = max(
+            3, min(30, int(env("JARVIS_PROACTIVE_LEARNING_THRESHOLD", default="5")))
+        )
         self.speaker_map = self._speaker_map()
         self.rules = Rules(
             int(env("JARVIS_PROACTIVE_DOOR_OPEN_SECONDS", default="600")),
@@ -447,15 +453,9 @@ class ProactiveEngine:
                 "JARVIS_HOME_ASSISTANT_TOKEN",
             ),
             enabled=env_bool("JARVIS_PROACTIVE_ENABLED", True),
-            min_importance=int(env(
-                "JARVIS_PROACTIVE_MIN_IMPORTANCE", default="80"
-            )),
-            cooldown=int(env(
-                "JARVIS_PROACTIVE_COOLDOWN_SECONDS", default="300"
-            )),
-            poll_seconds=int(env(
-                "JARVIS_PROACTIVE_POLL_SECONDS", default="15"
-            )),
+            min_importance=int(env("JARVIS_PROACTIVE_MIN_IMPORTANCE", default="80")),
+            cooldown=int(env("JARVIS_PROACTIVE_COOLDOWN_SECONDS", default="300")),
+            poll_seconds=int(env("JARVIS_PROACTIVE_POLL_SECONDS", default="15")),
             speaker_entity=env("JARVIS_PROACTIVE_SPEAKER_ENTITY"),
         )
 
@@ -474,11 +474,15 @@ class ProactiveEngine:
         except json.JSONDecodeError:
             logger.warning("Ignoring invalid JARVIS_PROACTIVE_ROOM_SPEAKERS")
             return {}
-        return {
-            str(key).strip().lower().replace(" ", "_"): str(value).strip()
-            for key, value in parsed.items()
-            if str(key).strip() and str(value).strip()
-        } if isinstance(parsed, dict) else {}
+        return (
+            {
+                str(key).strip().lower().replace(" ", "_"): str(value).strip()
+                for key, value in parsed.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if isinstance(parsed, dict)
+            else {}
+        )
 
     def initialise(self) -> None:
         if self.initialised:
@@ -511,9 +515,7 @@ class ProactiveEngine:
             connection.executescript(schema)
             existing = {
                 str(row[1])
-                for row in connection.execute(
-                    "PRAGMA table_info(proactive_events)"
-                ).fetchall()
+                for row in connection.execute("PRAGMA table_info(proactive_events)").fetchall()
             }
             additions = {
                 "confidence": "REAL NOT NULL DEFAULT 1.0",
@@ -549,7 +551,9 @@ class ProactiveEngine:
         if not self.enabled or not self.ha_url or not self.ha_token:
             logger.info(
                 "Proactive engine ready without poller: enabled=%s ha=%s token=%s",
-                self.enabled, bool(self.ha_url), bool(self.ha_token),
+                self.enabled,
+                bool(self.ha_url),
+                bool(self.ha_token),
             )
             return
         self.task = asyncio.create_task(self.poll_loop())
@@ -735,17 +739,21 @@ class ProactiveEngine:
         return self.get_event(event_id)
 
     def _decision(
-        self, candidate: Candidate, confidence: float, room: str,
-        now: int, connection: sqlite3.Connection,
+        self,
+        candidate: Candidate,
+        confidence: float,
+        room: str,
+        now: int,
+        connection: sqlite3.Connection,
     ) -> dict[str, Any]:
-        critical = candidate.importance >= 95 and candidate.category in {
-            "security", "cameras"
-        }
+        critical = candidate.importance >= 95 and candidate.category in {"security", "cameras"}
         day_start = now - (now % 86400)
-        spoken_today = int(connection.execute(
-            "SELECT COUNT(*) FROM proactive_events WHERE spoken_at >= ?",
-            (day_start,),
-        ).fetchone()[0])
+        spoken_today = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM proactive_events WHERE spoken_at >= ?",
+                (day_start,),
+            ).fetchone()[0]
+        )
         suppressed_reason = ""
         suppressed = connection.execute(
             "SELECT reason FROM initiative_suppressions WHERE fingerprint = ?",
@@ -773,10 +781,15 @@ class ProactiveEngine:
     def _consider_learning(
         self, connection: sqlite3.Connection, candidate: Candidate, now: int
     ) -> None:
-        count = int(connection.execute(
-            "SELECT COUNT(*) FROM proactive_events WHERE fingerprint = ? AND created_at >= ?",
-            (candidate.fingerprint, now - 30 * 86400),
-        ).fetchone()[0]) + 1
+        count = (
+            int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM proactive_events WHERE fingerprint = ? AND created_at >= ?",
+                    (candidate.fingerprint, now - 30 * 86400),
+                ).fetchone()[0]
+            )
+            + 1
+        )
         if count < self.learning_threshold:
             return
         confidence = min(0.95, 0.55 + count * 0.05)
@@ -789,11 +802,15 @@ class ProactiveEngine:
                  evidence_count=excluded.evidence_count,
                  confidence=excluded.confidence, updated_at=excluded.updated_at""",
             (
-                "proposal-" + candidate.fingerprint, candidate.fingerprint,
+                "proposal-" + candidate.fingerprint,
+                candidate.fingerprint,
                 f"Learn a preference for {candidate.title.lower()}",
                 "Repeated verified events suggest a routine or notification preference; "
                 "Jarvis will not automate it until approved.",
-                count, confidence, now, now,
+                count,
+                confidence,
+                now,
+                now,
             ),
         )
 
@@ -872,10 +889,7 @@ class ProactiveEngine:
                 continue
             if event["importance"] < settings["min_importance"]:
                 continue
-            critical = (
-                event["category"] in {"security", "cameras"}
-                and event["importance"] >= 95
-            )
+            critical = event["category"] in {"security", "cameras"} and event["importance"] >= 95
             if settings["notify_enabled"] and (not self.quiet(settings) or critical):
                 target = self.targets.get(user, "")
                 if target.startswith("notify."):
@@ -900,7 +914,8 @@ class ProactiveEngine:
             try:
                 if speaker.startswith("script."):
                     await self.ha_service(
-                        "script", "turn_on",
+                        "script",
+                        "turn_on",
                         {
                             "entity_id": speaker,
                             "variables": {"message": event["message"]},
@@ -908,7 +923,8 @@ class ProactiveEngine:
                     )
                 else:
                     await self.ha_service(
-                        "assist_satellite", "start_conversation",
+                        "assist_satellite",
+                        "start_conversation",
                         {
                             "entity_id": speaker,
                             "start_message": event["message"],
@@ -957,22 +973,33 @@ class ProactiveEngine:
         if cleaned in {"thanks", "thank you", "i know", "okay", "ok", "no"}:
             self.update(event["id"], status="dismissed", updated_at=int(time.time()))
             feedback, response = "dismissed", "Understood."
-        elif cleaned in {"yes", "show me", "show it", "open it"} and "view_camera" in event["actions"]:
+        elif (
+            cleaned in {"yes", "show me", "show it", "open it"}
+            and "view_camera" in event["actions"]
+        ):
             self.update(event["id"], status="viewed", updated_at=int(time.time()))
             feedback, response = "viewed", "I've opened the camera event in Jarvis."
         elif cleaned in {"that was useful", "useful", "good alert"}:
             feedback, response = "useful", "Noted. I'll keep that kind of alert useful and concise."
-        elif cleaned in {"don't announce that again", "dont announce that again", "stop telling me that"}:
+        elif cleaned in {
+            "don't announce that again",
+            "dont announce that again",
+            "stop telling me that",
+        }:
             self.update(event["id"], status="dismissed", updated_at=int(time.time()))
             with self.connection() as connection:
                 connection.execute(
                     "INSERT OR REPLACE INTO initiative_suppressions(fingerprint,reason,created_at) VALUES(?,?,?)",
                     (event["fingerprint"], "explicit_user_feedback", int(time.time())),
                 )
-            feedback, response = "suppress_kind", "Understood. I won't announce that kind of event again."
+            feedback, response = (
+                "suppress_kind",
+                "Understood. I won't announce that kind of event again.",
+            )
         elif cleaned.startswith("remind me"):
             self.update(
-                event["id"], status="snoozed",
+                event["id"],
+                status="snoozed",
                 snoozed_until=int(time.time()) + 15 * 60,
                 updated_at=int(time.time()),
             )
@@ -1034,11 +1061,13 @@ class ProactiveEngine:
                     "importance": "high" if event["importance"] >= 90 else "default",
                     "priority": "high" if event["importance"] >= 90 else "normal",
                     "clickAction": "jarvis://proactive",
-                    "actions": [{
-                        "action": "URI",
-                        "title": "Open Jarvis",
-                        "uri": "jarvis://proactive",
-                    }],
+                    "actions": [
+                        {
+                            "action": "URI",
+                            "title": "Open Jarvis",
+                            "uri": "jarvis://proactive",
+                        }
+                    ],
                 },
             },
         )
@@ -1080,22 +1109,17 @@ class ProactiveEngine:
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text
             raise RuntimeError(
-                "Home Assistant HTTP "
-                f"{exc.response.status_code}: {detail[:250]}"
+                f"Home Assistant HTTP {exc.response.status_code}: {detail[:250]}"
             ) from exc
         except httpx.HTTPError as exc:
-            raise RuntimeError(
-                f"Home Assistant request failed: {exc}"
-            ) from exc
+            raise RuntimeError(f"Home Assistant request failed: {exc}") from exc
 
         if not response.content:
             return {}
         try:
             return response.json()
         except ValueError as exc:
-            raise RuntimeError(
-                "Home Assistant returned invalid JSON"
-            ) from exc
+            raise RuntimeError("Home Assistant returned invalid JSON") from exc
 
     def set_state_provider(self, provider: Any) -> None:
         """Use Jarvis's shared live Home Assistant state cache."""
@@ -1105,11 +1129,7 @@ class ProactiveEngine:
         if self.state_provider is not None:
             states = self.state_provider()
             if isinstance(states, (list, tuple)):
-                return [
-                    item
-                    for item in states
-                    if isinstance(item, dict)
-                ]
+                return [item for item in states if isinstance(item, dict)]
 
         # Compatibility fallback for standalone use when the shared
         # House Awareness cache hasn't been wired.
@@ -1172,30 +1192,14 @@ class ProactiveEngine:
 
     def update(self, event_id: str, **fields: Any) -> None:
         statements = {
-            "status": (
-                "UPDATE proactive_events SET status = ? WHERE id = ?"
-            ),
-            "updated_at": (
-                "UPDATE proactive_events SET updated_at = ? WHERE id = ?"
-            ),
-            "notified_at": (
-                "UPDATE proactive_events SET notified_at = ? WHERE id = ?"
-            ),
-            "spoken_at": (
-                "UPDATE proactive_events SET spoken_at = ? WHERE id = ?"
-            ),
-            "snoozed_until": (
-                "UPDATE proactive_events SET snoozed_until = ? WHERE id = ?"
-            ),
-            "reply_until": (
-                "UPDATE proactive_events SET reply_until = ? WHERE id = ?"
-            ),
+            "status": ("UPDATE proactive_events SET status = ? WHERE id = ?"),
+            "updated_at": ("UPDATE proactive_events SET updated_at = ? WHERE id = ?"),
+            "notified_at": ("UPDATE proactive_events SET notified_at = ? WHERE id = ?"),
+            "spoken_at": ("UPDATE proactive_events SET spoken_at = ? WHERE id = ?"),
+            "snoozed_until": ("UPDATE proactive_events SET snoozed_until = ? WHERE id = ?"),
+            "reply_until": ("UPDATE proactive_events SET reply_until = ? WHERE id = ?"),
         }
-        safe = {
-            key: value
-            for key, value in fields.items()
-            if key in statements
-        }
+        safe = {key: value for key, value in fields.items() if key in statements}
         if not safe:
             return
         with self.connection() as connection:

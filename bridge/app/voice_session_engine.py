@@ -145,8 +145,7 @@ class VoiceSessionEngine:
                     "ALTER TABLE voice_sessions ADD COLUMN last_interrupt_reason TEXT"
                 ),
                 "last_interrupt_media_player": (
-                    "ALTER TABLE voice_sessions "
-                    "ADD COLUMN last_interrupt_media_player TEXT"
+                    "ALTER TABLE voice_sessions ADD COLUMN last_interrupt_media_player TEXT"
                 ),
             }
             for column, statement in migrations.items():

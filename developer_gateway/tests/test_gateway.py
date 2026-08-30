@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from developer_gateway.app import (
+    AUTHORITATIVE_WORKSPACE,
     SOURCE_COMMIT,
     app,
     authorised,
@@ -18,9 +19,9 @@ from developer_gateway.codex_client import canonical_workspace
 def configured_workspaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspaces = {
         "jarvis": tmp_path / "jarvis",
-        "jarvis-wear": tmp_path / "jarvis-wear",
+        "jarvis-wear": tmp_path / "jarvis",
     }
-    for path in workspaces.values():
+    for path in set(workspaces.values()):
         path.mkdir()
     monkeypatch.setattr("developer_gateway.app.WORKSPACES", workspaces)
 
@@ -37,7 +38,14 @@ def test_health_reports_source_provenance() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["source_commit"] == SOURCE_COMMIT
+    assert response.json()["workspace"] == str(AUTHORITATIVE_WORKSPACE)
     assert SOURCE_COMMIT == "development" or len(SOURCE_COMMIT) == 40
+
+
+def test_historical_workspace_aliases_share_one_authoritative_tree() -> None:
+    from developer_gateway.app import WORKSPACES
+
+    assert WORKSPACES["jarvis"] == WORKSPACES["jarvis-wear"]
 
 
 def test_workspace_allowlist_rejects_paths_and_unknown_ids(tmp_path: Path) -> None:

@@ -72,33 +72,19 @@ class VisionIntelligenceAlpha9Tests(unittest.TestCase):
             "current_zones": ["doorstep"],
         }
 
-        first_result = asyncio.run(
-            self.engine.ingest(first, publish=False)
-        )
-        second_result = asyncio.run(
-            self.engine.ingest(second, publish=False)
-        )
+        first_result = asyncio.run(self.engine.ingest(first, publish=False))
+        second_result = asyncio.run(self.engine.ingest(second, publish=False))
 
         self.assertFalse(first_result["suppressed"])
         self.assertTrue(second_result["suppressed"])
 
     def test_camera_query_matching_and_mapping(self):
-        self.assertTrue(
-            self.engine.matches_query(
-                "What happened at the front door?"
-            )
-        )
+        self.assertTrue(self.engine.matches_query("What happened at the front door?"))
         self.assertEqual(
             "front_door",
-            self.engine.camera_from_query(
-                "Show the front door camera"
-            ),
+            self.engine.camera_from_query("Show the front door camera"),
         )
-        self.assertFalse(
-            self.engine.matches_query(
-                "Turn on the bedroom floodlight"
-            )
-        )
+        self.assertFalse(self.engine.matches_query("Turn on the bedroom floodlight"))
 
     def test_public_event_has_communication_links(self):
         result = asyncio.run(

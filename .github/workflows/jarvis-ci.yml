@@ -2,8 +2,9 @@ name: Jarvis CI
 
 on:
   pull_request:
+    branches: [jarvis/unified-production]
   push:
-    branches: [main, conversation-engine, "jarvis/**"]
+    branches: [jarvis/unified-production]
   workflow_dispatch:
   schedule:
     - cron: "17 3 * * *"
@@ -65,12 +66,28 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r bridge/requirements.txt
           python -m pip install -r requirements-improver.txt
-      - name: Ruff correctness gate
-        run: python -m ruff check --select E9,F63,F7,F82 bridge/app bridge/tests
+      - name: Ruff correctness and format gates
+        run: |
+          python -m ruff check bridge/app bridge/tests developer_gateway tools
+          python -m ruff format --check bridge/app bridge/tests developer_gateway tools
+      - name: Mypy active-source gate
+        run: >-
+          python -m mypy bridge/app developer_gateway
+          tools/generate_ota_manifest.py tools/generate_product_release_manifest.py
+          tools/verify_product_baseline.py
       - name: Bandit high-severity repository scan
-        run: python -m bandit -q -r bridge/app -lll
+        run: python -m bandit -q -r bridge/app developer_gateway -lll
       - name: Dependency audit
-        run: python -m pip_audit -r bridge/requirements.txt --progress-spinner off
+        run: >-
+          python -m pip_audit -r bridge/requirements.txt -r requirements-improver.txt
+          -r developer_gateway/requirements.txt --progress-spinner off
+      - name: Workflow and current-tree secret gates
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+          docker run --rm -v "$PWD:/repo:ro" -w /repo \
+            zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            detect --source=/repo --no-git --no-banner --redact --verbose=false
 
   android-unit-tests:
     runs-on: ubuntu-latest

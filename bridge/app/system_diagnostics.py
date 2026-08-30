@@ -20,38 +20,48 @@ def build_voice_reliability_report(
 
     if not home_assistant_connected:
         health = "degraded"
-        recommendations.append({
-            "code": "home_assistant_offline",
-            "action": "Check the Home Assistant host, network and access token.",
-        })
+        recommendations.append(
+            {
+                "code": "home_assistant_offline",
+                "action": "Check the Home Assistant host, network and access token.",
+            }
+        )
     if realtime.get("last_error"):
         health = "degraded"
-        recommendations.append({
-            "code": "realtime_provider_error",
-            "action": "Inspect the latest realtime provider error before changing microphone tuning.",
-        })
+        recommendations.append(
+            {
+                "code": "realtime_provider_error",
+                "action": "Inspect the latest realtime provider error before changing microphone tuning.",
+            }
+        )
     transcript_p95 = _p95(runtime, "speech_start_to_transcript_ms")
     if transcript_p95 is not None and transcript_p95 > 2200:
         health = "degraded"
-        recommendations.append({
-            "code": "slow_transcription",
-            "action": "Check Core/provider network latency; microphone gain is not the likely cause.",
-        })
+        recommendations.append(
+            {
+                "code": "slow_transcription",
+                "action": "Check Core/provider network latency; microphone gain is not the likely cause.",
+            }
+        )
     clarification_count = int(counters.get("recognition_clarifications", 0) or 0)
     transcript_count = int(counters.get("voice_transcripts_completed", 0) or 0)
     if transcript_count >= 10 and clarification_count / transcript_count > 0.20:
         health = "degraded"
-        recommendations.append({
-            "code": "frequent_misunderstanding",
-            "action": "Review learned pronunciations and run the distance/TV recognition corpus.",
-        })
+        recommendations.append(
+            {
+                "code": "frequent_misunderstanding",
+                "action": "Review learned pronunciations and run the distance/TV recognition corpus.",
+            }
+        )
     rejected = int(counters.get("voice_wake_contention_rejected", 0) or 0)
     claimed = int(counters.get("voice_wake_claimed", 0) or 0)
     if claimed >= 10 and rejected / claimed > 0.40:
-        recommendations.append({
-            "code": "satellite_contention",
-            "action": "Review satellite placement or room assignment; several units hear the same wake too often.",
-        })
+        recommendations.append(
+            {
+                "code": "satellite_contention",
+                "action": "Review satellite placement or room assignment; several units hear the same wake too often.",
+            }
+        )
 
     return {
         "health": health,

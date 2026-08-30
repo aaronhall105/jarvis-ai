@@ -11,9 +11,7 @@ class ProgressExperienceTests(unittest.TestCase):
 
     def test_short_control_does_not_show_progress(self) -> None:
         text = "Turn the living room floodlight off"
-        self.assertFalse(
-            self.engine.should_emit_progress(text, self.engine.analyse(text))
-        )
+        self.assertFalse(self.engine.should_emit_progress(text, self.engine.analyse(text)))
 
     def test_task_commands_do_not_show_progress(self) -> None:
         for text in (
@@ -22,9 +20,7 @@ class ProgressExperienceTests(unittest.TestCase):
             "Turn the TV off in 30 minutes",
         ):
             with self.subTest(text=text):
-                self.assertFalse(
-                    self.engine.should_emit_progress(text, self.engine.analyse(text))
-                )
+                self.assertFalse(self.engine.should_emit_progress(text, self.engine.analyse(text)))
 
     def test_slow_state_question_can_show_progress_quickly(self) -> None:
         text = "What is the current battery state of Amber's phone?"
@@ -37,10 +33,7 @@ class ProgressExperienceTests(unittest.TestCase):
 
     def test_same_request_does_not_repeat_recent_phrase(self) -> None:
         text = "What is the temperature in the living room?"
-        phrases = [
-            self.engine.progress_phrase(text, ToneProfile())
-            for _ in range(10)
-        ]
+        phrases = [self.engine.progress_phrase(text, ToneProfile()) for _ in range(10)]
         self.assertEqual(len(phrases), len(set(phrases)))
 
     def test_phrases_vary_by_request_category(self) -> None:

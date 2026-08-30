@@ -13,7 +13,7 @@ import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
@@ -125,10 +125,7 @@ def zones_from(value: Any) -> list[str]:
 
 
 def load_camera_map() -> dict[str, dict[str, str]]:
-    mapping = {
-        key: dict(value)
-        for key, value in DEFAULT_CAMERA_MAP.items()
-    }
+    mapping = {key: dict(value) for key, value in DEFAULT_CAMERA_MAP.items()}
     raw = env("JARVIS_VISION_CAMERA_MAP")
     if not raw:
         return mapping
@@ -218,11 +215,7 @@ class VisionEngine:
         )
         self.unavailable_since: dict[str, int] = {}
         self.health_alerted: set[str] = set()
-        self.openai = (
-            AsyncOpenAI(api_key=openai_key)
-            if openai_key
-            else None
-        )
+        self.openai = AsyncOpenAI(api_key=openai_key) if openai_key else None
 
     @classmethod
     def from_env(cls) -> VisionEngine:
@@ -335,9 +328,7 @@ class VisionEngine:
         if not self.enabled:
             logger.info("Vision Intelligence is disabled")
             return
-        if not self.frigate_url and not (
-            self.ha_url and self.ha_token
-        ):
+        if not self.frigate_url and not (self.ha_url and self.ha_token):
             logger.info(
                 "Vision Intelligence ready without poller: "
                 "Frigate and Home Assistant are not configured"
@@ -377,13 +368,9 @@ class VisionEngine:
         if not isinstance(data, dict):
             data = {}
 
-        camera = camera_key(
-            body.get("camera")
-            or data.get("camera")
-        )
+        camera = camera_key(body.get("camera") or data.get("camera"))
         label = clean(
-            body.get("label")
-            or data.get("label"),
+            body.get("label") or data.get("label"),
             80,
         ).lower()
         if not camera or not label:
@@ -395,30 +382,17 @@ class VisionEngine:
             return None
 
         source_id = clean(
-            body.get("id")
-            or data.get("id"),
+            body.get("id") or data.get("id"),
             180,
         )
-        start_time = self._number(
-            body.get("start_time")
-            or data.get("start_time")
-        )
+        start_time = self._number(body.get("start_time") or data.get("start_time"))
         if start_time is None:
             start_time = time.time()
         if not source_id:
-            raw = (
-                f"{camera}|{label}|{start_time}|"
-                f"{body.get('current_zones')}"
-            )
-            source_id = hashlib.sha256(
-                raw.encode("utf-8")
-            ).hexdigest()[:32]
+            raw = f"{camera}|{label}|{start_time}|{body.get('current_zones')}"
+            source_id = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
-        raw_sub_label = (
-            body.get("sub_label")
-            or data.get("sub_label")
-            or ""
-        )
+        raw_sub_label = body.get("sub_label") or data.get("sub_label") or ""
         if isinstance(raw_sub_label, list) and raw_sub_label:
             raw_sub_label = raw_sub_label[0]
         zones = zones_from(
@@ -428,15 +402,9 @@ class VisionEngine:
             or data.get("current_zones")
         )
         score = self._number(
-            data.get("top_score")
-            or body.get("top_score")
-            or data.get("score")
-            or body.get("score")
+            data.get("top_score") or body.get("top_score") or data.get("score") or body.get("score")
         )
-        end_time = self._number(
-            body.get("end_time")
-            or data.get("end_time")
-        )
+        end_time = self._number(body.get("end_time") or data.get("end_time"))
         camera_details = self.camera_map.get(
             camera,
             {
@@ -458,9 +426,7 @@ class VisionEngine:
             "score": score or 0.0,
             "start_time": float(start_time),
             "end_time": end_time,
-            "has_snapshot": bool(
-                body.get("has_snapshot", True)
-            ),
+            "has_snapshot": bool(body.get("has_snapshot", True)),
             "has_clip": bool(body.get("has_clip", False)),
             "raw": envelope,
         }
@@ -507,14 +473,9 @@ class VisionEngine:
     @staticmethod
     def everyone_away(presence: dict[str, str]) -> bool:
         known = [
-            value
-            for value in presence.values()
-            if value not in {"", "unknown", "unavailable"}
+            value for value in presence.values() if value not in {"", "unknown", "unavailable"}
         ]
-        return bool(known) and all(
-            value != "home"
-            for value in known
-        )
+        return bool(known) and all(value != "home" for value in known)
 
     def importance(
         self,
@@ -596,9 +557,7 @@ class VisionEngine:
         now = int(time.time())
         suppressed = self.duplicate(event, now=now)
         importance = self.importance(event, away=away)
-        event_id = "vision-" + hashlib.sha256(
-            event["source_id"].encode("utf-8")
-        ).hexdigest()[:24]
+        event_id = "vision-" + hashlib.sha256(event["source_id"].encode("utf-8")).hexdigest()[:24]
         raw_json = json.dumps(
             event["raw"],
             ensure_ascii=False,
@@ -644,11 +603,7 @@ class VisionEngine:
                 ),
             )
         stored = self.get_event(event_id)
-        if (
-            publish
-            and stored is not None
-            and not stored["suppressed"]
-        ):
+        if publish and stored is not None and not stored["suppressed"]:
             await self.publish_proactive(stored)
         return stored
 
@@ -657,10 +612,15 @@ class VisionEngine:
         event: dict[str, Any],
     ) -> None:
         label = event["label"]
-        area = event["area"] or event["camera"].replace(
-            "_",
-            " ",
-        ).title()
+        area = (
+            event["area"]
+            or event["camera"]
+            .replace(
+                "_",
+                " ",
+            )
+            .title()
+        )
         if label == "camera_offline":
             title = "Camera offline"
             message = f"The {area} camera is unavailable."
@@ -681,15 +641,10 @@ class VisionEngine:
             kind = "vision_package_detected"
         else:
             title = "Camera activity"
-            message = (
-                f"{label.replace('_', ' ').title()} "
-                f"was detected at {area}."
-            )
+            message = f"{label.replace('_', ' ').title()} was detected at {area}."
             kind = "vision_object_detected"
 
-        entity_id = event["camera_entity"] or (
-            "camera." + event["camera"]
-        )
+        entity_id = event["camera_entity"] or ("camera." + event["camera"])
         candidate = Candidate(
             "cameras",
             kind,
@@ -707,21 +662,24 @@ class VisionEngine:
             "all",
             ("view_camera", "dismiss", "remind_later"),
             confidence=max(0.0, min(1.0, float(event["score"]))),
-            evidence=tuple(filter(None, (
-                f"frigate_track:{event['source_id']}",
-                f"camera:{event['camera']}",
-                f"zones:{','.join(event['zones'])}" if event["zones"] else "",
-                "snapshot_available" if event.get("has_snapshot") else "",
-                "everyone_away" if event["everyone_away"] else "someone_home",
-            ))),
+            evidence=tuple(
+                filter(
+                    None,
+                    (
+                        f"frigate_track:{event['source_id']}",
+                        f"camera:{event['camera']}",
+                        f"zones:{','.join(event['zones'])}" if event["zones"] else "",
+                        "snapshot_available" if event.get("has_snapshot") else "",
+                        "everyone_away" if event["everyone_away"] else "someone_home",
+                    ),
+                )
+            ),
             room=str(event.get("area") or ""),
         )
         try:
             await proactive_engine.record(candidate)
         except Exception:
-            logger.exception(
-                "Could not publish vision event to Jarvis activity"
-            )
+            logger.exception("Could not publish vision event to Jarvis activity")
 
     def get_by_source(
         self,
@@ -730,8 +688,7 @@ class VisionEngine:
         self.initialise()
         with self.connection() as connection:
             row = connection.execute(
-                "SELECT * FROM vision_events "
-                "WHERE source_id = ? LIMIT 1",
+                "SELECT * FROM vision_events WHERE source_id = ? LIMIT 1",
                 (source_id,),
             ).fetchone()
         return self.row(row) if row else None
@@ -822,18 +779,12 @@ class VisionEngine:
         result = dict(event)
         event_id = event["id"]
         result["snapshot_path"] = (
-            f"/api/vision/events/{event_id}/snapshot"
-            if event["has_snapshot"]
-            else ""
+            f"/api/vision/events/{event_id}/snapshot" if event["has_snapshot"] else ""
         )
-        result["describe_path"] = (
-            f"/api/vision/events/{event_id}/describe"
-        )
+        result["describe_path"] = f"/api/vision/events/{event_id}/describe"
         entity_id = event["camera_entity"]
         result["home_assistant_path"] = (
-            "/config/entities/entity/" + quote(entity_id, safe="")
-            if entity_id
-            else ""
+            "/config/entities/entity/" + quote(entity_id, safe="") if entity_id else ""
         )
         return result
 
@@ -844,10 +795,7 @@ class VisionEngine:
         source_id = quote(event["source_id"], safe="")
         if self.frigate_url and event["has_snapshot"]:
             headers = self._frigate_headers()
-            url = (
-                f"{self.frigate_url}/api/events/"
-                f"{source_id}/snapshot.jpg"
-            )
+            url = f"{self.frigate_url}/api/events/{source_id}/snapshot.jpg"
             async with httpx.AsyncClient(
                 timeout=12.0,
                 follow_redirects=False,
@@ -859,9 +807,7 @@ class VisionEngine:
                 response.raise_for_status()
                 data = response.content
                 if len(data) > 12_000_000:
-                    raise RuntimeError(
-                        "Frigate snapshot exceeded 12 MB"
-                    )
+                    raise RuntimeError("Frigate snapshot exceeded 12 MB")
                 content_type = response.headers.get(
                     "content-type",
                     "image/jpeg",
@@ -870,10 +816,7 @@ class VisionEngine:
 
         entity_id = event["camera_entity"]
         if self.ha_url and self.ha_token and entity_id:
-            url = (
-                f"{self.ha_url}/api/camera_proxy/"
-                f"{quote(entity_id, safe='._')}"
-            )
+            url = f"{self.ha_url}/api/camera_proxy/{quote(entity_id, safe='._')}"
             async with httpx.AsyncClient(
                 timeout=12.0,
                 follow_redirects=False,
@@ -885,9 +828,7 @@ class VisionEngine:
                 response.raise_for_status()
                 data = response.content
                 if len(data) > 12_000_000:
-                    raise RuntimeError(
-                        "Home Assistant snapshot exceeded 12 MB"
-                    )
+                    raise RuntimeError("Home Assistant snapshot exceeded 12 MB")
                 return (
                     data,
                     response.headers.get(
@@ -895,9 +836,7 @@ class VisionEngine:
                         "image/jpeg",
                     ),
                 )
-        raise RuntimeError(
-            "No snapshot source is configured for this camera"
-        )
+        raise RuntimeError("No snapshot source is configured for this camera")
 
     async def describe(
         self,
@@ -911,9 +850,7 @@ class VisionEngine:
         if event["description"] and not refresh:
             return self.public_event(event)
         if self.openai is None:
-            raise RuntimeError(
-                "OPENAI_API_KEY is required for snapshot descriptions"
-            )
+            raise RuntimeError("OPENAI_API_KEY is required for snapshot descriptions")
         data, content_type = await self.snapshot(event)
         encoded = base64.b64encode(data).decode("ascii")
         prompt = (
@@ -929,24 +866,24 @@ class VisionEngine:
         )
         response = await self.openai.responses.create(
             model=self.model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        },
-                        {
-                            "type": "input_image",
-                            "image_url": (
-                                f"data:{content_type};base64,"
-                                f"{encoded}"
-                            ),
-                        },
-                    ],
-                }
-            ],
+            input=cast(
+                Any,
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": prompt,
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": (f"data:{content_type};base64,{encoded}"),
+                            },
+                        ],
+                    }
+                ],
+            ),
             max_output_tokens=220,
         )
         description = clean(
@@ -954,9 +891,7 @@ class VisionEngine:
             800,
         )
         if not description:
-            raise RuntimeError(
-                "Vision model returned an empty description"
-            )
+            raise RuntimeError("Vision model returned an empty description")
         now = int(time.time())
         with self.connection() as connection:
             connection.execute(
@@ -970,15 +905,10 @@ class VisionEngine:
             raise RuntimeError("Vision event disappeared")
         return self.public_event(updated)
 
-
     async def live_person_rooms(
         self,
     ) -> dict[str, Any]:
-        if not (
-            self.ha_url
-            and self.ha_token
-            and self.openai is not None
-        ):
+        if not (self.ha_url and self.ha_token and self.openai is not None):
             return {
                 "source": "live_snapshots",
                 "rooms": [],
@@ -992,8 +922,7 @@ class VisionEngine:
                 details.get("entity_id", ""),
             )
             for key, details in self.camera_map.items()
-            if key != "front_door"
-                and details.get("entity_id")
+            if key != "front_door" and details.get("entity_id")
         ]
 
         if not cameras:
@@ -1008,10 +937,7 @@ class VisionEngine:
             area: str,
             entity_id: str,
         ) -> tuple[str, str, bytes] | None:
-            url = (
-                f"{self.ha_url}/api/camera_proxy/"
-                f"{quote(entity_id, safe='._')}"
-            )
+            url = f"{self.ha_url}/api/camera_proxy/{quote(entity_id, safe='._')}"
             try:
                 async with httpx.AsyncClient(
                     timeout=8.0,
@@ -1040,15 +966,9 @@ class VisionEngine:
             return area, content_type, data
 
         fetched = await asyncio.gather(
-            *(
-                fetch_camera(area, entity_id)
-                for area, entity_id in cameras
-            )
+            *(fetch_camera(area, entity_id) for area, entity_id in cameras)
         )
-        images = [
-            item for item in fetched
-            if item is not None
-        ]
+        images = [item for item in fetched if item is not None]
 
         if not images:
             return {
@@ -1076,34 +996,36 @@ class VisionEngine:
         ]
 
         for area, content_type, data in images:
-            encoded = base64.b64encode(data).decode(
-                "ascii"
+            encoded = base64.b64encode(data).decode("ascii")
+            content.append(
+                {
+                    "type": "input_text",
+                    "text": f"Camera room: {area}",
+                }
             )
-            content.append({
-                "type": "input_text",
-                "text": f"Camera room: {area}",
-            })
-            content.append({
-                "type": "input_image",
-                "image_url": (
-                    f"data:{content_type};base64,"
-                    f"{encoded}"
-                ),
-            })
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": (f"data:{content_type};base64,{encoded}"),
+                }
+            )
 
         try:
             response = await self.openai.responses.create(
                 model=self.model,
-                input=[{
-                    "role": "user",
-                    "content": content,
-                }],
+                input=cast(
+                    Any,
+                    [
+                        {
+                            "role": "user",
+                            "content": content,
+                        }
+                    ],
+                ),
                 max_output_tokens=120,
             )
         except Exception:
-            logger.exception(
-                "Live room camera analysis failed"
-            )
+            logger.exception("Live room camera analysis failed")
             return {
                 "source": "live_snapshots",
                 "rooms": [],
@@ -1139,15 +1061,10 @@ class VisionEngine:
         if not isinstance(supplied, list):
             supplied = []
 
-        room_lookup = {
-            area.casefold(): area
-            for area in allowed
-        }
+        room_lookup = {area.casefold(): area for area in allowed}
         rooms = []
         for value in supplied:
-            resolved = room_lookup.get(
-                str(value).strip().casefold()
-            )
+            resolved = room_lookup.get(str(value).strip().casefold())
             if resolved and resolved not in rooms:
                 rooms.append(resolved)
 
@@ -1177,9 +1094,7 @@ class VisionEngine:
                 limit=20,
             )
         )
-        recent["available"] = bool(
-            recent.get("events")
-        )
+        recent["available"] = bool(recent.get("events"))
         return recent
 
     def matches_query(self, text: str) -> bool:
@@ -1254,9 +1169,7 @@ class VisionEngine:
                 )
                 events[0] = described
             except Exception:
-                logger.exception(
-                    "Automatic camera description failed"
-                )
+                logger.exception("Automatic camera description failed")
 
         if not events:
             prompt = (
@@ -1279,8 +1192,7 @@ class VisionEngine:
                 LONDON,
             ).strftime("%d %b %Y %H:%M")
             description = event["description"] or (
-                event["label"].replace("_", " ").title()
-                + " detected"
+                event["label"].replace("_", " ").title() + " detected"
             )
             lines.append(
                 "- "
@@ -1297,17 +1209,13 @@ class VisionEngine:
                 "Do not identify a person by name or infer intent.",
                 "The absence of an event does not prove that nothing "
                 "happened before monitoring or outside the time window.",
-                "Home Assistant remains the authority for live feeds "
-                "and recordings.",
+                "Home Assistant remains the authority for live feeds and recordings.",
             ]
         )
         return {
             "prompt": "\n".join(lines),
             "primary_event": self.public_event(events[0]),
-            "events": [
-                self.public_event(event)
-                for event in events
-            ],
+            "events": [self.public_event(event) for event in events],
         }
 
     def set_state_provider(self, provider: Any) -> None:
@@ -1328,9 +1236,7 @@ class VisionEngine:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception(
-                    "Vision Intelligence poll failed"
-                )
+                logger.exception("Vision Intelligence poll failed")
             await asyncio.sleep(self.poll_seconds)
 
     async def poll_frigate(self) -> None:
@@ -1352,9 +1258,7 @@ class VisionEngine:
             response.raise_for_status()
             payload = response.json()
         if not isinstance(payload, list):
-            raise RuntimeError(
-                "Frigate events endpoint returned non-list JSON"
-            )
+            raise RuntimeError("Frigate events endpoint returned non-list JSON")
         newest = self.last_frigate_event_time
         for item in reversed(payload):
             if not isinstance(item, dict):
@@ -1377,9 +1281,7 @@ class VisionEngine:
         if not isinstance(states, (list, tuple)):
             return
         indexed = {
-            clean(item.get("entity_id"), 180): item
-            for item in states
-            if isinstance(item, dict)
+            clean(item.get("entity_id"), 180): item for item in states if isinstance(item, dict)
         }
         now = int(time.time())
         for camera, details in self.camera_map.items():
@@ -1401,17 +1303,11 @@ class VisionEngine:
                     camera,
                     now,
                 )
-                if (
-                    now - started >= self.offline_seconds
-                    and camera not in self.health_alerted
-                ):
+                if now - started >= self.offline_seconds and camera not in self.health_alerted:
                     self.health_alerted.add(camera)
                     await self.ingest(
                         {
-                            "id": (
-                                f"health-offline-{camera}-"
-                                f"{now // self.offline_seconds}"
-                            ),
+                            "id": (f"health-offline-{camera}-{now // self.offline_seconds}"),
                             "camera": camera,
                             "label": "camera_offline",
                             "start_time": started,
@@ -1435,36 +1331,27 @@ class VisionEngine:
 
     def cleanup(self) -> None:
         self.initialise()
-        threshold = int(
-            time.time() - self.retention_days * 86400
-        )
+        threshold = int(time.time() - self.retention_days * 86400)
         with self.connection() as connection:
             connection.execute(
-                "DELETE FROM vision_events "
-                "WHERE created_at < ?",
+                "DELETE FROM vision_events WHERE created_at < ?",
                 (threshold,),
             )
 
     def status(self) -> dict[str, Any]:
         self.initialise()
         with self.connection() as connection:
-            count = connection.execute(
-                "SELECT COUNT(*) AS count FROM vision_events"
-            ).fetchone()["count"]
+            count = connection.execute("SELECT COUNT(*) AS count FROM vision_events").fetchone()[
+                "count"
+            ]
         return {
             "ready": True,
             "release": "19.0.0-alpha12",
             "enabled": self.enabled,
             "frigate_configured": bool(self.frigate_url),
-            "home_assistant_configured": bool(
-                self.ha_url and self.ha_token
-            ),
-            "vision_model_configured": bool(
-                self.openai_key and self.model
-            ),
-            "poller_running": bool(
-                self.task and not self.task.done()
-            ),
+            "home_assistant_configured": bool(self.ha_url and self.ha_token),
+            "vision_model_configured": bool(self.openai_key and self.model),
+            "poller_running": bool(self.task and not self.task.done()),
             "camera_map": self.camera_map,
             "labels": sorted(self.labels),
             "event_count": int(count),
@@ -1475,9 +1362,7 @@ class VisionEngine:
     def _frigate_headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.frigate_token:
-            headers["Authorization"] = (
-                "Bearer " + self.frigate_token
-            )
+            headers["Authorization"] = "Bearer " + self.frigate_token
         return headers
 
     def _ha_headers(self) -> dict[str, str]:
@@ -1509,11 +1394,7 @@ async def authorise(request: Request) -> None:
         "JARVIS_MOBILE_TOKEN",
     )
     header = request.headers.get("Authorization", "")
-    supplied = (
-        header[7:].strip()
-        if header.lower().startswith("bearer ")
-        else ""
-    )
+    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
     if expected:
         if not hmac.compare_digest(expected, supplied):
             raise HTTPException(
@@ -1526,8 +1407,7 @@ async def authorise(request: Request) -> None:
         if ipaddress.ip_address(client).is_global:
             raise HTTPException(
                 403,
-                "A mobile token is required "
-                "for non-private clients",
+                "A mobile token is required for non-private clients",
             )
     except ValueError as exc:
         raise HTTPException(
@@ -1557,10 +1437,7 @@ async def events(
     )
     return {
         "count": len(items),
-        "events": [
-            engine.public_event(item)
-            for item in items
-        ],
+        "events": [engine.public_event(item) for item in items],
     }
 
 
@@ -1574,13 +1451,7 @@ async def latest(
         after=0,
         limit=1,
     )
-    return {
-        "event": (
-            engine.public_event(items[0])
-            if items
-            else None
-        )
-    }
+    return {"event": (engine.public_event(items[0]) if items else None)}
 
 
 @router.get("/events/{event_id}")

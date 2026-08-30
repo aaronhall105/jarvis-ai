@@ -16,7 +16,7 @@ describe where to obtain the Android client.
 
 ```bash
 git clone \
-  --branch conversation-engine \
+  --branch jarvis/unified-production \
   https://github.com/aaronhall105/jarvis-ai.git
 
 cd jarvis-ai
@@ -109,8 +109,8 @@ the reachable Core endpoint.
 
 ```bash
 cd ~/jarvis
-git fetch origin conversation-engine
-git pull --ff-only origin conversation-engine
+git fetch origin jarvis/unified-production
+git pull --ff-only origin jarvis/unified-production
 docker compose up -d --build
 curl -fsS http://localhost:8000/health
 ```

@@ -5,8 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/aaron/jarvis
-ExecStart=/home/aaron/jarvis/.venv-improver/bin/python /home/aaron/jarvis/tools/self_improvement_worker.py daemon
+WorkingDirectory=__JARVIS_ROOT__
+ExecStart=__JARVIS_ROOT__/.venv-improver/bin/python __JARVIS_ROOT__/tools/self_improvement_worker.py daemon
 
 Restart=on-failure
 RestartSec=20

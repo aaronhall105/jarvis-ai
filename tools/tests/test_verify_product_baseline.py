@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from tools import verify_product_baseline
@@ -14,6 +15,33 @@ def test_manifest_identifies_single_authoritative_branch() -> None:
     manifest = verify_product_baseline.load_manifest()
     assert manifest["authoritative_branch"] == "jarvis/unified-production"
     assert Path(verify_product_baseline.MANIFEST).is_file()
+
+
+def test_ground_truth_apks_resolve_to_one_existing_source_lineage() -> None:
+    manifest = verify_product_baseline.load_manifest()
+    phone = manifest["ground_truth_apks"]["phone"]
+    watch = manifest["ground_truth_apks"]["watch"]
+    assert phone["sha256"] == "5e3961eb3484c814a301f5385f11f3db890ad6d66a9ef79e933eb3209af40e16"
+    assert watch["sha256"] == "98e1f543d1afcbf267dc465a84959aaa77e2cf76913cceab596aa3e0e41efe91"
+    assert phone["source_commit"] == watch["source_commit"]
+    assert phone["actions_artifact_id"] == watch["actions_artifact_id"]
+
+
+def test_consolidation_lineage_has_required_decision_fields() -> None:
+    path = verify_product_baseline.ROOT / "docs/JARVIS_CONSOLIDATION_LINEAGE.json"
+    lineage = json.loads(path.read_text(encoding="utf-8"))
+    assert lineage["authoritative_branch"] == "jarvis/unified-production"
+    assert lineage["capabilities"]
+    required = {
+        "capability",
+        "current_implementations",
+        "best_source",
+        "source_commit",
+        "target_location",
+        "action",
+    }
+    for capability in lineage["capabilities"]:
+        assert required == set(capability)
 
 
 def test_manifest_covers_every_release_product_area() -> None:

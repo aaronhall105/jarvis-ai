@@ -205,8 +205,11 @@ class VoiceSessionEngineTests(unittest.IsolatedAsyncioTestCase):
                 )
             migrated = VoiceSessionEngine(str(db))
             row = await migrated.touch(
-                session_id="phone", conversation_id="conversation", user_key="aaron",
-                device_id="phone", endpoint_kind="mobile_app",
+                session_id="phone",
+                conversation_id="conversation",
+                user_key="aaron",
+                device_id="phone",
+                endpoint_kind="mobile_app",
             )
             self.assertEqual(row["endpoint_kind"], "mobile_app")
         finally:

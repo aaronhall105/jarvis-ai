@@ -48,8 +48,11 @@ public final class IntegrationsSettingsUiTest {
         assertNotNull(section);
         assertNotNull(content);
         assertNotNull(open);
-        assertEquals(View.VISIBLE, content.getVisibility());
+        assertEquals(View.GONE, content.getVisibility());
         assertNotNull(findText(root, "Google, email, calendar, contacts and external services."));
+
+        ((ViewGroup) section).getChildAt(0).performClick();
+        assertEquals(View.VISIBLE, content.getVisibility());
         open.performClick();
 
         Intent launched = shadowOf(activity).getNextStartedActivity();

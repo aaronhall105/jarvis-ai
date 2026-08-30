@@ -30,22 +30,12 @@ class DeviceResolver:
         snapshot = await self.registry.ensure_loaded()
 
         area_lookup = {
-            (
-                area.get("area_id")
-                or area.get("id")
-            ): area.get("name")
-            for area in snapshot.areas
+            (area.get("area_id") or area.get("id")): area.get("name") for area in snapshot.areas
         }
 
-        device_lookup = {
-            device.get("id"): device
-            for device in snapshot.devices
-        }
+        device_lookup = {device.get("id"): device for device in snapshot.devices}
 
-        state_lookup = {
-            state.get("entity_id"): state
-            for state in snapshot.states
-        }
+        state_lookup = {state.get("entity_id"): state for state in snapshot.states}
 
         results: list[dict[str, Any]] = []
 
@@ -68,10 +58,7 @@ class DeviceResolver:
                 {},
             )
 
-            area_id = (
-                entity.get("area_id")
-                or device.get("area_id")
-            )
+            area_id = entity.get("area_id") or device.get("area_id")
 
             state_object = state_lookup.get(
                 entity_id,
@@ -95,11 +82,7 @@ class DeviceResolver:
                 or entity_id
             )
 
-            area_name = (
-                area_lookup.get(area_id)
-                if area_id
-                else None
-            )
+            area_name = area_lookup.get(area_id) if area_id else None
 
             results.append(
                 {
@@ -109,7 +92,8 @@ class DeviceResolver:
                     "area_id": area_id,
                     "area_name": area_name,
                     "state": state,
-                    "available": state not in {
+                    "available": state
+                    not in {
                         "unavailable",
                         "unknown",
                         None,
@@ -141,11 +125,7 @@ class DeviceResolver:
     async def available_entities(
         self,
     ) -> list[dict[str, Any]]:
-        return [
-            entity
-            for entity in await self.controllable_entities()
-            if entity["available"]
-        ]
+        return [entity for entity in await self.controllable_entities() if entity["available"]]
 
     async def get(
         self,
@@ -170,22 +150,14 @@ class DeviceResolver:
         if not normalised_query:
             return []
 
-        terms = [
-            term
-            for term in normalised_query.split()
-            if len(term) >= 2
-        ]
+        terms = [term for term in normalised_query.split() if len(term) >= 2]
 
-        ranked: list[
-            tuple[int, dict[str, Any]]
-        ] = []
+        ranked: list[tuple[int, dict[str, Any]]] = []
 
         for entity in await self.controllable_entities():
             score = 0
             search_text = entity["search_text"]
-            normalised_name = self.normalise(
-                entity["name"]
-            )
+            normalised_name = self.normalise(entity["name"])
 
             if normalised_query == normalised_name:
                 score += 100
@@ -196,11 +168,7 @@ class DeviceResolver:
             if normalised_query in search_text:
                 score += 25
 
-            score += sum(
-                5
-                for term in terms
-                if term in search_text
-            )
+            score += sum(5 for term in terms if term in search_text)
 
             if score:
                 ranked.append(
@@ -219,7 +187,4 @@ class DeviceResolver:
             reverse=True,
         )
 
-        return [
-            entity
-            for _, entity in ranked[:max(1, min(limit, 50))]
-        ]
+        return [entity for _, entity in ranked[: max(1, min(limit, 50))]]

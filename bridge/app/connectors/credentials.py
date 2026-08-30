@@ -37,10 +37,10 @@ _SENSITIVE_KEY_PARTS = {
 }
 
 _PRIVATE_KEY_MARKERS = (
-    ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),
-    ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"),
-    ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),
-    ("-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"),
+    ("-----BEGIN PRIVATE KEY-----", "-----END PRIVATE KEY-----"),  # gitleaks:allow
+    ("-----BEGIN RSA PRIVATE KEY-----", "-----END RSA PRIVATE KEY-----"),  # gitleaks:allow
+    ("-----BEGIN EC PRIVATE KEY-----", "-----END EC PRIVATE KEY-----"),  # gitleaks:allow
+    ("-----BEGIN OPENSSH PRIVATE KEY-----", "-----END OPENSSH PRIVATE KEY-----"),  # gitleaks:allow
 )
 _MAX_REDACTION_INPUT = 1_000_000
 _SENSITIVE_QUERY_KEYS = frozenset(

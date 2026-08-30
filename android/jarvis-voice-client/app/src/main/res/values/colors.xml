@@ -7,5 +7,5 @@
     <color name="jarvis_muted">#676767</color>
     <color name="jarvis_accent">#141414</color>
     <color name="jarvis_danger">#141414</color>
-    <color name="jarvis_icon_background">#F2F2F2</color>
+    <color name="jarvis_icon_background">#FFFFFF</color>
 </resources>

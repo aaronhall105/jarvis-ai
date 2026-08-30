@@ -14,7 +14,7 @@ Jarvis AI is an actively developed personal assistant project.
 
 ## Development workflow
 
-1. Create a branch from `conversation-engine`.
+1. Create a branch from `jarvis/unified-production`.
 2. Make a bounded change.
 3. Run the relevant Python or Android tests.
 4. Run `git diff --check`.

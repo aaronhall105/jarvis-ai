@@ -21,11 +21,13 @@ def edit_distance(left: list[str], right: list[str]) -> int:
     for row, left_word in enumerate(left, 1):
         current = [row]
         for column, right_word in enumerate(right, 1):
-            current.append(min(
-                current[-1] + 1,
-                previous[column] + 1,
-                previous[column - 1] + (left_word != right_word),
-            ))
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (left_word != right_word),
+                )
+            )
         previous = current
     return previous[-1]
 
@@ -78,14 +80,16 @@ def evaluate(rows: list[dict[str, Any]]) -> Evaluation:
             if isinstance(value, (int, float)) and value >= 0:
                 destination.append(float(value))
         if not woke or not command_ok or errors:
-            failures.append({
-                "case_id": str(row.get("case_id") or index),
-                "room": str(row.get("room") or "unknown"),
-                "condition": str(row.get("condition") or "unknown"),
-                "word_errors": errors,
-                "wake_detected": woke,
-                "command_correct": command_ok,
-            })
+            failures.append(
+                {
+                    "case_id": str(row.get("case_id") or index),
+                    "room": str(row.get("room") or "unknown"),
+                    "condition": str(row.get("condition") or "unknown"),
+                    "word_errors": errors,
+                    "wake_detected": woke,
+                    "command_correct": command_ok,
+                }
+            )
 
     interruption_cases = sum(bool(row.get("interruption_expected")) for row in rows)
     summary = {
@@ -94,8 +98,7 @@ def evaluate(rows: list[dict[str, Any]]) -> Evaluation:
         "wake_success_rate": round(wake_successes / len(rows), 4),
         "command_success_rate": round(command_successes / len(rows), 4),
         "interruption_success_rate": (
-            round(interruption_successes / interruption_cases, 4)
-            if interruption_cases else None
+            round(interruption_successes / interruption_cases, 4) if interruption_cases else None
         ),
         "speech_end_to_transcript_p50_ms": percentile(transcript_latencies, 0.50),
         "speech_end_to_transcript_p95_ms": percentile(transcript_latencies, 0.95),
@@ -109,12 +112,24 @@ def evaluate(rows: list[dict[str, Any]]) -> Evaluation:
 def regression_reasons(candidate: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     higher_is_better = ("wake_success_rate", "command_success_rate", "interruption_success_rate")
-    lower_is_better = ("word_error_rate", "speech_end_to_transcript_p95_ms", "speech_end_to_first_audio_p95_ms")
+    lower_is_better = (
+        "word_error_rate",
+        "speech_end_to_transcript_p95_ms",
+        "speech_end_to_first_audio_p95_ms",
+    )
     for key in higher_is_better:
-        if candidate.get(key) is not None and baseline.get(key) is not None and candidate[key] < baseline[key]:
+        if (
+            candidate.get(key) is not None
+            and baseline.get(key) is not None
+            and candidate[key] < baseline[key]
+        ):
             reasons.append(f"{key} regressed from {baseline[key]} to {candidate[key]}")
     for key in lower_is_better:
-        if candidate.get(key) is not None and baseline.get(key) is not None and candidate[key] > baseline[key]:
+        if (
+            candidate.get(key) is not None
+            and baseline.get(key) is not None
+            and candidate[key] > baseline[key]
+        ):
             reasons.append(f"{key} regressed from {baseline[key]} to {candidate[key]}")
     return reasons
 
@@ -125,7 +140,11 @@ def main() -> int:
     parser.add_argument("--baseline", type=Path)
     args = parser.parse_args()
     text = args.input.read_text(encoding="utf-8")
-    rows = json.loads(text) if text.lstrip().startswith("[") else [json.loads(line) for line in text.splitlines() if line.strip()]
+    rows = (
+        json.loads(text)
+        if text.lstrip().startswith("[")
+        else [json.loads(line) for line in text.splitlines() if line.strip()]
+    )
     result = evaluate(rows)
     payload: dict[str, Any] = {"summary": result.summary, "failures": result.failures}
     exit_code = 0

@@ -62,12 +62,8 @@ class Alpha12PersonRoomTests(unittest.TestCase):
             RequestIntent.STATE_QUERY,
             decision.intent,
         )
-        self.assertTrue(
-            decision.allow_home_read
-        )
-        self.assertFalse(
-            decision.allow_home_control
-        )
+        self.assertTrue(decision.allow_home_read)
+        self.assertFalse(decision.allow_home_control)
 
     def test_only_amber_home_allows_cautious_inference(self):
         result = resolve_person_room(

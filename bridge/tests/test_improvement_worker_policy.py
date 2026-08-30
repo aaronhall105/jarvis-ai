@@ -83,14 +83,12 @@ def test_dangerous_added_code_is_rejected() -> None:
     with pytest.raises(worker.WorkerError):
         worker.validate_patch_policy(patch, policy(), config())
 
+
 def _initialise_attempt_cap_db(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    data_dir = (
-        tmp_path
-        / "data"
-    )
+    data_dir = tmp_path / "data"
 
     monkeypatch.setattr(
         worker,
@@ -101,10 +99,7 @@ def _initialise_attempt_cap_db(
     monkeypatch.setattr(
         worker,
         "DB_PATH",
-        (
-            data_dir
-            / "improvement.db"
-        ),
+        (data_dir / "improvement.db"),
     )
 
     with worker.connect() as connection:
@@ -142,24 +137,11 @@ def test_attempts_today_counts_previous_day_queue_generated_today(
         tmp_path,
     )
 
-    now = worker.datetime.now(
-        worker.timezone.utc
-    )
+    now = worker.datetime.now(worker.timezone.utc)
 
-    today = (
-        now.date().isoformat()
-    )
+    today = now.date().isoformat()
 
-    yesterday = (
-        (
-            now
-            - worker.timedelta(
-                days=1
-            )
-        )
-        .date()
-        .isoformat()
-    )
+    yesterday = (now - worker.timedelta(days=1)).date().isoformat()
 
     with worker.connect() as connection:
         connection.execute(
@@ -172,8 +154,7 @@ def test_attempts_today_counts_previous_day_queue_generated_today(
             """,
             (
                 11,
-                yesterday
-                + "T23:50:00+00:00",
+                yesterday + "T23:50:00+00:00",
                 "generating",
             ),
         )
@@ -190,8 +171,7 @@ def test_attempts_today_counts_previous_day_queue_generated_today(
             ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
-                today
-                + "T00:05:00+00:00",
+                today + "T00:05:00+00:00",
                 "candidate_generation_started",
                 "worker",
                 99,
@@ -200,10 +180,7 @@ def test_attempts_today_counts_previous_day_queue_generated_today(
             ),
         )
 
-    assert (
-        worker.attempts_today()
-        == 1
-    )
+    assert worker.attempts_today() == 1
 
 
 def test_attempts_today_does_not_count_candidate_state_without_start_audit(
@@ -215,13 +192,7 @@ def test_attempts_today_does_not_count_candidate_state_without_start_audit(
         tmp_path,
     )
 
-    today = (
-        worker.datetime.now(
-            worker.timezone.utc
-        )
-        .date()
-        .isoformat()
-    )
+    today = worker.datetime.now(worker.timezone.utc).date().isoformat()
 
     with worker.connect() as connection:
         connection.execute(
@@ -234,16 +205,12 @@ def test_attempts_today_does_not_count_candidate_state_without_start_audit(
             """,
             (
                 12,
-                today
-                + "T00:10:00+00:00",
+                today + "T00:10:00+00:00",
                 "generating",
             ),
         )
 
-    assert (
-        worker.attempts_today()
-        == 0
-    )
+    assert worker.attempts_today() == 0
 
 
 def test_attempts_today_counts_only_today_generation_start_events(
@@ -255,47 +222,30 @@ def test_attempts_today_counts_only_today_generation_start_events(
         tmp_path,
     )
 
-    now = worker.datetime.now(
-        worker.timezone.utc
-    )
+    now = worker.datetime.now(worker.timezone.utc)
 
-    today = (
-        now.date().isoformat()
-    )
+    today = now.date().isoformat()
 
-    yesterday = (
-        (
-            now
-            - worker.timedelta(
-                days=1
-            )
-        )
-        .date()
-        .isoformat()
-    )
+    yesterday = (now - worker.timedelta(days=1)).date().isoformat()
 
     rows = [
         (
-            today
-            + "T00:01:00+00:00",
+            today + "T00:01:00+00:00",
             "candidate_generation_started",
             11,
         ),
         (
-            today
-            + "T12:00:00+00:00",
+            today + "T12:00:00+00:00",
             "candidate_generation_started",
             12,
         ),
         (
-            today
-            + "T12:01:00+00:00",
+            today + "T12:01:00+00:00",
             "candidate_failed",
             12,
         ),
         (
-            yesterday
-            + "T23:59:59+00:00",
+            yesterday + "T23:59:59+00:00",
             "candidate_generation_started",
             10,
         ),
@@ -328,10 +278,7 @@ def test_attempts_today_counts_only_today_generation_start_events(
                 ),
             )
 
-    assert (
-        worker.attempts_today()
-        == 2
-    )
+    assert worker.attempts_today() == 2
 
 
 def test_proposal_only_blocks_direct_deploy() -> None:
@@ -413,14 +360,10 @@ def test_proposal_only_skips_live_actions(
             }
 
         if statuses == ("deploy_requested",):
-            pytest.fail(
-                "Proposal Mode queried deployment"
-            )
+            pytest.fail("Proposal Mode queried deployment")
 
         if statuses == ("rollback_requested",):
-            pytest.fail(
-                "Proposal Mode queried rollback"
-            )
+            pytest.fail("Proposal Mode queried rollback")
 
         return None
 
@@ -433,17 +376,19 @@ def test_proposal_only_skips_live_actions(
     monkeypatch.setattr(
         worker,
         "process_queued_candidate",
-        lambda candidate, *args: processed.append(
-            int(candidate["candidate_id"])
-        ),
+        lambda candidate, *args: processed.append(int(candidate["candidate_id"])),
     )
 
-    assert worker.run_once(
-        cfg,
-        {},
-    ) is True
+    assert (
+        worker.run_once(
+            cfg,
+            {},
+        )
+        is True
+    )
 
     assert processed == [3]
+
 
 def _bandit_issue(
     *,
@@ -508,13 +453,9 @@ def test_bandit_baseline_allows_existing_findings(
         del env
 
         if Path(cwd) == worker.ROOT:
-            return _bandit_completed(
-                baseline
-            )
+            return _bandit_completed(baseline)
 
-        return _bandit_completed(
-            candidate
-        )
+        return _bandit_completed(candidate)
 
     monkeypatch.setattr(
         worker,
@@ -522,9 +463,7 @@ def test_bandit_baseline_allows_existing_findings(
         fake_run,
     )
 
-    result = worker.bandit_baseline_result(
-        tmp_path
-    )
+    result = worker.bandit_baseline_result(tmp_path)
 
     assert result["passed"] is True
     assert result["blocking"] is True
@@ -566,13 +505,9 @@ def test_bandit_baseline_blocks_new_finding(
         del env
 
         if Path(cwd) == worker.ROOT:
-            return _bandit_completed(
-                baseline
-            )
+            return _bandit_completed(baseline)
 
-        return _bandit_completed(
-            candidate
-        )
+        return _bandit_completed(candidate)
 
     monkeypatch.setattr(
         worker,
@@ -580,18 +515,14 @@ def test_bandit_baseline_blocks_new_finding(
         fake_run,
     )
 
-    result = worker.bandit_baseline_result(
-        tmp_path
-    )
+    result = worker.bandit_baseline_result(tmp_path)
 
     assert result["passed"] is False
     assert result["blocking"] is True
     assert result["baseline_findings"] == 1
     assert result["candidate_findings"] == 2
     assert result["new_findings_count"] == 1
-    assert len(
-        result["new_findings"]
-    ) == 1
+    assert len(result["new_findings"]) == 1
 
 
 def test_bandit_baseline_blocks_unparseable_scan(
@@ -624,12 +555,11 @@ def test_bandit_baseline_blocks_unparseable_scan(
         fake_run,
     )
 
-    result = worker.bandit_baseline_result(
-        tmp_path
-    )
+    result = worker.bandit_baseline_result(tmp_path)
 
     assert result["passed"] is False
     assert result["blocking"] is True
+
 
 def _pytest_scan(
     failures: dict[str, int],
@@ -640,21 +570,15 @@ def _pytest_scan(
     returncode: int = 1,
 ) -> dict[str, object]:
     if tests is None:
-        tests = dict(
-            failures
-        )
+        tests = dict(failures)
 
     return {
         "ok": ok,
         "stage": "complete",
         "returncode": returncode,
         "total_tests": total,
-        "failures": worker.Counter(
-            failures
-        ),
-        "tests": worker.Counter(
-            tests
-        ),
+        "failures": worker.Counter(failures),
+        "tests": worker.Counter(tests),
         "output": "",
     }
 
@@ -864,12 +788,7 @@ def test_run_validation_uses_baseline_pytest(
         config(),
     )
 
-    names = [
-        item["name"]
-        for item in results[
-            "checks"
-        ]
-    ]
+    names = [item["name"] for item in results["checks"]]
 
     assert "pytest_baseline" in names
     assert "pytest" not in names
@@ -881,9 +800,7 @@ def test_docker_smoke_uses_writable_mounts_and_keeps_container_for_logs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    commands: list[
-        list[str]
-    ] = []
+    commands: list[list[str]] = []
 
     monkeypatch.setattr(
         worker,
@@ -904,40 +821,26 @@ def test_docker_smoke_uses_writable_mounts_and_keeps_container_for_logs(
         del check
         del env
 
-        commands.append(
-            list(command)
-        )
+        commands.append(list(command))
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "build",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "build",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
                 stdout="built",
             )
 
-        if (
-            command[:3]
-            == [
-                "docker",
-                "run",
-                "-d",
-            ]
-        ):
+        if command[:3] == [
+            "docker",
+            "run",
+            "-d",
+        ]:
             assert "--rm" not in command
 
-            mounts = [
-                command[index + 1]
-                for index, item in enumerate(
-                    command
-                )
-                if item == "-v"
-            ]
+            mounts = [command[index + 1] for index, item in enumerate(command) if item == "-v"]
 
             for mount in mounts:
                 source = Path(
@@ -947,10 +850,7 @@ def test_docker_smoke_uses_writable_mounts_and_keeps_container_for_logs(
                     )[0]
                 )
 
-                assert (
-                    source.stat().st_mode
-                    & 0o777
-                ) == 0o777
+                assert (source.stat().st_mode & 0o777) == 0o777
 
             return subprocess.CompletedProcess(
                 args=command,
@@ -958,33 +858,24 @@ def test_docker_smoke_uses_writable_mounts_and_keeps_container_for_logs(
                 stdout="container-id",
             )
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "inspect",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "inspect",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
                 stdout="true 0",
             )
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "exec",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "exec",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
-                stdout=(
-                    '{"status":"healthy",'
-                    '"service":"Jarvis Core"}'
-                ),
+                stdout=('{"status":"healthy","service":"Jarvis Core"}'),
             )
 
         return subprocess.CompletedProcess(
@@ -1054,60 +945,45 @@ def test_docker_smoke_preserves_startup_logs_for_exited_container(
         del check
         del env
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "build",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "build",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
                 stdout="built",
             )
 
-        if (
-            command[:3]
-            == [
-                "docker",
-                "run",
-                "-d",
-            ]
-        ):
+        if command[:3] == [
+            "docker",
+            "run",
+            "-d",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
                 stdout="container-id",
             )
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "inspect",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "inspect",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
                 stdout="false 1",
             )
 
-        if (
-            command[:2]
-            == [
-                "docker",
-                "logs",
-            ]
-        ):
+        if command[:2] == [
+            "docker",
+            "logs",
+        ]:
             return subprocess.CompletedProcess(
                 args=command,
                 returncode=0,
-                stdout=(
-                    "sqlite3.OperationalError: "
-                    "unable to open database file"
-                ),
+                stdout=("sqlite3.OperationalError: unable to open database file"),
             )
 
         return subprocess.CompletedProcess(
@@ -1131,10 +1007,8 @@ def test_docker_smoke_preserves_startup_logs_for_exited_container(
     assert result["passed"] is False
     assert result["stage"] == "startup"
 
-    assert (
-        "unable to open database file"
-        in result["output"]
-    )
+    assert "unable to open database file" in result["output"]
+
 
 def test_response_completion_metadata_includes_reasoning_tokens() -> None:
     class OutputDetails:
@@ -1151,9 +1025,7 @@ def test_response_completion_metadata_includes_reasoning_tokens() -> None:
         usage = Usage()
         id = "resp_test_completed"
 
-    metadata = worker._response_completion_metadata(
-        Response()
-    )
+    metadata = worker._response_completion_metadata(Response())
 
     assert metadata == {
         "response_status": "completed",
@@ -1196,133 +1068,64 @@ def test_require_completed_response_rejects_token_incomplete() -> None:
 def test_generation_and_review_have_completion_guards() -> None:
     import inspect
 
-    request_source = inspect.getsource(
-        worker.request_patch
-    )
+    request_source = inspect.getsource(worker.request_patch)
 
-    review_source = inspect.getsource(
-        worker.request_independent_review
-    )
+    review_source = inspect.getsource(worker.request_independent_review)
 
     assert '"max_output_tokens": 32000' in request_source
 
-    assert (
-        'kwargs["reasoning"] = {"effort": "medium"}'
-        in request_source
-    )
+    assert 'kwargs["reasoning"] = {"effort": "medium"}' in request_source
 
-    assert (
-        'purpose="Patch generation"'
-        in request_source
-    )
+    assert 'purpose="Patch generation"' in request_source
 
-    assert (
-        "_require_completed_response("
-        in request_source
-    )
+    assert "_require_completed_response(" in request_source
 
     assert '"max_output_tokens": 16000' in review_source
 
-    assert (
-        'purpose="Independent review"'
-        in review_source
-    )
+    assert 'purpose="Independent review"' in review_source
 
-    assert (
-        "_require_completed_response("
-        in review_source
-    )
+    assert "_require_completed_response(" in review_source
+
 
 def _make_minimal_pytest_workspace(
     root: Path,
 ) -> Path:
-    workspace = (
-        root
-        / "repo"
-    )
+    workspace = root / "repo"
 
-    (
-        workspace
-        / "bridge"
-        / "app"
-    ).mkdir(
-        parents=True
-    )
+    (workspace / "bridge" / "app").mkdir(parents=True)
 
-    (
-        workspace
-        / "bridge"
-        / "tests"
-    ).mkdir(
-        parents=True
-    )
+    (workspace / "bridge" / "tests").mkdir(parents=True)
 
-    (
-        workspace
-        / "config"
-    ).mkdir(
-        parents=True
-    )
+    (workspace / "config").mkdir(parents=True)
 
-    (
-        workspace
-        / "tools"
-    ).mkdir(
-        parents=True
-    )
+    (workspace / "tools").mkdir(parents=True)
 
-    (
-        workspace
-        / "bridge"
-        / "requirements.txt"
-    ).write_text(
+    (workspace / "bridge" / "requirements.txt").write_text(
         "pytest\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "bridge"
-        / "app"
-        / "example.py"
-    ).write_text(
+    (workspace / "bridge" / "app" / "example.py").write_text(
         "VALUE = 1\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "bridge"
-        / "tests"
-        / "test_example.py"
-    ).write_text(
-        "def test_example():\n"
-        "    assert True\n",
+    (workspace / "bridge" / "tests" / "test_example.py").write_text(
+        "def test_example():\n    assert True\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "config"
-        / "policy.json"
-    ).write_text(
+    (workspace / "config" / "policy.json").write_text(
         "{}\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "tools"
-        / "helper.py"
-    ).write_text(
+    (workspace / "tools" / "helper.py").write_text(
         "VALUE = 1\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "requirements-improver.txt"
-    ).write_text(
+    (workspace / "requirements-improver.txt").write_text(
         "pytest\n",
         encoding="utf-8",
     )
@@ -1333,95 +1136,48 @@ def _make_minimal_pytest_workspace(
 def test_pytest_build_context_excludes_private_repository_paths(
     tmp_path: Path,
 ) -> None:
-    workspace = (
-        _make_minimal_pytest_workspace(
-            tmp_path
-        )
-    )
+    workspace = _make_minimal_pytest_workspace(tmp_path)
 
-    (
-        workspace
-        / ".env"
-    ).write_text(
+    (workspace / ".env").write_text(
         "SECRET=do-not-copy\n",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "data"
-    ).mkdir()
+    (workspace / "data").mkdir()
 
-    (
-        workspace
-        / "data"
-        / "secret.db"
-    ).write_text(
+    (workspace / "data" / "secret.db").write_text(
         "private",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / ".git"
-    ).mkdir()
+    (workspace / ".git").mkdir()
 
-    (
-        workspace
-        / ".git"
-        / "config"
-    ).write_text(
+    (workspace / ".git" / "config").write_text(
         "private",
         encoding="utf-8",
     )
 
-    (
-        workspace
-        / "backup"
-    ).mkdir()
+    (workspace / "backup").mkdir()
 
-    (
-        workspace
-        / "backup"
-        / "secret.txt"
-    ).write_text(
+    (workspace / "backup" / "secret.txt").write_text(
         "private",
         encoding="utf-8",
     )
 
-    destination = (
-        tmp_path
-        / "safe-context"
-    )
+    destination = tmp_path / "safe-context"
 
     worker._prepare_pytest_build_context(
         workspace,
         destination,
     )
 
-    assert (
-        destination
-        / "bridge"
-        / "app"
-        / "example.py"
-    ).is_file()
+    assert (destination / "bridge" / "app" / "example.py").is_file()
 
-    assert (
-        destination
-        / "config"
-        / "policy.json"
-    ).is_file()
+    assert (destination / "config" / "policy.json").is_file()
 
-    assert (
-        destination
-        / "tools"
-        / "helper.py"
-    ).is_file()
+    assert (destination / "tools" / "helper.py").is_file()
 
-    assert (
-        destination
-        / "requirements-improver.txt"
-    ).is_file()
+    assert (destination / "requirements-improver.txt").is_file()
 
     for forbidden in (
         ".env",
@@ -1432,41 +1188,24 @@ def test_pytest_build_context_excludes_private_repository_paths(
         ".venv",
         ".venv-improver",
     ):
-        assert not (
-            destination
-            / forbidden
-        ).exists()
+        assert not (destination / forbidden).exists()
 
 
 def test_pytest_build_context_rejects_symlink(
     tmp_path: Path,
 ) -> None:
-    workspace = (
-        _make_minimal_pytest_workspace(
-            tmp_path
-        )
-    )
+    workspace = _make_minimal_pytest_workspace(tmp_path)
 
-    outside = (
-        tmp_path
-        / "outside.py"
-    )
+    outside = tmp_path / "outside.py"
 
     outside.write_text(
         "SECRET = 1\n",
         encoding="utf-8",
     )
 
-    link = (
-        workspace
-        / "bridge"
-        / "app"
-        / "escape.py"
-    )
+    link = workspace / "bridge" / "app" / "escape.py"
 
-    link.symlink_to(
-        outside
-    )
+    link.symlink_to(outside)
 
     with pytest.raises(
         worker.WorkerError,
@@ -1474,8 +1213,7 @@ def test_pytest_build_context_rejects_symlink(
     ):
         worker._prepare_pytest_build_context(
             workspace,
-            tmp_path
-            / "unsafe-context",
+            tmp_path / "unsafe-context",
         )
 
 
@@ -1589,10 +1327,7 @@ def test_worker_transaction_schema_migration(
 ) -> None:
     import sqlite3
 
-    database = (
-        tmp_path
-        / "improvement.db"
-    )
+    database = tmp_path / "improvement.db"
 
     monkeypatch.setattr(
         worker,
@@ -1606,9 +1341,7 @@ def test_worker_transaction_schema_migration(
         database,
     )
 
-    with sqlite3.connect(
-        database
-    ) as connection:
+    with sqlite3.connect(database) as connection:
         connection.execute(
             """
             CREATE TABLE improvement_candidates (
@@ -1619,30 +1352,19 @@ def test_worker_transaction_schema_migration(
 
     worker.ensure_candidate_transaction_columns()
 
-    with sqlite3.connect(
-        database
-    ) as connection:
+    with sqlite3.connect(database) as connection:
         columns = {
             str(row[1])
-            for row in connection.execute(
-                "PRAGMA table_info(improvement_candidates)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(improvement_candidates)").fetchall()
         }
 
-    assert set(
-        worker.TRANSACTION_COLUMNS
-    ).issubset(
-        columns
-    )
+    assert set(worker.TRANSACTION_COLUMNS).issubset(columns)
 
 
 def test_candidate_diff_hash_is_stable(
     tmp_path: Path,
 ) -> None:
-    repo = (
-        tmp_path
-        / "repo"
-    )
+    repo = tmp_path / "repo"
 
     repo.mkdir()
 
@@ -1680,10 +1402,7 @@ def test_candidate_diff_hash_is_stable(
         "Jarvis Test",
     )
 
-    file = (
-        repo
-        / "example.py"
-    )
+    file = repo / "example.py"
 
     file.write_text(
         "VALUE = 1\n",
@@ -1754,19 +1473,11 @@ def test_exact_candidate_binding_passes(
     digest = "c" * 64
     candidate_id = 7
 
-    worktrees = (
-        tmp_path
-        / "worktrees"
-    )
+    worktrees = tmp_path / "worktrees"
 
-    workspace = (
-        worktrees
-        / str(candidate_id)
-    )
+    workspace = worktrees / str(candidate_id)
 
-    workspace.mkdir(
-        parents=True
-    )
+    workspace.mkdir(parents=True)
 
     monkeypatch.setattr(
         worker,
@@ -1803,11 +1514,7 @@ def test_exact_candidate_binding_passes(
             "rev-parse",
             "HEAD",
         ]:
-            output = (
-                candidate_commit
-                if Path(cwd) == workspace
-                else base
-            )
+            output = candidate_commit if Path(cwd) == workspace else base
 
         elif command == [
             "git",
@@ -1826,9 +1533,7 @@ def test_exact_candidate_binding_passes(
             output = base
 
         else:
-            pytest.fail(
-                f"Unexpected Git command: {command}"
-            )
+            pytest.fail(f"Unexpected Git command: {command}")
 
         return subprocess.CompletedProcess(
             args=command,
@@ -1846,12 +1551,8 @@ def test_exact_candidate_binding_passes(
         {
             "candidate_id": candidate_id,
             "status": "deploy_requested",
-            "branch_name": (
-                f"jarvis/improvement-{candidate_id}"
-            ),
-            "workspace_path": str(
-                workspace
-            ),
+            "branch_name": (f"jarvis/improvement-{candidate_id}"),
+            "workspace_path": str(workspace),
             "base_commit": base,
             "candidate_commit": candidate_commit,
             "validated_patch_sha256": digest,
@@ -1859,14 +1560,8 @@ def test_exact_candidate_binding_passes(
     )
 
     assert result["base_commit"] == base
-    assert (
-        result["candidate_commit"]
-        == candidate_commit
-    )
-    assert (
-        result["validated_patch_sha256"]
-        == digest
-    )
+    assert result["candidate_commit"] == candidate_commit
+    assert result["validated_patch_sha256"] == digest
 
 
 def test_exact_candidate_binding_rejects_moved_branch(
@@ -1879,19 +1574,11 @@ def test_exact_candidate_binding_rejects_moved_branch(
     digest = "c" * 64
     candidate_id = 8
 
-    worktrees = (
-        tmp_path
-        / "worktrees"
-    )
+    worktrees = tmp_path / "worktrees"
 
-    workspace = (
-        worktrees
-        / str(candidate_id)
-    )
+    workspace = worktrees / str(candidate_id)
 
-    workspace.mkdir(
-        parents=True
-    )
+    workspace.mkdir(parents=True)
 
     monkeypatch.setattr(
         worker,
@@ -1934,9 +1621,7 @@ def test_exact_candidate_binding_rejects_moved_branch(
             output = moved
 
         else:
-            pytest.fail(
-                f"Unexpected Git command: {command}"
-            )
+            pytest.fail(f"Unexpected Git command: {command}")
 
         return subprocess.CompletedProcess(
             args=command,
@@ -1958,12 +1643,8 @@ def test_exact_candidate_binding_rejects_moved_branch(
             {
                 "candidate_id": candidate_id,
                 "status": "deploy_requested",
-                "branch_name": (
-                    f"jarvis/improvement-{candidate_id}"
-                ),
-                "workspace_path": str(
-                    workspace
-                ),
+                "branch_name": (f"jarvis/improvement-{candidate_id}"),
+                "workspace_path": str(workspace),
                 "base_commit": base,
                 "candidate_commit": candidate_commit,
                 "validated_patch_sha256": digest,
@@ -1974,49 +1655,22 @@ def test_exact_candidate_binding_rejects_moved_branch(
 def test_candidate_generation_requires_transactional_approval() -> None:
     import inspect
 
-    source = inspect.getsource(
-        worker.process_queued_candidate
-    )
+    source = inspect.getsource(worker.process_queued_candidate)
 
-    assert (
-        "auto_deploy_low_risk"
-        not in source
-    )
+    assert "auto_deploy_low_risk" not in source
 
-    assert (
-        'next_status = "awaiting_approval"'
-        in source
-    )
+    assert 'next_status = "awaiting_approval"' in source
 
-    assert (
-        "base_commit=base_commit"
-        in source
-    )
+    assert "base_commit=base_commit" in source
 
-    assert (
-        "candidate_commit=commit_sha"
-        in source
-    )
+    assert "candidate_commit=commit_sha" in source
 
-    assert (
-        "validated_patch_sha256=validated_patch_hash"
-        in source
-    )
+    assert "validated_patch_sha256=validated_patch_hash" in source
 
-    assert (
-        "approval_code_expires_at="
-        "approval_code_expires_at"
-        in source
-    )
+    assert "approval_code_expires_at=approval_code_expires_at" in source
 
-    assert (
-        "ready for you to review"
-        in source
-    )
-    assert (
-        "Nothing has been installed yet."
-        in source
-    )
+    assert "ready for you to review" in source
+    assert "Nothing has been installed yet." in source
 
 
 def _create_lease_test_database(
@@ -2031,10 +1685,7 @@ def _create_lease_test_database(
 ) -> Path:
     import sqlite3
 
-    database = (
-        tmp_path
-        / "lease-test.db"
-    )
+    database = tmp_path / "lease-test.db"
 
     monkeypatch.setattr(
         worker,
@@ -2048,9 +1699,7 @@ def _create_lease_test_database(
         database,
     )
 
-    with sqlite3.connect(
-        database
-    ) as connection:
+    with sqlite3.connect(database) as connection:
         connection.execute(
             """
             CREATE TABLE improvement_candidates (
@@ -2128,16 +1777,10 @@ def _create_lease_test_database(
 
     effective_phase = phase
 
-    if (
-        effective_phase is None
-        and status == "deploying"
-    ):
+    if effective_phase is None and status == "deploying":
         effective_phase = "claimed"
 
-    if (
-        lease_expires_at is not None
-        or effective_phase is not None
-    ):
+    if lease_expires_at is not None or effective_phase is not None:
         with worker.connect() as connection:
             connection.execute(
                 """
@@ -2177,9 +1820,7 @@ def test_deployment_claim_is_leased_and_one_time(
         candidate_commit=candidate_commit,
     )
 
-    claimed = worker.claim_deployment(
-        1
-    )
+    claimed = worker.claim_deployment(1)
 
     assert claimed["status"] == "deploying"
     assert claimed["deploy_lease_id"]
@@ -2192,9 +1833,7 @@ def test_deployment_claim_is_leased_and_one_time(
         worker.WorkerError,
         match="not available",
     ):
-        worker.claim_deployment(
-            1
-        )
+        worker.claim_deployment(1)
 
 
 def test_stale_deployment_before_merge_is_requeued(
@@ -2210,9 +1849,7 @@ def test_stale_deployment_before_merge_is_requeued(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
     )
 
     monkeypatch.setattr(
@@ -2251,9 +1888,7 @@ def test_stale_deployment_before_merge_is_requeued(
                 stdout=base,
             )
 
-        pytest.fail(
-            f"Unexpected command: {command}"
-        )
+        pytest.fail(f"Unexpected command: {command}")
 
     monkeypatch.setattr(
         worker,
@@ -2277,19 +1912,11 @@ def test_stale_deployment_before_merge_is_requeued(
 
     assert result == "requeued"
 
-    recovered = worker.fetch_candidate_by_id(
-        1
-    )
+    recovered = worker.fetch_candidate_by_id(1)
 
     assert recovered is not None
-    assert (
-        recovered["status"]
-        == "deploy_requested"
-    )
-    assert (
-        recovered["deploy_phase"]
-        == "recovered_requeued"
-    )
+    assert recovered["status"] == "deploy_requested"
+    assert recovered["deploy_phase"] == "recovered_requeued"
     assert recovered["deploy_lease_id"] is None
 
 
@@ -2307,9 +1934,7 @@ def test_stale_deployment_unknown_head_never_resets(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
     )
 
     monkeypatch.setattr(
@@ -2330,9 +1955,7 @@ def test_stale_deployment_unknown_head_never_resets(
         lambda *args, **kwargs: False,
     )
 
-    commands: list[
-        list[str]
-    ] = []
+    commands: list[list[str]] = []
 
     def fake_run(
         command: list[str],
@@ -2347,9 +1970,7 @@ def test_stale_deployment_unknown_head_never_resets(
         del check
         del env
 
-        commands.append(
-            command
-        )
+        commands.append(command)
 
         if command == [
             "git",
@@ -2362,9 +1983,7 @@ def test_stale_deployment_unknown_head_never_resets(
                 stdout=unexpected,
             )
 
-        pytest.fail(
-            f"Unexpected command: {command}"
-        )
+        pytest.fail(f"Unexpected command: {command}")
 
     monkeypatch.setattr(
         worker,
@@ -2389,9 +2008,7 @@ def test_stale_deployment_unknown_head_never_resets(
     assert result == "recovery_required"
 
     assert not any(
-        command[
-            :3
-        ]
+        command[:3]
         == [
             "git",
             "reset",
@@ -2400,28 +2017,17 @@ def test_stale_deployment_unknown_head_never_resets(
         for command in commands
     )
 
-    recovered = worker.fetch_candidate_by_id(
-        1
-    )
+    recovered = worker.fetch_candidate_by_id(1)
 
     assert recovered is not None
-    assert (
-        recovered["status"]
-        == "recovery_required"
-    )
-    assert (
-        recovered["deploy_phase"]
-        == "unexpected_head"
-    )
+    assert recovered["status"] == "recovery_required"
+    assert recovered["deploy_phase"] == "unexpected_head"
 
 
 def test_exact_reset_helper_uses_temporary_git_repository(
     tmp_path: Path,
 ) -> None:
-    repo = (
-        tmp_path
-        / "repo"
-    )
+    repo = tmp_path / "repo"
 
     repo.mkdir()
 
@@ -2459,10 +2065,7 @@ def test_exact_reset_helper_uses_temporary_git_repository(
         "Jarvis Test",
     )
 
-    file = (
-        repo
-        / "value.txt"
-    )
+    file = repo / "value.txt"
 
     file.write_text(
         "base\n",
@@ -2524,12 +2127,7 @@ def test_exact_reset_helper_uses_temporary_git_repository(
         == base
     )
 
-    assert (
-        file.read_text(
-            encoding="utf-8"
-        )
-        == "base\n"
-    )
+    assert file.read_text(encoding="utf-8") == "base\n"
 
 
 def test_run_once_prioritises_deployment_recovery(
@@ -2560,15 +2158,10 @@ def test_run_once_prioritises_deployment_recovery(
     def fake_fetch(
         statuses: tuple[str, ...],
     ) -> dict[str, object] | None:
-        if statuses == (
-            "deploying",
-        ):
+        if statuses == ("deploying",):
             return deploying
 
-        pytest.fail(
-            "run_once continued past interrupted "
-            f"deployment: {statuses}"
-        )
+        pytest.fail(f"run_once continued past interrupted deployment: {statuses}")
 
     monkeypatch.setattr(
         worker,
@@ -2587,26 +2180,18 @@ def test_run_once_prioritises_deployment_recovery(
     monkeypatch.setattr(
         worker,
         "recover_interrupted_deployment",
-        lambda candidate, *args: (
-            recovered.append(
-                int(
-                    candidate[
-                        "candidate_id"
-                    ]
-                )
-            )
-            or "requeued"
-        ),
+        lambda candidate, *args: recovered.append(int(candidate["candidate_id"])) or "requeued",
     )
 
-    assert worker.run_once(
-        cfg,
-        {},
-    ) is True
+    assert (
+        worker.run_once(
+            cfg,
+            {},
+        )
+        is True
+    )
 
-    assert recovered == [
-        44
-    ]
+    assert recovered == [44]
 
 
 def test_v2114b_recovery_claim_preserves_phase_and_fences_old_lease(
@@ -2622,9 +2207,7 @@ def test_v2114b_recovery_claim_preserves_phase_and_fences_old_lease(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
         phase="merging",
     )
 
@@ -2637,23 +2220,15 @@ def test_v2114b_recovery_claim_preserves_phase_and_fences_old_lease(
             SET deploy_lease_id = ?
             WHERE candidate_id = 1
             """,
-            (
-                old_lease,
-            ),
+            (old_lease,),
         )
 
-    claimed = worker.claim_stale_deployment_recovery(
-        1
-    )
+    claimed = worker.claim_stale_deployment_recovery(1)
 
     assert claimed is not None
     assert claimed["deploy_phase"] == "merging"
 
-    new_lease = str(
-        claimed[
-            "deploy_lease_id"
-        ]
-    )
+    new_lease = str(claimed["deploy_lease_id"])
 
     assert new_lease
     assert new_lease != old_lease
@@ -2708,9 +2283,7 @@ def test_v2114b_premerge_base_requeues_once(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
         phase=phase,
     )
 
@@ -2750,9 +2323,7 @@ def test_v2114b_premerge_base_requeues_once(
                 stdout=base,
             )
 
-        pytest.fail(
-            f"Unexpected command: {command}"
-        )
+        pytest.fail(f"Unexpected command: {command}")
 
     monkeypatch.setattr(
         worker,
@@ -2775,16 +2346,11 @@ def test_v2114b_premerge_base_requeues_once(
 
     assert first == "requeued"
 
-    recovered = worker.fetch_candidate_by_id(
-        1
-    )
+    recovered = worker.fetch_candidate_by_id(1)
 
     assert recovered is not None
     assert recovered["status"] == "deploy_requested"
-    assert (
-        recovered["deploy_phase"]
-        == "recovered_requeued"
-    )
+    assert recovered["deploy_phase"] == "recovered_requeued"
 
     second = worker.recover_interrupted_deployment(
         {
@@ -2827,9 +2393,7 @@ def test_v2114b_base_after_postmerge_never_redeploys(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
         phase=phase,
     )
 
@@ -2874,17 +2438,10 @@ def test_v2114b_base_after_postmerge_never_redeploys(
     monkeypatch.setattr(
         worker,
         "reset_repository_to_ref",
-        lambda ref, **kwargs: (
-            resets.append(
-                ref
-            )
-            or ref
-        ),
+        lambda ref, **kwargs: resets.append(ref) or ref,
     )
 
-    commands: list[
-        list[str]
-    ] = []
+    commands: list[list[str]] = []
 
     def fake_run(
         command: list[str],
@@ -2899,9 +2456,7 @@ def test_v2114b_base_after_postmerge_never_redeploys(
         del check
         del env
 
-        commands.append(
-            command
-        )
+        commands.append(command)
 
         if command == [
             "git",
@@ -2910,9 +2465,7 @@ def test_v2114b_base_after_postmerge_never_redeploys(
         ]:
             output = base
 
-        elif command[
-            :3
-        ] == [
+        elif command[:3] == [
             "docker",
             "compose",
             "up",
@@ -2920,9 +2473,7 @@ def test_v2114b_base_after_postmerge_never_redeploys(
             output = "rebuilt"
 
         else:
-            pytest.fail(
-                f"Unexpected command: {command}"
-            )
+            pytest.fail(f"Unexpected command: {command}")
 
         return subprocess.CompletedProcess(
             args=command,
@@ -2951,34 +2502,30 @@ def test_v2114b_base_after_postmerge_never_redeploys(
 
     assert result == "rolled_back"
 
-    recovered = worker.fetch_candidate_by_id(
-        1
-    )
+    recovered = worker.fetch_candidate_by_id(1)
 
     assert recovered is not None
     assert recovered["status"] == "rolled_back"
-    assert (
-        recovered["deploy_phase"]
-        == "interrupted_rolled_back"
-    )
+    assert recovered["deploy_phase"] == "interrupted_rolled_back"
 
     # HEAD was already at the exact base. Recovery verifies
     # the base runtime but must not reset or redeploy the
     # failed candidate.
     assert resets == []
 
-    assert sum(
-        1
-        for command in commands
-        if command[
-            :3
-        ]
-        == [
-            "docker",
-            "compose",
-            "up",
-        ]
-    ) == 1
+    assert (
+        sum(
+            1
+            for command in commands
+            if command[:3]
+            == [
+                "docker",
+                "compose",
+                "up",
+            ]
+        )
+        == 1
+    )
 
 
 def test_v2114b_candidate_head_rolls_back_exactly_once(
@@ -2994,9 +2541,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
         phase="verifying",
     )
 
@@ -3041,12 +2586,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
     monkeypatch.setattr(
         worker,
         "reset_repository_to_ref",
-        lambda ref, **kwargs: (
-            resets.append(
-                ref
-            )
-            or ref
-        ),
+        lambda ref, **kwargs: resets.append(ref) or ref,
     )
 
     def fake_run(
@@ -3069,9 +2609,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
         ]:
             output = candidate_commit
 
-        elif command[
-            :3
-        ] == [
+        elif command[:3] == [
             "docker",
             "compose",
             "up",
@@ -3079,9 +2617,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
             output = "rebuilt"
 
         else:
-            pytest.fail(
-                f"Unexpected command: {command}"
-            )
+            pytest.fail(f"Unexpected command: {command}")
 
         return subprocess.CompletedProcess(
             args=command,
@@ -3109,9 +2645,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
     )
 
     assert first == "rolled_back"
-    assert resets == [
-        base
-    ]
+    assert resets == [base]
 
     second = worker.recover_interrupted_deployment(
         {
@@ -3126,9 +2660,7 @@ def test_v2114b_candidate_head_rolls_back_exactly_once(
     assert second == "active"
 
     # Recovery is idempotent: the exact rollback happens once.
-    assert resets == [
-        base
-    ]
+    assert resets == [base]
 
 
 def test_v2114b_unknown_phase_fails_closed_even_on_base(
@@ -3144,9 +2676,7 @@ def test_v2114b_unknown_phase_fails_closed_even_on_base(
         status="deploying",
         base_commit=base,
         candidate_commit=candidate_commit,
-        lease_expires_at=worker.utc_after(
-            -60
-        ),
+        lease_expires_at=worker.utc_after(-60),
         phase="mystery_phase",
     )
 
@@ -3162,9 +2692,7 @@ def test_v2114b_unknown_phase_fails_closed_even_on_base(
         lambda *args, **kwargs: None,
     )
 
-    commands: list[
-        list[str]
-    ] = []
+    commands: list[list[str]] = []
 
     def fake_run(
         command: list[str],
@@ -3179,9 +2707,7 @@ def test_v2114b_unknown_phase_fails_closed_even_on_base(
         del check
         del env
 
-        commands.append(
-            command
-        )
+        commands.append(command)
 
         if command == [
             "git",
@@ -3194,9 +2720,7 @@ def test_v2114b_unknown_phase_fails_closed_even_on_base(
                 stdout=base,
             )
 
-        pytest.fail(
-            f"Unexpected command: {command}"
-        )
+        pytest.fail(f"Unexpected command: {command}")
 
     monkeypatch.setattr(
         worker,
@@ -3219,24 +2743,14 @@ def test_v2114b_unknown_phase_fails_closed_even_on_base(
 
     assert result == "recovery_required"
 
-    recovered = worker.fetch_candidate_by_id(
-        1
-    )
+    recovered = worker.fetch_candidate_by_id(1)
 
     assert recovered is not None
-    assert (
-        recovered["status"]
-        == "recovery_required"
-    )
-    assert (
-        recovered["deploy_phase"]
-        == "ambiguous_phase"
-    )
+    assert recovered["status"] == "recovery_required"
+    assert recovered["deploy_phase"] == "ambiguous_phase"
 
     assert not any(
-        command[
-            :3
-        ]
+        command[:3]
         in (
             [
                 "git",
@@ -3275,30 +2789,20 @@ def test_v2114b_active_lease_blocks_all_other_worker_work(
         "candidate_id": 77,
         "failure_id": 12,
         "status": "deploying",
-        "deploy_lease_expires_at": worker.utc_after(
-            300
-        ),
+        "deploy_lease_expires_at": worker.utc_after(300),
     }
 
-    fetches: list[
-        tuple[str, ...]
-    ] = []
+    fetches: list[tuple[str, ...]] = []
 
     def fake_fetch(
         statuses: tuple[str, ...],
     ) -> dict[str, object] | None:
-        fetches.append(
-            statuses
-        )
+        fetches.append(statuses)
 
-        if statuses == (
-            "deploying",
-        ):
+        if statuses == ("deploying",):
             return deploying
 
-        pytest.fail(
-            "Worker continued past an active deployment lease."
-        )
+        pytest.fail("Worker continued past an active deployment lease.")
 
     monkeypatch.setattr(
         worker,
@@ -3312,16 +2816,16 @@ def test_v2114b_active_lease_blocks_all_other_worker_work(
         lambda candidate: False,
     )
 
-    assert worker.run_once(
-        cfg,
-        {},
-    ) is False
-
-    assert fetches == [
-        (
-            "deploying",
+    assert (
+        worker.run_once(
+            cfg,
+            {},
         )
-    ]
+        is False
+    )
+
+    assert fetches == [("deploying",)]
+
 
 def test_normalise_unified_diff_repairs_hunk_counts() -> None:
     patch = """diff --git a/bridge/app/example.py b/bridge/app/example.py
@@ -3333,9 +2837,7 @@ def test_normalise_unified_diff_repairs_hunk_counts() -> None:
  context = True
 """
 
-    fixed = worker.normalise_unified_diff_hunk_counts(
-        patch
-    )
+    fixed = worker.normalise_unified_diff_hunk_counts(patch)
 
     assert "@@ -1,2 +1,2 @@" in fixed
     assert "-old = 1" in fixed
@@ -3356,16 +2858,10 @@ def test_build_context_balances_large_files(
             exist_ok=True,
         )
 
-    filler = "\n".join(
-        f"filler_{i} = {i}"
-        for i in range(1200)
-    )
+    filler = "\n".join(f"filler_{i} = {i}" for i in range(1200))
 
     (tmp_path / first).write_text(
-        filler
-        + "\ncompleted_calls = []\n"
-        + "for call in completed_calls:\n"
-        + "    pass\n",
+        filler + "\ncompleted_calls = []\n" + "for call in completed_calls:\n" + "    pass\n",
         encoding="utf-8",
     )
 
@@ -3421,7 +2917,6 @@ def test_build_context_balances_large_files(
     assert "await self.record_failure" in context
 
 
-
 def test_run_once_resumes_interrupted_manual_rollback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3460,9 +2955,7 @@ def test_run_once_resumes_interrupted_manual_rollback(
     monkeypatch.setattr(
         worker,
         "rollback_candidate",
-        lambda item, *args: processed.append(
-            int(item["candidate_id"])
-        ),
+        lambda item, *args: processed.append(int(item["candidate_id"])),
     )
 
     assert worker.run_once(cfg, {}) is True
@@ -3534,31 +3027,22 @@ def test_manual_rollback_resumes_after_reset(
     monkeypatch.setattr(
         worker,
         "reset_repository_to_ref",
-        lambda *args, **kwargs: pytest.fail(
-            "already-base recovery must not reset Git"
-        ),
+        lambda *args, **kwargs: pytest.fail("already-base recovery must not reset Git"),
     )
 
     def fake_run(command, **kwargs):
         del kwargs
         if command[:3] == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(
-                command, 0, stdout=base + "\n"
-            )
+            return subprocess.CompletedProcess(command, 0, stdout=base + "\n")
         if command[:3] == ["docker", "compose", "up"]:
-            return subprocess.CompletedProcess(
-                command, 0, stdout=""
-            )
+            return subprocess.CompletedProcess(command, 0, stdout="")
         pytest.fail(f"unexpected command: {command}")
 
     monkeypatch.setattr(worker, "run", fake_run)
 
     worker.rollback_candidate(candidate, cfg, {})
 
-    assert any(
-        item.get("status") == "rolled_back"
-        for item in updates
-    )
+    assert any(item.get("status") == "rolled_back" for item in updates)
 
 
 def test_manual_rollback_unexpected_head_fails_closed(
@@ -3611,9 +3095,7 @@ def test_manual_rollback_unexpected_head_fails_closed(
     monkeypatch.setattr(
         worker,
         "reset_repository_to_ref",
-        lambda *args, **kwargs: pytest.fail(
-            "unexpected HEAD must never be reset"
-        ),
+        lambda *args, **kwargs: pytest.fail("unexpected HEAD must never be reset"),
     )
     monkeypatch.setattr(
         worker,
@@ -3635,25 +3117,12 @@ def test_manual_rollback_unexpected_head_fails_closed(
             {},
         )
 
-    assert any(
-        item.get("status") == "recovery_required"
-        for item in updates
-    )
+    assert any(item.get("status") == "recovery_required" for item in updates)
 
 
 def test_manual_improvement_does_not_use_autonomous_quota() -> None:
-    assert (
-        worker.uses_autonomous_attempt_quota(
-            {"category": "requested_improvement"}
-        )
-        is False
-    )
-    assert (
-        worker.uses_autonomous_attempt_quota(
-            {"category": "general"}
-        )
-        is True
-    )
+    assert worker.uses_autonomous_attempt_quota({"category": "requested_improvement"}) is False
+    assert worker.uses_autonomous_attempt_quota({"category": "general"}) is True
 
 
 def test_attempts_today_excludes_manual_requests(
@@ -3665,13 +3134,7 @@ def test_attempts_today_excludes_manual_requests(
         tmp_path,
     )
 
-    today = (
-        worker.datetime.now(
-            worker.timezone.utc
-        )
-        .date()
-        .isoformat()
-    )
+    today = worker.datetime.now(worker.timezone.utc).date().isoformat()
 
     with worker.connect() as connection:
         for candidate_id, manual in (
@@ -3705,7 +3168,6 @@ def test_attempts_today_excludes_manual_requests(
             )
 
     assert worker.attempts_today() == 1
-
 
 
 def test_request_patch_includes_authoritative_source_context(
@@ -3758,10 +3220,7 @@ def test_request_patch_includes_authoritative_source_context(
         FakeOpenAI,
     )
 
-    marker = (
-        "AUTHORITATIVE_CONTEXT_MARKER_"
-        "candidate_source_must_reach_model"
-    )
+    marker = "AUTHORITATIVE_CONTEXT_MARKER_candidate_source_must_reach_model"
 
     failure = {
         "failure_id": 9001,
@@ -3788,29 +3247,19 @@ def test_request_patch_includes_authoritative_source_context(
         },
     )
 
-    prompt = captured[
-        "input"
-    ][0]["content"][0]["text"]
+    prompt = captured["input"][0]["content"][0]["text"]
 
     assert marker in prompt
     assert prompt.count(marker) == 1
-    assert (
-        "Authoritative repository source context:"
-        in prompt
-    )
-    assert (
-        "exact Git base commit"
-        in prompt
-    )
+    assert "Authoritative repository source context:" in prompt
+    assert "exact Git base commit" in prompt
 
 
 def test_build_context_reads_exact_base_commit_not_worktree(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    relative = Path(
-        "bridge/app/context_regression_probe.py"
-    )
+    relative = Path("bridge/app/context_regression_probe.py")
     target = tmp_path / relative
 
     target.parent.mkdir(
@@ -3841,18 +3290,11 @@ def test_build_context_reads_exact_base_commit_not_worktree(
         cwd=tmp_path,
     )
 
-    committed_marker = (
-        "COMMITTED_BASE_CONTEXT_MARKER"
-    )
-    worktree_marker = (
-        "UNCOMMITTED_WORKTREE_CONTEXT_MARKER"
-    )
+    committed_marker = "COMMITTED_BASE_CONTEXT_MARKER"
+    worktree_marker = "UNCOMMITTED_WORKTREE_CONTEXT_MARKER"
 
     target.write_text(
-        (
-            "voice_barge_in_context_marker = "
-            f"{committed_marker!r}\n"
-        ),
+        (f"voice_barge_in_context_marker = {committed_marker!r}\n"),
         encoding="utf-8",
     )
 
@@ -3876,10 +3318,7 @@ def test_build_context_reads_exact_base_commit_not_worktree(
     ).stdout.strip()
 
     target.write_text(
-        (
-            "voice_barge_in_context_marker = "
-            f"{worktree_marker!r}\n"
-        ),
+        (f"voice_barge_in_context_marker = {worktree_marker!r}\n"),
         encoding="utf-8",
     )
 
@@ -3891,16 +3330,12 @@ def test_build_context_reads_exact_base_commit_not_worktree(
     monkeypatch.setattr(
         worker,
         "infer_context_files",
-        lambda failure, policy: [
-            str(relative)
-        ],
+        lambda failure, policy: [str(relative)],
     )
 
     context, included = worker.build_context(
         {
-            "summary": (
-                "voice_barge_in_context_marker"
-            ),
+            "summary": ("voice_barge_in_context_marker"),
             "category": "requested_improvement",
             "evidence": {},
         },
@@ -3913,7 +3348,6 @@ def test_build_context_reads_exact_base_commit_not_worktree(
     assert included == [str(relative)]
     assert committed_marker in context
     assert worktree_marker not in context
-
 
 
 def test_infer_context_files_prioritises_keyword_subsystem(
@@ -3967,9 +3401,7 @@ def test_infer_context_files_prioritises_keyword_subsystem(
     result = worker.infer_context_files(
         {
             "category": "requested_improvement",
-            "summary": (
-                "Add true realtime voice barge-in"
-            ),
+            "summary": ("Add true realtime voice barge-in"),
             "evidence": {},
         },
         policy,
@@ -4028,9 +3460,7 @@ def test_request_patch_retry_includes_failed_patch(
             self,
             **kwargs,
         ):
-            captured.update(
-                kwargs
-            )
+            captured.update(kwargs)
             return Response()
 
     class FakeOpenAI:
@@ -4064,106 +3494,58 @@ def test_request_patch_retry_includes_failed_patch(
             "summary": "Retry regression",
             "evidence": {},
         },
-        context=(
-            "old_value = 1\n"
-        ),
-        context_files=[
-            "bridge/app/example.py"
-        ],
+        context=("old_value = 1\n"),
+        context_files=["bridge/app/example.py"],
         policy={
-            "allowed_edit_paths": [
-                "bridge/**"
-            ],
+            "allowed_edit_paths": ["bridge/**"],
             "forbidden_paths": [],
         },
         config=config(),
         env_values={
             "OPENAI_API_KEY": "test-key",
         },
-        previous_error=(
-            "patch does not apply"
-        ),
+        previous_error=("patch does not apply"),
         previous_patch=failed_patch,
     )
 
-    prompt = captured[
-        "input"
-    ][0]["content"][0]["text"]
+    prompt = captured["input"][0]["content"][0]["text"]
 
-    assert (
-        "patch does not apply"
-        in prompt
-    )
+    assert "patch does not apply" in prompt
 
-    assert (
-        "Previous failed patch "
-        "(REFERENCE ONLY — DO NOT COPY ITS CONTEXT):"
-        in prompt
-    )
+    assert "Previous failed patch (REFERENCE ONLY — DO NOT COPY ITS CONTEXT):" in prompt
 
-    assert (
-        "-old_value = 1"
-        in prompt
-    )
+    assert "-old_value = 1" in prompt
 
-    assert (
-        "copied exactly from that source"
-        in prompt
-    )
+    assert "copied exactly from that source" in prompt
 
 
 def test_candidate_validation_repair_is_bounded_and_uses_feedback() -> None:
     import inspect
 
-    source = inspect.getsource(
-        worker.process_queued_candidate
-    )
+    source = inspect.getsource(worker.process_queued_candidate)
 
-    assert source.count(
-        "validation_repair_used = False"
-    ) == 1
+    assert source.count("validation_repair_used = False") == 1
 
-    assert source.count(
-        "if validation_repair_used:"
-    ) == 1
+    assert source.count("if validation_repair_used:") == 1
 
-    assert (
-        'raise WorkerError(validation_error)'
-        in source
-    )
+    assert "raise WorkerError(validation_error)" in source
 
-    assert source.count(
-        '"candidate_validation_repair_started"'
-    ) == 1
+    assert source.count('"candidate_validation_repair_started"') == 1
 
-    assert (
-        'details={"repair_attempt": 1}'
-        in source
-    )
+    assert 'details={"repair_attempt": 1}' in source
 
-    assert (
-        "previous_error=validation_error"
-        in source
-    )
+    assert "previous_error=validation_error" in source
 
-    assert (
-        "previous_patch=failed_patch"
-        in source
-    )
+    assert "previous_patch=failed_patch" in source
 
-    assert (
-        'next_status = "awaiting_approval"'
-        in source
-    )
+    assert 'next_status = "awaiting_approval"' in source
 
 
 def test_apply_failure_source_feedback_uses_captured_base(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    relative = Path(
-        "bridge/app/apply_feedback_probe.py"
-    )
+    relative = Path("bridge/app/apply_feedback_probe.py")
     target = tmp_path / relative
 
     target.parent.mkdir(
@@ -4194,13 +3576,7 @@ def test_apply_failure_source_feedback_uses_captured_base(
         cwd=tmp_path,
     )
 
-    committed = (
-        "\n".join(
-            f"line_{index:02d}"
-            for index in range(1, 81)
-        )
-        + "\n"
-    )
+    committed = "\n".join(f"line_{index:02d}" for index in range(1, 81)) + "\n"
 
     target.write_text(
         committed,
@@ -4240,15 +3616,10 @@ def test_apply_failure_source_feedback_uses_captured_base(
         tmp_path,
     )
 
-    feedback = (
-        worker._apply_failure_source_feedback(
-            (
-                "error: patch failed: "
-                "bridge/app/apply_feedback_probe.py:40"
-            ),
-            base_commit,
-            radius=2,
-        )
+    feedback = worker._apply_failure_source_feedback(
+        ("error: patch failed: bridge/app/apply_feedback_probe.py:40"),
+        base_commit,
+        radius=2,
     )
 
     assert "EXACT BASE SOURCE" in feedback
@@ -4263,61 +3634,29 @@ def test_apply_failure_source_feedback_uses_captured_base(
 def test_apply_retry_uses_exact_base_source_feedback() -> None:
     import inspect
 
-    source = inspect.getsource(
-        worker.process_queued_candidate
-    )
+    source = inspect.getsource(worker.process_queued_candidate)
 
-    assert (
-        "source_feedback = "
-        in source
-    )
-    assert (
-        "_apply_failure_source_feedback("
-        in source
-    )
-    assert (
-        "generation_error += source_feedback"
-        in source
-    )
+    assert "source_feedback = " in source
+    assert "_apply_failure_source_feedback(" in source
+    assert "generation_error += source_feedback" in source
 
 
 def test_apply_retry_prioritises_exact_source_over_failed_patch() -> None:
     import inspect
 
-    source = inspect.getsource(
-        worker.request_patch
-    )
+    source = inspect.getsource(worker.request_patch)
 
-    failed_patch = source.index(
-        "Previous failed patch "
-    )
-    repair_rules = source.index(
-        "APPLY-FAILURE REPAIR RULES:"
-    )
-    authoritative_feedback = source.index(
-        "Failure feedback "
-    )
+    failed_patch = source.index("Previous failed patch ")
+    repair_rules = source.index("APPLY-FAILURE REPAIR RULES:")
+    authoritative_feedback = source.index("Failure feedback ")
 
-    assert (
-        failed_patch
-        < repair_rules
-        < authoritative_feedback
-    )
+    assert failed_patch < repair_rules < authoritative_feedback
 
-    assert (
-        "EXACT BASE SOURCE wins."
-        in source
-    )
+    assert "EXACT BASE SOURCE wins." in source
 
-    assert (
-        "character-for-character"
-        in source
-    )
+    assert "character-for-character" in source
 
-    assert (
-        "annotations only"
-        in source
-    )
+    assert "annotations only" in source
 
 
 def _make_structured_edit_repo(
@@ -4325,12 +3664,7 @@ def _make_structured_edit_repo(
     *,
     content: str = "alpha = 1\nbeta = 2\n",
 ):
-    target = (
-        tmp_path
-        / "bridge"
-        / "app"
-        / "example.py"
-    )
+    target = tmp_path / "bridge" / "app" / "example.py"
     target.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -4384,36 +3718,27 @@ def test_structured_edit_generates_git_owned_patch(
         tmp_path,
     )
 
-    patch, paths, patch_hash = (
-        worker.materialise_structured_edits(
-            tmp_path,
-            {
-                "edits": [
-                    {
-                        "path": (
-                            "bridge/app/example.py"
-                        ),
-                        "old_text": "alpha = 1",
-                        "new_text": "alpha = 2",
-                    },
-                ],
-            },
-            _structured_edit_policy(),
-            config(),
-        )
+    patch, paths, patch_hash = worker.materialise_structured_edits(
+        tmp_path,
+        {
+            "edits": [
+                {
+                    "path": ("bridge/app/example.py"),
+                    "old_text": "alpha = 1",
+                    "new_text": "alpha = 2",
+                },
+            ],
+        },
+        _structured_edit_policy(),
+        config(),
     )
 
-    assert paths == [
-        "bridge/app/example.py"
-    ]
+    assert paths == ["bridge/app/example.py"]
     assert "-alpha = 1" in patch
     assert "+alpha = 2" in patch
     assert patch_hash
 
-    patch_path = (
-        tmp_path
-        / "generated.patch"
-    )
+    patch_path = tmp_path / "generated.patch"
     patch_path.write_text(
         patch,
         encoding="utf-8",
@@ -4456,9 +3781,7 @@ def test_structured_edit_missing_old_text_fails_closed(
             {
                 "edits": [
                     {
-                        "path": (
-                            "bridge/app/example.py"
-                        ),
+                        "path": ("bridge/app/example.py"),
                         "old_text": "missing = 1",
                         "new_text": "missing = 2",
                     },
@@ -4474,10 +3797,7 @@ def test_structured_edit_duplicate_old_text_fails_closed(
 ) -> None:
     _make_structured_edit_repo(
         tmp_path,
-        content=(
-            "alpha = 1\n"
-            "alpha = 1\n"
-        ),
+        content=("alpha = 1\nalpha = 1\n"),
     )
 
     with pytest.raises(
@@ -4489,9 +3809,7 @@ def test_structured_edit_duplicate_old_text_fails_closed(
             {
                 "edits": [
                     {
-                        "path": (
-                            "bridge/app/example.py"
-                        ),
+                        "path": ("bridge/app/example.py"),
                         "old_text": "alpha = 1",
                         "new_text": "alpha = 2",
                     },
@@ -4505,12 +3823,7 @@ def test_structured_edit_duplicate_old_text_fails_closed(
 def test_structured_edit_forbidden_path_fails_closed(
     tmp_path,
 ) -> None:
-    target = (
-        tmp_path
-        / "bridge"
-        / "secret"
-        / "credentials.py"
-    )
+    target = tmp_path / "bridge" / "secret" / "credentials.py"
     target.parent.mkdir(
         parents=True,
         exist_ok=True,
@@ -4529,10 +3842,7 @@ def test_structured_edit_forbidden_path_fails_closed(
             {
                 "edits": [
                     {
-                        "path": (
-                            "bridge/secret/"
-                            "credentials.py"
-                        ),
+                        "path": ("bridge/secret/credentials.py"),
                         "old_text": "secret = 1",
                         "new_text": "secret = 2",
                     },
@@ -4546,36 +3856,13 @@ def test_structured_edit_forbidden_path_fails_closed(
 def test_candidate_generation_uses_structured_edits() -> None:
     import inspect
 
-    request_source = inspect.getsource(
-        worker.request_patch
-    )
-    process_source = inspect.getsource(
-        worker.process_queued_candidate
-    )
+    request_source = inspect.getsource(worker.request_patch)
+    process_source = inspect.getsource(worker.process_queued_candidate)
 
     assert '"edits": {' in request_source
-    assert (
-        '"patch": {"type": "string"}'
-        not in request_source
-    )
-    assert (
-        "structured edits"
-        in request_source
-    )
+    assert '"patch": {"type": "string"}' not in request_source
+    assert "structured edits" in request_source
 
-    assert (
-        process_source.count(
-            "materialise_structured_edits("
-        )
-        == 2
-    )
-    assert (
-        "normalise_unified_diff_hunk_counts("
-        not in process_source
-    )
-    assert (
-        process_source.count(
-            'payload["patch"] = patch'
-        )
-        == 2
-    )
+    assert process_source.count("materialise_structured_edits(") == 2
+    assert "normalise_unified_diff_hunk_counts(" not in process_source
+    assert process_source.count('payload["patch"] = patch') == 2

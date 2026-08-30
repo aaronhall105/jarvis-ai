@@ -56,9 +56,7 @@ class Alpha8ProactiveTest(unittest.TestCase):
         self.assertEqual("cycle_finished", result[0].kind)
 
     def test_duplicate_is_suppressed(self):
-        candidate = Candidate(
-            "system", "test", "sensor.test", "Test", "Message", "Reason", 85
-        )
+        candidate = Candidate("system", "test", "sensor.test", "Test", "Message", "Reason", 85)
 
         async def run():
             first = await self.engine.record(candidate)
@@ -71,14 +69,18 @@ class Alpha8ProactiveTest(unittest.TestCase):
     def test_quiet_hours_cross_midnight(self):
         settings = self.engine.default_settings("aaron")
         london = ZoneInfo("Europe/London")
-        self.assertTrue(self.engine.quiet(
-            settings,
-            datetime(2026, 7, 31, 3, 30, tzinfo=london),
-        ))
-        self.assertFalse(self.engine.quiet(
-            settings,
-            datetime(2026, 7, 31, 12, 0, tzinfo=london),
-        ))
+        self.assertTrue(
+            self.engine.quiet(
+                settings,
+                datetime(2026, 7, 31, 3, 30, tzinfo=london),
+            )
+        )
+        self.assertFalse(
+            self.engine.quiet(
+                settings,
+                datetime(2026, 7, 31, 12, 0, tzinfo=london),
+            )
+        )
 
     def test_lock_control_is_blocked(self):
         candidate = Candidate(
@@ -102,7 +104,6 @@ class Alpha8ProactiveTest(unittest.TestCase):
 
         asyncio.run(run())
 
-
     def test_invalid_saved_categories_fall_back_safely(self):
         self.engine.save_settings(
             SettingsModel(
@@ -112,8 +113,7 @@ class Alpha8ProactiveTest(unittest.TestCase):
         )
         with self.engine.connection() as connection:
             connection.execute(
-                "UPDATE proactive_settings "
-                "SET categories_json = ? WHERE user_id = ?",
+                "UPDATE proactive_settings SET categories_json = ? WHERE user_id = ?",
                 ("{invalid-json", "aaron"),
             )
 
@@ -144,7 +144,6 @@ class Alpha8ProactiveTest(unittest.TestCase):
             self.assertEqual("dismissed", updated["status"])
 
         asyncio.run(run())
-
 
 
 if __name__ == "__main__":

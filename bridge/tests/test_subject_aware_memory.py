@@ -249,6 +249,7 @@ async def test_migration_is_idempotent(tmp_path: Path) -> None:
     assert second_status["schema_version"] == 4
     assert second_status["total_count"] == 1
 
+
 @pytest.mark.asyncio
 async def test_legacy_surprise_about_amber_is_not_auto_shared(tmp_path: Path) -> None:
     database = tmp_path / "legacy_private.db"

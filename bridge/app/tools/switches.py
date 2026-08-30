@@ -35,7 +35,6 @@ class SwitchesTool(BaseHomeAssistantTool):
             service="turn_off",
         )
 
-
     async def turn_entity_on(
         self,
         entity_id: str,
@@ -62,13 +61,9 @@ class SwitchesTool(BaseHomeAssistantTool):
         turn_on: bool,
     ) -> dict[str, Any]:
         if turn_on:
-            return await self.turn_entity_on(
-                entity_id
-            )
+            return await self.turn_entity_on(entity_id)
 
-        return await self.turn_entity_off(
-            entity_id
-        )
+        return await self.turn_entity_off(entity_id)
 
     async def control(
         self,

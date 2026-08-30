@@ -42,9 +42,7 @@ class FakeClient:
             for state in self.states:
                 if state.get("entity_id") in (entity_ids or []):
                     state["state"] = "on"
-                    state.setdefault("attributes", {})["brightness"] = round(
-                        requested * 255 / 100
-                    )
+                    state.setdefault("attributes", {})["brightness"] = round(requested * 255 / 100)
 
 
 class FakeTools:
@@ -162,7 +160,12 @@ class CapabilityGroundingTests(unittest.IsolatedAsyncioTestCase):
         tools = FakeTools(
             [
                 state("light.bedroom_floodlight", "Bedroom Floodlight", "Bedroom", ["onoff"]),
-                state("light.living_room_floodlight", "Living Room Floodlight", "Living Room", ["brightness"]),
+                state(
+                    "light.living_room_floodlight",
+                    "Living Room Floodlight",
+                    "Living Room",
+                    ["brightness"],
+                ),
             ]
         )
         engine = CapabilityGroundingEngine(tools)

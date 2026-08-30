@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -196,15 +196,13 @@ class ProactiveOrchestrator:
             "",
         )
         self.security_occupancy_entities = {
-            value.strip()
-            for value in raw_security_entities.split(",")
-            if value.strip()
+            value.strip() for value in raw_security_entities.split(",") if value.strip()
         }
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._quiet_start = self._parse_clock(quiet_start, time(22, 30))
         self._quiet_end = self._parse_clock(quiet_end, time(7, 0))
         try:
-            self._timezone = ZoneInfo(timezone_name)
+            self._timezone: tzinfo = ZoneInfo(timezone_name)
             self.timezone_name = timezone_name
         except ZoneInfoNotFoundError:
             self._timezone = timezone.utc
@@ -405,7 +403,9 @@ class ProactiveOrchestrator:
                     alert_id,
                     action,
                     actor,
-                    json.dumps(details or {}, ensure_ascii=False, separators=(",", ":"), default=str),
+                    json.dumps(
+                        details or {}, ensure_ascii=False, separators=(",", ":"), default=str
+                    ),
                     self._iso(self._utc_now()),
                 ),
             )
@@ -743,7 +743,7 @@ class ProactiveOrchestrator:
         index = lower.find(marker)
         if index < 0:
             return None
-        tail = clean[index + len(marker):].strip().rstrip(".")
+        tail = clean[index + len(marker) :].strip().rstrip(".")
         tail = re.sub(r",?\s+and\s+", ", ", tail, flags=re.I)
         names = [item.strip() for item in tail.split(",") if item.strip()]
         filtered = [
@@ -1061,6 +1061,8 @@ class ProactiveOrchestrator:
                     (source_key,),
                 ).fetchone()
                 return int(row["alert_id"]) if row else None
+            if cursor.lastrowid is None:
+                raise RuntimeError("Proactive alert insert returned no identifier")
             return int(cursor.lastrowid)
 
     def _get_alert_sync(self, alert_id: int) -> dict[str, Any] | None:
@@ -1155,7 +1157,11 @@ class ProactiveOrchestrator:
             and str(alert["severity"]) in {"high", "critical"}
             and self.max_escalations > 0
         ):
-            delay = min(60, self.escalation_seconds) if str(alert["severity"]) == "critical" else self.escalation_seconds
+            delay = (
+                min(60, self.escalation_seconds)
+                if str(alert["severity"]) == "critical"
+                else self.escalation_seconds
+            )
             next_escalation = self._iso(now + timedelta(seconds=delay))
         status = "delivered" if delivered else "failed"
         reason = str(alert["reason"])
@@ -1181,7 +1187,9 @@ class ProactiveOrchestrator:
             try:
                 await self.awareness.mark_proactive_delivered(house_event_id)
             except Exception:
-                logger.exception("Could not mark House Awareness event delivered id=%s", house_event_id)
+                logger.exception(
+                    "Could not mark House Awareness event delivered id=%s", house_event_id
+                )
 
     async def _schedule_condition(
         self,
@@ -1304,7 +1312,9 @@ class ProactiveOrchestrator:
                 "importance": 90 if condition_type == "opening_open_long" else 85,
                 "payload": condition.get("payload") or {},
             }
-            await self._create_and_route_alert(synthetic, source_suffix=str(condition["condition_key"]))
+            await self._create_and_route_alert(
+                synthetic, source_suffix=str(condition["condition_key"])
+            )
             await asyncio.to_thread(
                 self._delete_condition_sync,
                 str(condition["condition_key"]),
@@ -1638,7 +1648,9 @@ class ProactiveOrchestrator:
 
     async def handle_command(self, text: str, actor: Any) -> ProactiveCommandResult:
         clean = text.strip()
-        actor_key = str(getattr(actor, "user_key", None) or getattr(actor, "display_name", None) or "user")
+        actor_key = str(
+            getattr(actor, "user_key", None) or getattr(actor, "display_name", None) or "user"
+        )
 
         if _ACTIVE_ALERTS_PATTERN.match(clean):
             alerts = [
@@ -1742,7 +1754,9 @@ class ProactiveOrchestrator:
                 actor=actor_key,
                 details={"recipient": recipient, "result": result},
             )
-            recipient_text = "both phones" if recipient == "both" else f"{recipient.title()}’s phone"
+            recipient_text = (
+                "both phones" if recipient == "both" else f"{recipient.title()}’s phone"
+            )
             return ProactiveCommandResult(
                 handled=True,
                 response=f"Sent to {recipient_text}.",
@@ -1756,7 +1770,9 @@ class ProactiveOrchestrator:
         def counts() -> dict[str, int]:
             with self._connect() as connection:
                 result = {
-                    "total": int(connection.execute("SELECT COUNT(*) FROM proactive_alerts").fetchone()[0]),
+                    "total": int(
+                        connection.execute("SELECT COUNT(*) FROM proactive_alerts").fetchone()[0]
+                    ),
                     "active": int(
                         connection.execute(
                             """
@@ -1770,7 +1786,11 @@ class ProactiveOrchestrator:
                             tuple(sorted(self.PERSISTENT_EVENT_TYPES)),
                         ).fetchone()[0]
                     ),
-                    "conditions": int(connection.execute("SELECT COUNT(*) FROM proactive_conditions").fetchone()[0]),
+                    "conditions": int(
+                        connection.execute("SELECT COUNT(*) FROM proactive_conditions").fetchone()[
+                            0
+                        ]
+                    ),
                     "suppressions": int(
                         connection.execute(
                             "SELECT COUNT(*) FROM proactive_suppressions WHERE until_at > ?",

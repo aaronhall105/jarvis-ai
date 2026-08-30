@@ -2,8 +2,9 @@ name: CodeQL
 
 on:
   push:
-    branches: [main, jarvis/unified-production]
+    branches: [jarvis/unified-production]
   pull_request:
+    branches: [jarvis/unified-production]
   schedule:
     - cron: "17 4 * * 1"
 

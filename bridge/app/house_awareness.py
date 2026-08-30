@@ -252,14 +252,10 @@ class HouseAwarenessEngine:
             if item.get("area_id") or item.get("id")
         }
         self._device_meta = {
-            str(item.get("id")): item
-            for item in snapshot.devices
-            if item.get("id")
+            str(item.get("id")): item for item in snapshot.devices if item.get("id")
         }
         self._entity_meta = {
-            str(item.get("entity_id")): item
-            for item in snapshot.entities
-            if item.get("entity_id")
+            str(item.get("entity_id")): item for item in snapshot.entities if item.get("entity_id")
         }
 
         try:
@@ -284,18 +280,12 @@ class HouseAwarenessEngine:
         each consumer poll is unnecessary. Copy only the container;
         retain the immutable-by-convention state object references.
         """
-        return [
-            item
-            for item in self._state_cache.values()
-            if isinstance(item, dict)
-        ]
+        return [item for item in self._state_cache.values() if isinstance(item, dict)]
 
     async def _seed_state_cache(self) -> None:
         states = await self.client.get_states()
         self._state_cache = {
-            str(item.get("entity_id")): item
-            for item in states
-            if item.get("entity_id")
+            str(item.get("entity_id")): item for item in states if item.get("entity_id")
         }
         logger.info("House Awareness seeded %d entity states", len(self._state_cache))
 
@@ -396,8 +386,7 @@ class HouseAwarenessEngine:
         if (
             event.event_type != "safety_alert"
             and self._last_proactive_at is not None
-            and (now - self._last_proactive_at).total_seconds()
-            < self.proactive_cooldown_seconds
+            and (now - self._last_proactive_at).total_seconds() < self.proactive_cooldown_seconds
         ):
             return
 
@@ -431,11 +420,7 @@ class HouseAwarenessEngine:
         entity_registry = self._entity_meta.get(entity_id, {})
         device = self._device_meta.get(str(entity_registry.get("device_id") or ""), {})
         attributes = new_state.get("attributes") or {}
-        area_id = str(
-            entity_registry.get("area_id")
-            or device.get("area_id")
-            or ""
-        ) or None
+        area_id = str(entity_registry.get("area_id") or device.get("area_id") or "") or None
         area_name = self._area_names.get(area_id or "") or None
         friendly_name = str(
             attributes.get("friendly_name")
@@ -446,11 +431,10 @@ class HouseAwarenessEngine:
             or entity_id.split(".", 1)[-1]
         )
         device_name = str(device.get("name_by_user") or device.get("name") or "") or None
-        entity_category = str(
-            entity_registry.get("entity_category")
-            or attributes.get("entity_category")
-            or ""
-        ) or None
+        entity_category = (
+            str(entity_registry.get("entity_category") or attributes.get("entity_category") or "")
+            or None
+        )
         return {
             "area_id": area_id,
             "area_name": area_name,
@@ -510,7 +494,13 @@ class HouseAwarenessEngine:
 
         if domain == "person":
             category = "presence"
-            person_key = "amber" if "amber" in combined else "aaron" if "aaron" in combined else self._normalise(name).replace(" ", "_")
+            person_key = (
+                "amber"
+                if "amber" in combined
+                else "aaron"
+                if "aaron" in combined
+                else self._normalise(name).replace(" ", "_")
+            )
             if new_key == "home" and old_key != "home":
                 event_type = "person_arrived"
                 summary = f"{name} arrived home."
@@ -571,7 +561,12 @@ class HouseAwarenessEngine:
                 event_type = "media_paused"
                 summary = f"{name} was paused."
                 importance = 30
-            elif old_key in {"playing", "paused", "buffering", "on"} and new_key in {"idle", "off", "standby", "unavailable"}:
+            elif old_key in {"playing", "paused", "buffering", "on"} and new_key in {
+                "idle",
+                "off",
+                "standby",
+                "unavailable",
+            }:
                 event_type = "media_stopped"
                 summary = f"{name} stopped."
                 importance = 30
@@ -657,7 +652,11 @@ class HouseAwarenessEngine:
             return None
 
         context = raw_event.get("context") or {}
-        occurred_at = str(raw_event.get("time_fired") or new_state.get("last_changed") or self._iso(self._utc_now()))
+        occurred_at = str(
+            raw_event.get("time_fired")
+            or new_state.get("last_changed")
+            or self._iso(self._utc_now())
+        )
         parsed = self._parse_time(occurred_at) or self._utc_now()
         proactive_candidate = importance >= self.proactive_min_importance
         payload = {
@@ -667,7 +666,8 @@ class HouseAwarenessEngine:
             "attributes": {
                 key: value
                 for key, value in (new_state.get("attributes") or {}).items()
-                if key in {
+                if key
+                in {
                     "friendly_name",
                     "device_class",
                     "unit_of_measurement",
@@ -740,9 +740,13 @@ class HouseAwarenessEngine:
                     int(event.user_visible),
                     int(event.proactive_candidate),
                     event.context_user_id,
-                    json.dumps(event.payload, ensure_ascii=False, separators=(",", ":"), default=str),
+                    json.dumps(
+                        event.payload, ensure_ascii=False, separators=(",", ":"), default=str
+                    ),
                 ),
             )
+            if cursor.lastrowid is None:
+                raise RuntimeError("House event insert returned no identifier")
             return int(cursor.lastrowid)
 
     def _prune_sync(self) -> None:
@@ -1012,19 +1016,23 @@ class HouseAwarenessEngine:
             public["summary_status"] = self.tools._area_summary_status(entity)
             key = f"{entity.get('area_id') or ''}:{self.tools._area_summary_key(entity)}"
             current = selected.get(key)
-            if current is None or self.tools._area_summary_priority(public) < self.tools._area_summary_priority(current):
+            if current is None or self.tools._area_summary_priority(
+                public
+            ) < self.tools._area_summary_priority(current):
                 selected[key] = public
 
         entities = sorted(selected.values(), key=self.tools._area_summary_priority)
-        calls = [{
-            "tool": "list_active_home_devices",
-            "arguments": {},
-            "result": {
-                "success": True,
-                "count": len(entities),
-                "entities": entities,
-            },
-        }]
+        calls = [
+            {
+                "tool": "list_active_home_devices",
+                "arguments": {},
+                "result": {
+                    "success": True,
+                    "count": len(entities),
+                    "entities": entities,
+                },
+            }
+        ]
         if not entities:
             return "Nothing user-facing appears to be left on in the flat.", calls
 
@@ -1033,8 +1041,10 @@ class HouseAwarenessEngine:
             name = str(entity.get("name") or entity.get("entity_id") or "Device")
             area = str(entity.get("area_name") or "")
             if area and name.casefold().startswith(area.casefold() + " "):
-                name = name[len(area):].strip()
-            if str(entity.get("domain") or "") == "media_player" and re.search(r"\b(?:tv|television)\b", name, re.I):
+                name = name[len(area) :].strip()
+            if str(entity.get("domain") or "") == "media_player" and re.search(
+                r"\b(?:tv|television)\b", name, re.I
+            ):
                 name = "TV"
             labels.append(f"{area} {name}".strip())
 
@@ -1047,7 +1057,10 @@ class HouseAwarenessEngine:
 
     async def context_for_model(self, user_text: str, *, minutes: int = 30) -> str:
         text = self._normalise(user_text)
-        if not re.search(r"\b(?:just|recent|recently|earlier|changed|happened|arrived|left|got home|went out|while i was out|while we were out)\b", text):
+        if not re.search(
+            r"\b(?:just|recent|recently|earlier|changed|happened|arrived|left|got home|went out|while i was out|while we were out)\b",
+            text,
+        ):
             return ""
         events = await self.recent_events(minutes=minutes, limit=12, min_importance=25)
         if not events:
@@ -1067,7 +1080,9 @@ class HouseAwarenessEngine:
             start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         elif "overnight" in normalised:
             if now_local.hour < 12:
-                start_local = (now_local - timedelta(days=1)).replace(hour=22, minute=0, second=0, microsecond=0)
+                start_local = (now_local - timedelta(days=1)).replace(
+                    hour=22, minute=0, second=0, microsecond=0
+                )
             else:
                 start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         else:

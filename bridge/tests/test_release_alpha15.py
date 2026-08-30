@@ -1,13 +1,20 @@
+from app.main import _liveness_payload
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 from app.realtime_voice import CORE_APPLICATION_VERSION as VOICE_CORE_VERSION
 from app.realtime_voice import VERSION, speak_response_event
 
 
 def test_authoritative_release_identity() -> None:
-    assert JARVIS_RELEASE == "19.0.0-alpha21"
+    assert JARVIS_RELEASE == "19.0.0-alpha23"
     assert VERSION == JARVIS_RELEASE
     assert VOICE_CORE_VERSION == CORE_APPLICATION_VERSION
     assert REALTIME_PROTOCOL_VERSION >= 2
+
+
+def test_health_reports_exact_build_source(monkeypatch) -> None:
+    source = "0123456789abcdef0123456789abcdef01234567"
+    monkeypatch.setenv("JARVIS_SOURCE_SHA", source)
+    assert _liveness_payload()["source_commit"] == source
 
 
 def test_openai_renderer_response_has_immutable_turn_metadata() -> None:

@@ -1,6 +1,6 @@
 # Jarvis AI
 
-[![Jarvis CI](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml/badge.svg?branch=conversation-engine)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml)
+[![Jarvis CI](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml/badge.svg?branch=jarvis%2Funified-production)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml)
 [![Android OTA release](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml/badge.svg)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml)
 [![Release](https://img.shields.io/badge/release-v19.0.0--alpha13-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13)
 
@@ -65,7 +65,7 @@ deployment model.
 
 ```bash
 git clone \
-  --branch conversation-engine \
+  --branch jarvis/unified-production \
   https://github.com/aaronhall105/jarvis-ai.git
 
 cd jarvis-ai

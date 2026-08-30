@@ -4,15 +4,21 @@ Jarvis 19.0.0-alpha15 is the one-time updater bootstrap. Alpha14 has no updater 
 
 ## Trusted distribution
 
-Production builds read only these public HTTPS feeds from the repository's `ota-feeds` branch:
+Production builds read only public HTTPS manifests attached to dedicated GitHub
+Release channel endpoints:
 
-- `feeds/alpha.json`: stable, beta, or alpha; newest eligible release wins
-- `feeds/beta.json`: stable or beta, never alpha
-- `feeds/stable.json`: stable only
+- `jarvis-alpha-feed/update-manifest.json`: stable, beta, or alpha
+- `jarvis-beta-feed/update-manifest.json`: stable or beta, never alpha
+- `jarvis-stable-feed/update-manifest.json`: stable only
 
 Each feed identifies one validated GitHub Release APK and includes its version name/code, SHA-256, byte size, channel, release notes, publication time, minimum SDK/protocol, commit SHA, and tag. The app rejects non-HTTPS downloads, malformed metadata, an older/equal version, package/version mismatches, and signing identities that do not match the installed Jarvis package.
 
-Only the tag-triggered `Jarvis Android OTA release` workflow can update feeds. It tests first, builds once, signs that build, verifies it, generates the checksum and manifest from those exact bytes, publishes those same bytes, and only then advances eligible feeds. Ordinary pushes never become OTA releases.
+Only the tag-triggered `Jarvis Android OTA release` workflow can replace these
+release assets. It tests first, builds phone and Watch once from the same
+unified source commit, signs those builds, verifies them, generates checksums
+and product/OTA manifests from those exact bytes, publishes those same bytes,
+and only then advances eligible channels. No development branch stores mutable
+OTA state, and ordinary pushes never become OTA releases.
 
 ## Stable signing identity
 
@@ -38,8 +44,10 @@ All Alpha15 and later alpha, beta, stable, and recovery APKs must use this ident
 2. Add release notes and deterministic tests. Test a fixture manifest or mock server; production has no configurable arbitrary feed.
 3. Push normally and wait for branch CI.
 4. Create the approved tag `v19.0.0-alpha16` (or a beta/stable semantic tag) on the exact validated commit and push the tag.
-5. The OTA workflow revalidates, signs, verifies, publishes the GitHub prerelease/release, then advances channel feeds.
-6. Confirm the release APK digest, manifest digest/size/commit/tag, certificate fingerprint, and successful workflow before announcing availability.
+5. The OTA workflow revalidates, signs, verifies, publishes the unified GitHub
+   prerelease/release, then advances the release-hosted channel asset.
+6. Confirm phone and Watch digests, product and OTA manifest source SHAs,
+   certificate fingerprints, and successful workflow before announcing availability.
 
 Do not manually advance a feed to a build that did not pass this pipeline. A failed test, signing step, build, or verification leaves feeds unchanged.
 

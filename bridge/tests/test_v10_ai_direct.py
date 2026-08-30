@@ -23,8 +23,11 @@ class DirectStateTests(unittest.IsolatedAsyncioTestCase):
         engine = AIEngine.__new__(AIEngine)
         engine.tools = FakeTools()
         actor = UserContext.from_request(
-            user_id="aaron", user_name="Aaron", user_is_admin=True,
-            device_id=None, voice_mode=False,
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=False,
         )
         reply = await engine._direct_person_location_reply("where is Amber", actor)
         self.assertIsNotNone(reply)

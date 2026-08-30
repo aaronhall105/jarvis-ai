@@ -7,7 +7,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -243,7 +243,7 @@ class ConditionalActionEngine:
         self.notify_failures = bool(notify_failures)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         try:
-            self._timezone = ZoneInfo(timezone_name)
+            self._timezone: tzinfo = ZoneInfo(timezone_name)
             self.timezone_name = timezone_name
         except ZoneInfoNotFoundError:
             self._timezone = timezone.utc
@@ -564,7 +564,7 @@ class ConditionalActionEngine:
             rows = connection.execute(
                 f"""
                 SELECT r.* FROM conditional_rule_runs AS r
-                WHERE {' AND '.join(clauses)}
+                WHERE {" AND ".join(clauses)}
                 ORDER BY r.triggered_at DESC, r.run_id DESC
                 LIMIT ?
                 """,
@@ -978,6 +978,7 @@ class ConditionalActionEngine:
             return minute >= start_i or minute < end_i
         if start is not None:
             return minute >= int(start)
+        assert end is not None
         return minute < int(end)
 
     @classmethod
@@ -1056,7 +1057,9 @@ class ConditionalActionEngine:
         clear_candidate: bool,
         error: str | None,
     ) -> None:
-        candidate_sql = ", candidate_state_json=NULL, candidate_since=NULL" if clear_candidate else ""
+        candidate_sql = (
+            ", candidate_state_json=NULL, candidate_since=NULL" if clear_candidate else ""
+        )
         with self._connection() as connection:
             connection.execute(
                 f"""
@@ -1173,11 +1176,15 @@ class ConditionalActionEngine:
             if verified is False and not result.get("command_accepted"):
                 success = False
             status = "completed" if success else "failed"
-            error = None if success else str(
-                result.get("response_message")
-                or result.get("message")
-                or result.get("error")
-                or "Conditional action failed."
+            error = (
+                None
+                if success
+                else str(
+                    result.get("response_message")
+                    or result.get("message")
+                    or result.get("error")
+                    or "Conditional action failed."
+                )
             )
         except Exception as exc:  # pragma: no cover - defensive execution guard
             logger.exception("Conditional rule %s failed", rule_id)
@@ -1186,7 +1193,9 @@ class ConditionalActionEngine:
             error = str(exc)
 
         completed_at = self._iso(self._utc_now())
-        final_rule_status = "completed" if status == "completed" and rule.get("one_shot") else "active"
+        final_rule_status = (
+            "completed" if status == "completed" and rule.get("one_shot") else "active"
+        )
         with self._connection() as connection:
             connection.execute(
                 """
@@ -1299,11 +1308,16 @@ class ConditionalActionEngine:
             return plan
 
         condition_text = self._normalise(match.group("condition"))
-        state_match = re.search(r"\b(?:is|are|stays?|still)\s+(?:still\s+)?(?P<state>on|off|open|closed|home|not home)\b", condition_text)
+        state_match = re.search(
+            r"\b(?:is|are|stays?|still)\s+(?:still\s+)?(?P<state>on|off|open|closed|home|not home)\b",
+            condition_text,
+        )
         if not state_match:
             return "The timed condition must name an exact state, such as ‘if it is still on’."
         target_state = state_match.group("state")
-        target_state = {"open": "on", "closed": "off", "not home": "not_home"}.get(target_state, target_state)
+        target_state = {"open": "on", "closed": "off", "not home": "not_home"}.get(
+            target_state, target_state
+        )
 
         entity_id: str | None = None
         entity_name: str | None = None
@@ -1360,7 +1374,7 @@ class ConditionalActionEngine:
         if not prefix_match:
             return None
         one_shot = prefix_match.group("prefix").casefold().startswith("next")
-        remainder = text[prefix_match.end():].strip()
+        remainder = text[prefix_match.end() :].strip()
 
         cooldown_seconds = self.default_cooldown_seconds
         cooldown_match = _COOLDOWN_PATTERN.search(remainder)
@@ -1368,7 +1382,9 @@ class ConditionalActionEngine:
             cooldown_seconds = self._duration_seconds(
                 cooldown_match.group("amount"), cooldown_match.group("unit")
             )
-            remainder = self._clean(remainder[:cooldown_match.start()] + " " + remainder[cooldown_match.end():])
+            remainder = self._clean(
+                remainder[: cooldown_match.start()] + " " + remainder[cooldown_match.end() :]
+            )
 
         split = self._split_trigger_action(remainder)
         if split is None:
@@ -1381,7 +1397,7 @@ class ConditionalActionEngine:
             debounce_seconds = self._duration_seconds(
                 debounce_match.group("amount"), debounce_match.group("unit")
             )
-            trigger_text = self._clean(trigger_text[:debounce_match.start()])
+            trigger_text = self._clean(trigger_text[: debounce_match.start()])
 
         start_minute, end_minute, trigger_text = self._extract_window(trigger_text)
         return ParsedRule(
@@ -1399,14 +1415,14 @@ class ConditionalActionEngine:
             index = value.casefold().find(separator)
             if index > 0:
                 left = self._clean(value[:index])
-                right = self._clean(value[index + len(separator):])
+                right = self._clean(value[index + len(separator) :])
                 if left and right:
                     return left, right
         matches = list(_ACTION_START_PATTERN.finditer(value))
         if matches:
             match = matches[-1]
-            left = self._clean(value[:match.start()])
-            right = self._clean(value[match.end():])
+            left = self._clean(value[: match.start()])
+            right = self._clean(value[match.end() :])
             if left and right:
                 return left, right
         return None
@@ -1428,19 +1444,23 @@ class ConditionalActionEngine:
             end = self._clock_minute(match.group("end"))
             if start is None or end is None:
                 return None, None, trigger_text
-            cleaned = self._clean(trigger_text[:match.start()] + " " + trigger_text[match.end():])
+            cleaned = self._clean(trigger_text[: match.start()] + " " + trigger_text[match.end() :])
             return start, end, cleaned
         match = _AFTER_WINDOW_PATTERN.search(trigger_text)
         if match:
             start = self._clock_minute(match.group("start"))
             if start is not None:
-                cleaned = self._clean(trigger_text[:match.start()] + " " + trigger_text[match.end():])
+                cleaned = self._clean(
+                    trigger_text[: match.start()] + " " + trigger_text[match.end() :]
+                )
                 return start, None, cleaned
         match = _BEFORE_WINDOW_PATTERN.search(trigger_text)
         if match:
             end = self._clock_minute(match.group("end"))
             if end is not None:
-                cleaned = self._clean(trigger_text[:match.start()] + " " + trigger_text[match.end():])
+                cleaned = self._clean(
+                    trigger_text[: match.start()] + " " + trigger_text[match.end() :]
+                )
                 return None, end, cleaned
         return None, None, trigger_text
 
@@ -1504,7 +1524,11 @@ class ConditionalActionEngine:
             trigger_type = "numeric_below" if direction in {"below", "under"} else "numeric_above"
             word = "below" if trigger_type == "numeric_below" else "above"
             unit = match.group("unit") or entity.get("unit") or ""
-            rendered = f"{threshold:g}{unit}" if unit in {"%", "°C", "°F"} else f"{threshold:g}{(' ' + unit) if unit else ''}"
+            rendered = (
+                f"{threshold:g}{unit}"
+                if unit in {"%", "°C", "°F"}
+                else f"{threshold:g}{(' ' + unit) if unit else ''}"
+            )
             return TriggerSpec(
                 trigger_type=trigger_type,
                 entity_id=str(entity["entity_id"]),
@@ -1522,13 +1546,17 @@ class ConditionalActionEngine:
                 return entity
             if verb in {"turn on", "turns on", "open", "opens", "start", "starts"}:
                 states = ["on"]
-                display = "turns on" if "turn" in verb else ("opens" if "open" in verb else "starts")
+                display = (
+                    "turns on" if "turn" in verb else ("opens" if "open" in verb else "starts")
+                )
             elif verb in {"finish", "finishes", "complete", "completes"}:
                 states = ["finished", "complete", "completed", "idle", "off"]
                 display = "finishes"
             else:
                 states = ["off"]
-                display = "turns off" if "turn" in verb else ("closes" if "close" in verb else "stops")
+                display = (
+                    "turns off" if "turn" in verb else ("closes" if "close" in verb else "stops")
+                )
             return TriggerSpec(
                 trigger_type="state_in",
                 entity_id=str(entity["entity_id"]),
@@ -1573,23 +1601,19 @@ class ConditionalActionEngine:
         exact = [
             item
             for item in entities
-            if query_key in {
+            if query_key
+            in {
                 self._normalise(str(item.get("name") or "")),
                 self._normalise(str(item.get("entity_id") or "")),
             }
         ]
         matches = exact if exact else entities
-        unique = {
-            str(item.get("entity_id")): item
-            for item in matches
-            if item.get("entity_id")
-        }
+        unique = {str(item.get("entity_id")): item for item in matches if item.get("entity_id")}
         if len(unique) == 1:
             return next(iter(unique.values()))
         if len(unique) > 1:
             names = [
-                str(item.get("name") or item.get("entity_id"))
-                for item in list(unique.values())[:4]
+                str(item.get("name") or item.get("entity_id")) for item in list(unique.values())[:4]
             ]
             return (
                 "I found more than one matching trigger entity — "
@@ -1606,7 +1630,9 @@ class ConditionalActionEngine:
     ) -> ActionPlan | str:
         match = _NOTIFY_ACTION_PATTERN.match(self._clean(action_text))
         if match:
-            recipient_text = (match.group("recipient") or match.group("recipient_alt") or "me").casefold()
+            recipient_text = (
+                match.group("recipient") or match.group("recipient_alt") or "me"
+            ).casefold()
             recipient = actor.user_key if recipient_text == "me" else recipient_text
             if recipient != actor.user_key:
                 return "For privacy, a voice-created conditional rule can only notify its owner."
@@ -1627,11 +1653,13 @@ class ConditionalActionEngine:
     def _window_description(start: int | None, end: int | None) -> str:
         if start is None and end is None:
             return ""
+
         def render(value: int) -> str:
             hour, minute = divmod(value, 60)
             suffix = "am" if hour < 12 else "pm"
             hour12 = hour % 12 or 12
             return f"{hour12}:{minute:02d} {suffix}" if minute else f"{hour12} {suffix}"
+
         if start is not None and end is not None:
             return f" between {render(start)} and {render(end)}"
         if start is not None:
@@ -1747,12 +1775,19 @@ class ConditionalActionEngine:
                         response=f"I couldn’t {verb.casefold()} rule {rule_id}.",
                         intent="condition_manage",
                     )
-                rule = await self.get_rule(rule_id)
+                managed_rule = await self.get_rule(rule_id)
+                if managed_rule is None:
+                    return TaskCommandResult(
+                        handled=True,
+                        success=False,
+                        response=f"Rule {rule_id} was updated but is no longer available.",
+                        intent="condition_manage",
+                    )
                 return TaskCommandResult(
                     handled=True,
-                    response=f"{verb} rule {rule_id}: {rule['trigger_summary']}.",
+                    response=f"{verb} rule {rule_id}: {managed_rule['trigger_summary']}.",
                     intent="condition_manage",
-                    details={"rule": rule},
+                    details={"rule": managed_rule},
                 )
 
         match = _CHANGE_COOLDOWN_PATTERN.match(value)
@@ -1875,54 +1910,57 @@ class ConditionalActionEngine:
                 intent="condition_create",
             )
 
-        trigger = await self._resolve_trigger(parsed.trigger_text)
-        if isinstance(trigger, str):
+        resolved_trigger = await self._resolve_trigger(parsed.trigger_text)
+        if isinstance(resolved_trigger, str):
             return TaskCommandResult(
                 handled=True,
                 success=False,
-                response=trigger,
+                response=resolved_trigger,
                 intent="condition_create",
             )
-        plan = await self._resolve_action(parsed.action_text, actor, trigger)
-        if isinstance(plan, str):
+        resolved_plan = await self._resolve_action(parsed.action_text, actor, resolved_trigger)
+        if isinstance(resolved_plan, str):
             return TaskCommandResult(
                 handled=True,
                 success=False,
-                response=plan,
+                response=resolved_plan,
                 intent="condition_create",
             )
 
         current_result = await self.tools.search_entity_states(
-            trigger.entity_id,
+            resolved_trigger.entity_id,
             limit=2,
         )
-        baseline = next(
+        resolved_baseline: dict[str, Any] | None = next(
             (
                 item
                 for item in current_result.get("entities", [])
-                if item.get("entity_id") == trigger.entity_id
+                if item.get("entity_id") == resolved_trigger.entity_id
             ),
             None,
         )
-        if baseline is None:
+        if resolved_baseline is None:
             return TaskCommandResult(
                 handled=True,
                 success=False,
-                response=f"{trigger.entity_name} is not currently readable, so I didn’t create the rule.",
+                response=(
+                    f"{resolved_trigger.entity_name} is not currently readable, "
+                    "so I didn’t create the rule."
+                ),
                 intent="condition_create",
             )
 
         rule, created = await self.create_rule(
             actor=actor,
             source_text=text,
-            trigger=trigger,
-            plan=plan,
+            trigger=resolved_trigger,
+            plan=resolved_plan,
             one_shot=parsed.one_shot,
             cooldown_seconds=parsed.cooldown_seconds,
             debounce_seconds=parsed.debounce_seconds,
             window_start_minute=parsed.window_start_minute,
             window_end_minute=parsed.window_end_minute,
-            baseline=baseline,
+            baseline=resolved_baseline,
         )
         if not created:
             return TaskCommandResult(
@@ -1940,8 +1978,8 @@ class ConditionalActionEngine:
         return TaskCommandResult(
             handled=True,
             response=(
-                f"Okay. Rule {rule['rule_id']} will {plan.summary} when "
-                f"{trigger.summary}{window}, {mode}."
+                f"Okay. Rule {rule['rule_id']} will {resolved_plan.summary} when "
+                f"{resolved_trigger.summary}{window}, {mode}."
             ),
             intent="condition_create",
             details={"rule": rule},

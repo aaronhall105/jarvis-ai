@@ -72,10 +72,7 @@ def utc_now() -> str:
 def utc_after(
     seconds: int,
 ) -> str:
-    return (
-        datetime.now(timezone.utc)
-        + timedelta(seconds=seconds)
-    ).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
 def timestamp_expired(
@@ -83,33 +80,20 @@ def timestamp_expired(
     *,
     missing_is_expired: bool = True,
 ) -> bool:
-    raw = str(
-        value or ""
-    ).strip()
+    raw = str(value or "").strip()
 
     if not raw:
         return missing_is_expired
 
     try:
-        parsed = datetime.fromisoformat(
-            raw
-        )
+        parsed = datetime.fromisoformat(raw)
     except ValueError:
         return True
 
     if parsed.tzinfo is None:
-        parsed = parsed.replace(
-            tzinfo=timezone.utc
-        )
+        parsed = parsed.replace(tzinfo=timezone.utc)
 
-    return (
-        parsed.astimezone(
-            timezone.utc
-        )
-        <= datetime.now(
-            timezone.utc
-        )
-    )
+    return parsed.astimezone(timezone.utc) <= datetime.now(timezone.utc)
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -148,21 +132,29 @@ def load_config() -> tuple[WorkerConfig, dict[str, str]]:
         WorkerConfig(
             model=model,
             poll_seconds=env_int(values, "JARVIS_IMPROVEMENT_POLL_SECONDS", 15, 5, 300),
-            max_attempts_per_day=env_int(values, "JARVIS_IMPROVEMENT_MAX_ATTEMPTS_PER_DAY", 3, 1, 20),
+            max_attempts_per_day=env_int(
+                values, "JARVIS_IMPROVEMENT_MAX_ATTEMPTS_PER_DAY", 3, 1, 20
+            ),
             max_patch_lines=env_int(values, "JARVIS_IMPROVEMENT_MAX_PATCH_LINES", 450, 40, 3000),
             max_changed_files=env_int(values, "JARVIS_IMPROVEMENT_MAX_CHANGED_FILES", 5, 1, 20),
             github_enabled=env_bool(values, "JARVIS_IMPROVEMENT_GITHUB_ENABLED", False),
             ai_review_enabled=env_bool(values, "JARVIS_IMPROVEMENT_AI_REVIEW_ENABLED", True),
             notify_enabled=env_bool(values, "JARVIS_IMPROVEMENT_NOTIFY_ENABLED", True),
-            notify_service=values.get("JARVIS_IMPROVEMENT_NOTIFY_SERVICE", "notify.mobile_app_aaron_s_phone").strip(),
+            notify_service=values.get(
+                "JARVIS_IMPROVEMENT_NOTIFY_SERVICE", "notify.mobile_app_aaron_s_phone"
+            ).strip(),
             auto_deploy_low_risk=env_bool(values, "JARVIS_IMPROVEMENT_AUTO_DEPLOY_LOW_RISK", False),
             proposal_only=env_bool(
                 values,
                 "JARVIS_IMPROVEMENT_PROPOSAL_ONLY",
                 True,
             ),
-            candidate_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_CANDIDATE_TIMEOUT_SECONDS", 600, 60, 3600),
-            deploy_health_timeout_seconds=env_int(values, "JARVIS_IMPROVEMENT_DEPLOY_HEALTH_TIMEOUT_SECONDS", 90, 20, 600),
+            candidate_timeout_seconds=env_int(
+                values, "JARVIS_IMPROVEMENT_CANDIDATE_TIMEOUT_SECONDS", 600, 60, 3600
+            ),
+            deploy_health_timeout_seconds=env_int(
+                values, "JARVIS_IMPROVEMENT_DEPLOY_HEALTH_TIMEOUT_SECONDS", 90, 20, 600
+            ),
             base_branch=values.get(
                 "JARVIS_IMPROVEMENT_BASE_BRANCH",
                 AUTHORITATIVE_PRODUCTION_BRANCH,
@@ -211,18 +203,12 @@ def ensure_candidate_transaction_columns() -> None:
 
     with connect() as connection:
         existing = {
-            str(
-                row["name"]
-            )
-            for row in connection.execute(
-                "PRAGMA table_info(improvement_candidates)"
-            ).fetchall()
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(improvement_candidates)").fetchall()
         }
 
         if not existing:
-            raise WorkerError(
-                "improvement_candidates table is missing."
-            )
+            raise WorkerError("improvement_candidates table is missing.")
 
         for (
             name,
@@ -231,10 +217,7 @@ def ensure_candidate_transaction_columns() -> None:
             if name in existing:
                 continue
 
-            connection.execute(
-                "ALTER TABLE improvement_candidates "
-                f"ADD COLUMN {name} {data_type}"
-            )
+            connection.execute(f"ALTER TABLE improvement_candidates ADD COLUMN {name} {data_type}")
 
 
 def json_load(value: str | None, default: Any) -> Any:
@@ -299,13 +282,10 @@ def audit(
         )
 
 
-
 def plain_failure_explanation(error: str) -> tuple[str, str]:
     text = str(error or "").casefold()
 
-    if "unified diff" in text or (
-        "patch" in text and ("invalid" in text or "malformed" in text)
-    ):
+    if "unified diff" in text or ("patch" in text and ("invalid" in text or "malformed" in text)):
         return (
             "Creating the code change",
             "Jarvis created the change, but the code patch was formatted "
@@ -315,8 +295,7 @@ def plain_failure_explanation(error: str) -> tuple[str, str]:
     if "pytest" in text or "test failed" in text or "tests failed" in text:
         return (
             "Automated testing",
-            "Jarvis created the change, but one or more automated tests "
-            "found a problem.",
+            "Jarvis created the change, but one or more automated tests found a problem.",
         )
 
     if "security" in text or "bandit" in text or "pip-audit" in text:
@@ -328,8 +307,7 @@ def plain_failure_explanation(error: str) -> tuple[str, str]:
     if "forbidden" in text or "policy" in text:
         return (
             "Safety checks",
-            "Jarvis created a change that did not meet the safety rules, "
-            "so it was blocked.",
+            "Jarvis created a change that did not meet the safety rules, so it was blocked.",
         )
 
     if "docker" in text or "build failed" in text:
@@ -346,8 +324,7 @@ def plain_failure_explanation(error: str) -> tuple[str, str]:
 
     return (
         "Automated checks",
-        "Jarvis could not complete this improvement because one of its "
-        "automated checks failed.",
+        "Jarvis could not complete this improvement because one of its automated checks failed.",
     )
 
 
@@ -457,16 +434,10 @@ def fetch_candidate_by_id(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
-    return (
-        dict(row)
-        if row
-        else None
-    )
+    return dict(row) if row else None
 
 
 PREMERGE_DEPLOY_PHASES = frozenset(
@@ -496,11 +467,7 @@ ROLLBACK_DEPLOY_PHASES = frozenset(
     }
 )
 
-KNOWN_DEPLOY_PHASES = (
-    PREMERGE_DEPLOY_PHASES
-    | POSTMERGE_DEPLOY_PHASES
-    | ROLLBACK_DEPLOY_PHASES
-)
+KNOWN_DEPLOY_PHASES = PREMERGE_DEPLOY_PHASES | POSTMERGE_DEPLOY_PHASES | ROLLBACK_DEPLOY_PHASES
 
 
 MANUAL_ROLLBACK_ACTIVE_PHASES = frozenset(
@@ -521,10 +488,7 @@ def fetch_manual_rollback_candidate() -> dict[str, Any] | None:
     resume it instead of leaving status='rolling_back' orphaned.
     """
 
-    placeholders = ",".join(
-        "?"
-        for _ in MANUAL_ROLLBACK_ACTIVE_PHASES
-    )
+    placeholders = ",".join("?" for _ in MANUAL_ROLLBACK_ACTIVE_PHASES)
 
     with connect() as connection:
         row = connection.execute(
@@ -554,9 +518,7 @@ def deployment_lease_is_expired(
     candidate: dict[str, Any],
 ) -> bool:
     return timestamp_expired(
-        candidate.get(
-            "deploy_lease_expires_at"
-        ),
+        candidate.get("deploy_lease_expires_at"),
         missing_is_expired=True,
     )
 
@@ -569,17 +531,11 @@ def claim_deployment(
     ensure_candidate_transaction_columns()
 
     now = utc_now()
-    expires_at = utc_after(
-        lease_seconds
-    )
-    lease_id = secrets.token_hex(
-        16
-    )
+    expires_at = utc_after(lease_seconds)
+    lease_id = secrets.token_hex(16)
 
     with connect() as connection:
-        connection.execute(
-            "BEGIN IMMEDIATE"
-        )
+        connection.execute("BEGIN IMMEDIATE")
 
         row = connection.execute(
             """
@@ -587,30 +543,16 @@ def claim_deployment(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
         if row is None:
-            raise WorkerError(
-                f"Candidate {candidate_id} was not found."
-            )
+            raise WorkerError(f"Candidate {candidate_id} was not found.")
 
-        candidate = dict(
-            row
-        )
+        candidate = dict(row)
 
-        if str(
-            candidate.get(
-                "status"
-            )
-            or ""
-        ) != "deploy_requested":
-            raise WorkerError(
-                "Candidate is not available for "
-                "deployment claiming."
-            )
+        if str(candidate.get("status") or "") != "deploy_requested":
+            raise WorkerError("Candidate is not available for deployment claiming.")
 
         cursor = connection.execute(
             """
@@ -639,9 +581,7 @@ def claim_deployment(
         )
 
         if cursor.rowcount != 1:
-            raise WorkerError(
-                "Deployment claim lost a database race."
-            )
+            raise WorkerError("Deployment claim lost a database race.")
 
         claimed = connection.execute(
             """
@@ -649,19 +589,13 @@ def claim_deployment(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
         if claimed is None:
-            raise WorkerError(
-                "Claimed candidate disappeared."
-            )
+            raise WorkerError("Claimed candidate disappeared.")
 
-        return dict(
-            claimed
-        )
+        return dict(claimed)
 
 
 def update_deployment_phase(
@@ -672,14 +606,10 @@ def update_deployment_phase(
     lease_seconds: int = 15 * 60,
 ) -> None:
     if not lease_id:
-        raise WorkerError(
-            "Deployment lease ID is missing."
-        )
+        raise WorkerError("Deployment lease ID is missing.")
 
     now = utc_now()
-    expires_at = utc_after(
-        lease_seconds
-    )
+    expires_at = utc_after(lease_seconds)
 
     with connect() as connection:
         cursor = connection.execute(
@@ -703,9 +633,7 @@ def update_deployment_phase(
         )
 
         if cursor.rowcount != 1:
-            raise WorkerError(
-                "Deployment lease was lost."
-            )
+            raise WorkerError("Deployment lease was lost.")
 
 
 def deployment_lease_owned(
@@ -724,32 +652,17 @@ def deployment_lease_owned(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
     if row is None:
         return False
 
-    stored = str(
-        row[
-            "deploy_lease_id"
-        ]
-        or ""
-    )
+    stored = str(row["deploy_lease_id"] or "")
 
     return (
-        str(
-            row[
-                "status"
-            ]
-            or ""
-        )
-        == "deploying"
-        and bool(
-            stored
-        )
+        str(row["status"] or "") == "deploying"
+        and bool(stored)
         and secrets.compare_digest(
             stored,
             lease_id,
@@ -768,16 +681,12 @@ def transition_deployment_state(
     rolled_back_at: str | None = None,
 ) -> None:
     if not lease_id:
-        raise WorkerError(
-            "Deployment lease ID is missing."
-        )
+        raise WorkerError("Deployment lease ID is missing.")
 
     now = utc_now()
 
     with connect() as connection:
-        connection.execute(
-            "BEGIN IMMEDIATE"
-        )
+        connection.execute("BEGIN IMMEDIATE")
 
         cursor = connection.execute(
             """
@@ -815,10 +724,7 @@ def transition_deployment_state(
         )
 
         if cursor.rowcount != 1:
-            raise WorkerError(
-                "Deployment lease was lost before "
-                "the state transition completed."
-            )
+            raise WorkerError("Deployment lease was lost before the state transition completed.")
 
 
 def claim_stale_deployment_recovery(
@@ -829,17 +735,11 @@ def claim_stale_deployment_recovery(
     ensure_candidate_transaction_columns()
 
     now = utc_now()
-    expires_at = utc_after(
-        lease_seconds
-    )
-    lease_id = secrets.token_hex(
-        16
-    )
+    expires_at = utc_after(lease_seconds)
+    lease_id = secrets.token_hex(16)
 
     with connect() as connection:
-        connection.execute(
-            "BEGIN IMMEDIATE"
-        )
+        connection.execute("BEGIN IMMEDIATE")
 
         row = connection.execute(
             """
@@ -847,29 +747,18 @@ def claim_stale_deployment_recovery(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
         if row is None:
             return None
 
-        candidate = dict(
-            row
-        )
+        candidate = dict(row)
 
-        if str(
-            candidate.get(
-                "status"
-            )
-            or ""
-        ) != "deploying":
+        if str(candidate.get("status") or "") != "deploying":
             return None
 
-        if not deployment_lease_is_expired(
-            candidate
-        ):
+        if not deployment_lease_is_expired(candidate):
             return None
 
         cursor = connection.execute(
@@ -901,16 +790,10 @@ def claim_stale_deployment_recovery(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
-        return (
-            dict(claimed)
-            if claimed
-            else None
-        )
+        return dict(claimed) if claimed else None
 
 
 def fetch_failure(failure_id: int) -> dict[str, Any]:
@@ -985,19 +868,14 @@ def attempts_today() -> int:
 def uses_autonomous_attempt_quota(
     failure: dict[str, Any],
 ) -> bool:
-    return (
-        str(failure.get("category") or "").casefold()
-        != "requested_improvement"
-    )
+    return str(failure.get("category") or "").casefold() != "requested_improvement"
 
 
 def infer_context_files(
     failure: dict[str, Any],
     policy: dict[str, Any],
 ) -> list[str]:
-    category = str(
-        failure.get("category") or "general"
-    )
+    category = str(failure.get("category") or "general")
 
     category_map = policy.get(
         "context_files_by_category",
@@ -1031,10 +909,7 @@ def infer_context_files(
 
     source = " ".join(
         (
-            str(
-                failure.get("summary")
-                or ""
-            ),
+            str(failure.get("summary") or ""),
             category,
             json.dumps(
                 evidence,
@@ -1047,14 +922,9 @@ def infer_context_files(
     selected: list[str] = []
 
     for raw_keyword, values in keyword_map.items():
-        keyword = str(
-            raw_keyword or ""
-        ).strip().casefold()
+        keyword = str(raw_keyword or "").strip().casefold()
 
-        if (
-            not keyword
-            or keyword not in source
-        ):
+        if not keyword or keyword not in source:
             continue
 
         if isinstance(
@@ -1067,16 +937,9 @@ def infer_context_files(
             values,
             list,
         ):
-            selected.extend(
-                str(value)
-                for value in values
-            )
+            selected.extend(str(value) for value in values)
 
-    selected.extend(
-        category_map.get(category)
-        or category_map.get("general")
-        or []
-    )
+    selected.extend(category_map.get(category) or category_map.get("general") or [])
 
     result: list[str] = []
     seen: set[str] = set()
@@ -1090,9 +953,7 @@ def infer_context_files(
                 path,
                 allowed,
             )
-            or not (
-                ROOT / path
-            ).is_file()
+            or not (ROOT / path).is_file()
         ):
             continue
 
@@ -1144,9 +1005,17 @@ def _context_search_terms(
     source = redact(source).casefold()
 
     stop = {
-        "this", "that", "with", "from",
-        "have", "were", "your", "into",
-        "true", "false", "none",
+        "this",
+        "that",
+        "with",
+        "from",
+        "have",
+        "were",
+        "your",
+        "into",
+        "true",
+        "false",
+        "none",
     }
 
     terms: list[str] = []
@@ -1160,10 +1029,7 @@ def _context_search_terms(
 
         terms.append(token)
 
-    if (
-        "failed" in source
-        or '"success": false' in source
-    ):
+    if "failed" in source or '"success": false' in source:
         for token in (
             "failed_tool",
             "failure_like",
@@ -1194,30 +1060,19 @@ def _relevant_context_excerpt(
         merged: list[list[int]] = []
 
         for left, right in sorted(ranges):
-            if (
-                merged
-                and left <= merged[-1][1]
-            ):
+            if merged and left <= merged[-1][1]:
                 merged[-1][1] = max(
                     merged[-1][1],
                     right,
                 )
             else:
-                merged.append(
-                    [left, right]
-                )
+                merged.append([left, right])
 
         parts: list[str] = []
 
         for left, right in merged:
-            parts.append(
-                f"===== SOURCE LINES "
-                f"{left + 1}-{right} "
-                f"OF {count} ====="
-            )
-            parts.extend(
-                lines[left:right]
-            )
+            parts.append(f"===== SOURCE LINES {left + 1}-{right} OF {count} =====")
+            parts.extend(lines[left:right])
 
         return "\n".join(parts) + "\n"
 
@@ -1231,33 +1086,17 @@ def _relevant_context_excerpt(
     for index, line in enumerate(lines):
         folded = line.casefold()
 
-        hits = {
-            term
-            for term in terms
-            if term in folded
-        }
+        hits = {term for term in terms if term in folded}
 
         if not hits:
             continue
 
-        score = sum(
-            4
-            if "_" in term
-            else 2
-            if len(term) >= 8
-            else 1
-            for term in hits
-        )
+        score = sum(4 if "_" in term else 2 if len(term) >= 8 else 1 for term in hits)
 
-        ranked.append(
-            (-score, index)
-        )
+        ranked.append((-score, index))
 
     for _, index in sorted(ranked):
-        if any(
-            left <= index < right
-            for left, right in ranges
-        ):
+        if any(left <= index < right for left, right in ranges):
             continue
 
         trial = ranges + [
@@ -1341,19 +1180,14 @@ def _apply_failure_source_feedback(
             )
         )
 
-        sections.append(
-            "===== EXACT BASE SOURCE: "
-            f"{path}:{start}-{end} =====\n"
-            f"{body}"
-        )
+        sections.append(f"===== EXACT BASE SOURCE: {path}:{start}-{end} =====\n{body}")
 
     if not sections:
         return ""
 
     return (
         "\n\nExact source around Git's rejected "
-        "hunk from the captured base commit:\n"
-        + "\n\n".join(sections)
+        "hunk from the captured base commit:\n" + "\n\n".join(sections)
     )
 
 
@@ -1378,9 +1212,7 @@ def build_context(
     if not files:
         return "", []
 
-    terms = _context_search_terms(
-        failure
-    )
+    terms = _context_search_terms(failure)
 
     per_file = max(
         4000,
@@ -1401,9 +1233,7 @@ def build_context(
                 cwd=ROOT,
             ).stdout
         else:
-            content = (
-                ROOT / path
-            ).read_text(
+            content = (ROOT / path).read_text(
                 encoding="utf-8",
                 errors="replace",
             )
@@ -1416,16 +1246,9 @@ def build_context(
             per_file,
         )
 
-        section = (
-            f"\n===== FILE: {path} =====\n"
-            f"{excerpt}"
-        )
+        section = f"\n===== FILE: {path} =====\n{excerpt}"
 
-        if (
-            sum(len(item) for item in sections)
-            + len(section)
-            > max_chars
-        ):
+        if sum(len(item) for item in sections) + len(section) > max_chars:
             continue
 
         sections.append(section)
@@ -1434,10 +1257,7 @@ def build_context(
     context = "".join(sections)
 
     if len(context) > max_chars:
-        raise WorkerError(
-            "Improvement context exceeded "
-            "the configured character limit."
-        )
+        raise WorkerError("Improvement context exceeded the configured character limit.")
 
     return context, included
 
@@ -1472,7 +1292,9 @@ def request_independent_review(
     if OpenAI is None:
         raise WorkerError("The OpenAI package is missing from the worker environment.")
     diff = run(["git", "diff", "--no-ext-diff", "--unified=3"], cwd=workspace).stdout
-    evidence = redact(json.dumps(failure.get("evidence", {}), ensure_ascii=False, indent=2, default=str))
+    evidence = redact(
+        json.dumps(failure.get("evidence", {}), ensure_ascii=False, indent=2, default=str)
+    )
     prompt = f"""
 Review this proposed Jarvis Core patch independently. The generator and reviewer are separate passes. Reject the patch if it could operate the wrong Home Assistant device, weaken identity/Admin Mode controls, invent state, leak secrets, add unsafe execution, omit a meaningful regression test, or fail to address the recorded failure.
 
@@ -1497,11 +1319,11 @@ Local validation summary:
                 "risk": {"type": "string", "enum": ["low", "medium", "high", "critical"]},
                 "summary": {"type": "string"},
                 "findings": {"type": "array", "items": {"type": "string"}},
-                "required_changes": {"type": "array", "items": {"type": "string"}}
+                "required_changes": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["verdict", "risk", "summary", "findings", "required_changes"],
-            "additionalProperties": False
-        }
+            "additionalProperties": False,
+        },
     }
     client = OpenAI(api_key=api_key, timeout=180, max_retries=2)
     kwargs: dict[str, Any] = {
@@ -1512,15 +1334,13 @@ Local validation summary:
         "tool_choice": {"type": "function", "name": "submit_review"},
         "parallel_tool_calls": False,
         "store": False,
-        "max_output_tokens": 16000
+        "max_output_tokens": 16000,
     }
     if config.model.lower().startswith("gpt-5"):
         kwargs["reasoning"] = {"effort": "high"}
         kwargs["text"] = {"verbosity": "low"}
 
-    response = client.responses.create(
-        **kwargs
-    )
+    response = client.responses.create(**kwargs)
 
     review_usage = _require_completed_response(
         response,
@@ -1534,29 +1354,13 @@ Local validation summary:
 
     review["enabled"] = True
 
-    review[
-        "response_id"
-    ] = review_usage[
-        "response_id"
-    ]
+    review["response_id"] = review_usage["response_id"]
 
-    review[
-        "response_status"
-    ] = review_usage[
-        "response_status"
-    ]
+    review["response_status"] = review_usage["response_status"]
 
-    review[
-        "output_tokens"
-    ] = review_usage[
-        "output_tokens"
-    ]
+    review["output_tokens"] = review_usage["output_tokens"]
 
-    review[
-        "reasoning_tokens"
-    ] = review_usage[
-        "reasoning_tokens"
-    ]
+    review["reasoning_tokens"] = review_usage["reasoning_tokens"]
 
     return review
 
@@ -1587,12 +1391,7 @@ def _response_completion_metadata(
         incomplete,
         dict,
     ):
-        incomplete_reason = str(
-            incomplete.get(
-                "reason"
-            )
-            or ""
-        )
+        incomplete_reason = str(incomplete.get("reason") or "")
     else:
         incomplete_reason = str(
             getattr(
@@ -1658,18 +1457,9 @@ def _require_completed_response(
     *,
     purpose: str,
 ) -> dict[str, Any]:
-    metadata = (
-        _response_completion_metadata(
-            response
-        )
-    )
+    metadata = _response_completion_metadata(response)
 
-    if (
-        metadata[
-            "response_status"
-        ]
-        != "completed"
-    ):
+    if metadata["response_status"] != "completed":
         raise WorkerError(
             f"{purpose} response was not completed: "
             f"status={metadata['response_status'] or 'unknown'} "
@@ -1705,11 +1495,11 @@ def request_patch(
     prompt = f"""
 You are repairing Jarvis Core, a production Home Assistant AI assistant.
 Generate the smallest safe set of exact structured source edits that fixes the recorded failure and adds a regression test.
-Failure ID: {failure['failure_id']}
-Category: {failure.get('category')}
-Severity: {failure.get('severity')}
-Occurrences: {failure.get('occurrences')}
-Summary: {failure.get('summary')}
+Failure ID: {failure["failure_id"]}
+Category: {failure.get("category")}
+Severity: {failure.get("severity")}
+Occurrences: {failure.get("occurrences")}
+Summary: {failure.get("summary")}
 Redacted evidence:
 {failure_json}
 Files supplied for context: {context_files}
@@ -1747,10 +1537,7 @@ Requirements:
         if previous_patch:
             prompt += (
                 "\n\nPrevious failed patch "
-                "(REFERENCE ONLY — DO NOT COPY ITS CONTEXT):\n"
-                + redact(
-                    previous_patch
-                )[:24000]
+                "(REFERENCE ONLY — DO NOT COPY ITS CONTEXT):\n" + redact(previous_patch)[:24000]
             )
 
         prompt += (
@@ -1762,14 +1549,9 @@ Requirements:
         )
 
         if previous_error:
-            retry_error = redact(
-                previous_error
-            )[-12000:]
+            retry_error = redact(previous_error)[-12000:]
 
-            if (
-                "===== EXACT BASE SOURCE:"
-                in retry_error
-            ):
+            if "===== EXACT BASE SOURCE:" in retry_error:
                 prompt += (
                     "\n\nAPPLY-FAILURE REPAIR RULES:\n"
                     "- EXACT BASE SOURCE is authoritative "
@@ -1793,11 +1575,7 @@ Requirements:
                     "anchor over a broad replacement."
                 )
 
-            prompt += (
-                "\n\nFailure feedback "
-                "(AUTHORITATIVE FOR THIS RETRY):\n"
-                + retry_error
-            )
+            prompt += "\n\nFailure feedback (AUTHORITATIVE FOR THIS RETRY):\n" + retry_error
 
     instructions = """
 Act as a conservative senior Python engineer and safety reviewer. You may only submit bounded structured source edits through the submit_patch tool. Prefer deterministic fixes over prompt-only changes. A candidate must include a regression test and must not modify forbidden paths. Never generate Git diff syntax; the local worker will materialise the edits and generate the Git patch. Do not claim tests passed; the local worker will verify them.
@@ -1881,9 +1659,7 @@ Act as a conservative senior Python engineer and safety reviewer. You may only s
     kwargs: dict[str, Any] = {
         "model": config.model,
         "instructions": instructions,
-        "input": [
-            {"role": "user", "content": [{"type": "input_text", "text": prompt}]}
-        ],
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
         "tools": [tool],
         "tool_choice": {"type": "function", "name": "submit_patch"},
         "parallel_tool_calls": False,
@@ -1894,18 +1670,14 @@ Act as a conservative senior Python engineer and safety reviewer. You may only s
         kwargs["reasoning"] = {"effort": "medium"}
         kwargs["text"] = {"verbosity": "medium"}
 
-    response = client.responses.create(
-        **kwargs
-    )
+    response = client.responses.create(**kwargs)
 
     usage = _require_completed_response(
         response,
         purpose="Patch generation",
     )
 
-    payload = parse_patch_arguments(
-        response
-    )
+    payload = parse_patch_arguments(response)
 
     return payload, usage
 
@@ -1933,12 +1705,16 @@ def patch_line_count(patch: str) -> int:
     )
 
 
-def validate_patch_policy(patch: str, policy: dict[str, Any], config: WorkerConfig) -> tuple[list[str], str]:
+def validate_patch_policy(
+    patch: str, policy: dict[str, Any], config: WorkerConfig
+) -> tuple[list[str], str]:
     paths = patch_paths(patch)
     if not paths:
         raise WorkerError("The model did not return a valid unified diff.")
     if len(paths) > config.max_changed_files:
-        raise WorkerError(f"Patch changes {len(paths)} files; policy allows {config.max_changed_files}.")
+        raise WorkerError(
+            f"Patch changes {len(paths)} files; policy allows {config.max_changed_files}."
+        )
     lines = patch_line_count(patch)
     if lines > config.max_patch_lines:
         raise WorkerError(f"Patch changes {lines} lines; policy allows {config.max_patch_lines}.")
@@ -1954,8 +1730,7 @@ def validate_patch_policy(patch: str, policy: dict[str, Any], config: WorkerConf
             raise WorkerError(f"Patch touches path outside the allow-list: {path}")
 
     forbidden_added_patterns = [
-        re.compile(pattern, re.I)
-        for pattern in policy.get("forbidden_added_patterns", [])
+        re.compile(pattern, re.I) for pattern in policy.get("forbidden_added_patterns", [])
     ]
     additions = "\n".join(
         line[1:]
@@ -1973,10 +1748,7 @@ def create_worktree(
     branch_name: str,
     base_ref: str = "HEAD",
 ) -> Path:
-    workspace = (
-        WORKTREES
-        / str(candidate_id)
-    )
+    workspace = WORKTREES / str(candidate_id)
 
     if workspace.exists():
         run(
@@ -2025,20 +1797,12 @@ def create_worktree(
     return workspace
 
 
-
-
 def _validate_structured_edit_path(
     path: str,
     policy: dict[str, Any],
 ) -> str:
-    if (
-        not path
-        or path.startswith("/")
-        or ".." in Path(path).parts
-    ):
-        raise WorkerError(
-            f"Unsafe structured edit path: {path}"
-        )
+    if not path or path.startswith("/") or ".." in Path(path).parts:
+        raise WorkerError(f"Unsafe structured edit path: {path}")
 
     forbidden = policy.get(
         "forbidden_paths",
@@ -2050,16 +1814,10 @@ def _validate_structured_edit_path(
     )
 
     if path_matches(path, forbidden):
-        raise WorkerError(
-            "Structured edit touches forbidden path: "
-            f"{path}"
-        )
+        raise WorkerError(f"Structured edit touches forbidden path: {path}")
 
     if not path_matches(path, allowed):
-        raise WorkerError(
-            "Structured edit touches path outside "
-            f"the allow-list: {path}"
-        )
+        raise WorkerError(f"Structured edit touches path outside the allow-list: {path}")
 
     return path
 
@@ -2073,15 +1831,10 @@ def materialise_structured_edits(
     edits = payload.get("edits")
 
     if not isinstance(edits, list) or not edits:
-        raise WorkerError(
-            "The model did not return any structured edits."
-        )
+        raise WorkerError("The model did not return any structured edits.")
 
     if len(edits) > config.max_patch_lines:
-        raise WorkerError(
-            "Structured edit count exceeds the "
-            "candidate patch limit."
-        )
+        raise WorkerError("Structured edit count exceeds the candidate patch limit.")
 
     grouped: dict[
         str,
@@ -2090,20 +1843,14 @@ def materialise_structured_edits(
 
     for index, edit in enumerate(edits, start=1):
         if not isinstance(edit, dict):
-            raise WorkerError(
-                "Structured edit "
-                f"{index} is not an object."
-            )
+            raise WorkerError(f"Structured edit {index} is not an object.")
 
         path_value = edit.get("path")
         old_text = edit.get("old_text")
         new_text = edit.get("new_text")
 
         if not isinstance(path_value, str):
-            raise WorkerError(
-                "Structured edit "
-                f"{index} has an invalid path."
-            )
+            raise WorkerError(f"Structured edit {index} has an invalid path.")
 
         path = _validate_structured_edit_path(
             path_value,
@@ -2111,27 +1858,16 @@ def materialise_structured_edits(
         )
 
         if not isinstance(old_text, str):
-            raise WorkerError(
-                "Structured edit "
-                f"{index} has invalid old_text."
-            )
+            raise WorkerError(f"Structured edit {index} has invalid old_text.")
 
         if not isinstance(new_text, str):
-            raise WorkerError(
-                "Structured edit "
-                f"{index} has invalid new_text."
-            )
+            raise WorkerError(f"Structured edit {index} has invalid new_text.")
 
         if not old_text:
-            raise WorkerError(
-                "Structured edit old_text must "
-                "not be empty."
-            )
+            raise WorkerError("Structured edit old_text must not be empty.")
 
         if old_text == new_text:
-            raise WorkerError(
-                "Structured edit would make no change."
-            )
+            raise WorkerError("Structured edit would make no change.")
 
         grouped.setdefault(
             path,
@@ -2156,39 +1892,24 @@ def materialise_structured_edits(
         target = workspace / path
 
         if target.is_symlink():
-            raise WorkerError(
-                "Structured edits may not modify "
-                f"symlinks: {path}"
-            )
+            raise WorkerError(f"Structured edits may not modify symlinks: {path}")
 
         if not target.exists() or not target.is_file():
-            raise WorkerError(
-                "Structured edit target is not an "
-                f"existing regular file: {path}"
-            )
+            raise WorkerError(f"Structured edit target is not an existing regular file: {path}")
 
         resolved = target.resolve()
 
-        if not resolved.is_relative_to(
-            workspace_root
-        ):
-            raise WorkerError(
-                "Structured edit escaped the "
-                f"candidate workspace: {path}"
-            )
+        if not resolved.is_relative_to(workspace_root):
+            raise WorkerError(f"Structured edit escaped the candidate workspace: {path}")
 
         original = target.read_text(
             encoding="utf-8",
         )
 
-        spans: list[
-            tuple[int, int, str]
-        ] = []
+        spans: list[tuple[int, int, str]] = []
 
         for old_text, new_text in replacements:
-            occurrences = original.count(
-                old_text
-            )
+            occurrences = original.count(old_text)
 
             if occurrences != 1:
                 raise WorkerError(
@@ -2198,26 +1919,16 @@ def materialise_structured_edits(
                     "is required."
                 )
 
-            start = original.index(
-                old_text
-            )
-            end = start + len(
-                old_text
-            )
+            start = original.index(old_text)
+            end = start + len(old_text)
 
             for (
                 existing_start,
                 existing_end,
                 _,
             ) in spans:
-                if (
-                    start < existing_end
-                    and end > existing_start
-                ):
-                    raise WorkerError(
-                        "Structured edits overlap in "
-                        f"{path}."
-                    )
+                if start < existing_end and end > existing_start:
+                    raise WorkerError(f"Structured edits overlap in {path}.")
 
             spans.append(
                 (
@@ -2234,11 +1945,7 @@ def materialise_structured_edits(
             key=lambda item: item[0],
             reverse=True,
         ):
-            updated = (
-                updated[:start]
-                + new_text
-                + updated[end:]
-            )
+            updated = updated[:start] + new_text + updated[end:]
 
         target.write_text(
             updated,
@@ -2258,9 +1965,7 @@ def materialise_structured_edits(
     ).stdout
 
     if not patch.strip():
-        raise WorkerError(
-            "Structured edits produced no Git diff."
-        )
+        raise WorkerError("Structured edits produced no Git diff.")
 
     paths, patch_hash = validate_patch_policy(
         patch,
@@ -2268,14 +1973,11 @@ def materialise_structured_edits(
         config,
     )
 
-    expected_paths = sorted(
-        grouped
-    )
+    expected_paths = sorted(grouped)
 
     if paths != expected_paths:
         raise WorkerError(
-            "Generated Git diff paths do not match "
-            "the requested structured edit paths."
+            "Generated Git diff paths do not match the requested structured edit paths."
         )
 
     return patch, paths, patch_hash
@@ -2285,9 +1987,7 @@ def normalise_unified_diff_hunk_counts(
     patch: str,
 ) -> str:
     """Recalculate unified-diff hunk counts only."""
-    lines = patch.splitlines(
-        keepends=True
-    )
+    lines = patch.splitlines(keepends=True)
 
     header = re.compile(
         r"^@@ -(\d+)(?:,\d+)? "
@@ -2310,14 +2010,9 @@ def normalise_unified_diff_hunk_counts(
         end = index + 1
 
         while end < len(lines):
-            body = lines[end].rstrip(
-                "\r\n"
-            )
+            body = lines[end].rstrip("\r\n")
 
-            if (
-                body.startswith("@@ ")
-                or body.startswith("diff --git ")
-            ):
+            if body.startswith("@@ ") or body.startswith("diff --git "):
                 break
 
             if body == r"\ No newline at end of file":
@@ -2325,10 +2020,7 @@ def normalise_unified_diff_hunk_counts(
                 continue
 
             if not body:
-                raise WorkerError(
-                    "Unified diff hunk contains "
-                    "an unprefixed blank line."
-                )
+                raise WorkerError("Unified diff hunk contains an unprefixed blank line.")
 
             prefix = body[0]
 
@@ -2340,20 +2032,11 @@ def normalise_unified_diff_hunk_counts(
             elif prefix == "+":
                 new_count += 1
             else:
-                raise WorkerError(
-                    "Unified diff hunk contains "
-                    "an invalid body line."
-                )
+                raise WorkerError("Unified diff hunk contains an invalid body line.")
 
             end += 1
 
-        newline = (
-            "\r\n"
-            if raw.endswith("\r\n")
-            else "\n"
-            if raw.endswith("\n")
-            else ""
-        )
+        newline = "\r\n" if raw.endswith("\r\n") else "\n" if raw.endswith("\n") else ""
 
         lines[index] = (
             f"@@ -{match.group(1)},{old_count} "
@@ -2400,7 +2083,9 @@ def security_diff_scan(workspace: Path, policy: dict[str, Any]) -> dict[str, Any
     return {"passed": not findings, "findings": findings}
 
 
-def command_result(name: str, completed: subprocess.CompletedProcess[str], blocking: bool = True) -> dict[str, Any]:
+def command_result(
+    name: str, completed: subprocess.CompletedProcess[str], blocking: bool = True
+) -> dict[str, Any]:
     return {
         "name": name,
         "passed": completed.returncode == 0,
@@ -2413,9 +2098,7 @@ def command_result(name: str, completed: subprocess.CompletedProcess[str], block
 def _normalise_bandit_filename(
     value: Any,
 ) -> str:
-    filename = str(
-        value or ""
-    ).replace(
+    filename = str(value or "").replace(
         "\\\\",
         "/",
     )
@@ -2446,81 +2129,40 @@ def _bandit_issue_key(
     """
 
     return (
-        _normalise_bandit_filename(
-            issue.get(
-                "filename"
-            )
-        ),
-        str(
-            issue.get(
-                "test_id"
-            )
-            or ""
-        ),
-        str(
-            issue.get(
-                "issue_text"
-            )
-            or ""
-        ),
-        str(
-            issue.get(
-                "issue_severity"
-            )
-            or ""
-        ).upper(),
-        str(
-            issue.get(
-                "issue_confidence"
-            )
-            or ""
-        ).upper(),
+        _normalise_bandit_filename(issue.get("filename")),
+        str(issue.get("test_id") or ""),
+        str(issue.get("issue_text") or ""),
+        str(issue.get("issue_severity") or "").upper(),
+        str(issue.get("issue_confidence") or "").upper(),
     )
 
 
 def _parse_bandit_json(
     output: str,
 ) -> list[dict[str, Any]] | None:
-    text = str(
-        output or ""
-    ).strip()
+    text = str(output or "").strip()
 
     candidates = [
         text,
     ]
 
-    first = text.find(
-        "{"
-    )
+    first = text.find("{")
 
-    last = text.rfind(
-        "}"
-    )
+    last = text.rfind("}")
 
-    if (
-        first >= 0
-        and last >= first
-    ):
-        candidates.append(
-            text[
-                first : last + 1
-            ]
-        )
+    if first >= 0 and last >= first:
+        candidates.append(text[first : last + 1])
 
     for candidate in candidates:
         try:
-            payload = json.loads(
-                candidate
-            )
+            payload = json.loads(candidate)
         except (
             TypeError,
             ValueError,
         ):
             continue
 
-        results = payload.get(
-            "results"
-        )
+        results = payload.get("results")
 
         if not isinstance(
             results,
@@ -2548,9 +2190,7 @@ def _run_bandit_json(
 ]:
     completed = run(
         [
-            str(
-                VENV_PYTHON
-            ),
+            str(VENV_PYTHON),
             "-m",
             "bandit",
             "-q",
@@ -2575,9 +2215,7 @@ def _run_bandit_json(
 
     return (
         completed,
-        _parse_bandit_json(
-            completed.stdout
-        ),
+        _parse_bandit_json(completed.stdout),
     )
 
 
@@ -2592,36 +2230,23 @@ def bandit_baseline_result(
     introduced by the candidate is blocking.
     """
 
-    baseline_completed, baseline_issues = (
-        _run_bandit_json(
-            ROOT
-        )
-    )
+    baseline_completed, baseline_issues = _run_bandit_json(ROOT)
 
-    candidate_completed, candidate_issues = (
-        _run_bandit_json(
-            workspace
-        )
-    )
+    candidate_completed, candidate_issues = _run_bandit_json(workspace)
 
     if baseline_issues is None:
         return {
             "name": "bandit_baseline",
             "passed": False,
             "blocking": True,
-            "returncode": (
-                baseline_completed.returncode
-            ),
+            "returncode": (baseline_completed.returncode),
             "baseline_findings": None,
             "candidate_findings": None,
             "new_findings": [],
             "fixed_findings": None,
             "output": (
                 "Unable to parse or execute the "
-                "production Bandit baseline.\n"
-                + baseline_completed.stdout[
-                    -8000:
-                ]
+                "production Bandit baseline.\n" + baseline_completed.stdout[-8000:]
             ),
         }
 
@@ -2630,125 +2255,67 @@ def bandit_baseline_result(
             "name": "bandit_baseline",
             "passed": False,
             "blocking": True,
-            "returncode": (
-                candidate_completed.returncode
-            ),
-            "baseline_findings": len(
-                baseline_issues
-            ),
+            "returncode": (candidate_completed.returncode),
+            "baseline_findings": len(baseline_issues),
             "candidate_findings": None,
             "new_findings": [],
             "fixed_findings": None,
             "output": (
                 "Unable to parse or execute the "
-                "candidate Bandit scan.\n"
-                + candidate_completed.stdout[
-                    -8000:
-                ]
+                "candidate Bandit scan.\n" + candidate_completed.stdout[-8000:]
             ),
         }
 
-    baseline_counts = Counter(
-        _bandit_issue_key(
-            issue
-        )
-        for issue in baseline_issues
-    )
+    baseline_counts = Counter(_bandit_issue_key(issue) for issue in baseline_issues)
 
-    candidate_counts = Counter(
-        _bandit_issue_key(
-            issue
-        )
-        for issue in candidate_issues
-    )
+    candidate_counts = Counter(_bandit_issue_key(issue) for issue in candidate_issues)
 
-    new_counts = (
-        candidate_counts
-        - baseline_counts
-    )
+    new_counts = candidate_counts - baseline_counts
 
-    fixed_counts = (
-        baseline_counts
-        - candidate_counts
-    )
+    fixed_counts = baseline_counts - candidate_counts
 
-    remaining = Counter(
-        new_counts
-    )
+    remaining = Counter(new_counts)
 
-    new_findings: list[
-        dict[str, Any]
-    ] = []
+    new_findings: list[dict[str, Any]] = []
 
     for issue in candidate_issues:
-        key = _bandit_issue_key(
-            issue
-        )
+        key = _bandit_issue_key(issue)
 
-        if remaining.get(
-            key,
-            0,
-        ) <= 0:
+        if (
+            remaining.get(
+                key,
+                0,
+            )
+            <= 0
+        ):
             continue
 
         new_findings.append(
             {
-                "filename": (
-                    _normalise_bandit_filename(
-                        issue.get(
-                            "filename"
-                        )
-                    )
-                ),
-                "test_id": issue.get(
-                    "test_id"
-                ),
-                "issue_text": issue.get(
-                    "issue_text"
-                ),
-                "severity": issue.get(
-                    "issue_severity"
-                ),
-                "confidence": issue.get(
-                    "issue_confidence"
-                ),
-                "line_number": issue.get(
-                    "line_number"
-                ),
+                "filename": (_normalise_bandit_filename(issue.get("filename"))),
+                "test_id": issue.get("test_id"),
+                "issue_text": issue.get("issue_text"),
+                "severity": issue.get("issue_severity"),
+                "confidence": issue.get("issue_confidence"),
+                "line_number": issue.get("line_number"),
             }
         )
 
-        remaining[
-            key
-        ] -= 1
+        remaining[key] -= 1
 
-    new_count = sum(
-        new_counts.values()
-    )
+    new_count = sum(new_counts.values())
 
-    fixed_count = sum(
-        fixed_counts.values()
-    )
+    fixed_count = sum(fixed_counts.values())
 
-    passed = (
-        new_count == 0
-    )
+    passed = new_count == 0
 
     return {
         "name": "bandit_baseline",
         "passed": passed,
         "blocking": True,
-        "returncode": (
-            0
-            if passed
-            else 1
-        ),
-        "baseline_findings": len(
-            baseline_issues
-        ),
-        "candidate_findings": len(
-            candidate_issues
-        ),
+        "returncode": (0 if passed else 1),
+        "baseline_findings": len(baseline_issues),
+        "candidate_findings": len(candidate_issues),
         "new_findings": new_findings,
         "new_findings_count": new_count,
         "fixed_findings": fixed_count,
@@ -2765,26 +2332,11 @@ def bandit_baseline_result(
 def _pytest_failure_identity(
     testcase: ET.Element,
 ) -> str:
-    file_name = (
-        testcase.get(
-            "file"
-        )
-        or ""
-    )
+    file_name = testcase.get("file") or ""
 
-    class_name = (
-        testcase.get(
-            "classname"
-        )
-        or ""
-    )
+    class_name = testcase.get("classname") or ""
 
-    test_name = (
-        testcase.get(
-            "name"
-        )
-        or ""
-    )
+    test_name = testcase.get("name") or ""
 
     return "::".join(
         value
@@ -2806,98 +2358,60 @@ def _load_pytest_junit(
     dict[str, list[str]],
 ]:
     if not path.is_file():
-        raise WorkerError(
-            f"Missing pytest JUnit report: {path}"
-        )
+        raise WorkerError(f"Missing pytest JUnit report: {path}")
     try:
-        root = ET.parse(
-            path
-        ).getroot()
+        root = ET.parse(path).getroot()
     except (
         ET.ParseError,
         OSError,
     ) as exc:
-        raise WorkerError(
-            f"Invalid pytest JUnit report: {path}: {exc}"
-        ) from exc
+        raise WorkerError(f"Invalid pytest JUnit report: {path}: {exc}") from exc
 
     failures: Counter[str] = Counter()
     tests: Counter[str] = Counter()
     failure_details: dict[str, list[str]] = {}
     total = 0
 
-    for testcase in root.findall(
-        ".//testcase"
-    ):
+    for testcase in root.findall(".//testcase"):
         total += 1
-        identity = (
-            _pytest_failure_identity(
-                testcase
-            )
-        )
+        identity = _pytest_failure_identity(testcase)
         if not identity:
-            raise WorkerError(
-                "Pytest JUnit report contains "
-                "a testcase with no stable identity."
-            )
+            raise WorkerError("Pytest JUnit report contains a testcase with no stable identity.")
 
         tests[identity] += 1
 
-        failure_node = testcase.find(
-            "failure"
-        )
-        error_node = testcase.find(
-            "error"
-        )
-        if (
-            failure_node is None
-            and error_node is None
-        ):
+        failure_node = testcase.find("failure")
+        error_node = testcase.find("error")
+        if failure_node is None and error_node is None:
             continue
 
         failures[identity] += 1
 
-        detail_node = (
-            failure_node
-            if failure_node is not None
-            else error_node
-        )
+        detail_node = failure_node if failure_node is not None else error_node
         if detail_node is None:
             continue
 
         detail_parts: list[str] = []
-        message = str(
-            detail_node.get("message")
-            or ""
-        ).strip()
-        body = str(
-            detail_node.text
-            or ""
-        ).strip()
+        message = str(detail_node.get("message") or "").strip()
+        body = str(detail_node.text or "").strip()
 
         if message:
             detail_parts.append(message)
         if body:
             detail_parts.append(body)
 
-        detail = "\n".join(
-            detail_parts
-        ).strip()
+        detail = "\n".join(detail_parts).strip()
         if not detail:
             continue
 
         # Evidence is diagnostic only. Keep it bounded and
         # redact secrets before it can reach candidate feedback.
-        clean_detail = redact(
-            detail
-        )[-6000:]
+        clean_detail = redact(detail)[-6000:]
 
         failure_details.setdefault(
             identity,
             [],
-        ).append(
-            clean_detail
-        )
+        ).append(clean_detail)
 
     return (
         failures,
@@ -2921,9 +2435,7 @@ def _prepare_pytest_build_context(
     workspace_root = workspace.resolve()
 
     if not workspace_root.is_dir():
-        raise WorkerError(
-            f"Invalid pytest workspace: {workspace}"
-        )
+        raise WorkerError(f"Invalid pytest workspace: {workspace}")
 
     destination.mkdir(
         parents=True,
@@ -2947,81 +2459,39 @@ def _prepare_pytest_build_context(
         source: Path,
     ) -> None:
         try:
-            resolved = source.resolve(
-                strict=True
-            )
+            resolved = source.resolve(strict=True)
         except OSError as exc:
-            raise WorkerError(
-                f"Unable to resolve pytest context source: "
-                f"{source}: {exc}"
-            ) from exc
+            raise WorkerError(f"Unable to resolve pytest context source: {source}: {exc}") from exc
 
-        if not resolved.is_relative_to(
-            workspace_root
-        ):
-            raise WorkerError(
-                "Pytest context source escapes workspace: "
-                f"{source}"
-            )
+        if not resolved.is_relative_to(workspace_root):
+            raise WorkerError(f"Pytest context source escapes workspace: {source}")
 
         if source.is_symlink():
-            raise WorkerError(
-                "Pytest context source may not be a symlink: "
-                f"{source}"
-            )
+            raise WorkerError(f"Pytest context source may not be a symlink: {source}")
 
-        items = (
-            source.rglob("*")
-            if source.is_dir()
-            else ()
-        )
+        items = source.rglob("*") if source.is_dir() else ()
 
         for item in items:
-            relative = item.relative_to(
-                workspace
-            )
+            relative = item.relative_to(workspace)
 
             if item.is_symlink():
-                raise WorkerError(
-                    "Pytest build context contains a symlink: "
-                    f"{relative}"
-                )
+                raise WorkerError(f"Pytest build context contains a symlink: {relative}")
 
             if any(
-                (
-                    part in forbidden_components
-                    or part == ".env"
-                    or part.startswith(
-                        ".env."
-                    )
-                )
+                (part in forbidden_components or part == ".env" or part.startswith(".env."))
                 for part in relative.parts
             ):
-                raise WorkerError(
-                    "Pytest build context contains a "
-                    f"forbidden path: {relative}"
-                )
+                raise WorkerError(f"Pytest build context contains a forbidden path: {relative}")
 
     for name in allowed_sources:
-        source = (
-            workspace
-            / name
-        )
+        source = workspace / name
 
         if not source.exists():
-            raise WorkerError(
-                "Required pytest build-context source "
-                f"is missing: {name}"
-            )
+            raise WorkerError(f"Required pytest build-context source is missing: {name}")
 
-        validate_source(
-            source
-        )
+        validate_source(source)
 
-        target = (
-            destination
-            / name
-        )
+        target = destination / name
 
         if source.is_dir():
             shutil.copytree(
@@ -3058,25 +2528,13 @@ def _prepare_pytest_build_context(
         "speaker-data",
     )
 
-    leaked = [
-        name
-        for name in forbidden_top_level
-        if (
-            destination
-            / name
-        ).exists()
-    ]
+    leaked = [name for name in forbidden_top_level if (destination / name).exists()]
 
     if leaked:
         raise WorkerError(
-            "Forbidden paths leaked into pytest "
-            "Docker context: "
-            + ", ".join(
-                sorted(
-                    leaked
-                )
-            )
+            "Forbidden paths leaked into pytest Docker context: " + ", ".join(sorted(leaked))
         )
+
 
 def _pytest_runtime_dockerfile() -> str:
     return """FROM python:3.12-slim
@@ -3122,26 +2580,19 @@ def _docker_pytest_scan(
         r"[^A-Za-z0-9_.-]+",
         "-",
         label,
-    ).strip(
-        "-"
-    )
+    ).strip("-")
 
     if not safe_label:
         safe_label = "scan"
 
     temp_root = Path(
         tempfile.mkdtemp(
-            prefix=(
-                f"jarvis-pytest-{safe_label}-"
-            ),
+            prefix=(f"jarvis-pytest-{safe_label}-"),
             dir=WORK_ROOT,
         )
     )
 
-    results_dir = (
-        temp_root
-        / "results"
-    )
+    results_dir = temp_root / "results"
 
     results_dir.mkdir(
         parents=True,
@@ -3149,26 +2600,13 @@ def _docker_pytest_scan(
     )
 
     # Temporary result mount only.
-    results_dir.chmod(
-        0o777
-    )
+    results_dir.chmod(0o777)
 
-    build_context = (
-        temp_root
-        / "context"
-    )
+    build_context = temp_root / "context"
 
-    image = (
-        "jarvis-pytest-"
-        f"{safe_label}:"
-        f"{os.getpid()}-"
-        f"{time.time_ns()}"
-    )
+    image = f"jarvis-pytest-{safe_label}:{os.getpid()}-{time.time_ns()}"
 
-    report = (
-        results_dir
-        / "report.xml"
-    )
+    report = results_dir / "report.xml"
 
     try:
         try:
@@ -3184,15 +2622,10 @@ def _docker_pytest_scan(
                 "total_tests": None,
                 "failures": Counter(),
                 "tests": Counter(),
-                "output": str(
-                    exc
-                ),
+                "output": str(exc),
             }
 
-        dockerfile = (
-            build_context
-            / "Dockerfile.pytest"
-        )
+        dockerfile = build_context / "Dockerfile.pytest"
 
         dockerfile.write_text(
             _pytest_runtime_dockerfile(),
@@ -3218,15 +2651,11 @@ def _docker_pytest_scan(
             return {
                 "ok": False,
                 "stage": "build",
-                "returncode": (
-                    build.returncode
-                ),
+                "returncode": (build.returncode),
                 "total_tests": None,
                 "failures": Counter(),
                 "tests": Counter(),
-                "output": build.stdout[
-                    -12000:
-                ],
+                "output": build.stdout[-12000:],
             }
 
         completed = run(
@@ -3248,34 +2677,15 @@ def _docker_pytest_scan(
                 "--pids-limit",
                 "256",
                 "--tmpfs",
-                (
-                    "/tmp:rw,noexec,"
-                    "nosuid,size=128m"
-                ),
+                ("/tmp:rw,noexec,nosuid,size=128m"),
                 "--tmpfs",
-                (
-                    "/workspace/data:"
-                    "rw,noexec,nosuid,"
-                    "size=128m"
-                ),
+                ("/workspace/data:rw,noexec,nosuid,size=128m"),
                 "--tmpfs",
-                (
-                    "/workspace/logs:"
-                    "rw,noexec,nosuid,"
-                    "size=64m"
-                ),
+                ("/workspace/logs:rw,noexec,nosuid,size=64m"),
                 "--tmpfs",
-                (
-                    "/workspace/"
-                    ".jarvis-improver:"
-                    "rw,noexec,nosuid,"
-                    "size=64m"
-                ),
+                ("/workspace/.jarvis-improver:rw,noexec,nosuid,size=64m"),
                 "-v",
-                (
-                    f"{results_dir}:"
-                    "/results:rw"
-                ),
+                (f"{results_dir}:/results:rw"),
                 image,
                 "python",
                 "-m",
@@ -3284,54 +2694,39 @@ def _docker_pytest_scan(
                 "bridge/tests",
                 "-p",
                 "no:cacheprovider",
-                (
-                    "--junitxml="
-                    "/results/report.xml"
-                ),
+                ("--junitxml=/results/report.xml"),
             ],
             cwd=build_context,
             timeout=timeout,
             check=False,
         )
 
-        if (
-            completed.returncode
-            not in {
-                0,
-                1,
-            }
-        ):
+        if completed.returncode not in {
+            0,
+            1,
+        }:
             return {
                 "ok": False,
                 "stage": "pytest",
-                "returncode": (
-                    completed.returncode
-                ),
+                "returncode": (completed.returncode),
                 "total_tests": None,
                 "failures": Counter(),
                 "tests": Counter(),
-                "output": completed.stdout[
-                    -12000:
-                ],
+                "output": completed.stdout[-12000:],
             }
 
         if not report.is_file():
             return {
                 "ok": False,
                 "stage": "report",
-                "returncode": (
-                    completed.returncode
-                ),
+                "returncode": (completed.returncode),
                 "total_tests": None,
                 "failures": Counter(),
                 "tests": Counter(),
                 "output": (
                     "Pytest finished but "
                     "did not create its "
-                    "JUnit report.\n"
-                    + completed.stdout[
-                        -12000:
-                    ]
+                    "JUnit report.\n" + completed.stdout[-12000:]
                 ),
             }
 
@@ -3341,37 +2736,27 @@ def _docker_pytest_scan(
                 tests,
                 total,
                 failure_details,
-            ) = _load_pytest_junit(
-                report
-            )
+            ) = _load_pytest_junit(report)
         except WorkerError as exc:
             return {
                 "ok": False,
                 "stage": "report",
-                "returncode": (
-                    completed.returncode
-                ),
+                "returncode": (completed.returncode),
                 "total_tests": None,
                 "failures": Counter(),
                 "tests": Counter(),
-                "output": str(
-                    exc
-                ),
+                "output": str(exc),
             }
 
         return {
             "ok": True,
             "stage": "complete",
-            "returncode": (
-                completed.returncode
-            ),
+            "returncode": (completed.returncode),
             "total_tests": total,
             "failures": failures,
             "tests": tests,
             "failure_details": failure_details,
-            "output": completed.stdout[
-                -12000:
-            ],
+            "output": completed.stdout[-12000:],
         }
 
     finally:
@@ -3393,6 +2778,7 @@ def _docker_pytest_scan(
             ignore_errors=True,
         )
 
+
 def pytest_baseline_result(
     workspace: Path,
     timeout: int,
@@ -3403,18 +2789,12 @@ def pytest_baseline_result(
         timeout=timeout,
     )
 
-    if not baseline.get(
-        "ok"
-    ):
+    if not baseline.get("ok"):
         return {
             "name": "pytest_baseline",
             "passed": False,
             "blocking": True,
-            "returncode": (
-                baseline.get(
-                    "returncode"
-                )
-            ),
+            "returncode": (baseline.get("returncode")),
             "runtime": "python:3.12-slim",
             "baseline_total_tests": None,
             "candidate_total_tests": None,
@@ -3429,15 +2809,7 @@ def pytest_baseline_result(
             "output": (
                 "Unable to establish "
                 "the production pytest "
-                "baseline.\n"
-                + str(
-                    baseline.get(
-                        "output"
-                    )
-                    or ""
-                )[
-                    -12000:
-                ]
+                "baseline.\n" + str(baseline.get("output") or "")[-12000:]
             ),
         }
 
@@ -3447,30 +2819,16 @@ def pytest_baseline_result(
         timeout=timeout,
     )
 
-    if not candidate.get(
-        "ok"
-    ):
+    if not candidate.get("ok"):
         return {
             "name": "pytest_baseline",
             "passed": False,
             "blocking": True,
-            "returncode": (
-                candidate.get(
-                    "returncode"
-                )
-            ),
+            "returncode": (candidate.get("returncode")),
             "runtime": "python:3.12-slim",
-            "baseline_total_tests": (
-                baseline.get(
-                    "total_tests"
-                )
-            ),
+            "baseline_total_tests": (baseline.get("total_tests")),
             "candidate_total_tests": None,
-            "baseline_failures": sum(
-                baseline[
-                    "failures"
-                ].values()
-            ),
+            "baseline_failures": sum(baseline["failures"].values()),
             "candidate_failures": None,
             "new_failures_count": None,
             "new_failures": [],
@@ -3481,177 +2839,82 @@ def pytest_baseline_result(
             "output": (
                 "Unable to execute "
                 "candidate pytest "
-                "validation.\n"
-                + str(
-                    candidate.get(
-                        "output"
-                    )
-                    or ""
-                )[
-                    -12000:
-                ]
+                "validation.\n" + str(candidate.get("output") or "")[-12000:]
             ),
         }
 
-    baseline_failures: Counter[
-        str
-    ] = baseline[
-        "failures"
-    ]
+    baseline_failures: Counter[str] = baseline["failures"]
 
-    candidate_failures: Counter[
-        str
-    ] = candidate[
-        "failures"
-    ]
+    candidate_failures: Counter[str] = candidate["failures"]
 
-    baseline_tests: Counter[
-        str
-    ] = baseline[
-        "tests"
-    ]
+    baseline_tests: Counter[str] = baseline["tests"]
 
-    candidate_tests: Counter[
-        str
-    ] = candidate[
-        "tests"
-    ]
+    candidate_tests: Counter[str] = candidate["tests"]
 
-    new_counts = (
-        candidate_failures
-        - baseline_failures
-    )
+    new_counts = candidate_failures - baseline_failures
 
-    resolved_counts = (
-        baseline_failures
-        - candidate_failures
-    )
+    resolved_counts = baseline_failures - candidate_failures
 
-    missing_test_counts = (
-        baseline_tests
-        - candidate_tests
-    )
+    missing_test_counts = baseline_tests - candidate_tests
 
-    added_test_counts = (
-        candidate_tests
-        - baseline_tests
-    )
+    added_test_counts = candidate_tests - baseline_tests
 
-    candidate_failure_details = (
-        candidate.get(
-            "failure_details"
-        )
-        or {}
-    )
+    candidate_failure_details = candidate.get("failure_details") or {}
     new_failures: list[dict[str, Any]] = []
 
-    for identity, count in sorted(
-        new_counts.items()
-    ):
+    for identity, count in sorted(new_counts.items()):
         item: dict[str, Any] = {
             "test": identity,
             "count": count,
         }
 
-        raw_details = (
-            candidate_failure_details.get(
-                identity
-            )
-            or []
-        )
+        raw_details = candidate_failure_details.get(identity) or []
         if isinstance(
             raw_details,
             list,
         ):
-            evidence = "\n\n".join(
-                str(value)
-                for value in raw_details[:2]
-                if str(value).strip()
-            )[-8000:]
+            evidence = "\n\n".join(str(value) for value in raw_details[:2] if str(value).strip())[
+                -8000:
+            ]
             if evidence:
-                item[
-                    "evidence"
-                ] = evidence
+                item["evidence"] = evidence
 
-        new_failures.append(
-            item
-        )
+        new_failures.append(item)
 
     missing_tests = [
         {
             "test": identity,
             "count": count,
         }
-        for identity, count in sorted(
-            missing_test_counts.items()
-        )
+        for identity, count in sorted(missing_test_counts.items())
     ]
 
-    new_count = sum(
-        new_counts.values()
-    )
+    new_count = sum(new_counts.values())
 
-    resolved_count = sum(
-        resolved_counts.values()
-    )
+    resolved_count = sum(resolved_counts.values())
 
-    missing_count = sum(
-        missing_test_counts.values()
-    )
+    missing_count = sum(missing_test_counts.values())
 
-    added_count = sum(
-        added_test_counts.values()
-    )
+    added_count = sum(added_test_counts.values())
 
-    passed = (
-        new_count == 0
-        and missing_count == 0
-    )
+    passed = new_count == 0 and missing_count == 0
 
     return {
         "name": "pytest_baseline",
         "passed": passed,
         "blocking": True,
-        "returncode": (
-            0
-            if passed
-            else 1
-        ),
+        "returncode": (0 if passed else 1),
         "runtime": "python:3.12-slim",
-        "baseline_total_tests": (
-            baseline[
-                "total_tests"
-            ]
-        ),
-        "candidate_total_tests": (
-            candidate[
-                "total_tests"
-            ]
-        ),
-        "baseline_failures": sum(
-            baseline_failures.values()
-        ),
-        "candidate_failures": sum(
-            candidate_failures.values()
-        ),
-        "new_failures_count": (
-            new_count
-        ),
-        "new_failures": (
-            new_failures
-        ),
-        "resolved_failures_count": (
-            resolved_count
-        ),
-        "missing_tests_count": (
-            missing_count
-        ),
-        "missing_tests": (
-            missing_tests
-        ),
-        "added_tests_count": (
-            added_count
-        ),
+        "baseline_total_tests": (baseline["total_tests"]),
+        "candidate_total_tests": (candidate["total_tests"]),
+        "baseline_failures": sum(baseline_failures.values()),
+        "candidate_failures": sum(candidate_failures.values()),
+        "new_failures_count": (new_count),
+        "new_failures": (new_failures),
+        "resolved_failures_count": (resolved_count),
+        "missing_tests_count": (missing_count),
+        "missing_tests": (missing_tests),
+        "added_tests_count": (added_count),
         "output": (
             "Pytest baseline comparison: "
             f"baseline_total="
@@ -3669,13 +2932,21 @@ def pytest_baseline_result(
         ),
     }
 
-def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig) -> tuple[dict[str, Any], dict[str, Any]]:
+
+def run_validation(
+    workspace: Path, policy: dict[str, Any], config: WorkerConfig
+) -> tuple[dict[str, Any], dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
     commands: list[tuple[str, list[str], bool, int]] = [
         ("git_diff_check", ["git", "diff", "--check"], True, 60),
         ("compileall", [str(VENV_PYTHON), "-m", "compileall", "-q", "bridge/app"], True, 180),
-        ("ruff", [str(VENV_PYTHON), "-m", "ruff", "check", "bridge/app", "bridge/tests"], True, 240),
+        (
+            "ruff",
+            [str(VENV_PYTHON), "-m", "ruff", "check", "bridge/app", "bridge/tests"],
+            True,
+            240,
+        ),
     ]
     for name, command, blocking, timeout in commands:
         completed = run(command, cwd=workspace, timeout=timeout, check=False)
@@ -3688,15 +2959,19 @@ def run_validation(workspace: Path, policy: dict[str, Any], config: WorkerConfig
         )
     )
 
-    results.append(
-        bandit_baseline_result(
-            workspace
-        )
-    )
+    results.append(bandit_baseline_result(workspace))
 
     if (workspace / "bridge/requirements.txt").exists():
         completed = run(
-            [str(VENV_PYTHON), "-m", "pip_audit", "-r", "bridge/requirements.txt", "--progress-spinner", "off"],
+            [
+                str(VENV_PYTHON),
+                "-m",
+                "pip_audit",
+                "-r",
+                "bridge/requirements.txt",
+                "--progress-spinner",
+                "off",
+            ],
             cwd=workspace,
             timeout=300,
             check=False,
@@ -3755,9 +3030,7 @@ def docker_smoke_test(
             # the container process to a host UID that is neither
             # the worker owner nor group, so normal 0775 ownership
             # is insufficient for SQLite and application logs.
-            path.chmod(
-                0o777
-            )
+            path.chmod(0o777)
 
     try:
         build = run(
@@ -3777,9 +3050,7 @@ def docker_smoke_test(
             return {
                 "passed": False,
                 "stage": "build",
-                "output": build.stdout[
-                    -12000:
-                ],
+                "output": build.stdout[-12000:],
             }
 
         run_command = [
@@ -3837,34 +3108,23 @@ def docker_smoke_test(
             return {
                 "passed": False,
                 "stage": "start",
-                "output": started.stdout[
-                    -12000:
-                ],
+                "output": started.stdout[-12000:],
             }
 
-        deadline = (
-            time.monotonic()
-            + min(
-                timeout,
-                120,
-            )
+        deadline = time.monotonic() + min(
+            timeout,
+            120,
         )
 
         last_output = ""
 
-        while (
-            time.monotonic()
-            < deadline
-        ):
+        while time.monotonic() < deadline:
             state = run(
                 [
                     "docker",
                     "inspect",
                     "-f",
-                    (
-                        "{{.State.Running}} "
-                        "{{.State.ExitCode}}"
-                    ),
+                    ("{{.State.Running}} {{.State.ExitCode}}"),
                     container,
                 ],
                 cwd=workspace,
@@ -3887,39 +3147,15 @@ def docker_smoke_test(
                 return {
                     "passed": False,
                     "stage": "startup",
-                    "output": (
-                        state.stdout
-                        + "\n"
-                        + logs.stdout
-                    )[
-                        -12000:
-                    ],
+                    "output": (state.stdout + "\n" + logs.stdout)[-12000:],
                 }
 
-            state_parts = (
-                state.stdout
-                .strip()
-                .split()
-            )
+            state_parts = state.stdout.strip().split()
 
-            running = bool(
-                state_parts
-                and state_parts[
-                    0
-                ].casefold()
-                == "true"
-            )
+            running = bool(state_parts and state_parts[0].casefold() == "true")
 
             if not running:
-                exit_code = (
-                    state_parts[
-                        1
-                    ]
-                    if len(
-                        state_parts
-                    ) > 1
-                    else "unknown"
-                )
+                exit_code = state_parts[1] if len(state_parts) > 1 else "unknown"
 
                 logs = run(
                     [
@@ -3936,12 +3172,8 @@ def docker_smoke_test(
                     "passed": False,
                     "stage": "startup",
                     "output": (
-                        "Candidate container exited "
-                        f"with code {exit_code}.\n"
-                        + logs.stdout
-                    )[
-                        -12000:
-                    ],
+                        f"Candidate container exited with code {exit_code}.\n" + logs.stdout
+                    )[-12000:],
                 }
 
             check = run(
@@ -3966,29 +3198,19 @@ def docker_smoke_test(
                 check=False,
             )
 
-            last_output = (
-                check.stdout
-            )
+            last_output = check.stdout
 
-            if (
-                check.returncode == 0
-                and '"status":"healthy"'
-                in check.stdout.replace(
-                    " ",
-                    "",
-                )
+            if check.returncode == 0 and '"status":"healthy"' in check.stdout.replace(
+                " ",
+                "",
             ):
                 return {
                     "passed": True,
                     "stage": "health",
-                    "output": check.stdout[
-                        -4000:
-                    ],
+                    "output": check.stdout[-4000:],
                 }
 
-            time.sleep(
-                2
-            )
+            time.sleep(2)
 
         logs = run(
             [
@@ -4004,13 +3226,7 @@ def docker_smoke_test(
         return {
             "passed": False,
             "stage": "health",
-            "output": (
-                last_output
-                + "\n"
-                + logs
-            )[
-                -12000:
-            ],
+            "output": (last_output + "\n" + logs)[-12000:],
         }
 
     finally:
@@ -4062,12 +3278,16 @@ def commit_candidate(workspace: Path, candidate_id: int, failure_id: int, summar
     status = run(["git", "status", "--porcelain"], cwd=workspace).stdout.strip()
     if not status:
         raise WorkerError("Candidate patch produced no tracked changes.")
-    message = f"Jarvis improvement {candidate_id}: {summary[:72]}\n\nFixes recorded failure {failure_id}."
+    message = (
+        f"Jarvis improvement {candidate_id}: {summary[:72]}\n\nFixes recorded failure {failure_id}."
+    )
     run(["git", "commit", "-m", message], cwd=workspace)
     return run(["git", "rev-parse", "HEAD"], cwd=workspace).stdout.strip()
 
 
-def maybe_create_pr(workspace: Path, branch: str, candidate_id: int, summary: str, config: WorkerConfig) -> str | None:
+def maybe_create_pr(
+    workspace: Path, branch: str, candidate_id: int, summary: str, config: WorkerConfig
+) -> str | None:
     if not config.github_enabled or shutil.which("gh") is None:
         return None
     auth = run(["gh", "auth", "status"], cwd=workspace, timeout=30, check=False)
@@ -4087,9 +3307,18 @@ def maybe_create_pr(workspace: Path, branch: str, candidate_id: int, summary: st
     ).strip()
     pr = run(
         [
-            "gh", "pr", "create", "--draft", "--base", config.base_branch,
-            "--head", branch, "--title", f"Jarvis improvement {candidate_id}: {summary[:60]}",
-            "--body", body,
+            "gh",
+            "pr",
+            "create",
+            "--draft",
+            "--base",
+            config.base_branch,
+            "--head",
+            branch,
+            "--title",
+            f"Jarvis improvement {candidate_id}: {summary[:60]}",
+            "--body",
+            body,
         ],
         cwd=workspace,
         timeout=120,
@@ -4107,17 +3336,13 @@ def _normalise_commit_sha(
     *,
     label: str,
 ) -> str:
-    sha = str(
-        value or ""
-    ).strip().lower()
+    sha = str(value or "").strip().lower()
 
     if not re.fullmatch(
         r"[0-9a-f]{40}|[0-9a-f]{64}",
         sha,
     ):
-        raise WorkerError(
-            f"Invalid {label} commit SHA."
-        )
+        raise WorkerError(f"Invalid {label} commit SHA.")
 
     return sha
 
@@ -4156,132 +3381,68 @@ def candidate_diff_sha256(
     diff = completed.stdout
 
     if not diff.strip():
-        raise WorkerError(
-            "Validated candidate diff is empty."
-        )
+        raise WorkerError("Validated candidate diff is empty.")
 
-    return hashlib.sha256(
-        diff.encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
 
 
 def verify_candidate_deploy_binding(
     candidate: dict[str, Any],
 ) -> dict[str, str]:
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    if str(
-        candidate.get(
-            "status"
-        )
-        or ""
-    ) not in {
+    if str(candidate.get("status") or "") not in {
         "deploy_requested",
         "deploying",
     }:
-        raise WorkerError(
-            "Candidate is not in an authorised "
-            "deployment state."
-        )
+        raise WorkerError("Candidate is not in an authorised deployment state.")
 
-    expected_branch = (
-        f"jarvis/improvement-{candidate_id}"
-    )
+    expected_branch = f"jarvis/improvement-{candidate_id}"
 
-    branch = str(
-        candidate.get(
-            "branch_name"
-        )
-        or ""
-    )
+    branch = str(candidate.get("branch_name") or "")
 
     if branch != expected_branch:
-        raise WorkerError(
-            "Candidate branch binding is invalid."
-        )
+        raise WorkerError("Candidate branch binding is invalid.")
 
-    workspace_raw = str(
-        candidate.get(
-            "workspace_path"
-        )
-        or ""
-    ).strip()
+    workspace_raw = str(candidate.get("workspace_path") or "").strip()
 
     if not workspace_raw:
-        raise WorkerError(
-            "Candidate workspace binding is missing."
-        )
+        raise WorkerError("Candidate workspace binding is missing.")
 
-    workspace = Path(
-        workspace_raw
-    )
+    workspace = Path(workspace_raw)
 
-    if (
-        not workspace.exists()
-        or workspace.is_symlink()
-    ):
-        raise WorkerError(
-            "Candidate workspace is missing or unsafe."
-        )
+    if not workspace.exists() or workspace.is_symlink():
+        raise WorkerError("Candidate workspace is missing or unsafe.")
 
-    expected_workspace = (
-        WORKTREES
-        / str(candidate_id)
-    ).resolve()
+    expected_workspace = (WORKTREES / str(candidate_id)).resolve()
 
     try:
-        resolved_workspace = workspace.resolve(
-            strict=True
-        )
+        resolved_workspace = workspace.resolve(strict=True)
     except OSError as exc:
-        raise WorkerError(
-            "Candidate workspace cannot be resolved."
-        ) from exc
+        raise WorkerError("Candidate workspace cannot be resolved.") from exc
 
-    if (
-        resolved_workspace
-        != expected_workspace
-    ):
+    if resolved_workspace != expected_workspace:
         raise WorkerError(
-            "Candidate workspace path does not match "
-            "the controlled worktree location."
+            "Candidate workspace path does not match the controlled worktree location."
         )
 
     base_commit = _normalise_commit_sha(
-        candidate.get(
-            "base_commit"
-        ),
+        candidate.get("base_commit"),
         label="stored base",
     )
 
     candidate_commit = _normalise_commit_sha(
-        candidate.get(
-            "candidate_commit"
-        ),
+        candidate.get("candidate_commit"),
         label="stored candidate",
     )
 
-    stored_hash = str(
-        candidate.get(
-            "validated_patch_sha256"
-        )
-        or ""
-    ).strip().lower()
+    stored_hash = str(candidate.get("validated_patch_sha256") or "").strip().lower()
 
     if not re.fullmatch(
         r"[0-9a-f]{64}",
         stored_hash,
     ):
-        raise WorkerError(
-            "Validated candidate patch hash is missing "
-            "or invalid."
-        )
+        raise WorkerError("Validated candidate patch hash is missing or invalid.")
 
     ensure_repo()
 
@@ -4298,8 +3459,7 @@ def verify_candidate_deploy_binding(
 
     if current_ref != base_commit:
         raise WorkerError(
-            "Live Jarvis HEAD no longer matches the "
-            "candidate's validated base commit."
+            "Live Jarvis HEAD no longer matches the candidate's validated base commit."
         )
 
     branch_ref = _normalise_commit_sha(
@@ -4315,9 +3475,7 @@ def verify_candidate_deploy_binding(
     )
 
     if branch_ref != candidate_commit:
-        raise WorkerError(
-            "Candidate branch moved after validation."
-        )
+        raise WorkerError("Candidate branch moved after validation.")
 
     workspace_ref = _normalise_commit_sha(
         run(
@@ -4332,9 +3490,7 @@ def verify_candidate_deploy_binding(
     )
 
     if workspace_ref != candidate_commit:
-        raise WorkerError(
-            "Candidate worktree moved after validation."
-        )
+        raise WorkerError("Candidate worktree moved after validation.")
 
     merge_base = _normalise_commit_sha(
         run(
@@ -4350,8 +3506,7 @@ def verify_candidate_deploy_binding(
 
     if merge_base != base_commit:
         raise WorkerError(
-            "Candidate is no longer a direct descendant "
-            "of its validated base commit."
+            "Candidate is no longer a direct descendant of its validated base commit."
         )
 
     actual_hash = candidate_diff_sha256(
@@ -4364,18 +3519,14 @@ def verify_candidate_deploy_binding(
         stored_hash,
         actual_hash,
     ):
-        raise WorkerError(
-            "Candidate diff changed after validation."
-        )
+        raise WorkerError("Candidate diff changed after validation.")
 
     return {
         "base_commit": base_commit,
         "candidate_commit": candidate_commit,
         "validated_patch_sha256": actual_hash,
         "branch": branch,
-        "workspace": str(
-            resolved_workspace
-        ),
+        "workspace": str(resolved_workspace),
     }
 
 
@@ -4425,24 +3576,20 @@ def reset_repository_to_ref(
     )
 
     if actual != target:
-        raise WorkerError(
-            "Repository reset did not land on "
-            "the requested rollback commit."
-        )
+        raise WorkerError("Repository reset did not land on the requested rollback commit.")
 
     return actual
 
 
-def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]) -> None:
+def process_queued_candidate(
+    candidate: dict[str, Any], config: WorkerConfig, env_values: dict[str, str]
+) -> None:
     candidate_id = int(candidate["candidate_id"])
     failure_id = int(candidate["failure_id"])
     failure = fetch_failure(failure_id)
     manual_request = not uses_autonomous_attempt_quota(failure)
 
-    if (
-        not manual_request
-        and attempts_today() >= config.max_attempts_per_day
-    ):
+    if not manual_request and attempts_today() >= config.max_attempts_per_day:
         return
 
     if not improvement_enabled():
@@ -4466,7 +3613,9 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
     )
 
     branch = f"jarvis/improvement-{candidate_id}"
-    update_candidate(candidate_id, status="generating", model=config.model, branch_name=branch, error=None)
+    update_candidate(
+        candidate_id, status="generating", model=config.model, branch_name=branch, error=None
+    )
     audit(
         "candidate_generation_started",
         failure_id=failure_id,
@@ -4508,18 +3657,14 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                     base_commit,
                 )
 
-                workspace_base = (
-                    run(
-                        [
-                            "git",
-                            "rev-parse",
-                            "HEAD",
-                        ],
-                        cwd=workspace,
-                    )
-                    .stdout
-                    .strip()
-                )
+                workspace_base = run(
+                    [
+                        "git",
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    cwd=workspace,
+                ).stdout.strip()
 
                 if (
                     _normalise_commit_sha(
@@ -4529,8 +3674,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                     != base_commit
                 ):
                     raise WorkerError(
-                        "Candidate worktree was not created "
-                        "from the captured base commit."
+                        "Candidate worktree was not created from the captured base commit."
                     )
 
                 (
@@ -4566,11 +3710,9 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             except Exception as exc:
                 generation_error = str(exc)
 
-                source_feedback = (
-                    _apply_failure_source_feedback(
-                        generation_error,
-                        base_commit,
-                    )
+                source_feedback = _apply_failure_source_feedback(
+                    generation_error,
+                    base_commit,
                 )
 
                 if source_feedback:
@@ -4599,15 +3741,9 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 config.candidate_timeout_seconds,
             )
             tests["candidate_container"] = smoke
-            tests["passed"] = (
-                bool(tests.get("passed"))
-                and bool(smoke.get("passed"))
-            )
+            tests["passed"] = bool(tests.get("passed")) and bool(smoke.get("passed"))
 
-            if (
-                tests["passed"]
-                and security.get("passed")
-            ):
+            if tests["passed"] and security.get("passed"):
                 break
 
             validation_error = (
@@ -4626,9 +3762,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 raise WorkerError(validation_error)
 
             validation_repair_used = True
-            failed_patch = str(
-                payload.get("patch") or ""
-            )
+            failed_patch = str(payload.get("patch") or "")
 
             audit(
                 "candidate_validation_repair_started",
@@ -4679,8 +3813,7 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
                 != base_commit
             ):
                 raise WorkerError(
-                    "Candidate repair worktree was not "
-                    "created from the captured base commit."
+                    "Candidate repair worktree was not created from the captured base commit."
                 )
 
             (
@@ -4742,12 +3875,10 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             label="candidate",
         )
 
-        validated_patch_hash = (
-            candidate_diff_sha256(
-                base_commit,
-                commit_sha,
-                cwd=workspace,
-            )
+        validated_patch_hash = candidate_diff_sha256(
+            base_commit,
+            commit_sha,
+            cwd=workspace,
         )
 
         pr_url = maybe_create_pr(
@@ -4758,13 +3889,9 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
             config,
         )
 
-        approval_code = (
-            f"{secrets.randbelow(900000) + 100000:06d}"
-        )
+        approval_code = f"{secrets.randbelow(900000) + 100000:06d}"
 
-        approval_code_expires_at = utc_after(
-            24 * 60 * 60
-        )
+        approval_code_expires_at = utc_after(24 * 60 * 60)
 
         diff_stats = {
             "changed_files": len(paths),
@@ -4838,7 +3965,12 @@ def process_queued_candidate(candidate: dict[str, Any], config: WorkerConfig, en
     except Exception as exc:
         update_candidate(candidate_id, status="failed", error=str(exc)[-12000:])
         update_failure(failure_id, status="recorded")
-        audit("candidate_failed", failure_id=failure_id, candidate_id=candidate_id, details={"error": str(exc)[-4000:]})
+        audit(
+            "candidate_failed",
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={"error": str(exc)[-4000:]},
+        )
         failed_where, failed_reason = plain_failure_explanation(str(exc))
         notify_aaron(
             f"{failed_reason} Nothing was installed. "
@@ -4868,8 +4000,14 @@ def health_check(timeout_seconds: int) -> tuple[bool, str]:
 
 def monitor_logs(seconds: int = 30) -> tuple[bool, str]:
     time.sleep(min(seconds, 10))
-    logs = run(["docker", "compose", "logs", "--since", f"{seconds}s", "--tail", "300", "jarvis-core"], timeout=60, check=False).stdout
-    bad = re.search(r"(?i)(traceback|syntaxerror|importerror|critical|application startup failed)", logs)
+    logs = run(
+        ["docker", "compose", "logs", "--since", f"{seconds}s", "--tail", "300", "jarvis-core"],
+        timeout=60,
+        check=False,
+    ).stdout
+    bad = re.search(
+        r"(?i)(traceback|syntaxerror|importerror|critical|application startup failed)", logs
+    )
     return bad is None, logs[-12000:]
 
 
@@ -4879,9 +4017,7 @@ def deploy_candidate(
     env_values: dict[str, str],
 ) -> None:
     if config.proposal_only:
-        raise WorkerError(
-            "Deployment is disabled while Proposal Mode is active."
-        )
+        raise WorkerError("Deployment is disabled while Proposal Mode is active.")
     if config.base_branch != AUTHORITATIVE_PRODUCTION_BRANCH:
         raise WorkerError(
             "Deployment is restricted to the authoritative "
@@ -4890,48 +4026,25 @@ def deploy_candidate(
 
     ensure_candidate_transaction_columns()
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    failure_id = int(
-        candidate[
-            "failure_id"
-        ]
-    )
+    failure_id = int(candidate["failure_id"])
 
-    claimed = claim_deployment(
-        candidate_id
-    )
+    claimed = claim_deployment(candidate_id)
 
-    lease_id = str(
-        claimed.get(
-            "deploy_lease_id"
-        )
-        or ""
-    )
+    lease_id = str(claimed.get("deploy_lease_id") or "")
 
     if not lease_id:
-        raise WorkerError(
-            "Deployment claim did not produce a lease."
-        )
+        raise WorkerError("Deployment claim did not produce a lease.")
 
     merged = False
 
     try:
-        binding = verify_candidate_deploy_binding(
-            claimed
-        )
+        binding = verify_candidate_deploy_binding(claimed)
 
-        current_ref = binding[
-            "base_commit"
-        ]
+        current_ref = binding["base_commit"]
 
-        candidate_commit = binding[
-            "candidate_commit"
-        ]
+        candidate_commit = binding["candidate_commit"]
 
         update_deployment_phase(
             candidate_id,
@@ -4961,10 +4074,7 @@ def deploy_candidate(
         )
 
         if premerge_ref != current_ref:
-            raise WorkerError(
-                "Live Jarvis HEAD changed after deployment "
-                "binding verification."
-            )
+            raise WorkerError("Live Jarvis HEAD changed after deployment binding verification.")
 
         update_deployment_phase(
             candidate_id,
@@ -4996,8 +4106,7 @@ def deploy_candidate(
 
         if merged_ref != candidate_commit:
             raise WorkerError(
-                "The live repository did not land on the "
-                "exact validated candidate commit."
+                "The live repository did not land on the exact validated candidate commit."
             )
 
         update_deployment_phase(
@@ -5029,22 +4138,13 @@ def deploy_candidate(
             "verifying",
         )
 
-        healthy, health_output = (
-            health_check(
-                config.deploy_health_timeout_seconds
-            )
-        )
+        healthy, health_output = health_check(config.deploy_health_timeout_seconds)
 
-        logs_ok, logs = monitor_logs(
-            30
-        )
+        logs_ok, logs = monitor_logs(30)
 
         if not healthy or not logs_ok:
             raise WorkerError(
-                "Deployment health verification failed.\n"
-                + health_output
-                + "\n"
-                + logs
+                "Deployment health verification failed.\n" + health_output + "\n" + logs
             )
 
         transition_deployment_state(
@@ -5068,26 +4168,19 @@ def deploy_candidate(
             details={
                 "commit": candidate_commit,
                 "base_commit": current_ref,
-                "validated_patch_sha256": (
-                    binding[
-                        "validated_patch_sha256"
-                    ]
-                ),
+                "validated_patch_sha256": (binding["validated_patch_sha256"]),
             },
         )
 
         notify_aaron(
-            f"Improvement {candidate_id} deployed successfully "
-            "and passed health checks.",
+            f"Improvement {candidate_id} deployed successfully and passed health checks.",
             title="Jarvis updated",
             config=config,
             env_values=env_values,
         )
 
     except Exception as exc:
-        error = str(
-            exc
-        )[-12000:]
+        error = str(exc)[-12000:]
 
         if not merged:
             transition_deployment_state(
@@ -5110,9 +4203,7 @@ def deploy_candidate(
             raise
 
         rollback_ref = _normalise_commit_sha(
-            claimed.get(
-                "base_commit"
-            ),
+            claimed.get("base_commit"),
             label="rollback base",
         )
 
@@ -5154,15 +4245,9 @@ def deploy_candidate(
                 "rollback_verifying",
             )
 
-            healthy, rollback_health = (
-                health_check(
-                    config.deploy_health_timeout_seconds
-                )
-            )
+            healthy, rollback_health = health_check(config.deploy_health_timeout_seconds)
 
-            logs_ok, rollback_logs = monitor_logs(
-                30
-            )
+            logs_ok, rollback_logs = monitor_logs(30)
 
             if not healthy or not logs_ok:
                 raise WorkerError(
@@ -5217,10 +4302,7 @@ def deploy_candidate(
 
             rollback_error = (
                 "Deployment failed and automatic rollback "
-                "could not be verified. "
-                + str(
-                    rollback_exc
-                )
+                "could not be verified. " + str(rollback_exc)
             )[-12000:]
 
             transition_deployment_state(
@@ -5257,60 +4339,31 @@ def recover_interrupted_deployment(
     env_values: dict[str, str],
 ) -> str:
     if config.proposal_only:
-        raise WorkerError(
-            "Deployment recovery is disabled while "
-            "Proposal Mode is active."
-        )
+        raise WorkerError("Deployment recovery is disabled while Proposal Mode is active.")
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    failure_id = int(
-        candidate[
-            "failure_id"
-        ]
-    )
+    failure_id = int(candidate["failure_id"])
 
-    claimed = claim_stale_deployment_recovery(
-        candidate_id
-    )
+    claimed = claim_stale_deployment_recovery(candidate_id)
 
     if claimed is None:
         return "active"
 
-    lease_id = str(
-        claimed.get(
-            "deploy_lease_id"
-        )
-        or ""
-    )
+    lease_id = str(claimed.get("deploy_lease_id") or "")
 
     if not lease_id:
-        raise WorkerError(
-            "Recovery claim did not produce a lease."
-        )
+        raise WorkerError("Recovery claim did not produce a lease.")
 
-    phase = str(
-        claimed.get(
-            "deploy_phase"
-        )
-        or ""
-    ).strip()
+    phase = str(claimed.get("deploy_phase") or "").strip()
 
     base_commit = _normalise_commit_sha(
-        claimed.get(
-            "base_commit"
-        ),
+        claimed.get("base_commit"),
         label="recovery base",
     )
 
     candidate_commit = _normalise_commit_sha(
-        claimed.get(
-            "candidate_commit"
-        ),
+        claimed.get("candidate_commit"),
         label="recovery candidate",
     )
 
@@ -5330,11 +4383,7 @@ def recover_interrupted_deployment(
 
     except Exception as exc:
         error = (
-            "Interrupted deployment could not safely "
-            "inspect the live repository: "
-            + str(
-                exc
-            )
+            "Interrupted deployment could not safely inspect the live repository: " + str(exc)
         )[-12000:]
 
         transition_deployment_state(
@@ -5391,10 +4440,7 @@ def recover_interrupted_deployment(
                 lease_id,
                 status="deploy_requested",
                 phase="recovered_requeued",
-                error=(
-                    "Recovered interrupted deployment "
-                    "before the candidate commit was merged."
-                ),
+                error=("Recovered interrupted deployment before the candidate commit was merged."),
             )
 
             audit(
@@ -5438,21 +4484,13 @@ def recover_interrupted_deployment(
                 "recovery_verifying",
             )
 
-            healthy, output = health_check(
-                config.deploy_health_timeout_seconds
-            )
+            healthy, output = health_check(config.deploy_health_timeout_seconds)
 
-            logs_ok, logs = monitor_logs(
-                30
-            )
+            logs_ok, logs = monitor_logs(30)
 
             if not healthy or not logs_ok:
                 raise WorkerError(
-                    "Recovered base did not pass runtime "
-                    "verification.\n"
-                    + output
-                    + "\n"
-                    + logs
+                    "Recovered base did not pass runtime verification.\n" + output + "\n" + logs
                 )
 
             transition_deployment_state(
@@ -5484,8 +4522,7 @@ def recover_interrupted_deployment(
             )
 
             notify_aaron(
-                f"Interrupted improvement {candidate_id} was "
-                "confirmed safely rolled back.",
+                f"Interrupted improvement {candidate_id} was confirmed safely rolled back.",
                 title="Jarvis deployment recovered",
                 config=config,
                 env_values=env_values,
@@ -5499,17 +4536,10 @@ def recover_interrupted_deployment(
                 lease_id,
             ):
                 raise WorkerError(
-                    "Recovery worker lost its lease and "
-                    "refused further mutation."
+                    "Recovery worker lost its lease and refused further mutation."
                 ) from exc
 
-            error = (
-                "Interrupted base recovery verification "
-                "failed: "
-                + str(
-                    exc
-                )
-            )[-12000:]
+            error = ("Interrupted base recovery verification failed: " + str(exc))[-12000:]
 
             transition_deployment_state(
                 candidate_id,
@@ -5607,21 +4637,14 @@ def recover_interrupted_deployment(
             "recovery_verifying",
         )
 
-        healthy, output = health_check(
-            config.deploy_health_timeout_seconds
-        )
+        healthy, output = health_check(config.deploy_health_timeout_seconds)
 
-        logs_ok, logs = monitor_logs(
-            30
-        )
+        logs_ok, logs = monitor_logs(30)
 
         if not healthy or not logs_ok:
             raise WorkerError(
                 "Interrupted deployment rollback did "
-                "not pass verification.\n"
-                + output
-                + "\n"
-                + logs
+                "not pass verification.\n" + output + "\n" + logs
             )
 
         transition_deployment_state(
@@ -5630,10 +4653,7 @@ def recover_interrupted_deployment(
             status="rolled_back",
             phase="interrupted_rolled_back",
             rolled_back_at=utc_now(),
-            error=(
-                "Interrupted deployment was automatically "
-                "rolled back to its validated base."
-            ),
+            error=("Interrupted deployment was automatically rolled back to its validated base."),
         )
 
         update_failure(
@@ -5653,8 +4673,7 @@ def recover_interrupted_deployment(
         )
 
         notify_aaron(
-            f"Interrupted improvement {candidate_id} was "
-            "rolled back safely.",
+            f"Interrupted improvement {candidate_id} was rolled back safely.",
             title="Jarvis deployment recovered",
             config=config,
             env_values=env_values,
@@ -5668,16 +4687,10 @@ def recover_interrupted_deployment(
             lease_id,
         ):
             raise WorkerError(
-                "Recovery worker lost its lease and "
-                "refused further mutation."
+                "Recovery worker lost its lease and refused further mutation."
             ) from exc
 
-        error = (
-            "Interrupted deployment recovery failed: "
-            + str(
-                exc
-            )
-        )[-12000:]
+        error = ("Interrupted deployment recovery failed: " + str(exc))[-12000:]
 
         transition_deployment_state(
             candidate_id,
@@ -5697,8 +4710,7 @@ def recover_interrupted_deployment(
         )
 
         notify_aaron(
-            f"Improvement {candidate_id} requires manual "
-            "recovery after an interrupted deployment.",
+            f"Improvement {candidate_id} requires manual recovery after an interrupted deployment.",
             title="Jarvis recovery required",
             config=config,
             env_values=env_values,
@@ -5715,9 +4727,7 @@ def claim_manual_rollback(
     now = utc_now()
 
     with connect() as connection:
-        connection.execute(
-            "BEGIN IMMEDIATE"
-        )
+        connection.execute("BEGIN IMMEDIATE")
 
         row = connection.execute(
             """
@@ -5725,30 +4735,16 @@ def claim_manual_rollback(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
         if row is None:
-            raise WorkerError(
-                f"Candidate {candidate_id} was not found."
-            )
+            raise WorkerError(f"Candidate {candidate_id} was not found.")
 
-        candidate = dict(
-            row
-        )
+        candidate = dict(row)
 
-        if str(
-            candidate.get(
-                "status"
-            )
-            or ""
-        ) != "rollback_requested":
-            raise WorkerError(
-                "Candidate is not available for "
-                "manual rollback claiming."
-            )
+        if str(candidate.get("status") or "") != "rollback_requested":
+            raise WorkerError("Candidate is not available for manual rollback claiming.")
 
         cursor = connection.execute(
             """
@@ -5767,9 +4763,7 @@ def claim_manual_rollback(
         )
 
         if cursor.rowcount != 1:
-            raise WorkerError(
-                "Manual rollback claim lost a database race."
-            )
+            raise WorkerError("Manual rollback claim lost a database race.")
 
         claimed = connection.execute(
             """
@@ -5777,60 +4771,39 @@ def claim_manual_rollback(
             FROM improvement_candidates
             WHERE candidate_id = ?
             """,
-            (
-                candidate_id,
-            ),
+            (candidate_id,),
         ).fetchone()
 
         if claimed is None:
-            raise WorkerError(
-                "Claimed rollback candidate disappeared."
-            )
+            raise WorkerError("Claimed rollback candidate disappeared.")
 
-        return dict(
-            claimed
-        )
+        return dict(claimed)
 
 
 def verify_manual_rollback_binding(
     candidate: dict[str, Any],
 ) -> dict[str, str]:
-    if str(
-        candidate.get(
-            "status"
-        )
-        or ""
-    ) != "rolling_back":
-        raise WorkerError(
-            "Candidate is not in a claimed manual "
-            "rollback state."
-        )
+    if str(candidate.get("status") or "") != "rolling_back":
+        raise WorkerError("Candidate is not in a claimed manual rollback state.")
 
     base_commit = _normalise_commit_sha(
-        candidate.get(
-            "base_commit"
-        ),
+        candidate.get("base_commit"),
         label="manual rollback base",
     )
 
     candidate_commit = _normalise_commit_sha(
-        candidate.get(
-            "candidate_commit"
-        ),
+        candidate.get("candidate_commit"),
         label="manual rollback candidate",
     )
 
     rollback_ref = _normalise_commit_sha(
-        candidate.get(
-            "rollback_ref"
-        ),
+        candidate.get("rollback_ref"),
         label="stored rollback",
     )
 
     if rollback_ref != base_commit:
         raise WorkerError(
-            "Stored rollback reference does not match "
-            "the candidate's exact validated base commit."
+            "Stored rollback reference does not match the candidate's exact validated base commit."
         )
 
     ensure_repo()
@@ -5876,77 +4849,40 @@ def rollback_candidate(
     env_values: dict[str, str],
 ) -> None:
     if config.proposal_only:
-        raise WorkerError(
-            "Rollback execution is disabled while "
-            "Proposal Mode is active."
-        )
+        raise WorkerError("Rollback execution is disabled while Proposal Mode is active.")
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    failure_id = int(
-        candidate[
-            "failure_id"
-        ]
-    )
+    failure_id = int(candidate["failure_id"])
 
-    candidate_status = str(
-        candidate.get("status") or ""
-    )
-    candidate_phase = str(
-        candidate.get("deploy_phase") or ""
-    )
+    candidate_status = str(candidate.get("status") or "")
+    candidate_phase = str(candidate.get("deploy_phase") or "")
 
     if candidate_status == "rollback_requested":
-        claimed = claim_manual_rollback(
-            candidate_id
-        )
+        claimed = claim_manual_rollback(candidate_id)
 
-    elif (
-        candidate_status == "rolling_back"
-        and candidate_phase
-        in MANUAL_ROLLBACK_ACTIVE_PHASES
-    ):
-        claimed = fetch_candidate_by_id(
-            candidate_id
-        )
+    elif candidate_status == "rolling_back" and candidate_phase in MANUAL_ROLLBACK_ACTIVE_PHASES:
+        claimed = fetch_candidate_by_id(candidate_id)
 
         if claimed is None:
-            raise WorkerError(
-                "Interrupted manual rollback candidate disappeared."
-            )
+            raise WorkerError("Interrupted manual rollback candidate disappeared.")
 
         if (
-            str(claimed.get("status") or "")
-            != "rolling_back"
-            or str(claimed.get("deploy_phase") or "")
-            not in MANUAL_ROLLBACK_ACTIVE_PHASES
+            str(claimed.get("status") or "") != "rolling_back"
+            or str(claimed.get("deploy_phase") or "") not in MANUAL_ROLLBACK_ACTIVE_PHASES
         ):
             raise WorkerError(
-                "Interrupted manual rollback changed state "
-                "before recovery could resume."
+                "Interrupted manual rollback changed state before recovery could resume."
             )
 
     else:
-        raise WorkerError(
-            "Candidate is not available for manual rollback."
-        )
+        raise WorkerError("Candidate is not available for manual rollback.")
 
     try:
-        binding = verify_manual_rollback_binding(
-            claimed
-        )
+        binding = verify_manual_rollback_binding(claimed)
 
     except Exception as exc:
-        error = (
-            "Manual rollback safety verification failed. "
-            + str(
-                exc
-            )
-        )[-12000:]
+        error = ("Manual rollback safety verification failed. " + str(exc))[-12000:]
 
         update_candidate(
             candidate_id,
@@ -5975,17 +4911,11 @@ def rollback_candidate(
 
         raise
 
-    base_commit = binding[
-        "base_commit"
-    ]
+    base_commit = binding["base_commit"]
 
-    candidate_commit = binding[
-        "candidate_commit"
-    ]
+    candidate_commit = binding["candidate_commit"]
 
-    action = binding[
-        "action"
-    ]
+    action = binding["action"]
 
     audit(
         "candidate_rolling_back",
@@ -6044,9 +4974,7 @@ def rollback_candidate(
             )
 
         else:
-            raise WorkerError(
-                "Manual rollback action is invalid."
-            )
+            raise WorkerError("Manual rollback action is invalid.")
 
         post_git_ref = _normalise_commit_sha(
             run(
@@ -6061,17 +4989,11 @@ def rollback_candidate(
 
         if post_git_ref != base_commit:
             raise WorkerError(
-                "Manual rollback did not leave the "
-                "repository on the exact stored base."
+                "Manual rollback did not leave the repository on the exact stored base."
             )
 
     except Exception as exc:
-        error = (
-            "Manual rollback Git safety operation failed. "
-            + str(
-                exc
-            )
-        )[-12000:]
+        error = ("Manual rollback Git safety operation failed. " + str(exc))[-12000:]
 
         update_candidate(
             candidate_id,
@@ -6115,9 +5037,7 @@ def rollback_candidate(
         deploy_phase="manual_rollback_verifying",
     )
 
-    healthy, output = health_check(
-        config.deploy_health_timeout_seconds
-    )
+    healthy, output = health_check(config.deploy_health_timeout_seconds)
 
     if not healthy:
         update_candidate(
@@ -6137,9 +5057,7 @@ def rollback_candidate(
             },
         )
 
-        raise WorkerError(
-            f"Rollback health check failed: {output}"
-        )
+        raise WorkerError(f"Rollback health check failed: {output}")
 
     final_ref = _normalise_commit_sha(
         run(
@@ -6166,9 +5084,7 @@ def rollback_candidate(
             error=error,
         )
 
-        raise WorkerError(
-            error
-        )
+        raise WorkerError(error)
 
     update_candidate(
         candidate_id,
@@ -6195,8 +5111,7 @@ def rollback_candidate(
     )
 
     notify_aaron(
-        f"Improvement {candidate_id} was rolled back "
-        "successfully to its exact validated base.",
+        f"Improvement {candidate_id} was rolled back successfully to its exact validated base.",
         title="Jarvis rollback completed",
         config=config,
         env_values=env_values,
@@ -6216,16 +5131,10 @@ def run_once(
         return False
 
     if not config.proposal_only:
-        deploying = fetch_candidate(
-            (
-                "deploying",
-            )
-        )
+        deploying = fetch_candidate(("deploying",))
 
         if deploying:
-            if deployment_lease_is_expired(
-                deploying
-            ):
+            if deployment_lease_is_expired(deploying):
                 recover_interrupted_deployment(
                     deploying,
                     config,
@@ -6251,11 +5160,7 @@ def run_once(
 
             return True
 
-        deploy = fetch_candidate(
-            (
-                "deploy_requested",
-            )
-        )
+        deploy = fetch_candidate(("deploy_requested",))
 
         if deploy:
             deploy_candidate(
@@ -6266,11 +5171,7 @@ def run_once(
 
             return True
 
-    queued = fetch_candidate(
-        (
-            "queued",
-        )
-    )
+    queued = fetch_candidate(("queued",))
 
     if queued:
         process_queued_candidate(
@@ -6305,19 +5206,26 @@ def print_status() -> None:
         candidates = connection.execute(
             "SELECT status, COUNT(*) AS count FROM improvement_candidates GROUP BY status"
         ).fetchall()
-    print(json.dumps({
-        "enabled": improvement_enabled(),
-        "proposal_only": load_config()[0].proposal_only,
-        "worker_heartbeat": setting("worker_heartbeat", "") or None,
-        "failures": {str(row["status"]): int(row["count"]) for row in failures},
-        "candidates": {str(row["status"]): int(row["count"]) for row in candidates},
-        "database": str(DB_PATH),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "enabled": improvement_enabled(),
+                "proposal_only": load_config()[0].proposal_only,
+                "worker_heartbeat": setting("worker_heartbeat", "") or None,
+                "failures": {str(row["status"]): int(row["count"]) for row in failures},
+                "candidates": {str(row["status"]): int(row["count"]) for row in candidates},
+                "database": str(DB_PATH),
+            },
+            indent=2,
+        )
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Jarvis supervised self-improvement worker")
-    parser.add_argument("command", choices=("daemon", "run-once", "status"), nargs="?", default="daemon")
+    parser.add_argument(
+        "command", choices=("daemon", "run-once", "status"), nargs="?", default="daemon"
+    )
     args = parser.parse_args()
     config, env_values = load_config()
 

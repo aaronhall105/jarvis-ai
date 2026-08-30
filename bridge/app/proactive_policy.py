@@ -134,7 +134,7 @@ def battery_transition(
 
     old_level = (
         numeric(previous.get("state"))
-        if is_real_battery_level(previous)
+        if previous is not None and is_real_battery_level(previous)
         else None
     )
 
@@ -143,16 +143,10 @@ def battery_transition(
     if old_level is None:
         return None
 
-    if (
-        level <= critical_percent
-        and old_level > critical_percent
-    ):
+    if level <= critical_percent and old_level > critical_percent:
         return "battery_critical", 96, level
 
-    if (
-        level <= low_percent
-        and old_level > low_percent
-    ):
+    if level <= low_percent and old_level > low_percent:
         return "battery_low", 80, level
 
     return None
@@ -197,9 +191,7 @@ def safety_kind(
     if old in {"on", "true", "detected", "wet"}:
         return ""
 
-    device_class = str(
-        attributes(current).get("device_class") or ""
-    ).strip().casefold()
+    device_class = str(attributes(current).get("device_class") or "").strip().casefold()
 
     return {
         "smoke": "smoke_detected",

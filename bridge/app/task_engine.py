@@ -6,7 +6,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -228,7 +228,7 @@ class TemporalActionEngine:
         self.notify_completion = bool(notify_completion)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         try:
-            self._timezone = ZoneInfo(timezone_name)
+            self._timezone: tzinfo = ZoneInfo(timezone_name)
             self.timezone_name = timezone_name
         except ZoneInfoNotFoundError:
             self._timezone = timezone.utc
@@ -474,11 +474,7 @@ class TemporalActionEngine:
             values.extend(sorted(statuses))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 200)))
-        order_by = (
-            "updated_at DESC, task_id DESC"
-            if newest_first
-            else "due_at ASC, task_id ASC"
-        )
+        order_by = "updated_at DESC, task_id DESC" if newest_first else "due_at ASC, task_id ASC"
         with self._connection() as connection:
             rows = connection.execute(
                 f"""
@@ -804,10 +800,14 @@ class TemporalActionEngine:
             if verified is False:
                 success = False
             status = "completed" if success else "failed"
-            error = None if success else str(
-                result.get("response_message")
-                or result.get("message")
-                or "The scheduled action could not be verified."
+            error = (
+                None
+                if success
+                else str(
+                    result.get("response_message")
+                    or result.get("message")
+                    or "The scheduled action could not be verified."
+                )
             )
         except Exception as exc:  # pragma: no cover - exercised through failure result
             logger.exception("Scheduled task %s failed", task_id)
@@ -861,10 +861,7 @@ class TemporalActionEngine:
         task_id = int(task["task_id"])
         summary = str(task.get("action_summary") or "scheduled action")
         result_message = str(
-            result.get("response_message")
-            or result.get("message")
-            or error
-            or ""
+            result.get("response_message") or result.get("message") or error or ""
         ).strip()
         if status == "completed":
             message = f"Task {task_id} completed: {summary}."
@@ -953,8 +950,7 @@ class TemporalActionEngine:
                 response_message = f"Completed all {completed} steps."
             else:
                 response_message = (
-                    f"Completed {completed} of {len(raw_steps)} steps. "
-                    f"Step {failed_step} failed."
+                    f"Completed {completed} of {len(raw_steps)} steps. Step {failed_step} failed."
                 )
             return {
                 "success": success,
@@ -1286,8 +1282,10 @@ class TemporalActionEngine:
             except (AttributeError, NotImplementedError):
                 routines = []
             exact = [
-                item for item in routines
-                if query in {
+                item
+                for item in routines
+                if query
+                in {
                     self._normalise(str(item.get("name") or "")),
                     self._normalise(str(item.get("entity_id") or "")),
                 }
@@ -1295,14 +1293,11 @@ class TemporalActionEngine:
             matches = exact
             if not matches:
                 matches = [
-                    item for item in routines
+                    item
+                    for item in routines
                     if query and query in self._normalise(str(item.get("name") or ""))
                 ]
-            unique = {
-                str(item.get("entity_id")): item
-                for item in matches
-                if item.get("entity_id")
-            }
+            unique = {str(item.get("entity_id")): item for item in matches if item.get("entity_id")}
             if len(unique) == 1:
                 item = next(iter(unique.values()))
                 name = str(item.get("name") or item["entity_id"])
@@ -1312,8 +1307,14 @@ class TemporalActionEngine:
                     summary=f"run {name}",
                 )
             if len(unique) > 1:
-                names = sorted(str(item.get("name") or item.get("entity_id")) for item in unique.values())[:3]
-                return "I found more than one matching Home Assistant routine — " + ", ".join(names) + "."
+                names = sorted(
+                    str(item.get("name") or item.get("entity_id")) for item in unique.values()
+                )[:3]
+                return (
+                    "I found more than one matching Home Assistant routine — "
+                    + ", ".join(names)
+                    + "."
+                )
 
         action, target = self._extract_on_off_target(normalised)
         if action is None or target is None:
@@ -1381,9 +1382,7 @@ class TemporalActionEngine:
         areas = await self.tools.registry.areas()
         query_key = self._normalise(query)
         exact = [
-            area
-            for area in areas
-            if self._normalise(str(area.get("name") or "")) == query_key
+            area for area in areas if self._normalise(str(area.get("name") or "")) == query_key
         ]
         if len(exact) == 1:
             area = exact[0]
@@ -1395,8 +1394,7 @@ class TemporalActionEngine:
             candidates = [
                 area
                 for area in areas
-                if query_key
-                and query_key in self._normalise(str(area.get("name") or ""))
+                if query_key and query_key in self._normalise(str(area.get("name") or ""))
             ]
             if len(candidates) == 1:
                 area = candidates[0]
@@ -1432,9 +1430,7 @@ class TemporalActionEngine:
 
         matches = exact if exact else candidates
         unique = {
-            str(device.get("entity_id")): device
-            for device in matches
-            if device.get("entity_id")
+            str(device.get("entity_id")): device for device in matches if device.get("entity_id")
         }
         if len(unique) == 1:
             device = next(iter(unique.values()))
@@ -1444,8 +1440,7 @@ class TemporalActionEngine:
             }
         if len(unique) > 1:
             names = sorted(
-                str(device.get("name") or device.get("entity_id"))
-                for device in unique.values()
+                str(device.get("name") or device.get("entity_id")) for device in unique.values()
             )[:3]
             return (
                 "I found more than one matching device — "
@@ -1467,10 +1462,7 @@ class TemporalActionEngine:
     def _task_result_message(task: dict[str, Any]) -> str:
         result = task.get("result") or {}
         return str(
-            result.get("response_message")
-            or result.get("message")
-            or task.get("error")
-            or ""
+            result.get("response_message") or result.get("message") or task.get("error") or ""
         ).strip()
 
     def _describe_task_status(self, task: dict[str, Any]) -> str:
@@ -1514,8 +1506,7 @@ class TemporalActionEngine:
                     response = "You have no completed task history to delete."
                 else:
                     response = (
-                        f"Deleted {count} completed task history "
-                        f"record{'s' if count != 1 else ''}."
+                        f"Deleted {count} completed task history record{'s' if count != 1 else ''}."
                     )
                 return TaskCommandResult(
                     handled=True,
@@ -1673,6 +1664,12 @@ class TemporalActionEngine:
                     ),
                 )
             task = await self.get_task(task_id)
+            if task is None:
+                return TaskCommandResult(
+                    handled=True,
+                    success=False,
+                    response=f"Task {task_id} was cancelled but is no longer available.",
+                )
             return TaskCommandResult(
                 handled=True,
                 response=f"Cancelled task {task_id}: {task['action_summary']}.",

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/aaron/jarvis-wear/tools/adb_readiness.py
+ExecStart=/usr/bin/python3 __JARVIS_ROOT__/tools/adb_readiness.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

@@ -814,6 +814,7 @@ def _liveness_payload() -> dict[str, str]:
         "service": settings.jarvis_name,
         "version": CORE_APPLICATION_VERSION,
         "release": JARVIS_RELEASE,
+        "source_commit": os.getenv("JARVIS_SOURCE_SHA", "development"),
         "time": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -917,9 +918,7 @@ async def system_status() -> dict[str, object]:
         conversation_status: dict[str, object] = await conversations.health_snapshot()
     except Exception:
         logger.exception("Conversation database status failed")
-        runtime_metrics.record_error(
-            "conversations", "conversation database status unavailable"
-        )
+        runtime_metrics.record_error("conversations", "conversation database status unavailable")
         conversation_status = {
             "healthy": False,
             "reason": "conversation database status unavailable",

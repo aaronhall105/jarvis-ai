@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.local/share/jarvis-developer/current
 LoadCredential=jarvis-developer-token:%h/.config/jarvis/developer-token
-ExecStart=/home/aaron/.local/share/jarvis-developer/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
+ExecStart=%h/.local/share/jarvis-developer/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -16,7 +16,8 @@ LockPersonality=true
 RestrictSUIDSGID=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/home/aaron/jarvis /home/aaron/jarvis-wear /home/aaron/.codex %h/.local/share/jarvis-developer /tmp
+Environment=JARVIS_AUTHORITATIVE_WORKSPACE=__JARVIS_ROOT__
+ReadWritePaths=__JARVIS_ROOT__ %h/.codex %h/.local/share/jarvis-developer /tmp
 
 [Install]
 WantedBy=default.target

@@ -5,9 +5,7 @@ from pathlib import Path
 from app.code_awareness import CodeAwarenessEngine
 
 
-class CodeAwarenessTests(
-    unittest.IsolatedAsyncioTestCase
-):
+class CodeAwarenessTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -16,8 +14,7 @@ class CodeAwarenessTests(
         source.mkdir()
 
         (source / "demo.py").write_text(
-            "def example():\n"
-            "    return 'needle-value'\n",
+            "def example():\n    return 'needle-value'\n",
             encoding="utf-8",
         )
 

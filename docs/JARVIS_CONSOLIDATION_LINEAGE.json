@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "audited_at_utc": "2026-08-30",
+  "authoritative_branch": "jarvis/unified-production",
+  "ground_truth": {
+    "phone": {
+      "sha256": "5e3961eb3484c814a301f5385f11f3db890ad6d66a9ef79e933eb3209af40e16",
+      "actions_artifact_id": 9714544550,
+      "actions_run_id": 33251557799,
+      "source_branch": "jarvis/unified-production",
+      "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01"
+    },
+    "watch": {
+      "sha256": "98e1f543d1afcbf267dc465a84959aaa77e2cf76913cceab596aa3e0e41efe91",
+      "actions_artifact_id": 9714544550,
+      "actions_run_id": 33251557799,
+      "source_branch": "jarvis/unified-production",
+      "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01"
+    }
+  },
+  "branch_inventory": [
+    {"branch": "conversation-engine", "final_sha": "fe88f70ee2848d997e7d6fe7a05198d13c7864cf", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "one outdated documentation-only commit"},
+    {"branch": "jarvis/alpha19-production-hardening", "final_sha": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production"},
+    {"branch": "jarvis/external-agent-platform", "final_sha": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "platform foundation superseded by integrations and unified-production"},
+    {"branch": "jarvis/integrations-accounts-v1", "final_sha": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production"},
+    {"branch": "jarvis/production-alpha14", "final_sha": "8fe2b11e4f9afc90018ee3cec2b8722e7ade53ef", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "four older endpoint fixes superseded by current routing and tests"},
+    {"branch": "jarvis/unified-runtime-v1", "final_sha": "ce6a397651eb15effb364866a822302714581347", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "runtime, Android, Wear and Developer capabilities reconciled into unified-production"},
+    {"branch": "jarvis/wear-v1", "final_sha": "5b21be44c1feae14580b8eb61fb811ed2bc1c90b", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "Wear foundation and later fixes reconciled into unified-production"},
+    {"branch": "ota-feeds", "final_sha": "b96e355de8989350ebca37825f9efc4c2a93ba33", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "data-only manifests migrated to release-hosted channel assets"},
+    {"branch": "jarvis/preserve-alpha19-production-wip-20260827", "final_sha": "4acb17de42541dcbd9964c2adeff0d60efb6c47c", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production after selective grounding reconciliation"},
+    {"branch": "jarvis/improvement-31", "final_sha": "60b133e19024c72894448ffefa801d8632cba04a", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "ancestor of unified-production"},
+    {"branch": "safety/pre-alpha14-20260816T132241Z", "final_sha": "1e226fb8832d1a1e4088e4081af0dedcaddfc216", "unique_product_code": false, "disposition": "archive_then_delete", "finding": "historical realtime finalization fix superseded by the current turn lifecycle"}
+  ],
+  "capabilities": [
+    {"capability": "brain_and_core_api", "current_implementations": ["conversation-engine", "jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1"], "best_source": "reconciled unified Core", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app", "action": "KEEP"},
+    {"capability": "conversation_engine", "current_implementations": ["conversation-engine", "jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1"], "best_source": "principal-scoped durable conversation API plus unified lifecycle", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app/conversation_engine.py", "action": "KEEP"},
+    {"capability": "planner", "current_implementations": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"], "best_source": "verified integrations planner", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/agent_planner.py", "action": "KEEP"},
+    {"capability": "capability_registry", "current_implementations": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"], "best_source": "health-aware connector registry", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/connectors", "action": "KEEP"},
+    {"capability": "memory", "current_implementations": ["conversation-engine", "jarvis/production-alpha14", "jarvis/integrations-accounts-v1"], "best_source": "principal-scoped persistent Brain memory", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/memory_engine.py", "action": "KEEP"},
+    {"capability": "identity", "current_implementations": ["jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"], "best_source": "unified principal/conversation/turn/device scope", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app", "action": "KEEP"},
+    {"capability": "realtime", "current_implementations": ["jarvis/production-alpha14", "jarvis/wear-v1", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"], "best_source": "integrations Core plus unified-runtime ledger, fencing and endpoint routing", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "bridge/app/realtime_voice.py", "action": "MERGE_COMPLETE"},
+    {"capability": "realtime_turn_ledger", "current_implementations": ["jarvis/unified-runtime-v1"], "best_source": "durable unified-runtime ledger", "source_commit": "ce6a397651eb15effb364866a822302714581347", "target_location": "bridge/app/realtime_turn_ledger.py", "action": "KEEP"},
+    {"capability": "durable_jobs", "current_implementations": ["jarvis/production-alpha14", "jarvis/integrations-accounts-v1"], "best_source": "idempotent integration follow-up engine", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/followup_engine.py", "action": "KEEP"},
+    {"capability": "proactive_engine", "current_implementations": ["jarvis/production-alpha14", "jarvis/integrations-accounts-v1"], "best_source": "durable house-aware proactive engine", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/proactive_intelligence.py", "action": "KEEP"},
+    {"capability": "action_receipts", "current_implementations": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"], "best_source": "verified durable receipts", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/connectors/audit.py", "action": "KEEP"},
+    {"capability": "home_assistant", "current_implementations": ["conversation-engine", "jarvis/production-alpha14", "jarvis/integrations-accounts-v1"], "best_source": "grounded reads and verified writes with preserved freshness hardening", "source_commit": "4acb17de42541dcbd9964c2adeff0d60efb6c47c", "target_location": "bridge/app/home_assistant_connector.py", "action": "MERGE_COMPLETE"},
+    {"capability": "presence", "current_implementations": ["jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"], "best_source": "fresh evidence and configured-person graph", "source_commit": "4acb17de42541dcbd9964c2adeff0d60efb6c47c", "target_location": "bridge/app/presence.py", "action": "MERGE_COMPLETE"},
+    {"capability": "cameras_and_frigate", "current_implementations": ["jarvis/production-alpha14", "jarvis/integrations-accounts-v1"], "best_source": "camera evidence and vision routing", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/vision_intelligence.py", "action": "KEEP"},
+    {"capability": "external_agent", "current_implementations": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"], "best_source": "integrations external-agent runtime", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/external_agent_runtime.py", "action": "KEEP"},
+    {"capability": "web_and_research", "current_implementations": ["jarvis/external-agent-platform", "jarvis/integrations-accounts-v1"], "best_source": "provenance-aware research with SSRF/rebinding defenses", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/research_engine.py", "action": "KEEP"},
+    {"capability": "integration_accounts", "current_implementations": ["jarvis/integrations-accounts-v1"], "best_source": "principal-scoped encrypted account store", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/integration_accounts.py", "action": "KEEP"},
+    {"capability": "google_oauth", "current_implementations": ["jarvis/integrations-accounts-v1"], "best_source": "authorization code, PKCE, one-time state and replay protection", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/google_integration.py", "action": "KEEP"},
+    {"capability": "gmail", "current_implementations": ["jarvis/integrations-accounts-v1"], "best_source": "verified Gmail connector and receipts", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/google_integration.py", "action": "KEEP"},
+    {"capability": "calendar", "current_implementations": ["jarvis/integrations-accounts-v1"], "best_source": "verified Google Calendar connector", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/google_integration.py", "action": "KEEP"},
+    {"capability": "contacts", "current_implementations": ["jarvis/integrations-accounts-v1"], "best_source": "verified Google Contacts connector", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/google_integration.py", "action": "KEEP"},
+    {"capability": "developer_codex", "current_implementations": ["jarvis/wear-v1", "jarvis/unified-runtime-v1"], "best_source": "authenticated audited gateway with unified workspace aliases", "source_commit": "ce6a397651eb15effb364866a822302714581347", "target_location": "developer_gateway", "action": "RECONNECT"},
+    {"capability": "self_improvement", "current_implementations": ["conversation-engine", "jarvis/alpha19-production-hardening", "jarvis/integrations-accounts-v1"], "best_source": "approval-gated improvement lifecycle", "source_commit": "6799816b5615adf9b15cd8a42c0e1aed38de47cd", "target_location": "bridge/app/self_improvement.py", "action": "KEEP"},
+    {"capability": "phone_app", "current_implementations": ["ground-truth artifact 9714544550", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"], "best_source": "exact source that produced the supplied phone APK", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "android/jarvis-voice-client/app", "action": "RESTORE_EXACT_UI_KEEP_CURRENT_LOGIC"},
+    {"capability": "watch_app", "current_implementations": ["ground-truth artifact 9714544550", "jarvis/wear-v1", "jarvis/unified-runtime-v1"], "best_source": "exact source that produced the supplied watch APK", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "android/jarvis-voice-client/wear", "action": "KEEP_EXACT"},
+    {"capability": "shared_phone_watch_protocol", "current_implementations": ["jarvis/wear-v1", "jarvis/unified-runtime-v1"], "best_source": "shared wearprotocol Gradle module", "source_commit": "ce6a397651eb15effb364866a822302714581347", "target_location": "android/jarvis-voice-client/wearprotocol", "action": "KEEP"},
+    {"capability": "ota", "current_implementations": ["jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1", "ota-feeds"], "best_source": "tag-only unified release workflow and release-hosted channel asset", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": ".github/workflows/android-ota-release.yml", "action": "MOVE_AND_DELETE_BRANCH"},
+    {"capability": "deployment_and_provenance", "current_implementations": ["jarvis/integrations-accounts-v1", "jarvis/unified-runtime-v1", "jarvis/unified-production"], "best_source": "unified-production-only deployment with exact source health", "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01", "target_location": "tools/deploy_unified_core.sh", "action": "HARDEN"}
+  ]
+}

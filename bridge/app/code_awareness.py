@@ -114,30 +114,20 @@ class CodeAwarenessEngine:
         roots: dict[str, Path],
     ) -> None:
         self.enabled = bool(enabled)
-        self.roots = {
-            str(name): Path(path)
-            for name, path in roots.items()
-        }
+        self.roots = {str(name): Path(path) for name, path in roots.items()}
 
     @classmethod
     def from_environment(cls) -> "CodeAwarenessEngine":
-        enabled = (
-            os.getenv(
-                "JARVIS_CODE_AWARENESS_ENABLED",
-                "false",
-            )
-            .strip()
-            .lower()
-            in {"1", "true", "yes", "on"}
-        )
+        enabled = os.getenv(
+            "JARVIS_CODE_AWARENESS_ENABLED",
+            "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
         return cls(
             enabled=enabled,
             roots={
                 "jarvis": Path("/host-code/jarvis"),
-                "voice_pe": Path(
-                    "/host-code/jarvis-voice-direct-alpha1"
-                ),
+                "voice_pe": Path("/host-code/jarvis-voice-direct-alpha1"),
             },
         )
 
@@ -157,9 +147,7 @@ class CodeAwarenessEngine:
 
     def _require_enabled(self) -> None:
         if not self.enabled:
-            raise CodeAwarenessError(
-                "Code Awareness is disabled."
-            )
+            raise CodeAwarenessError("Code Awareness is disabled.")
 
     def _root(self, root_name: str) -> Path:
         self._require_enabled()
@@ -167,16 +155,12 @@ class CodeAwarenessEngine:
         name = str(root_name or "").strip()
 
         if name not in self.roots:
-            raise CodeAwarenessError(
-                f"Unknown code root: {name}"
-            )
+            raise CodeAwarenessError(f"Unknown code root: {name}")
 
         root = self.roots[name]
 
         if not root.exists():
-            raise CodeAwarenessError(
-                f"Code root is not mounted: {name}"
-            )
+            raise CodeAwarenessError(f"Code root is not mounted: {name}")
 
         return root.resolve()
 
@@ -186,10 +170,7 @@ class CodeAwarenessEngine:
         relative: Path,
     ) -> bool:
         for part in relative.parts:
-            if part.casefold() in {
-                item.casefold()
-                for item in cls.DENIED_DIR_NAMES
-            }:
+            if part.casefold() in {item.casefold() for item in cls.DENIED_DIR_NAMES}:
                 return True
 
         if relative.parts:
@@ -210,23 +191,17 @@ class CodeAwarenessEngine:
         relative = Path(raw or ".")
 
         if relative.is_absolute():
-            raise CodeAwarenessError(
-                "Absolute paths are not permitted."
-            )
+            raise CodeAwarenessError("Absolute paths are not permitted.")
 
         candidate = (root / relative).resolve()
 
         try:
             resolved_relative = candidate.relative_to(root)
         except ValueError as exc:
-            raise CodeAwarenessError(
-                "Path escapes the permitted code root."
-            ) from exc
+            raise CodeAwarenessError("Path escapes the permitted code root.") from exc
 
         if self._denied_relative(resolved_relative):
-            raise CodeAwarenessError(
-                "That path is restricted."
-            )
+            raise CodeAwarenessError("That path is restricted.")
 
         return root, candidate, resolved_relative
 
@@ -248,10 +223,7 @@ class CodeAwarenessEngine:
         value = value.rstrip("\r\n")
 
         if len(value) > cls.MAX_LINE_CHARS:
-            return (
-                value[: cls.MAX_LINE_CHARS]
-                + " …"
-            )
+            return value[: cls.MAX_LINE_CHARS] + " …"
 
         return value
 
@@ -282,14 +254,10 @@ class CodeAwarenessEngine:
         )
 
         if not candidate.exists():
-            raise CodeAwarenessError(
-                "Requested path does not exist."
-            )
+            raise CodeAwarenessError("Requested path does not exist.")
 
         if not candidate.is_dir():
-            raise CodeAwarenessError(
-                "code_list requires a directory."
-            )
+            raise CodeAwarenessError("code_list requires a directory.")
 
         items: list[dict[str, Any]] = []
 
@@ -313,10 +281,7 @@ class CodeAwarenessEngine:
                             "type": "directory",
                         }
                     )
-                elif (
-                    entry.is_file()
-                    and self._is_text_file(entry)
-                ):
+                elif entry.is_file() and self._is_text_file(entry):
                     items.append(
                         {
                             "path": rel.as_posix(),
@@ -338,17 +303,12 @@ class CodeAwarenessEngine:
                 current_path = Path(current)
                 current_relative = current_path.relative_to(root)
 
-                depth = (
-                    len(current_relative.parts)
-                    - start_depth
-                )
+                depth = len(current_relative.parts) - start_depth
 
                 directories[:] = [
                     name
                     for name in directories
-                    if not self._denied_relative(
-                        current_relative / name
-                    )
+                    if not self._denied_relative(current_relative / name)
                 ]
 
                 if depth >= 2:
@@ -405,19 +365,13 @@ class CodeAwarenessEngine:
         )
 
         if not candidate.exists():
-            raise CodeAwarenessError(
-                "Requested file does not exist."
-            )
+            raise CodeAwarenessError("Requested file does not exist.")
 
         if not candidate.is_file():
-            raise CodeAwarenessError(
-                "code_read requires a file."
-            )
+            raise CodeAwarenessError("code_read requires a file.")
 
         if not self._is_text_file(candidate):
-            raise CodeAwarenessError(
-                "That file type is not available to Code Awareness."
-            )
+            raise CodeAwarenessError("That file type is not available to Code Awareness.")
 
         start = max(1, int(start_line))
         end = max(start, int(end_line))
@@ -446,21 +400,14 @@ class CodeAwarenessEngine:
                 if number > end:
                     break
 
-                selected.append(
-                    f"{number}: "
-                    + self._safe_display_line(line)
-                )
+                selected.append(f"{number}: " + self._safe_display_line(line))
 
         return {
             "success": True,
             "root": root_name,
             "path": relative.as_posix(),
             "start_line": start,
-            "end_line": (
-                start + len(selected) - 1
-                if selected
-                else start
-            ),
+            "end_line": (start + len(selected) - 1 if selected else start),
             "total_lines_seen": total_lines,
             "content": "\n".join(selected),
             "read_only": True,
@@ -481,9 +428,7 @@ class CodeAwarenessEngine:
         needle = str(query or "").strip()
 
         if not needle:
-            raise CodeAwarenessError(
-                "Search query is empty."
-            )
+            raise CodeAwarenessError("Search query is empty.")
 
         limit = max(
             1,
@@ -494,17 +439,13 @@ class CodeAwarenessEngine:
         )
 
         if not candidate.exists():
-            raise CodeAwarenessError(
-                "Requested search path does not exist."
-            )
+            raise CodeAwarenessError("Requested search path does not exist.")
 
         files: list[Path] = []
 
         if candidate.is_file():
             if not self._is_text_file(candidate):
-                raise CodeAwarenessError(
-                    "That file type is not searchable."
-                )
+                raise CodeAwarenessError("That file type is not searchable.")
             files = [candidate]
 
         elif candidate.is_dir():
@@ -518,9 +459,7 @@ class CodeAwarenessEngine:
                 directories[:] = [
                     name
                     for name in directories
-                    if not self._denied_relative(
-                        current_relative / name
-                    )
+                    if not self._denied_relative(current_relative / name)
                 ]
 
                 for name in filenames:
@@ -546,9 +485,7 @@ class CodeAwarenessEngine:
                     break
 
         else:
-            raise CodeAwarenessError(
-                "Unsupported search path."
-            )
+            raise CodeAwarenessError("Unsupported search path.")
 
         folded_needle = needle.casefold()
         matches: list[dict[str, Any]] = []
@@ -564,22 +501,14 @@ class CodeAwarenessEngine:
                         handle,
                         start=1,
                     ):
-                        if (
-                            folded_needle
-                            not in line.casefold()
-                        ):
+                        if folded_needle not in line.casefold():
                             continue
 
                         matches.append(
                             {
-                                "path": (
-                                    path.relative_to(root)
-                                    .as_posix()
-                                ),
+                                "path": (path.relative_to(root).as_posix()),
                                 "line": number,
-                                "text": self._safe_display_line(
-                                    line
-                                ),
+                                "text": self._safe_display_line(line),
                             }
                         )
 
@@ -615,18 +544,11 @@ class CodeAwarenessEngine:
 
         relative = Path(raw)
 
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-        ):
-            raise CodeAwarenessError(
-                "Invalid Git path."
-            )
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CodeAwarenessError("Invalid Git path.")
 
         if self._denied_relative(relative):
-            raise CodeAwarenessError(
-                "That Git path is restricted."
-            )
+            raise CodeAwarenessError("That Git path is restricted.")
 
         return root, relative.as_posix()
 
@@ -640,9 +562,7 @@ class CodeAwarenessEngine:
         git = shutil.which("git")
 
         if not git:
-            raise CodeAwarenessError(
-                "Git is not installed in Jarvis Core."
-            )
+            raise CodeAwarenessError("Git is not installed in Jarvis Core.")
 
         command = [
             git,
@@ -676,10 +596,7 @@ class CodeAwarenessEngine:
         output = completed.stdout or ""
 
         if len(output) > self.MAX_GIT_OUTPUT_CHARS:
-            output = (
-                output[: self.MAX_GIT_OUTPUT_CHARS]
-                + "\n… output truncated …"
-            )
+            output = output[: self.MAX_GIT_OUTPUT_CHARS] + "\n… output truncated …"
 
         return {
             "success": completed.returncode == 0,
@@ -766,9 +683,7 @@ class CodeAwarenessEngine:
     ) -> dict[str, Any]:
         try:
             if name == "code_roots":
-                return await asyncio.to_thread(
-                    self.roots_result
-                )
+                return await asyncio.to_thread(self.roots_result)
 
             if name == "code_list":
                 return await asyncio.to_thread(
@@ -817,9 +732,7 @@ class CodeAwarenessEngine:
                     int(arguments.get("limit") or 10),
                 )
 
-            raise CodeAwarenessError(
-                f"Unsupported Code Awareness tool: {name}"
-            )
+            raise CodeAwarenessError(f"Unsupported Code Awareness tool: {name}")
 
         except (
             CodeAwarenessError,
@@ -844,8 +757,7 @@ class CodeAwarenessEngine:
                 "type": "function",
                 "name": "code_roots",
                 "description": (
-                    "List the live source-code repositories Jarvis "
-                    "is permitted to inspect."
+                    "List the live source-code repositories Jarvis is permitted to inspect."
                 ),
                 "parameters": {
                     "type": "object",
@@ -1020,10 +932,7 @@ class CodeAwarenessEngine:
             {
                 "type": "function",
                 "name": "git_log",
-                "description": (
-                    "Read recent Git commit history from a permitted "
-                    "live repository."
-                ),
+                "description": ("Read recent Git commit history from a permitted live repository."),
                 "parameters": {
                     "type": "object",
                     "properties": {

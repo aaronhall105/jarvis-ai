@@ -1,9 +1,26 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "authoritative_branch": "jarvis/unified-production",
-  "audited_at_utc": "2026-08-29",
+  "audited_at_utc": "2026-08-30",
+  "ground_truth_apks": {
+    "phone": {
+      "name": "jarvis-phone-19.0.0-alpha21-release.apk",
+      "sha256": "5e3961eb3484c814a301f5385f11f3db890ad6d66a9ef79e933eb3209af40e16",
+      "actions_artifact_id": 9714544550,
+      "actions_run_id": 33251557799,
+      "source_branch": "jarvis/unified-production",
+      "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01"
+    },
+    "watch": {
+      "name": "jarvis-watch-19.0.0-alpha21-release.apk",
+      "sha256": "98e1f543d1afcbf267dc465a84959aaa77e2cf76913cceab596aa3e0e41efe91",
+      "actions_artifact_id": 9714544550,
+      "actions_run_id": 33251557799,
+      "source_branch": "jarvis/unified-production",
+      "source_commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01"
+    }
+  },
   "source_heads": {
-    "android-alpha17-release": "3279a57ac8593cc2eba70d1678350dea25235a96",
     "conversation-engine": "fe88f70ee2848d997e7d6fe7a05198d13c7864cf",
     "jarvis/production-alpha14": "8fe2b11e4f9afc90018ee3cec2b8722e7ade53ef",
     "jarvis/wear-v1": "5b21be44c1feae14580b8eb61fb811ed2bc1c90b",
@@ -11,7 +28,8 @@
     "jarvis/alpha19-production-hardening": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1",
     "jarvis/external-agent-platform": "3aaf49988d2f196f1fc34cb49968289d02a7ecb1",
     "jarvis/integrations-accounts-v1": "6799816b5615adf9b15cd8a42c0e1aed38de47cd",
-    "ota-feeds": "cc1992ecb434d9efd44bc05c70f23565cd6f23b0"
+    "phone-watch-ground-truth": "1eb4c5913a3e69213ec45ad726bebb45779e3c01",
+    "ota-feeds-final": "b96e355de8989350ebca37825f9efc4c2a93ba33"
   },
   "deployed_core_before_reconciliation": {
     "source_commit": "fa1273b7b550ef38a81f9bb86e1598d3139fc1c1",
@@ -58,13 +76,10 @@
       ]
     },
     "android": {
-      "baseline": "3279a57ac8593cc2eba70d1678350dea25235a96 (actual alpha17 phone UI)",
-      "supplements": ["jarvis/unified-runtime-v1 runtime", "jarvis/integrations-accounts-v1"],
+      "baseline": "GitHub Actions artifact 9714544550 from unified-production@1eb4c5913a3e69213ec45ad726bebb45779e3c01",
+      "supplements": ["jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
       "required": [
-        "exact alpha17 phone branding",
-        "alpha17 MainActivity navigation and composer",
-        "House activity, New chat and More options",
-        "Chat history and Improvements",
+        "production Jarvis branding",
         "persistent chat history",
         "delete current chat",
         "Developer and Codex gateway",
@@ -79,7 +94,7 @@
       ]
     },
     "wear": {
-      "baseline": "jarvis/unified-runtime-v1",
+      "baseline": "GitHub Actions artifact 9714544550 from unified-production@1eb4c5913a3e69213ec45ad726bebb45779e3c01",
       "required": [
         "Wear app module",
         "Wear protocol module",
@@ -271,15 +286,15 @@
     },
     "android_phone_app": {
       "branches": ["conversation-engine", "jarvis/production-alpha14", "jarvis/wear-v1", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
-      "intended_source": "actual alpha17 Android UI at 3279a57 with unified-production runtime and integrations additions",
-      "unique_capabilities": {"3279a57 alpha17": ["authoritative MainActivity UX", "Jarvis logo and launcher", "House activity", "New chat", "More options", "Chat history", "Improvements", "delete chat", "Settings presentation", "composer layout"], "jarvis/unified-runtime-v1": ["Developer mode", "current persistent history schema", "turn recovery", "voice ownership", "Wear bridge"], "jarvis/integrations-accounts-v1": ["IntegrationsActivity", "account client", "Google return route", "Integrations settings section"]},
-      "missing_from_other_line": ["alpha20 lost unified functionality", "alpha21 replaced the actual alpha17 phone experience", "alpha17 lacked later runtime, Developer, Wear and Integrations functionality"],
-      "deployed_before": "phone alpha21 contained unified functionality but not the authoritative alpha17 UI and branding",
-      "reconciliation": "required; exact alpha17 UI/resources restored with current runtime logic retained"
+      "intended_source": "the exact unified-production source at 1eb4c591 that produced ground-truth artifact 9714544550",
+      "unique_capabilities": {"jarvis/unified-runtime-v1": ["latest Main/Settings UI", "branding", "delete chat", "Developer mode", "persistent history", "turn recovery", "voice ownership", "Wear bridge"], "jarvis/integrations-accounts-v1": ["IntegrationsActivity", "account client", "Google return route", "top-level Integrations section"]},
+      "missing_from_other_line": ["alpha20 integrations release lost unified UI/runtime features", "alpha22 substituted the alpha17 UI and resources for the supplied ground-truth UI"],
+      "deployed_before": "alpha22 did not match the supplied ground-truth phone APK",
+      "reconciliation": "ground-truth 1eb4c591 Android source restored exactly; all current runtime and integrations logic from that unified source retained"
     },
     "wear_os_app": {
       "branches": ["jarvis/wear-v1", "jarvis/unified-runtime-v1"],
-      "intended_source": "jarvis/unified-runtime-v1",
+      "intended_source": "the exact unified-production Wear source at 1eb4c591 that produced ground-truth artifact 9714544550",
       "unique_capabilities": {"jarvis/wear-v1": ["initial watch app/protocol"], "jarvis/unified-runtime-v1": ["later phone/watch routing, startup buffering, epochs, audio reliability"]},
       "missing_from_other_line": ["jarvis/integrations-accounts-v1 did not contain Wear modules"],
       "deployed_before": "not part of the alpha20 integrations source tree",
@@ -302,12 +317,12 @@
       "reconciliation": "required and implemented"
     },
     "ota_updater": {
-      "branches": ["jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1", "ota-feeds"],
-      "intended_source": "unified-production workflow and updater with ota-feeds as data-only publication branch",
-      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["signed alpha19/alpha20 phone release pipeline"], "jarvis/unified-runtime-v1": ["current updater UI and version markers"], "ota-feeds": ["validated channel manifests"]},
+      "branches": ["jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1", "historical ota-feeds"],
+      "intended_source": "unified-production tag workflow with release-hosted channel manifests",
+      "unique_capabilities": {"jarvis/integrations-accounts-v1": ["signed alpha19/alpha20 phone release pipeline"], "jarvis/unified-runtime-v1": ["current updater UI and version markers"], "historical ota-feeds": ["validated channel manifests migrated to release assets"]},
       "missing_from_other_line": ["prior workflows allowed release-line regression"],
       "deployed_before": "alpha feed pointed to alpha20 integration-only Android artifact",
-      "reconciliation": "required; authoritative-ref and product-capability gates added"
+      "reconciliation": "authoritative-ref and product-capability gates retained; channel manifests moved to release assets so the branch can be deleted"
     },
     "deployment_and_release_tooling": {
       "branches": ["jarvis/production-alpha14", "jarvis/unified-runtime-v1", "jarvis/integrations-accounts-v1"],
@@ -345,48 +360,62 @@
       "developer_gateway/install.sh",
       "developer_gateway/jarvis-developer.service",
       "tools/deploy_unified_core.sh",
+      "tools/generate_product_release_manifest.py",
       "tools/verify_sqlite_integrity.py",
       "android/jarvis-voice-client/wear/build.gradle.kts",
       "android/jarvis-voice-client/wearprotocol/build.gradle.kts",
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/IntegrationsActivity.java",
-      "android/jarvis-voice-client/app/src/test/java/com/aaron/jarvisvoice/Alpha17ExperienceTest.java",
-      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_logo_ui.png",
-      "docs/ANDROID_ALPHA17_RECONCILIATION.md"
-    ],
-    "absent_files": [
-      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_wordmark_master.png",
-      "android/jarvis-voice-client/app/src/main/res/drawable-xxxhdpi/control_delete_red.png",
-      "android/jarvis-voice-client/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png"
+      "docs/JARVIS_CONSOLIDATION_LINEAGE.json",
+      "android/jarvis-voice-client/app/src/main/res/drawable-xxxhdpi/control_delete_red.png"
     ],
     "markers": {
       "bridge/app/realtime_voice.py": ["turn.status", "turn.accepted", "turn.interrupted"],
-      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime"],
-      "developer_gateway/app.py": ["Developer audit event=thread_start", "source_commit"],
+      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime", "JARVIS_SOURCE_SHA"],
+      "developer_gateway/app.py": ["Developer audit event=thread_start", "source_commit", "AUTHORITATIVE_WORKSPACE"],
       "developer_gateway/install.sh": ["jarvis/unified-production", "origin/$authoritative_branch", "SOURCE_COMMIT", "systemctl --user restart"],
-      "developer_gateway/jarvis-developer.service": ["WorkingDirectory=%h/.local/share/jarvis-developer/current"],
+      "developer_gateway/jarvis-developer.service": ["WorkingDirectory=%h/.local/share/jarvis-developer/current", "JARVIS_AUTHORITATIVE_WORKSPACE=__JARVIS_ROOT__"],
       "android/jarvis-voice-client/app/src/main/AndroidManifest.xml": [".IntegrationsActivity", "android:host=\"integrations\"", ".WearChannelListenerService", ".JarvisVoiceInteractionService"],
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.jarvis_logo_ui", "text(\"Jarvis\", 22", "\"House activity\"", "\"New chat\"", "\"More options\"", "\"Chat history\"", "\"Improvements\"", "\"Delete current chat\"", "\"Settings\"", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.control_delete_red", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java": ["Voice and conversation", "Connections", "Integrations", "Developer", "Open integrations & accounts"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java": ["TurnRecoveryJournal", "TurnDeliveryFence", "turn.status"],
       "bridge/app/static/chat.html": ["jarvis-chat-tabs-v1", "chat-tab"],
       "tools/self_improvement_worker.py": ["AUTHORITATIVE_PRODUCTION_BRANCH", "Deployment is restricted to the authoritative"],
-      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build --no-deps jarvis-core", "PRAGMA quick_check"],
-      ".github/workflows/android-ota-release.yml": ["git fetch origin jarvis/unified-production", "verify_product_baseline.py", "jarvis-wear-v${version}-release.apk", "SHA256SUMS.txt", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
-      ".github/workflows/wear-v1-signed-pair.yml": ["branches: [jarvis/unified-production]", "./gradlew --no-daemon", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
-      ".github/workflows/codeql.yml": ["branches: [main, jarvis/unified-production]"]
-    },
-    "forbidden_markers": {
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["text(\"J A R V I S\"", "R.drawable.control_delete_red"],
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java": ["expandableSection(", "class BubbleSpinner"]
+      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["releases/download/jarvis-", "update-manifest.json"],
+      ".github/workflows/android-ota-release.yml": ["git fetch origin jarvis/unified-production", "verify_product_baseline.py", "jarvis-wear-v${version}-release.apk", "product-release-manifest.json", "jarvis-$1-feed", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
+      ".github/workflows/codeql.yml": ["branches: [jarvis/unified-production]"]
     },
     "sha256": {
-      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png": "ae551628ee4e5f1c7645d4c9a4099cc1ba2b462fe110479d2b9be9ae7ce0165a",
-      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_logo_ui.png": "0ca048af7edd74991c4509f798699d606e2053d1a052e8b2ea8d629925ce4e03",
-      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml": "943f998c9aedb91a0c3d55a6e5ce3ac77f0899660591da13919de7df29693ec2",
-      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis_status.xml": "0ec41d1566b6416544d580ad47ed2c1f92d712df0773587de26dd94710a022be",
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ChatHistoryActivity.java": "bf6f4d37eeb0c74aa80ac9a2c9db96560997b4ce48c98684bdf268e7eea62176",
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ImprovementsActivity.java": "1c087cac638fabbfe895e5f4047c7625291c7548824949e21cea22b35bb94257",
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ProactiveActivity.java": "6810de0427c59ef71807b91e995eca6f54569b305af084951e733561f03af85a"
+      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png": "48f71005d585a8494463cf3b8c4db8ca1b8e82a7b4fb4942db67c0c1dcbe74af",
+      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_wordmark_master.png": "da33a713573cc452e9de9868053ae095eba241b8f5d5ed72ad8f939eb8b3c5fa",
+      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml": "b252ac194a15bd535680f3831b318ddef7db50bc695c59b0a563919c57cbcbf9"
+    },
+    "exact_source": {
+      "commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01",
+      "files": [
+        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java",
+        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java",
+        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ChatHistoryActivity.java",
+        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ImprovementsActivity.java",
+        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ProactiveActivity.java",
+        "android/jarvis-voice-client/wear/src/main/java/com/aaron/jarvisvoice/wear/JarvisWearActivity.java",
+        "android/jarvis-voice-client/wear/src/main/java/com/aaron/jarvisvoice/wear/WearChannelManager.java",
+        "android/jarvis-voice-client/wear/src/main/java/com/aaron/jarvisvoice/wear/WearVoiceService.java",
+        "android/jarvis-voice-client/wearprotocol/src/main/java/com/aaron/jarvisvoice/protocol/WearWireProtocol.java"
+      ]
+    },
+    "forbidden_files": [
+      "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_logo_ui.png",
+      ".github/workflows/wear-v1-signed-pair.yml",
+      "bridge/Dockerfile.v15",
+      "bridge/app/main_v15.py",
+      "bridge/app/main_v16.py",
+      "updates/v18.1.0/android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java",
+      "tools/install_self_development_v2.sh"
+    ],
+    "forbidden_markers": {
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["ota-feeds"],
+      ".github/workflows/android-ota-release.yml": ["git fetch origin ota-feeds", "push origin ota-feeds"]
     }
   },
   "historical_branches": [

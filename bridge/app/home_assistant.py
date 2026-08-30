@@ -21,7 +21,6 @@ class HomeAssistantHTTPError(HomeAssistantError):
         self.status_code = status_code
 
 
-
 @dataclass
 class HomeAssistantStatus:
     connected: bool
@@ -44,9 +43,7 @@ class HomeAssistantClient:
         elif parsed.scheme == "http":
             scheme = "ws"
         else:
-            raise HomeAssistantError(
-                "HOME_ASSISTANT_URL must start with http:// or https://"
-            )
+            raise HomeAssistantError("HOME_ASSISTANT_URL must start with http:// or https://")
 
         return f"{scheme}://{parsed.netloc}/api/websocket"
 
@@ -59,9 +56,7 @@ class HomeAssistantClient:
         first_message = json.loads(await websocket.recv())
 
         if first_message.get("type") != "auth_required":
-            raise HomeAssistantError(
-                f"Unexpected authentication response: {first_message}"
-            )
+            raise HomeAssistantError(f"Unexpected authentication response: {first_message}")
 
         await websocket.send(
             json.dumps(
@@ -87,9 +82,7 @@ class HomeAssistantClient:
         command: dict[str, Any],
     ) -> Any:
         if not self.token:
-            raise HomeAssistantError(
-                "HOME_ASSISTANT_TOKEN is missing"
-            )
+            raise HomeAssistantError("HOME_ASSISTANT_TOKEN is missing")
 
         async with websockets.connect(
             self.websocket_url,
@@ -121,13 +114,11 @@ class HomeAssistantClient:
                     raise HomeAssistantError(
                         error.get(
                             "message",
-                            f"Home Assistant command failed: "
-                            f"{command.get('type', 'unknown')}",
+                            f"Home Assistant command failed: {command.get('type', 'unknown')}",
                         )
                     )
 
                 return response.get("result")
-
 
     async def rest_request(
         self,
@@ -205,15 +196,12 @@ class HomeAssistantClient:
             )
 
         except Exception as exc:
-            logger.exception(
-                "Home Assistant connection test failed"
-            )
+            logger.exception("Home Assistant connection test failed")
 
             return HomeAssistantStatus(
                 connected=False,
                 message=str(exc),
             )
-
 
     async def iter_events(
         self,
@@ -277,9 +265,7 @@ class HomeAssistantClient:
         )
 
         if not isinstance(result, list):
-            raise HomeAssistantError(
-                "Home Assistant returned an invalid states response"
-            )
+            raise HomeAssistantError("Home Assistant returned an invalid states response")
 
         return result
 

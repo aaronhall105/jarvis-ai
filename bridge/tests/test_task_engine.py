@@ -304,7 +304,6 @@ class TemporalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.engine.get_task(1))
         self.assertEqual((await self.engine.get_task(2))["status"], "pending")
 
-
     async def test_ambiguous_delete_history_requires_confirmation(self) -> None:
         await self.engine.handle_command(
             "Turn the TV off in 10 seconds",

@@ -13,16 +13,38 @@ class FakeRegistry:
                 {"area_id": "bedroom", "name": "Bedroom", "aliases": []},
             ],
             devices=[
-                {"id": "phone_a", "name_by_user": "Aaron's Phone", "name": "SM-G996B", "model": "SM-G996B"},
-                {"id": "phone_b", "name_by_user": "Amber Phone", "name": "Amber Phone", "model": "SM-S911U1"},
+                {
+                    "id": "phone_a",
+                    "name_by_user": "Aaron's Phone",
+                    "name": "SM-G996B",
+                    "model": "SM-G996B",
+                },
+                {
+                    "id": "phone_b",
+                    "name_by_user": "Amber Phone",
+                    "name": "Amber Phone",
+                    "model": "SM-S911U1",
+                },
             ],
             entities=[
                 {"entity_id": "person.amber", "name": "Amber", "original_name": "Amber"},
-                {"entity_id": "light.living_room_floodlight", "name": "Living Room Floodlight", "original_name": "Floodlight"},
-                {"entity_id": "media_player.samsung_tv", "name": "Living Room TV", "original_name": "TV"},
+                {
+                    "entity_id": "light.living_room_floodlight",
+                    "name": "Living Room Floodlight",
+                    "original_name": "Floodlight",
+                },
+                {
+                    "entity_id": "media_player.samsung_tv",
+                    "name": "Living Room TV",
+                    "original_name": "TV",
+                },
             ],
             states=[
-                {"entity_id": "person.amber", "state": "home", "attributes": {"friendly_name": "Amber"}},
+                {
+                    "entity_id": "person.amber",
+                    "state": "home",
+                    "attributes": {"friendly_name": "Amber"},
+                },
             ],
             refreshed_at="now",
         )
@@ -35,8 +57,11 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = UnderstandingEngine(FakeRegistry())
         self.actor = UserContext.from_request(
-            user_id="aaron-id", user_name="Aaron", user_is_admin=True,
-            device_id=None, voice_mode=False,
+            user_id="aaron-id",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=False,
         )
 
     async def test_where_us_amber(self):

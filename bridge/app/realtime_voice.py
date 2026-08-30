@@ -1331,12 +1331,12 @@ class RealtimeVoiceProxy:
         self.last_error: str | None = None
         self._provider_epoch_counter = 0
         self.voice_pe_wake_arbiter = VoicePeWakeArbiter()
-        self.voice_pe_session_started: Callable[
-            [dict[str, Any]], Coroutine[Any, Any, None]
-        ] | None = None
-        self.voice_pe_session_ended: Callable[
-            [dict[str, Any]], Coroutine[Any, Any, None]
-        ] | None = None
+        self.voice_pe_session_started: (
+            Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
+        self.voice_pe_session_ended: (
+            Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
         self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
 
     def _turn_ledger_identity(
@@ -2636,10 +2636,13 @@ class RealtimeVoiceProxy:
                             event,
                             transcript,
                         )
-                    speaker_pcm = _speaker_capture_segment_pcm(
-                        state,
-                        event,
-                    ) or b""
+                    speaker_pcm = (
+                        _speaker_capture_segment_pcm(
+                            state,
+                            event,
+                        )
+                        or b""
+                    )
                     if speaker_pcm and not SPEAKER_SUPPRESSION_ENABLED:
                         _speaker_verify_schedule(
                             state,

@@ -43,9 +43,17 @@ def load_token() -> str:
 
 TOKEN = load_token()
 SOURCE_COMMIT = load_source_commit()
+AUTHORITATIVE_WORKSPACE = Path(
+    os.getenv(
+        "JARVIS_AUTHORITATIVE_WORKSPACE",
+        str(Path.home() / "jarvis-unified-production"),
+    )
+).resolve()
 WORKSPACES = {
-    "jarvis": Path("/home/aaron/jarvis"),
-    "jarvis-wear": Path("/home/aaron/jarvis-wear"),
+    "jarvis": AUTHORITATIVE_WORKSPACE,
+    # Preserve the existing Android preference as a compatibility alias while
+    # routing both names to the one authoritative product tree.
+    "jarvis-wear": AUTHORITATIVE_WORKSPACE,
 }
 codex = CodexAppServer(os.getenv("CODEX_EXECUTABLE", "/usr/local/bin/codex"))
 started = time.monotonic()
@@ -99,6 +107,7 @@ async def health() -> dict[str, Any]:
         "status": "healthy",
         "service": "jarvis-developer",
         "source_commit": SOURCE_COMMIT,
+        "workspace": str(AUTHORITATIVE_WORKSPACE),
         "uptime_seconds": int(time.monotonic() - started),
     }
 

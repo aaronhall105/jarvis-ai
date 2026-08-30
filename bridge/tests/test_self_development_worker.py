@@ -79,9 +79,7 @@ def test_incremental_repair_preserves_previous_good_edit(tmp_path: Path) -> None
             }
         ]
     }
-    patch_one, paths_one, _ = development._apply_incremental_edits(
-        repo, first, policy(), config()
-    )
+    patch_one, paths_one, _ = development._apply_incremental_edits(repo, first, policy(), config())
     assert paths_one == ["bridge/app/example.py"]
     assert "+value = 2" in patch_one
 
@@ -94,9 +92,7 @@ def test_incremental_repair_preserves_previous_good_edit(tmp_path: Path) -> None
             }
         ]
     }
-    patch_two, paths_two, _ = development._apply_incremental_edits(
-        repo, repair, policy(), config()
-    )
+    patch_two, paths_two, _ = development._apply_incremental_edits(repo, repair, policy(), config())
 
     source = (repo / "bridge/app/example.py").read_text(encoding="utf-8")
     assert source == "value = 2\nresult = value + 2\n"
@@ -128,9 +124,7 @@ def test_failed_incremental_step_is_atomic(tmp_path: Path) -> None:
         development._apply_incremental_edits(repo, payload, policy(), config())
 
     assert (repo / "bridge/app/example.py").read_text(encoding="utf-8") == before
-    assert subprocess.run(
-        ["git", "diff", "--quiet"], cwd=repo, check=False
-    ).returncode == 0
+    assert subprocess.run(["git", "diff", "--quiet"], cwd=repo, check=False).returncode == 0
 
 
 def test_run_once_resumes_developing_before_queued(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,15 +290,9 @@ def test_v25_feedback_redaction_preserves_test_identifiers() -> None:
 
 
 def test_v25_detects_external_credit_exhaustion() -> None:
-    assert development._is_external_credit_block(
-        "Error: credit_balance_exhausted"
-    )
-    assert development._is_external_credit_block(
-        "OpenAI: insufficient_quota"
-    )
-    assert not development._is_external_credit_block(
-        "ordinary validation failure"
-    )
+    assert development._is_external_credit_block("Error: credit_balance_exhausted")
+    assert development._is_external_credit_block("OpenAI: insufficient_quota")
+    assert not development._is_external_credit_block("ordinary validation failure")
 
 
 def test_v25_external_block_does_not_consume_internal_retry(
@@ -316,9 +304,7 @@ def test_v25_external_block_does_not_consume_internal_retry(
     }
 
     def blocked(*args):
-        raise development.ExternalDependencyBlocked(
-            "credit_balance_exhausted"
-        )
+        raise development.ExternalDependencyBlocked("credit_balance_exhausted")
 
     monkeypatch.setattr(development, "_development_step", blocked)
 
@@ -356,9 +342,7 @@ def test_v25_external_pause_preserves_genuine_attempt_count(
     monkeypatch.setattr(
         development,
         "_save_state",
-        lambda cid, st, **fields: saved.append(
-            {"cid": cid, "state": dict(st), **fields}
-        ),
+        lambda cid, st, **fields: saved.append({"cid": cid, "state": dict(st), **fields}),
     )
     monkeypatch.setattr(base, "audit", lambda *args, **kwargs: None)
 
@@ -529,9 +513,7 @@ OPENAI_API_KEY={secret}
 """
     )
 
-    failures, tests, total, details = base._load_pytest_junit(
-        report
-    )
+    failures, tests, total, details = base._load_pytest_junit(report)
 
     assert total == 1
     assert sum(failures.values()) == 1
@@ -553,20 +535,14 @@ def test_v25_pytest_baseline_attaches_evidence_only_to_new_failures(
         "ok": True,
         "returncode": 1,
         "total_tests": 10,
-        "failures": base.Counter(
-            {"existing::failure": 1}
-        ),
+        "failures": base.Counter({"existing::failure": 1}),
         "tests": base.Counter(
             {
                 "existing::failure": 1,
                 "new::failure": 1,
             }
         ),
-        "failure_details": {
-            "existing::failure": [
-                "existing failure evidence"
-            ]
-        },
+        "failure_details": {"existing::failure": ["existing failure evidence"]},
         "output": "",
     }
     candidate = {
@@ -586,19 +562,13 @@ def test_v25_pytest_baseline_attaches_evidence_only_to_new_failures(
             }
         ),
         "failure_details": {
-            "existing::failure": [
-                "existing failure evidence"
-            ],
-            "new::failure": [
-                "exact new assertion evidence"
-            ],
+            "existing::failure": ["existing failure evidence"],
+            "new::failure": ["exact new assertion evidence"],
         },
         "output": "",
     }
 
-    scans = iter(
-        [baseline, candidate]
-    )
+    scans = iter([baseline, candidate])
     monkeypatch.setattr(
         base,
         "_docker_pytest_scan",

@@ -18,33 +18,21 @@ from app.self_improvement import (
 )
 
 
-PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[2]
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 SPEC = importlib.util.spec_from_file_location(
     "self_improvement_worker_e2e_dry_run",
-    PROJECT_ROOT
-    / "tools"
-    / "self_improvement_worker.py",
+    PROJECT_ROOT / "tools" / "self_improvement_worker.py",
 )
 
 assert SPEC is not None
 assert SPEC.loader is not None
 
-worker = importlib.util.module_from_spec(
-    SPEC
-)
+worker = importlib.util.module_from_spec(SPEC)
 
-sys.modules[
-    SPEC.name
-] = worker
+sys.modules[SPEC.name] = worker
 
-SPEC.loader.exec_module(
-    worker
-)
+SPEC.loader.exec_module(worker)
 
 
 PATCH = (
@@ -94,9 +82,7 @@ def _config() -> Any:
         github_enabled=False,
         ai_review_enabled=True,
         notify_enabled=False,
-        notify_service=(
-            "notify.mobile_app_aaron_s_phone"
-        ),
+        notify_service=("notify.mobile_app_aaron_s_phone"),
         auto_deploy_low_risk=False,
         proposal_only=True,
         candidate_timeout_seconds=60,
@@ -152,9 +138,7 @@ def _seed_failure_and_candidate(
             ),
         )
 
-        failure_id = int(
-            failure.lastrowid
-        )
+        failure_id = int(failure.lastrowid)
 
         candidate = connection.execute(
             """
@@ -174,9 +158,7 @@ def _seed_failure_and_candidate(
             ),
         )
 
-        candidate_id = int(
-            candidate.lastrowid
-        )
+        candidate_id = int(candidate.lastrowid)
 
     return (
         failure_id,
@@ -192,84 +174,34 @@ def _install_isolated_runtime(
     docker_image: str | None = None,
     docker_failure_probe: bool = False,
 ) -> dict[str, Any]:
-    sandbox = (
-        tmp_path
-        / "jarvis-e2e-sandbox"
-    )
+    sandbox = tmp_path / "jarvis-e2e-sandbox"
 
-    repo = (
-        sandbox
-        / "repo"
-    )
+    repo = sandbox / "repo"
 
-    work_root = (
-        sandbox
-        / "improver"
-    )
+    work_root = sandbox / "improver"
 
-    data_dir = (
-        sandbox
-        / "data"
-    )
+    data_dir = sandbox / "data"
 
-    repo.mkdir(
-        parents=True
-    )
+    repo.mkdir(parents=True)
 
-    (
-        repo
-        / "bridge"
-        / "app"
-    ).mkdir(
-        parents=True
-    )
+    (repo / "bridge" / "app").mkdir(parents=True)
 
-    (
-        repo
-        / "bridge"
-        / "tests"
-    ).mkdir(
-        parents=True
-    )
+    (repo / "bridge" / "tests").mkdir(parents=True)
 
-    (
-        repo
-        / "config"
-    ).mkdir(
-        parents=True
-    )
+    (repo / "config").mkdir(parents=True)
 
-    (
-        repo
-        / "bridge"
-        / "app"
-        / "__init__.py"
-    ).write_text(
+    (repo / "bridge" / "app" / "__init__.py").write_text(
         "",
         encoding="utf-8",
     )
 
-    (
-        repo
-        / "bridge"
-        / "app"
-        / "example.py"
-    ).write_text(
+    (repo / "bridge" / "app" / "example.py").write_text(
         "VALUE = 1\n",
         encoding="utf-8",
     )
 
-    (
-        repo
-        / "bridge"
-        / "tests"
-        / "test_example.py"
-    ).write_text(
-        "from app.example import VALUE\n"
-        "\n"
-        "\n"
-        "def test_value() -> None:\n"
-        "    assert VALUE == 1\n",
+    (repo / "bridge" / "tests" / "test_example.py").write_text(
+        "from app.example import VALUE\n\n\ndef test_value() -> None:\n    assert VALUE == 1\n",
         encoding="utf-8",
     )
 
@@ -307,11 +239,7 @@ def _install_isolated_runtime(
         "medium_risk_paths": [],
     }
 
-    policy_path = (
-        repo
-        / "config"
-        / "self_improvement_policy.json"
-    )
+    policy_path = repo / "config" / "self_improvement_policy.json"
 
     policy_path.write_text(
         json.dumps(
@@ -325,53 +253,30 @@ def _install_isolated_runtime(
     docker_project = ""
 
     if real_docker:
-        image = str(
-            docker_image
-            or ""
-        ).strip()
+        image = str(docker_image or "").strip()
 
         if not image:
-            raise AssertionError(
-                "Real Docker dry-run requires "
-                "an explicitly pinned local image."
-            )
+            raise AssertionError("Real Docker dry-run requires an explicitly pinned local image.")
 
-        docker_project = (
-            "jarvis-v2115b-"
-            + uuid.uuid4().hex[
-                :12
-            ]
-        )
+        docker_project = "jarvis-v2115b-" + uuid.uuid4().hex[:12]
 
-        compose_file = (
-            repo
-            / "compose.yaml"
-        )
+        compose_file = repo / "compose.yaml"
 
-        boundary_command = (
-            "sleep 300"
-        )
+        boundary_command = "sleep 300"
 
-        health_command = (
-            "exit 0"
-        )
+        health_command = "exit 0"
 
         environment_block = ""
 
         if docker_failure_probe:
             boundary_command = (
-                'if [ "$JARVIS_DRY_RUN_STATE" = "base" ]; '
-                "then sleep 300; else exit 42; fi"
+                'if [ "$JARVIS_DRY_RUN_STATE" = "base" ]; then sleep 300; else exit 42; fi'
             )
 
-            health_command = (
-                'test "$JARVIS_DRY_RUN_STATE" = "base"'
-            )
+            health_command = 'test "$JARVIS_DRY_RUN_STATE" = "base"'
 
             environment_block = (
-                "    environment:\n"
-                "      JARVIS_DRY_RUN_STATE: "
-                '"${JARVIS_DRY_RUN_STATE:-unknown}"\n'
+                '    environment:\n      JARVIS_DRY_RUN_STATE: "${JARVIS_DRY_RUN_STATE:-unknown}"\n'
             )
 
         compose_file.write_text(
@@ -455,15 +360,10 @@ def _install_isolated_runtime(
         "HEAD",
     )
 
-    database = (
-        data_dir
-        / "jarvis_improvement.db"
-    )
+    database = data_dir / "jarvis_improvement.db"
 
     engine = SelfImprovementEngine(
-        str(
-            database
-        ),
+        str(database),
         enabled=True,
         auto_prepare=False,
         core_version="dry-run",
@@ -472,9 +372,7 @@ def _install_isolated_runtime(
     (
         failure_id,
         candidate_id,
-    ) = _seed_failure_and_candidate(
-        engine
-    )
+    ) = _seed_failure_and_candidate(engine)
 
     monkeypatch.setattr(
         worker,
@@ -503,8 +401,7 @@ def _install_isolated_runtime(
     monkeypatch.setattr(
         worker,
         "ENV_PATH",
-        sandbox
-        / "missing.env",
+        sandbox / "missing.env",
     )
 
     monkeypatch.setattr(
@@ -516,37 +413,30 @@ def _install_isolated_runtime(
     monkeypatch.setattr(
         worker,
         "WORKTREES",
-        work_root
-        / "worktrees",
+        work_root / "worktrees",
     )
 
     monkeypatch.setattr(
         worker,
         "ARTIFACTS",
-        work_root
-        / "artifacts",
+        work_root / "artifacts",
     )
 
     monkeypatch.setattr(
         worker,
         "LOCK_PATH",
-        work_root
-        / "worker.lock",
+        work_root / "worker.lock",
     )
 
     monkeypatch.setattr(
         worker,
         "VENV_PYTHON",
-        Path(
-            sys.executable
-        ),
+        Path(sys.executable),
     )
 
     sandbox_root = sandbox.resolve()
 
-    docker_commands: list[
-        list[str]
-    ] = []
+    docker_commands: list[list[str]] = []
 
     def safe_run(
         command: list[str],
@@ -556,73 +446,37 @@ def _install_isolated_runtime(
         check: bool = True,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        actual_cwd = (
-            repo
-            if cwd is None
-            else Path(
-                cwd
-            )
-        )
+        actual_cwd = repo if cwd is None else Path(cwd)
 
-        resolved_cwd = (
-            actual_cwd
-            .resolve()
-        )
+        resolved_cwd = actual_cwd.resolve()
 
-        if not resolved_cwd.is_relative_to(
-            sandbox_root
-        ):
+        if not resolved_cwd.is_relative_to(sandbox_root):
             raise AssertionError(
                 "DRY-RUN SAFETY VIOLATION: "
                 "command attempted outside sandbox: "
                 f"{resolved_cwd}: {command}"
             )
 
-        is_compose = (
-            command[
-                :2
-            ]
-            == [
-                "docker",
-                "compose",
-            ]
-        )
+        is_compose = command[:2] == [
+            "docker",
+            "compose",
+        ]
 
         effective_env = env
 
-        if (
-            is_compose
-            and real_docker
-        ):
-            effective_env = dict(
-                os.environ
-                if env is None
-                else env
-            )
+        if is_compose and real_docker:
+            effective_env = dict(os.environ if env is None else env)
 
-            effective_env[
-                "COMPOSE_PROJECT_NAME"
-            ] = docker_project
+            effective_env["COMPOSE_PROJECT_NAME"] = docker_project
 
-            if (
-                docker_failure_probe
-                and command[
-                    :3
-                ]
-                == [
-                    "docker",
-                    "compose",
-                    "up",
-                ]
-            ):
+            if docker_failure_probe and command[:3] == [
+                "docker",
+                "compose",
+                "up",
+            ]:
                 source = (
-                    repo
-                    / "bridge"
-                    / "app"
-                    / "example.py"
-                ).read_text(
-                    encoding="utf-8"
-                ).strip()
+                    (repo / "bridge" / "app" / "example.py").read_text(encoding="utf-8").strip()
+                )
 
                 if source == "VALUE = 1":
                     state = "base"
@@ -633,31 +487,20 @@ def _install_isolated_runtime(
                 else:
                     state = "unknown"
 
-                effective_env[
-                    "JARVIS_DRY_RUN_STATE"
-                ] = state
+                effective_env["JARVIS_DRY_RUN_STATE"] = state
 
-        if command[
-            :3
-        ] == [
+        if command[:3] == [
             "docker",
             "compose",
             "up",
         ]:
-            docker_commands.append(
-                list(
-                    command
-                )
-            )
+            docker_commands.append(list(command))
 
             if not real_docker:
                 return subprocess.CompletedProcess(
                     args=command,
                     returncode=0,
-                    stdout=(
-                        "DRY-RUN: isolated Docker "
-                        "boundary simulated"
-                    ),
+                    stdout=("DRY-RUN: isolated Docker boundary simulated"),
                 )
 
         completed = subprocess.run(
@@ -671,20 +514,10 @@ def _install_isolated_runtime(
             check=False,
         )
 
-        if (
-            check
-            and completed.returncode != 0
-        ):
+        if check and completed.returncode != 0:
             raise worker.WorkerError(
                 "Dry-run command failed "
-                f"({completed.returncode}): "
-                + " ".join(
-                    command
-                )
-                + "\n"
-                + completed.stdout[
-                    -8000:
-                ]
+                f"({completed.returncode}): " + " ".join(command) + "\n" + completed.stdout[-8000:]
             )
 
         return completed
@@ -696,12 +529,8 @@ def _install_isolated_runtime(
     )
 
     payload = {
-        "summary": (
-            "Set the deterministic example value to 2"
-        ),
-        "root_cause": (
-            "The example constant retained its old value."
-        ),
+        "summary": ("Set the deterministic example value to 2"),
+        "root_cause": ("The example constant retained its old value."),
         "risk": "low",
         "edits": [
             {
@@ -765,9 +594,7 @@ def _install_isolated_runtime(
         lambda **kwargs: {
             "verdict": "approve",
             "risk": "low",
-            "summary": (
-                "Deterministic dry-run reviewer approval."
-            ),
+            "summary": ("Deterministic dry-run reviewer approval."),
             "findings": [],
             "required_changes": [],
         },
@@ -813,30 +640,17 @@ def _install_isolated_runtime(
     }
 
 
-
-
 def _real_compose_environment(
     environment: dict[str, Any],
 ) -> dict[str, str]:
-    project = str(
-        environment.get(
-            "docker_project"
-        )
-        or ""
-    ).strip()
+    project = str(environment.get("docker_project") or "").strip()
 
     if not project:
-        raise AssertionError(
-            "Disposable Compose project is missing."
-        )
+        raise AssertionError("Disposable Compose project is missing.")
 
-    result = dict(
-        os.environ
-    )
+    result = dict(os.environ)
 
-    result[
-        "COMPOSE_PROJECT_NAME"
-    ] = project
+    result["COMPOSE_PROJECT_NAME"] = project
 
     return result
 
@@ -850,10 +664,7 @@ def _docker_project_container_ids(
             "ps",
             "-aq",
             "--filter",
-            (
-                "label=com.docker.compose.project="
-                + project
-            ),
+            ("label=com.docker.compose.project=" + project),
         ],
         text=True,
         stdout=subprocess.PIPE,
@@ -861,11 +672,7 @@ def _docker_project_container_ids(
         check=True,
     )
 
-    return [
-        line.strip()
-        for line in completed.stdout.splitlines()
-        if line.strip()
-    ]
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
 def _docker_project_network_ids(
@@ -878,10 +685,7 @@ def _docker_project_network_ids(
             "ls",
             "-q",
             "--filter",
-            (
-                "label=com.docker.compose.project="
-                + project
-            ),
+            ("label=com.docker.compose.project=" + project),
         ],
         text=True,
         stdout=subprocess.PIPE,
@@ -889,38 +693,20 @@ def _docker_project_network_ids(
         check=True,
     )
 
-    return [
-        line.strip()
-        for line in completed.stdout.splitlines()
-        if line.strip()
-    ]
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
 def _cleanup_real_docker(
     environment: dict[str, Any],
 ) -> None:
-    if not bool(
-        environment.get(
-            "real_docker"
-        )
-    ):
+    if not bool(environment.get("real_docker")):
         return
 
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    repo = Path(
-        environment[
-            "repo"
-        ]
-    )
+    repo = Path(environment["repo"])
 
-    compose_env = _real_compose_environment(
-        environment
-    )
+    compose_env = _real_compose_environment(environment)
 
     subprocess.run(
         [
@@ -940,11 +726,7 @@ def _cleanup_real_docker(
         check=False,
     )
 
-    container_ids = (
-        _docker_project_container_ids(
-            project
-        )
-    )
+    container_ids = _docker_project_container_ids(project)
 
     if container_ids:
         subprocess.run(
@@ -960,11 +742,7 @@ def _cleanup_real_docker(
             check=False,
         )
 
-    network_ids = (
-        _docker_project_network_ids(
-            project
-        )
-    )
+    network_ids = _docker_project_network_ids(project)
 
     if network_ids:
         subprocess.run(
@@ -980,22 +758,11 @@ def _cleanup_real_docker(
             check=False,
         )
 
-    remaining_containers = (
-        _docker_project_container_ids(
-            project
-        )
-    )
+    remaining_containers = _docker_project_container_ids(project)
 
-    remaining_networks = (
-        _docker_project_network_ids(
-            project
-        )
-    )
+    remaining_networks = _docker_project_network_ids(project)
 
-    if (
-        remaining_containers
-        or remaining_networks
-    ):
+    if remaining_containers or remaining_networks:
         raise AssertionError(
             "Disposable Docker project cleanup "
             "left resources behind: "
@@ -1007,32 +774,19 @@ def _cleanup_real_docker(
 def _wait_for_real_boundary(
     environment: dict[str, Any],
 ) -> dict[str, Any]:
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    deadline = (
-        time.monotonic()
-        + 20.0
-    )
+    deadline = time.monotonic() + 20.0
 
     while time.monotonic() < deadline:
-        ids = _docker_project_container_ids(
-            project
-        )
+        ids = _docker_project_container_ids(project)
 
-        if len(
-            ids
-        ) == 1:
+        if len(ids) == 1:
             inspect = subprocess.run(
                 [
                     "docker",
                     "inspect",
-                    ids[
-                        0
-                    ],
+                    ids[0],
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -1040,140 +794,57 @@ def _wait_for_real_boundary(
                 check=True,
             )
 
-            payload = json.loads(
-                inspect.stdout
-            )[0]
+            payload = json.loads(inspect.stdout)[0]
 
-            state = payload[
-                "State"
-            ]
+            state = payload["State"]
 
-            health = (
-                state.get(
-                    "Health"
-                )
-                or {}
-            ).get(
-                "Status"
-            )
+            health = (state.get("Health") or {}).get("Status")
 
             if health == "healthy":
                 return payload
 
-            if state.get(
-                "Status"
-            ) in {
+            if state.get("Status") in {
                 "dead",
                 "exited",
             }:
-                raise AssertionError(
-                    "Disposable Docker boundary "
-                    f"exited early: {state}"
-                )
+                raise AssertionError(f"Disposable Docker boundary exited early: {state}")
 
-        time.sleep(
-            0.2
-        )
+        time.sleep(0.2)
 
-    raise AssertionError(
-        "Disposable Docker boundary did "
-        "not become healthy."
-    )
+    raise AssertionError("Disposable Docker boundary did not become healthy.")
 
 
 def _assert_real_docker_isolation(
     environment: dict[str, Any],
     container: dict[str, Any],
 ) -> None:
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    host_config = container[
-        "HostConfig"
-    ]
+    host_config = container["HostConfig"]
 
-    port_bindings = (
-        host_config.get(
-            "PortBindings"
-        )
-        or {}
-    )
+    port_bindings = host_config.get("PortBindings") or {}
 
     assert port_bindings == {}
 
-    mounts = container.get(
-        "Mounts"
-    ) or []
+    mounts = container.get("Mounts") or []
 
-    assert not any(
-        mount.get(
-            "Type"
-        )
-        == "bind"
-        for mount in mounts
-    )
+    assert not any(mount.get("Type") == "bind" for mount in mounts)
 
-    assert host_config.get(
-        "ReadonlyRootfs"
-    ) is True
+    assert host_config.get("ReadonlyRootfs") is True
 
-    security_opt = (
-        host_config.get(
-            "SecurityOpt"
-        )
-        or []
-    )
+    security_opt = host_config.get("SecurityOpt") or []
 
-    assert any(
-        "no-new-privileges"
-        in str(
-            value
-        )
-        for value in security_opt
-    )
+    assert any("no-new-privileges" in str(value) for value in security_opt)
 
-    cap_drop = (
-        host_config.get(
-            "CapDrop"
-        )
-        or []
-    )
+    cap_drop = host_config.get("CapDrop") or []
 
-    assert "ALL" in {
-        str(
-            value
-        ).upper()
-        for value in cap_drop
-    }
+    assert "ALL" in {str(value).upper() for value in cap_drop}
 
-    networks = (
-        container[
-            "NetworkSettings"
-        ].get(
-            "Networks"
-        )
-        or {}
-    )
+    networks = container["NetworkSettings"].get("Networks") or {}
 
-    assert set(
-        networks
-    ) == {
-        (
-            project
-            + "_isolated"
-        )
-    }
+    assert set(networks) == {(project + "_isolated")}
 
-    network_id = next(
-        iter(
-            _docker_project_network_ids(
-                project
-            )
-        )
-    )
+    network_id = next(iter(_docker_project_network_ids(project)))
 
     network_inspect = subprocess.run(
         [
@@ -1188,39 +859,21 @@ def _assert_real_docker_isolation(
         check=True,
     )
 
-    network = json.loads(
-        network_inspect.stdout
-    )[0]
+    network = json.loads(network_inspect.stdout)[0]
 
-    assert network.get(
-        "Internal"
-    ) is True
+    assert network.get("Internal") is True
 
 
 def _prepare_and_request_deploy(
     environment: dict[str, Any],
 ) -> dict[str, Any]:
-    candidate_id = int(
-        environment[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(environment["candidate_id"])
 
-    failure_id = int(
-        environment[
-            "failure_id"
-        ]
-    )
+    failure_id = int(environment["failure_id"])
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
-    engine: SelfImprovementEngine = (
-        environment[
-            "engine"
-        ]
-    )
+    engine: SelfImprovementEngine = environment["engine"]
 
     worker.process_queued_candidate(
         {
@@ -1231,71 +884,28 @@ def _prepare_and_request_deploy(
         {},
     )
 
-    candidate = asyncio.run(
-        engine.get_candidate(
-            candidate_id
-        )
-    )
+    candidate = asyncio.run(engine.get_candidate(candidate_id))
 
     assert candidate is not None
-    assert (
-        candidate[
-            "status"
-        ]
-        == "awaiting_approval"
-    )
+    assert candidate["status"] == "awaiting_approval"
 
-    review_code = str(
-        candidate[
-            "approval_code"
-        ]
-    )
+    review_code = str(candidate["approval_code"])
 
-    assert (
-        len(
-            review_code
-        )
-        == 6
-    )
+    assert len(review_code) == 6
 
     assert review_code.isdigit()
 
-    base_commit = str(
-        candidate[
-            "base_commit"
-        ]
-    )
+    base_commit = str(candidate["base_commit"])
 
-    candidate_commit = str(
-        candidate[
-            "candidate_commit"
-        ]
-    )
+    candidate_commit = str(candidate["candidate_commit"])
 
-    validated_hash = str(
-        candidate[
-            "validated_patch_sha256"
-        ]
-    )
+    validated_hash = str(candidate["validated_patch_sha256"])
 
-    assert (
-        base_commit
-        == environment[
-            "base_commit"
-        ]
-    )
+    assert base_commit == environment["base_commit"]
 
-    assert (
-        candidate_commit
-        != base_commit
-    )
+    assert candidate_commit != base_commit
 
-    assert (
-        len(
-            validated_hash
-        )
-        == 64
-    )
+    assert len(validated_hash) == 64
 
     approved = asyncio.run(
         engine.approve_candidate(
@@ -1308,18 +918,9 @@ def _prepare_and_request_deploy(
     assert approved.success is True
     assert approved.details is not None
 
-    deploy_code = str(
-        approved.details[
-            "deploy_code"
-        ]
-    )
+    deploy_code = str(approved.details["deploy_code"])
 
-    assert (
-        len(
-            deploy_code
-        )
-        == 6
-    )
+    assert len(deploy_code) == 6
 
     assert deploy_code.isdigit()
 
@@ -1333,38 +934,20 @@ def _prepare_and_request_deploy(
 
     assert requested.success is True
 
-    candidate = asyncio.run(
-        engine.get_candidate(
-            candidate_id
-        )
-    )
+    candidate = asyncio.run(engine.get_candidate(candidate_id))
 
     assert candidate is not None
-    assert (
-        candidate[
-            "status"
-        ]
-        == "deploy_requested"
-    )
-    assert (
-        candidate[
-            "deploy_phase"
-        ]
-        == "requested"
-    )
+    assert candidate["status"] == "deploy_requested"
+    assert candidate["deploy_phase"] == "requested"
 
     return candidate
-
-
 
 
 def _authorize_manual_rollback(
     environment: dict[str, Any],
     candidate_id: int,
 ) -> dict[str, Any]:
-    engine = environment[
-        "engine"
-    ]
+    engine = environment["engine"]
 
     issued = asyncio.run(
         engine.issue_rollback_ticket(
@@ -1376,15 +959,9 @@ def _authorize_manual_rollback(
     assert issued.success is True
     assert issued.details is not None
 
-    rollback_code = str(
-        issued.details[
-            "rollback_code"
-        ]
-    )
+    rollback_code = str(issued.details["rollback_code"])
 
-    assert len(
-        rollback_code
-    ) == 6
+    assert len(rollback_code) == 6
 
     assert rollback_code.isdigit()
 
@@ -1398,34 +975,15 @@ def _authorize_manual_rollback(
 
     assert requested.success is True
 
-    candidate = asyncio.run(
-        engine.get_candidate(
-            candidate_id
-        )
-    )
+    candidate = asyncio.run(engine.get_candidate(candidate_id))
 
     assert candidate is not None
 
-    assert (
-        candidate[
-            "status"
-        ]
-        == "rollback_requested"
-    )
+    assert candidate["status"] == "rollback_requested"
 
-    assert (
-        candidate[
-            "deploy_phase"
-        ]
-        == "manual_rollback_requested"
-    )
+    assert candidate["deploy_phase"] == "manual_rollback_requested"
 
-    assert (
-        candidate[
-            "rollback_ticket_consumed_at"
-        ]
-        is not None
-    )
+    assert candidate["rollback_ticket_consumed_at"] is not None
 
     return candidate
 
@@ -1439,13 +997,9 @@ def test_v2115a_end_to_end_transaction_succeeds_in_sandbox(
         tmp_path,
     )
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     # Production remains Proposal Mode ON. Only this disposable
     # test configuration is allowed to enter the deployment
@@ -1453,28 +1007,12 @@ def test_v2115a_end_to_end_transaction_succeeds_in_sandbox(
     config.proposal_only = False
 
     worker.deploy_candidate(
-        worker.fetch_candidate_by_id(
-            int(
-                candidate[
-                    "candidate_id"
-                ]
-            )
-        ),
+        worker.fetch_candidate_by_id(int(candidate["candidate_id"])),
         config,
         {},
     )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            int(
-                candidate[
-                    "candidate_id"
-                ]
-            )
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(int(candidate["candidate_id"])))
 
     assert final is not None
     assert final["status"] == "deployed"
@@ -1482,46 +1020,24 @@ def test_v2115a_end_to_end_transaction_succeeds_in_sandbox(
     assert final["deploy_lease_id"] is None
 
     repo_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
-    assert (
-        repo_head
-        == final[
-            "candidate_commit"
-        ]
-    )
+    assert repo_head == final["candidate_commit"]
 
-    assert (
-        environment[
-            "docker_commands"
+    assert environment["docker_commands"] == [
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
         ]
-        == [
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ]
-        ]
-    )
+    ]
 
-    failure = asyncio.run(
-        environment[
-            "engine"
-        ].get_failure(
-            int(
-                environment[
-                    "failure_id"
-                ]
-            )
-        )
-    )
+    failure = asyncio.run(environment["engine"].get_failure(int(environment["failure_id"])))
 
     assert failure is not None
     assert failure["status"] == "deployed"
@@ -1536,15 +1052,9 @@ def test_v2115a_tampered_binding_fails_before_merge(
         tmp_path,
     )
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
     with worker.connect() as connection:
         connection.execute(
@@ -1559,9 +1069,7 @@ def test_v2115a_tampered_binding_fails_before_merge(
             ),
         )
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
@@ -1570,56 +1078,26 @@ def test_v2115a_tampered_binding_fails_before_merge(
         match="diff changed",
     ):
         worker.deploy_candidate(
-            worker.fetch_candidate_by_id(
-                candidate_id
-            ),
+            worker.fetch_candidate_by_id(candidate_id),
             config,
             {},
         )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
-    assert (
-        final[
-            "status"
-        ]
-        == "deployment_blocked"
-    )
-    assert (
-        final[
-            "deploy_phase"
-        ]
-        == "premerge_failed"
-    )
+    assert final["status"] == "deployment_blocked"
+    assert final["deploy_phase"] == "premerge_failed"
 
     repo_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
-    assert (
-        repo_head
-        == environment[
-            "base_commit"
-        ]
-    )
+    assert repo_head == environment["base_commit"]
 
-    assert (
-        environment[
-            "docker_commands"
-        ]
-        == []
-    )
+    assert environment["docker_commands"] == []
 
 
 def test_v2115a_proposal_mode_blocks_transaction_before_claim(
@@ -1631,19 +1109,11 @@ def test_v2115a_proposal_mode_blocks_transaction_before_claim(
         tmp_path,
     )
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     assert config.proposal_only is True
 
@@ -1652,79 +1122,39 @@ def test_v2115a_proposal_mode_blocks_transaction_before_claim(
         match="Proposal Mode",
     ):
         worker.deploy_candidate(
-            worker.fetch_candidate_by_id(
-                candidate_id
-            ),
+            worker.fetch_candidate_by_id(candidate_id),
             config,
             {},
         )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
-    assert (
-        final[
-            "status"
-        ]
-        == "deploy_requested"
-    )
-    assert (
-        final[
-            "deploy_phase"
-        ]
-        == "requested"
-    )
+    assert final["status"] == "deploy_requested"
+    assert final["deploy_phase"] == "requested"
     assert final["deploy_lease_id"] is None
 
     repo_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
-    assert (
-        repo_head
-        == environment[
-            "base_commit"
-        ]
-    )
+    assert repo_head == environment["base_commit"]
 
-    assert (
-        environment[
-            "docker_commands"
-        ]
-        == []
-    )
+    assert environment["docker_commands"] == []
+
 
 @pytest.mark.skipif(
-    os.environ.get(
-        "JARVIS_V2115B_REAL_DOCKER"
-    )
-    != "1",
-    reason=(
-        "V2.1.15B real Docker test runs "
-        "only when explicitly enabled."
-    ),
+    os.environ.get("JARVIS_V2115B_REAL_DOCKER") != "1",
+    reason=("V2.1.15B real Docker test runs only when explicitly enabled."),
 )
 def test_v2115b_real_compose_deployment_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> None:
-    docker_image = str(
-        os.environ.get(
-            "JARVIS_V2115B_IMAGE"
-        )
-        or ""
-    ).strip()
+    docker_image = str(os.environ.get("JARVIS_V2115B_IMAGE") or "").strip()
 
     assert docker_image
 
@@ -1735,164 +1165,81 @@ def test_v2115b_real_compose_deployment_boundary(
         docker_image=docker_image,
     )
 
-    request.addfinalizer(
-        lambda: _cleanup_real_docker(
-            environment
-        )
-    )
+    request.addfinalizer(lambda: _cleanup_real_docker(environment))
 
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    assert project.startswith(
-        "jarvis-v2115b-"
-    )
+    assert project.startswith("jarvis-v2115b-")
 
-    assert (
-        _docker_project_container_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_container_ids(project) == []
 
-    assert (
-        _docker_project_network_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_network_ids(project) == []
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
     worker.deploy_candidate(
-        worker.fetch_candidate_by_id(
-            int(
-                candidate[
-                    "candidate_id"
-                ]
-            )
-        ),
+        worker.fetch_candidate_by_id(int(candidate["candidate_id"])),
         config,
         {},
     )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            int(
-                candidate[
-                    "candidate_id"
-                ]
-            )
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(int(candidate["candidate_id"])))
 
     assert final is not None
     assert final["status"] == "deployed"
     assert final["deploy_phase"] == "deployed"
 
-    assert (
-        environment[
-            "docker_commands"
+    assert environment["docker_commands"] == [
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
         ]
-        == [
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ]
-        ]
-    )
+    ]
 
-    container = _wait_for_real_boundary(
-        environment
-    )
+    container = _wait_for_real_boundary(environment)
 
     _assert_real_docker_isolation(
         environment,
         container,
     )
 
-    assert (
-        container[
-            "Config"
-        ][
-            "Image"
-        ]
-        == docker_image
-    )
+    assert container["Config"]["Image"] == docker_image
 
     repo_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
-    assert (
-        repo_head
-        == final[
-            "candidate_commit"
-        ]
-    )
+    assert repo_head == final["candidate_commit"]
 
     # Explicit cleanup proves the successful path.
     # The pytest finalizer above independently guarantees
     # the same cleanup is attempted on any earlier failure.
-    _cleanup_real_docker(
-        environment
-    )
+    _cleanup_real_docker(environment)
 
-    assert (
-        _docker_project_container_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_container_ids(project) == []
 
-    assert (
-        _docker_project_network_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_network_ids(project) == []
+
 
 @pytest.mark.skipif(
-    os.environ.get(
-        "JARVIS_V2115C_REAL_DOCKER"
-    )
-    != "1",
-    reason=(
-        "V2.1.15C real rollback test runs "
-        "only when explicitly enabled."
-    ),
+    os.environ.get("JARVIS_V2115C_REAL_DOCKER") != "1",
+    reason=("V2.1.15C real rollback test runs only when explicitly enabled."),
 )
 def test_v2115c_real_compose_failure_auto_rollback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> None:
-    docker_image = str(
-        os.environ.get(
-            "JARVIS_V2115C_IMAGE"
-        )
-        or ""
-    ).strip()
+    docker_image = str(os.environ.get("JARVIS_V2115C_IMAGE") or "").strip()
 
     assert docker_image
 
@@ -1904,39 +1251,19 @@ def test_v2115c_real_compose_failure_auto_rollback(
         docker_failure_probe=True,
     )
 
-    request.addfinalizer(
-        lambda: _cleanup_real_docker(
-            environment
-        )
-    )
+    request.addfinalizer(lambda: _cleanup_real_docker(environment))
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    base_commit = str(
-        environment[
-            "base_commit"
-        ]
-    )
+    base_commit = str(environment["base_commit"])
 
-    candidate_commit = str(
-        candidate[
-            "candidate_commit"
-        ]
-    )
+    candidate_commit = str(candidate["candidate_commit"])
 
     assert candidate_commit != base_commit
 
-    observations: list[
-        dict[str, Any]
-    ] = []
+    observations: list[dict[str, Any]] = []
 
     def deployment_health(
         *args: Any,
@@ -1945,21 +1272,13 @@ def test_v2115c_real_compose_failure_auto_rollback(
         del args
         del kwargs
 
-        project = str(
-            environment[
-                "docker_project"
-            ]
-        )
+        project = str(environment["docker_project"])
 
         try:
-            container = _wait_for_real_boundary(
-                environment
-            )
+            container = _wait_for_real_boundary(environment)
 
         except AssertionError as exc:
-            ids = _docker_project_container_ids(
-                project
-            )
+            ids = _docker_project_container_ids(project)
 
             assert len(ids) == 1
 
@@ -1967,9 +1286,7 @@ def test_v2115c_real_compose_failure_auto_rollback(
                 [
                     "docker",
                     "inspect",
-                    ids[
-                        0
-                    ],
+                    ids[0],
                 ],
                 text=True,
                 stdout=subprocess.PIPE,
@@ -1977,31 +1294,18 @@ def test_v2115c_real_compose_failure_auto_rollback(
                 check=True,
             )
 
-            container = json.loads(
-                completed.stdout
-            )[0]
+            container = json.loads(completed.stdout)[0]
 
-            env = (
-                container[
-                    "Config"
-                ].get(
-                    "Env"
-                )
-                or []
-            )
+            env = container["Config"].get("Env") or []
 
             state = next(
                 (
                     value.split(
                         "=",
                         1,
-                    )[
-                        1
-                    ]
+                    )[1]
                     for value in env
-                    if value.startswith(
-                        "JARVIS_DRY_RUN_STATE="
-                    )
+                    if value.startswith("JARVIS_DRY_RUN_STATE=")
                 ),
                 "",
             )
@@ -2009,20 +1313,10 @@ def test_v2115c_real_compose_failure_auto_rollback(
             observations.append(
                 {
                     "state": state,
-                    "status": container[
-                        "State"
-                    ][
-                        "Status"
-                    ],
-                    "exit_code": container[
-                        "State"
-                    ][
-                        "ExitCode"
-                    ],
+                    "status": container["State"]["Status"],
+                    "exit_code": container["State"]["ExitCode"],
                     "head": _git(
-                        environment[
-                            "repo"
-                        ],
+                        environment["repo"],
                         "rev-parse",
                         "HEAD",
                     ),
@@ -2031,32 +1325,19 @@ def test_v2115c_real_compose_failure_auto_rollback(
 
             return (
                 False,
-                str(
-                    exc
-                ),
+                str(exc),
             )
 
-        env = (
-            container[
-                "Config"
-            ].get(
-                "Env"
-            )
-            or []
-        )
+        env = container["Config"].get("Env") or []
 
         state = next(
             (
                 value.split(
                     "=",
                     1,
-                )[
-                    1
-                ]
+                )[1]
                 for value in env
-                if value.startswith(
-                    "JARVIS_DRY_RUN_STATE="
-                )
+                if value.startswith("JARVIS_DRY_RUN_STATE=")
             ),
             "",
         )
@@ -2064,30 +1345,11 @@ def test_v2115c_real_compose_failure_auto_rollback(
         observations.append(
             {
                 "state": state,
-                "status": container[
-                    "State"
-                ][
-                    "Status"
-                ],
-                "health": (
-                    container[
-                        "State"
-                    ].get(
-                        "Health"
-                    )
-                    or {}
-                ).get(
-                    "Status"
-                ),
-                "exit_code": container[
-                    "State"
-                ][
-                    "ExitCode"
-                ],
+                "status": container["State"]["Status"],
+                "health": (container["State"].get("Health") or {}).get("Status"),
+                "exit_code": container["State"]["ExitCode"],
                 "head": _git(
-                    environment[
-                        "repo"
-                    ],
+                    environment["repo"],
                     "rev-parse",
                     "HEAD",
                 ),
@@ -2096,10 +1358,7 @@ def test_v2115c_real_compose_failure_auto_rollback(
 
         return (
             True,
-            (
-                "Disposable rollback boundary "
-                "is healthy."
-            ),
+            ("Disposable rollback boundary is healthy."),
         )
 
     monkeypatch.setattr(
@@ -2108,34 +1367,21 @@ def test_v2115c_real_compose_failure_auto_rollback(
         deployment_health,
     )
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
     with pytest.raises(
         worker.WorkerError,
-        match=(
-            "Deployment health "
-            "verification failed"
-        ),
+        match=("Deployment health verification failed"),
     ):
         worker.deploy_candidate(
-            worker.fetch_candidate_by_id(
-                candidate_id
-            ),
+            worker.fetch_candidate_by_id(candidate_id),
             config,
             {},
         )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
     assert final["status"] == "rolled_back"
@@ -2144,192 +1390,89 @@ def test_v2115c_real_compose_failure_auto_rollback(
     assert final["rolled_back_at"] is not None
 
     repo_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
     assert repo_head == base_commit
 
-    assert (
-        environment[
-            "repo"
-        ]
-        / "bridge"
-        / "app"
-        / "example.py"
-    ).read_text(
+    assert (environment["repo"] / "bridge" / "app" / "example.py").read_text(
         encoding="utf-8"
     ) == "VALUE = 1\n"
 
     assert len(observations) == 2
 
-    candidate_observation = observations[
-        0
+    candidate_observation = observations[0]
+
+    rollback_observation = observations[1]
+
+    assert candidate_observation["state"] == "candidate"
+
+    assert candidate_observation["status"] == "exited"
+
+    assert candidate_observation["exit_code"] == 42
+
+    assert candidate_observation["head"] == candidate_commit
+
+    assert rollback_observation["state"] == "base"
+
+    assert rollback_observation["status"] == "running"
+
+    assert rollback_observation["health"] == "healthy"
+
+    assert rollback_observation["head"] == base_commit
+
+    assert environment["docker_commands"] == [
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
+        ],
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
+        ],
     ]
 
-    rollback_observation = observations[
-        1
-    ]
-
-    assert (
-        candidate_observation[
-            "state"
-        ]
-        == "candidate"
-    )
-
-    assert (
-        candidate_observation[
-            "status"
-        ]
-        == "exited"
-    )
-
-    assert (
-        candidate_observation[
-            "exit_code"
-        ]
-        == 42
-    )
-
-    assert (
-        candidate_observation[
-            "head"
-        ]
-        == candidate_commit
-    )
-
-    assert (
-        rollback_observation[
-            "state"
-        ]
-        == "base"
-    )
-
-    assert (
-        rollback_observation[
-            "status"
-        ]
-        == "running"
-    )
-
-    assert (
-        rollback_observation[
-            "health"
-        ]
-        == "healthy"
-    )
-
-    assert (
-        rollback_observation[
-            "head"
-        ]
-        == base_commit
-    )
-
-    assert (
-        environment[
-            "docker_commands"
-        ]
-        == [
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ],
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ],
-        ]
-    )
-
-    failure = asyncio.run(
-        environment[
-            "engine"
-        ].get_failure(
-            int(
-                environment[
-                    "failure_id"
-                ]
-            )
-        )
-    )
+    failure = asyncio.run(environment["engine"].get_failure(int(environment["failure_id"])))
 
     assert failure is not None
     assert failure["status"] == "recorded"
 
-    container = _wait_for_real_boundary(
-        environment
-    )
+    container = _wait_for_real_boundary(environment)
 
     _assert_real_docker_isolation(
         environment,
         container,
     )
 
-    assert (
-        container[
-            "Config"
-        ][
-            "Image"
-        ]
-        == docker_image
-    )
+    assert container["Config"]["Image"] == docker_image
 
-    _cleanup_real_docker(
-        environment
-    )
+    _cleanup_real_docker(environment)
 
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    assert (
-        _docker_project_container_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_container_ids(project) == []
 
-    assert (
-        _docker_project_network_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_network_ids(project) == []
+
 
 @pytest.mark.skipif(
-    os.environ.get(
-        "JARVIS_V2116B_REAL_DOCKER"
-    )
-    != "1",
-    reason=(
-        "V2.1.16B real manual rollback test "
-        "runs only when explicitly enabled."
-    ),
+    os.environ.get("JARVIS_V2116B_REAL_DOCKER") != "1",
+    reason=("V2.1.16B real manual rollback test runs only when explicitly enabled."),
 )
 def test_v2116b_manual_rollback_exact_candidate_real_docker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     request: pytest.FixtureRequest,
 ) -> None:
-    docker_image = str(
-        os.environ.get(
-            "JARVIS_V2116B_IMAGE"
-        )
-        or ""
-    ).strip()
+    docker_image = str(os.environ.get("JARVIS_V2116B_IMAGE") or "").strip()
 
     assert docker_image
 
@@ -2340,64 +1483,34 @@ def test_v2116b_manual_rollback_exact_candidate_real_docker(
         docker_image=docker_image,
     )
 
-    request.addfinalizer(
-        lambda: _cleanup_real_docker(
-            environment
-        )
-    )
+    request.addfinalizer(lambda: _cleanup_real_docker(environment))
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    base_commit = str(
-        environment[
-            "base_commit"
-        ]
-    )
+    base_commit = str(environment["base_commit"])
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
     worker.deploy_candidate(
-        worker.fetch_candidate_by_id(
-            candidate_id
-        ),
+        worker.fetch_candidate_by_id(candidate_id),
         config,
         {},
     )
 
-    deployed = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    deployed = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert deployed is not None
     assert deployed["status"] == "deployed"
 
-    candidate_commit = str(
-        deployed[
-            "candidate_commit"
-        ]
-    )
+    candidate_commit = str(deployed["candidate_commit"])
 
     assert (
         _git(
-            environment[
-                "repo"
-            ],
+            environment["repo"],
             "rev-parse",
             "HEAD",
         )
@@ -2410,20 +1523,12 @@ def test_v2116b_manual_rollback_exact_candidate_real_docker(
     )
 
     worker.rollback_candidate(
-        worker.fetch_candidate_by_id(
-            candidate_id
-        ),
+        worker.fetch_candidate_by_id(candidate_id),
         config,
         {},
     )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
     assert final["status"] == "rolled_back"
@@ -2431,84 +1536,49 @@ def test_v2116b_manual_rollback_exact_candidate_real_docker(
 
     assert (
         _git(
-            environment[
-                "repo"
-            ],
+            environment["repo"],
             "rev-parse",
             "HEAD",
         )
         == base_commit
     )
 
-    assert (
-        environment[
-            "docker_commands"
-        ]
-        == [
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ],
-            [
-                "docker",
-                "compose",
-                "up",
-                "-d",
-                "--build",
-            ],
-        ]
-    )
+    assert environment["docker_commands"] == [
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
+        ],
+        [
+            "docker",
+            "compose",
+            "up",
+            "-d",
+            "--build",
+        ],
+    ]
 
-    container = _wait_for_real_boundary(
-        environment
-    )
+    container = _wait_for_real_boundary(environment)
 
     _assert_real_docker_isolation(
         environment,
         container,
     )
 
-    failure = asyncio.run(
-        environment[
-            "engine"
-        ].get_failure(
-            int(
-                environment[
-                    "failure_id"
-                ]
-            )
-        )
-    )
+    failure = asyncio.run(environment["engine"].get_failure(int(environment["failure_id"])))
 
     assert failure is not None
     assert failure["status"] == "recorded"
 
-    _cleanup_real_docker(
-        environment
-    )
+    _cleanup_real_docker(environment)
 
-    project = str(
-        environment[
-            "docker_project"
-        ]
-    )
+    project = str(environment["docker_project"])
 
-    assert (
-        _docker_project_container_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_container_ids(project) == []
 
-    assert (
-        _docker_project_network_ids(
-            project
-        )
-        == []
-    )
+    assert _docker_project_network_ids(project) == []
 
 
 def test_v2116b_manual_rollback_already_at_base_is_idempotent(
@@ -2520,46 +1590,26 @@ def test_v2116b_manual_rollback_already_at_base_is_idempotent(
         tmp_path,
     )
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    base_commit = str(
-        environment[
-            "base_commit"
-        ]
-    )
+    base_commit = str(environment["base_commit"])
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
     worker.deploy_candidate(
-        worker.fetch_candidate_by_id(
-            candidate_id
-        ),
+        worker.fetch_candidate_by_id(candidate_id),
         config,
         {},
     )
 
-    assert len(
-        environment[
-            "docker_commands"
-        ]
-    ) == 1
+    assert len(environment["docker_commands"]) == 1
 
     _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "reset",
         "--hard",
         base_commit,
@@ -2567,9 +1617,7 @@ def test_v2116b_manual_rollback_already_at_base_is_idempotent(
 
     assert (
         _git(
-            environment[
-                "repo"
-            ],
+            environment["repo"],
             "rev-parse",
             "HEAD",
         )
@@ -2588,10 +1636,7 @@ def test_v2116b_manual_rollback_already_at_base_is_idempotent(
         del args
         del kwargs
 
-        raise AssertionError(
-            "Idempotent base rollback must not "
-            "execute git reset."
-        )
+        raise AssertionError("Idempotent base rollback must not execute git reset.")
 
     monkeypatch.setattr(
         worker,
@@ -2600,20 +1645,12 @@ def test_v2116b_manual_rollback_already_at_base_is_idempotent(
     )
 
     worker.rollback_candidate(
-        worker.fetch_candidate_by_id(
-            candidate_id
-        ),
+        worker.fetch_candidate_by_id(candidate_id),
         config,
         {},
     )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
     assert final["status"] == "rolled_back"
@@ -2621,20 +1658,14 @@ def test_v2116b_manual_rollback_already_at_base_is_idempotent(
 
     assert (
         _git(
-            environment[
-                "repo"
-            ],
+            environment["repo"],
             "rev-parse",
             "HEAD",
         )
         == base_commit
     )
 
-    assert len(
-        environment[
-            "docker_commands"
-        ]
-    ) == 2
+    assert len(environment["docker_commands"]) == 2
 
 
 def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
@@ -2646,44 +1677,23 @@ def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
         tmp_path,
     )
 
-    candidate = _prepare_and_request_deploy(
-        environment
-    )
+    candidate = _prepare_and_request_deploy(environment)
 
-    candidate_id = int(
-        candidate[
-            "candidate_id"
-        ]
-    )
+    candidate_id = int(candidate["candidate_id"])
 
-    config = environment[
-        "config"
-    ]
+    config = environment["config"]
 
     config.proposal_only = False
 
     worker.deploy_candidate(
-        worker.fetch_candidate_by_id(
-            candidate_id
-        ),
+        worker.fetch_candidate_by_id(candidate_id),
         config,
         {},
     )
 
-    assert len(
-        environment[
-            "docker_commands"
-        ]
-    ) == 1
+    assert len(environment["docker_commands"]) == 1
 
-    newer_file = (
-        environment[
-            "repo"
-        ]
-        / "bridge"
-        / "app"
-        / "newer_commit.py"
-    )
+    newer_file = environment["repo"] / "bridge" / "app" / "newer_commit.py"
 
     newer_file.write_text(
         "NEWER = True\n",
@@ -2691,53 +1701,31 @@ def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
     )
 
     _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "add",
         "bridge/app/newer_commit.py",
     )
 
     _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "commit",
         "-m",
         "newer unrelated commit",
     )
 
     newer_head = _git(
-        environment[
-            "repo"
-        ],
+        environment["repo"],
         "rev-parse",
         "HEAD",
     )
 
-    deployed = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    deployed = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert deployed is not None
 
-    assert (
-        newer_head
-        != deployed[
-            "candidate_commit"
-        ]
-    )
+    assert newer_head != deployed["candidate_commit"]
 
-    assert (
-        newer_head
-        != deployed[
-            "base_commit"
-        ]
-    )
+    assert newer_head != deployed["base_commit"]
 
     _authorize_manual_rollback(
         environment,
@@ -2751,9 +1739,7 @@ def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
         del args
         del kwargs
 
-        raise AssertionError(
-            "Unexpected HEAD must never reach git reset."
-        )
+        raise AssertionError("Unexpected HEAD must never reach git reset.")
 
     monkeypatch.setattr(
         worker,
@@ -2766,42 +1752,22 @@ def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
         match="unexpected live HEAD",
     ):
         worker.rollback_candidate(
-            worker.fetch_candidate_by_id(
-                candidate_id
-            ),
+            worker.fetch_candidate_by_id(candidate_id),
             config,
             {},
         )
 
-    final = asyncio.run(
-        environment[
-            "engine"
-        ].get_candidate(
-            candidate_id
-        )
-    )
+    final = asyncio.run(environment["engine"].get_candidate(candidate_id))
 
     assert final is not None
 
-    assert (
-        final[
-            "status"
-        ]
-        == "recovery_required"
-    )
+    assert final["status"] == "recovery_required"
 
-    assert (
-        final[
-            "deploy_phase"
-        ]
-        == "manual_rollback_blocked"
-    )
+    assert final["deploy_phase"] == "manual_rollback_blocked"
 
     assert (
         _git(
-            environment[
-                "repo"
-            ],
+            environment["repo"],
             "rev-parse",
             "HEAD",
         )
@@ -2810,29 +1776,10 @@ def test_v2116b_manual_rollback_refuses_newer_unrelated_head(
 
     # Only the original deployment crossed the
     # Docker boundary. The blocked rollback did not.
-    assert len(
-        environment[
-            "docker_commands"
-        ]
-    ) == 1
+    assert len(environment["docker_commands"]) == 1
 
-    failure = asyncio.run(
-        environment[
-            "engine"
-        ].get_failure(
-            int(
-                environment[
-                    "failure_id"
-                ]
-            )
-        )
-    )
+    failure = asyncio.run(environment["engine"].get_failure(int(environment["failure_id"])))
 
     assert failure is not None
 
-    assert (
-        failure[
-            "status"
-        ]
-        == "deployed"
-    )
+    assert failure["status"] == "deployed"
