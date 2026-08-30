@@ -78,12 +78,14 @@ public final class UpdatesActivity extends Activity {
     }
     private void refresh() {
         UpdateRelease release = stored(prefs.availableManifest()); UpdateRelease verified = stored(prefs.verifiedManifest());
+        UpdateRelease installedVerified = stored(prefs.installedVerifiedManifest());
         String checked = prefs.lastChecked() == 0 ? "Never" : DateFormat.getMediumDateFormat(this).format(new Date(prefs.lastChecked())) + " " + DateFormat.getTimeFormat(this).format(new Date(prefs.lastChecked()));
         status.setText(prefs.error().isBlank() ? "Last checked: " + checked : "Error: " + prefs.error());
         if (release == null) { available.setText("None"); notes.setText(""); } else {
             available.setText(release.versionName() + " • " + formatSize(release.apkSize()) + " • " + release.publishedAt().substring(0, 10)); notes.setText(release.releaseNotes());
         }
-        download.setEnabled(release != null); install.setEnabled(verified != null); integrity.setText(verified == null ? "Not verified" : "Verified: checksum, package, version and signing certificate");
+        download.setEnabled(release != null); install.setEnabled(verified != null);
+        integrity.setText(integritySummary(verified, installedVerified, JarvisVersion.RELEASE));
         String updated = prefs.lastSuccessfulUpdate() == 0 ? "Unknown" : java.text.DateFormat.getDateTimeInstance().format(new Date(prefs.lastSuccessfulUpdate()));
         history.setText("Previous installed version: " + prefs.previousVersion() + "\nValidated pre-OTA baseline: 19.0.0-alpha14\nLast successful update: " + updated + "\n\nAndroid normally blocks installing a lower versionCode. Safe rollback requires a recovery build containing known-good code with a new, higher versionCode; Jarvis never uninstalls itself or wipes settings.");
         check.setEnabled(true);
@@ -91,6 +93,12 @@ public final class UpdatesActivity extends Activity {
     private void busy(String value) { status.setText(value); check.setEnabled(false); download.setEnabled(false); install.setEnabled(false); }
     private void error(Exception exception) { runOnUiThread(() -> { status.setText("Error: " + (exception.getMessage() == null ? "Update failed" : exception.getMessage())); refresh(); }); }
     private UpdateRelease stored(String value) { try { return UpdateManager.stored(value); } catch (Exception ignored) { return null; } }
+    static String integritySummary(UpdateRelease staged, UpdateRelease installed, String currentVersion) {
+        if (staged != null) return "Verified update ready: checksum, package, version and signing certificate";
+        if (installed != null && installed.versionName().equals(currentVersion))
+            return "Installed OTA verified: checksum, package, version and signing certificate";
+        return "Not verified — no matching Jarvis OTA verification record";
+    }
     private Switch toggle(LinearLayout page, String title, boolean checked) { Switch value = new Switch(this); value.setText(title); value.setChecked(checked); page.addView(value, match()); return value; }
     private Button button(LinearLayout page, String title, View.OnClickListener listener) { Button value = new Button(this); value.setText(title); value.setOnClickListener(listener); page.addView(value, match()); return value; }
     private void label(LinearLayout page, String value) { TextView view = text(page, value); view.setTextColor(Color.rgb(90,90,90)); view.setPadding(0, dp(22), 0, dp(5)); }

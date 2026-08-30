@@ -48,6 +48,8 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 - Developer/Codex mode and current menus/actions
 - Top-level Integrations settings entry, `IntegrationsActivity`, and Google OAuth deep link
 - Truthful Setup Required / Not Connected provider states
+- Truthful staged-versus-installed OTA integrity evidence retained across an
+  in-place update
 
 ### Wear OS
 

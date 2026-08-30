@@ -384,6 +384,8 @@
       "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check", "final persistent-data cutover", "docker run --rm --interactive", ".pre-cutover-"],
       "tools/install_adb_readiness.sh": ["__JARVIS_ROOT__", "systemctl --user restart jarvis-adb-readiness.service"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["releases/download/jarvis-", "update-manifest.json"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdatePreferences.java": ["installed_verified_manifest", "matchingVerifiedManifest", "currentVersionCode"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdatesActivity.java": ["Installed OTA verified: checksum, package, version and signing certificate", "no matching Jarvis OTA verification record"],
       ".github/workflows/android-ota-release.yml": ["git fetch origin jarvis/unified-production", "verify_product_baseline.py", "jarvis-wear-v${version}-release.apk", "product-release-manifest.json", "jarvis-$1-feed", "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"],
       ".github/workflows/codeql.yml": ["branches: [jarvis/unified-production]"]
     },
