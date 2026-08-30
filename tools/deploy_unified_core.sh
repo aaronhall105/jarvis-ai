@@ -134,7 +134,7 @@ if [[ "$LIVE_ROOT" != "$PREVIOUS_LIVE_ROOT" ]] \
   docker stop jarvis-core jarvis-speaker-verifier >/dev/null
   OLD_CONTAINERS_STOPPED=true
 
-  docker run --rm \
+  docker run --rm --interactive \
     --volume "$PREVIOUS_LIVE_ROOT:/source:ro" \
     --volume "$LIVE_ROOT:/target" \
     "$CORE_IMAGE" \
@@ -205,6 +205,11 @@ finally:
     if archive.exists() and not any(archive.iterdir()):
         archive.rmdir()
 PY
+  test -d "$CUTOVER_ARCHIVE"
+  for directory in data config logs speaker-data; do
+    test -d "$LIVE_ROOT/$directory"
+    test -d "$CUTOVER_ARCHIVE/$directory"
+  done
 fi
 
 COMPOSE_CUTOVER_STARTED=true
