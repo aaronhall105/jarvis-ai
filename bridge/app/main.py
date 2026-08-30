@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import sys
 import threading
@@ -1368,8 +1369,25 @@ def _require_mobile_integration_principal(authorization: str | None) -> str:
         or not supplied
         or not secrets.compare_digest(expected, supplied.strip())
     ):
+        candidate = supplied.strip() if separator == " " else ""
+        logger.warning(
+            "Mobile integrations authentication rejected supplied_length=%s "
+            "supplied_fingerprint=%s expected_fingerprint=%s",
+            len(candidate),
+            _safe_token_fingerprint(candidate),
+            _safe_token_fingerprint(expected),
+        )
         raise HTTPException(status_code=403, detail="Invalid mobile integrations token.")
     return principal
+
+
+def _safe_token_fingerprint(value: str) -> str:
+    """Return a short one-way diagnostic fingerprint, never credential text."""
+
+    candidate = str(value or "")
+    if not candidate:
+        return "absent"
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
 
 
 def _require_improvement_token(token: str | None) -> None:

@@ -59,6 +59,14 @@ class FakeUpstream:
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_token_fingerprint_is_one_way_and_bounded(self) -> None:
+        secret = "physical-phone-token-value"
+        fingerprint = module._safe_token_fingerprint(secret)
+
+        self.assertEqual(16, len(fingerprint))
+        self.assertNotIn(secret, fingerprint)
+        self.assertEqual("absent", module._safe_token_fingerprint(""))
+
     def test_release_and_modes(self) -> None:
         self.assertRegex(
             module.VERSION,
@@ -681,6 +689,36 @@ class VoicePeWakeArbiterTests(unittest.TestCase):
 
 
 class VoicePeWakeAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rejected_mobile_auth_logs_only_safe_fingerprints(self) -> None:
+        rejected = "rejected-phone-token-do-not-log"
+        proxy = module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="secret",
+                mobile_token="configured-core-token",
+                voice_pe_token="voice-pe",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Aaron",
+            )
+        )
+        client = AuthClient({"type": "auth", "token": rejected})
+
+        async def brain(command: str, metadata: dict, on_delta):
+            raise AssertionError("rejected authentication must not reach the brain")
+
+        with self.assertLogs("jarvis-realtime-voice", level="WARNING") as captured:
+            await proxy.handle(client, brain)
+
+        rendered = "\n".join(captured.output)
+        self.assertNotIn(rejected, rendered)
+        self.assertIn(module._safe_token_fingerprint(rejected), rendered)
+        self.assertEqual(client.messages[0]["type"], "auth.error")
+        self.assertEqual(client.close_code, 4403)
+
     async def test_losing_satellite_closes_before_provider_connection(self) -> None:
         proxy = module.RealtimeVoiceProxy(
             module.RealtimeVoiceConfig(

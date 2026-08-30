@@ -178,9 +178,8 @@ public final class IntegrationsActivity extends Activity {
                 renderProviders(providers);
             }
 
-            @Override public void onError(String message) {
-                coreState.setText("Core offline — " + message);
-                showOfflineProviders();
+            @Override public void onError(IntegrationsClient.Failure failure) {
+                showProviderFailure(failure);
             }
         });
     }
@@ -192,7 +191,31 @@ public final class IntegrationsActivity extends Activity {
         }
     }
 
-    private void showOfflineProviders() {
+    void showProviderFailure(IntegrationsClient.Failure failure) {
+        String state;
+        String detail;
+        switch (failure.kind) {
+            case AUTHENTICATION_REJECTED -> {
+                coreState.setText("Core authentication rejected — check the mobile voice token in Settings");
+                state = "Authentication required";
+                detail = "Jarvis Core is reachable but rejected the saved mobile voice token";
+            }
+            case SETUP_REQUIRED -> {
+                coreState.setText("Core online — integrations setup required");
+                state = "Setup required";
+                detail = failure.message;
+            }
+            case PROVIDER_UNAVAILABLE -> {
+                coreState.setText("Core online — integrations provider unavailable");
+                state = "Provider unavailable";
+                detail = failure.message;
+            }
+            default -> {
+                coreState.setText("Core unreachable — " + failure.message);
+                state = "Core unreachable";
+                detail = "Jarvis Core could not be reached to verify this provider";
+            }
+        }
         providerList.removeAllViews();
         for (String name : List.of(
             "Google", "Gmail", "Calendar", "Contacts", "Microsoft", "Web",
@@ -201,10 +224,10 @@ public final class IntegrationsActivity extends Activity {
             IntegrationProvider provider = new IntegrationProvider(
                 name.toLowerCase(Locale.ROOT).replace(" ", "_"),
                 name,
-                "Core offline",
+                state,
                 false,
                 false,
-                "Jarvis Core must be online to verify this provider",
+                detail,
                 List.of(),
                 List.of(),
                 "",

@@ -156,6 +156,13 @@ public final class RealtimeProtocolTest {
         );
     }
 
+    @Test public void realtimeAuthenticationCloseCodesAreTerminalAndSpecific() {
+        assertTrue(JarvisRealtimeClient.isAuthenticationCloseCode(4401));
+        assertTrue(JarvisRealtimeClient.isAuthenticationCloseCode(4403));
+        assertFalse(JarvisRealtimeClient.isAuthenticationCloseCode(1000));
+        assertFalse(JarvisRealtimeClient.isAuthenticationCloseCode(1011));
+    }
+
     @Test public void turnAcceptedAndConflictRemainAddressable()
             throws Exception {
         RealtimeProtocol.Event accepted =

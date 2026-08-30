@@ -59,4 +59,40 @@ public final class IntegrationProviderTest {
             "https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=x"
         ));
     }
+
+    @Test public void reachableAuthenticationFailureIsNotClassifiedAsOffline() {
+        IntegrationsClient.Failure unauthorized =
+            IntegrationsClient.failureForHttpCode(401);
+        IntegrationsClient.Failure forbidden =
+            IntegrationsClient.failureForHttpCode(403);
+
+        assertEquals(
+            IntegrationsClient.FailureKind.AUTHENTICATION_REJECTED,
+            unauthorized.kind
+        );
+        assertEquals(
+            IntegrationsClient.FailureKind.AUTHENTICATION_REJECTED,
+            forbidden.kind
+        );
+        assertFalse(forbidden.message.toLowerCase().contains("offline"));
+    }
+
+    @Test public void reachableCoreStatesRemainDistinct() {
+        assertEquals(
+            IntegrationsClient.FailureKind.SETUP_REQUIRED,
+            IntegrationsClient.failureForHttpCode(503).kind
+        );
+        assertEquals(
+            IntegrationsClient.FailureKind.PROVIDER_UNAVAILABLE,
+            IntegrationsClient.failureForHttpCode(502).kind
+        );
+    }
+
+    @Test public void providerRefreshBudgetCoversMeasuredCoreHealthRefresh() {
+        assertTrue(IntegrationsClient.PROVIDER_READ_TIMEOUT_SECONDS >= 45L);
+        assertTrue(
+            IntegrationsClient.PROVIDER_CALL_TIMEOUT_SECONDS
+                > IntegrationsClient.PROVIDER_READ_TIMEOUT_SECONDS
+        );
+    }
 }

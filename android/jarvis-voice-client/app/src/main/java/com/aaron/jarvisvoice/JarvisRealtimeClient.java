@@ -58,6 +58,7 @@ public final class JarvisRealtimeClient {
     private static final long AUTH_TIMEOUT_MS = 12_000L;
     private static final long READY_TIMEOUT_MS = 20_000L;
     private static final long PING_INTERVAL_MS = 10_000L;
+    private static final long PONG_TIMEOUT_MS = 12_000L;
     private static final long LAN_RECHECK_MS = 30_000L;
     private static final long TURN_RECOVERY_RECHECK_MS = 750L;
     private static final int MAX_TURN_RECOVERY_STATUS_CHECKS = 12;
@@ -80,7 +81,6 @@ public final class JarvisRealtimeClient {
     private final TurnPerformanceTracker performance;
     private final NetworkQualityMonitor network;
     private final OkHttpClient http = new OkHttpClient.Builder()
-        .pingInterval(12, TimeUnit.SECONDS)
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
@@ -100,6 +100,8 @@ public final class JarvisRealtimeClient {
     private long pingStartedAtMs;
     private long turnStartedAtMs;
     private boolean firstAudioMeasured;
+    private boolean authenticationRejected;
+    private boolean authenticationRejectionReported;
     private final ClientTurnIdStore turnIds;
     private final TurnRecoveryJournal recoveryJournal;
     private final TurnRecoveryState turnRecovery =
@@ -583,6 +585,8 @@ public final class JarvisRealtimeClient {
         ready = false;
         activeCoreUrl = selectedCoreUrl;
         activeEndpointName = endpointName;
+        authenticationRejected = false;
+        authenticationRejectionReported = false;
         openStartedAtMs = SystemClock.elapsedRealtime();
         diagnostics.recordNetworkStatus(true, "Online");
         diagnostics.recordEndpoint(endpointName, selectedCoreUrl);
@@ -666,9 +670,30 @@ public final class JarvisRealtimeClient {
                 String value = reason == null || reason.isBlank()
                     ? "Connection closed"
                     : reason;
+                if (authenticationRejected || isAuthenticationCloseCode(code)) {
+                    recordAuthenticationRejected(value);
+                    return;
+                }
                 diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
+            }
+
+            @Override public void onClosing(
+                WebSocket webSocket,
+                int code,
+                String reason
+            ) {
+                if (currentGeneration != generation) return;
+                if (isAuthenticationCloseCode(code)) {
+                    authenticationRejected = true;
+                    shouldReconnect = false;
+                    recordAuthenticationRejected(reason);
+                }
+                // OkHttp requires the client to acknowledge a peer close. Leaving
+                // the socket half-closed allowed its transport ping timeout to
+                // overwrite the actual Core authentication error.
+                webSocket.close(1000, null);
             }
 
             @Override public void onFailure(
@@ -687,6 +712,10 @@ public final class JarvisRealtimeClient {
                     ? "Connection failed"
                     : throwable.getMessage();
                 String value = reason == null ? "Connection failed" : reason;
+                if (authenticationRejected) {
+                    recordAuthenticationRejected(value);
+                    return;
+                }
                 diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
@@ -729,13 +758,15 @@ public final class JarvisRealtimeClient {
             case "auth.error" -> {
                 authenticated = false;
                 ready = false;
+                authenticationRejected = true;
                 shouldReconnect = false;
                 cancelTimers();
-                post(() -> listener.onError(
-                    event.message.isBlank()
-                        ? "Mobile voice token rejected"
-                        : event.message
-                ));
+                String reason = event.message.isBlank()
+                    ? "Mobile voice token rejected"
+                    : event.message;
+                recordAuthenticationRejected(reason);
+                WebSocket current = socket;
+                if (current != null) current.close(1000, "Authentication rejected");
             }
             case "ready" -> {
                 ready = true;
@@ -784,11 +815,13 @@ public final class JarvisRealtimeClient {
                 }
             }
             case "pong" -> {
+                main.removeCallbacks(pongTimeout);
                 if (pingStartedAtMs > 0L) {
                     diagnostics.recordRoundTrip(
                         SystemClock.elapsedRealtime() - pingStartedAtMs
                     );
                 }
+                pingStartedAtMs = 0L;
                 schedulePing();
             }
             case "status" -> post(() -> listener.onStatus(event.message));
@@ -2002,11 +2035,22 @@ public final class JarvisRealtimeClient {
         }
     };
 
+    private final Runnable pongTimeout = () -> {
+        if (ready && pingStartedAtMs > 0L) {
+            failCurrent(generation, "Jarvis Core did not answer the realtime ping");
+        }
+    };
+
     private final Runnable pingTask = () -> {
         WebSocket current = socket;
         if (!ready || current == null) return;
         pingStartedAtMs = SystemClock.elapsedRealtime();
-        current.send(RealtimeProtocol.ping(System.currentTimeMillis()));
+        if (!current.send(RealtimeProtocol.ping(System.currentTimeMillis()))) {
+            failCurrent(generation, "Jarvis realtime ping could not be sent");
+            return;
+        }
+        main.removeCallbacks(pongTimeout);
+        main.postDelayed(pongTimeout, PONG_TIMEOUT_MS);
     };
 
     private void scheduleAuthTimeout(int currentGeneration) {
@@ -2025,6 +2069,7 @@ public final class JarvisRealtimeClient {
 
     private void schedulePing() {
         main.removeCallbacks(pingTask);
+        main.removeCallbacks(pongTimeout);
         if (ready) main.postDelayed(pingTask, PING_INTERVAL_MS);
     }
 
@@ -2157,6 +2202,21 @@ public final class JarvisRealtimeClient {
         main.removeCallbacks(pingTask);
         main.removeCallbacks(lanRecheckTask);
         recoveryScheduleGeneration++;
+    }
+
+    static boolean isAuthenticationCloseCode(int code) {
+        return code == 4401 || code == 4403;
+    }
+
+    private void recordAuthenticationRejected(String detail) {
+        if (authenticationRejectionReported) return;
+        authenticationRejectionReported = true;
+        String reason = detail == null || detail.isBlank()
+            ? "Mobile voice token rejected"
+            : detail;
+        diagnostics.recordCoreReachability("Authentication rejected", reason);
+        diagnostics.recordNetworkStatus(true, "Online");
+        post(() -> listener.onError(reason));
     }
 
     private void post(Runnable runnable) {

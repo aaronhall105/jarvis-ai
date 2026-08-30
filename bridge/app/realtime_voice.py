@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import audioop
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -57,6 +58,15 @@ VOICE_PE_WAKE_CONTENTION_SECONDS = 1.25
 _LOGGER = logging.getLogger("jarvis-realtime-voice")
 DeltaHandler = Callable[[str], Awaitable[None]]
 BrainHandler = Callable[[str, dict[str, Any], DeltaHandler], Awaitable[dict[str, Any]]]
+
+
+def _safe_token_fingerprint(value: str) -> str:
+    """Return a short one-way diagnostic fingerprint, never credential text."""
+
+    candidate = str(value or "")
+    if not candidate:
+        return "absent"
+    return hashlib.sha256(candidate.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -1739,6 +1749,20 @@ class RealtimeVoiceProxy:
             auth_payload.get("token"),
             client_kind,
         ):
+            supplied_token = str(auth_payload.get("token") or "").strip()
+            expected_token = (
+                self.config.voice_pe_token
+                if client_kind == "voice_pe"
+                else self.config.mobile_token
+            )
+            _LOGGER.warning(
+                "Realtime authentication rejected client_kind=%s supplied_length=%s "
+                "supplied_fingerprint=%s expected_fingerprint=%s",
+                client_kind,
+                len(supplied_token),
+                _safe_token_fingerprint(supplied_token),
+                _safe_token_fingerprint(expected_token),
+            )
             await self._send_json(
                 client,
                 {

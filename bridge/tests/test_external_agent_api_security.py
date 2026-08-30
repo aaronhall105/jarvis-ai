@@ -126,3 +126,5 @@ def test_mobile_account_routes_map_bearer_auth_to_server_owned_principal() -> No
     assert "secrets.compare_digest" in segment
     assert "status_code=503" in segment
     assert "status_code=403" in segment
+    assert "_safe_token_fingerprint" in segment
+    assert "authorization" not in segment.split("logger.warning", 1)[-1]

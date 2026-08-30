@@ -23,9 +23,26 @@ import okhttp3.Response;
 
 /** Authenticated client for the redacted mobile integrations API. */
 public final class IntegrationsClient implements AutoCloseable {
+    public enum FailureKind {
+        AUTHENTICATION_REJECTED,
+        SETUP_REQUIRED,
+        PROVIDER_UNAVAILABLE,
+        CORE_UNREACHABLE
+    }
+
+    public static final class Failure {
+        public final FailureKind kind;
+        public final String message;
+
+        Failure(FailureKind kind, String message) {
+            this.kind = kind;
+            this.message = message;
+        }
+    }
+
     public interface ProvidersCallback {
         void onSuccess(List<IntegrationProvider> providers);
-        void onError(String message);
+        void onError(Failure failure);
     }
 
     public interface OAuthCallback {
@@ -39,14 +56,16 @@ public final class IntegrationsClient implements AutoCloseable {
     }
 
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
+    static final long PROVIDER_READ_TIMEOUT_SECONDS = 45L;
+    static final long PROVIDER_CALL_TIMEOUT_SECONDS = 50L;
     private final SecureStore store;
     private final Context context;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final OkHttpClient client = new OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .callTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(PROVIDER_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .callTimeout(PROVIDER_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
         .build();
 
@@ -71,7 +90,7 @@ public final class IntegrationsClient implements AutoCloseable {
                 }
                 main.post(() -> callback.onSuccess(providers));
             } catch (Exception exception) {
-                main.post(() -> callback.onError(message(exception)));
+                main.post(() -> callback.onError(failure(exception)));
             }
         });
     }
@@ -121,17 +140,21 @@ public final class IntegrationsClient implements AutoCloseable {
     }
 
     private JSONObject request(String method, String path, JSONObject payload) throws Exception {
-        if (store.mobileToken().isBlank()) {
-            throw new IOException("Mobile voice token is not configured");
+        String mobileToken = store.mobileToken();
+        if (mobileToken.isBlank()) {
+            throw new IntegrationException(new Failure(
+                FailureKind.SETUP_REQUIRED,
+                "Mobile voice token is not configured"
+            ));
         }
-        Exception last = null;
+        IOException lastTransportFailure = null;
         for (String endpoint : endpoints()) {
             try {
                 HttpUrl url = HttpUrl.parse(endpoint + path);
                 if (url == null) continue;
                 Request.Builder request = new Request.Builder()
                     .url(url)
-                    .header("Authorization", "Bearer " + store.mobileToken())
+                    .header("Authorization", "Bearer " + mobileToken)
                     .header("Accept", "application/json");
                 if ("GET".equals(method)) {
                     request.get();
@@ -144,17 +167,34 @@ public final class IntegrationsClient implements AutoCloseable {
                     ));
                 }
                 try (Response response = client.newCall(request.build()).execute()) {
-                    String raw = response.body() == null ? "" : response.body().string();
                     if (!response.isSuccessful()) {
-                        throw new IOException("Jarvis Core HTTP " + response.code());
+                        throw new IntegrationException(failureForHttpCode(response.code()));
                     }
-                    return raw.isBlank() ? new JSONObject() : new JSONObject(raw);
+                    String raw = response.body() == null ? "" : response.body().string();
+                    try {
+                        return raw.isBlank() ? new JSONObject() : new JSONObject(raw);
+                    } catch (Exception exception) {
+                        throw new IntegrationException(new Failure(
+                            FailureKind.PROVIDER_UNAVAILABLE,
+                            "Jarvis Core returned a malformed integrations response"
+                        ));
+                    }
                 }
-            } catch (Exception exception) {
-                last = exception;
+            } catch (IntegrationException exception) {
+                // Any HTTP response proves that this authoritative Core is reachable.
+                // Do not hide a meaningful rejection or server state behind a later
+                // transport failure from another candidate endpoint.
+                throw exception;
+            } catch (IOException exception) {
+                lastTransportFailure = exception;
             }
         }
-        throw last == null ? new IOException("Core offline") : last;
+        throw new IntegrationException(new Failure(
+            FailureKind.CORE_UNREACHABLE,
+            lastTransportFailure == null
+                ? "Jarvis Core could not be reached"
+                : message(lastTransportFailure)
+        ));
     }
 
     private List<String> endpoints() {
@@ -179,9 +219,44 @@ public final class IntegrationsClient implements AutoCloseable {
             && url.queryParameter("code_challenge") != null;
     }
 
+    static Failure failureForHttpCode(int code) {
+        if (code == 401 || code == 403) {
+            return new Failure(
+                FailureKind.AUTHENTICATION_REJECTED,
+                "Jarvis Core rejected the mobile voice token"
+            );
+        }
+        if (code == 503) {
+            return new Failure(
+                FailureKind.SETUP_REQUIRED,
+                "Jarvis Core integrations setup is incomplete"
+            );
+        }
+        return new Failure(
+            FailureKind.PROVIDER_UNAVAILABLE,
+            "Jarvis Core integrations request failed with HTTP " + code
+        );
+    }
+
+    private static Failure failure(Exception exception) {
+        if (exception instanceof IntegrationException integrationException) {
+            return integrationException.failure;
+        }
+        return new Failure(FailureKind.CORE_UNREACHABLE, message(exception));
+    }
+
     private static String message(Exception exception) {
         String value = exception.getMessage();
         return value == null || value.isBlank() ? "Core offline" : value;
+    }
+
+    private static final class IntegrationException extends IOException {
+        final Failure failure;
+
+        IntegrationException(Failure failure) {
+            super(failure.message);
+            this.failure = failure;
+        }
     }
 
     @Override public void close() {

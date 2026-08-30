@@ -3,6 +3,7 @@ package com.aaron.jarvisvoice;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertFalse;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.content.Intent;
@@ -97,6 +98,24 @@ public final class IntegrationsSettingsUiTest {
         assertNull(findText(root, "Connected"));
     }
 
+    @Test public void authenticationRejectionIsNeverRenderedAsCoreOffline() {
+        IntegrationsActivity activity = Robolectric.buildActivity(IntegrationsActivity.class)
+            .create()
+            .get();
+        activity.showProviderFailure(new IntegrationsClient.Failure(
+            IntegrationsClient.FailureKind.AUTHENTICATION_REJECTED,
+            "Jarvis Core rejected the mobile voice token"
+        ));
+
+        View root = activity.findViewById(android.R.id.content);
+        assertNotNull(findText(
+            root,
+            "Core authentication rejected — check the mobile voice token in Settings"
+        ));
+        assertEquals(11, countText(root, "Authentication required"));
+        assertFalse(allText(root).contains("Core offline"));
+    }
+
     private static IntegrationProvider provider(String id, String name, String state) {
         return new IntegrationProvider(
             id,
@@ -148,5 +167,19 @@ public final class IntegrationsSettingsUiTest {
             count += countText(group.getChildAt(index), expected);
         }
         return count;
+    }
+
+    private static String allText(View root) {
+        StringBuilder value = new StringBuilder();
+        collectText(root, value);
+        return value.toString();
+    }
+
+    private static void collectText(View view, StringBuilder value) {
+        if (view instanceof TextView text) value.append(text.getText()).append('\n');
+        if (!(view instanceof ViewGroup group)) return;
+        for (int index = 0; index < group.getChildCount(); index++) {
+            collectText(group.getChildAt(index), value);
+        }
     }
 }

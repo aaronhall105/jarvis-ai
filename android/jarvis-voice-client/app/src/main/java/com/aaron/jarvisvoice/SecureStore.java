@@ -22,6 +22,7 @@ public final class SecureStore {
     private static final String PREFS = "jarvis_voice_settings";
     private static final String KEY_ALIAS = "jarvis_voice_token_v1710";
     private static final String MOBILE_TOKEN = "mobile_voice_token";
+    private static final String LEGACY_MOBILE_TOKEN = "token";
     private static final String HOME_ASSISTANT_TOKEN = "home_assistant_token_v1730";
     private static final String IMPROVEMENT_ADMIN_TOKEN =
         "improvement_admin_token_v190140";
@@ -33,6 +34,7 @@ public final class SecureStore {
     public SecureStore(Context context) {
         this.context = context.getApplicationContext();
         this.preferences = this.context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        migrateLegacyMobileSettings();
         migrateAssistantDefaults();
         migrateWakeEngineDefaults();
         migrateWakeStabilityDefaults();
@@ -42,6 +44,23 @@ public final class SecureStore {
         migrateVoiceOwnershipAlpha12();
         migrateRemoteCoreAlpha14();
         migratePrivateDeveloperEndpointV13();
+    }
+
+    private void migrateLegacyMobileSettings() {
+        if (preferences.getBoolean("mobile_settings_migration_v1720", false)) return;
+        SharedPreferences.Editor editor = preferences.edit();
+        if (!preferences.contains(MOBILE_TOKEN) && preferences.contains(LEGACY_MOBILE_TOKEN)) {
+            // Both values use the same Android Keystore alias. Copying the
+            // encrypted envelope preserves the credential without exposing it.
+            editor.putString(
+                MOBILE_TOKEN,
+                preferences.getString(LEGACY_MOBILE_TOKEN, "")
+            );
+        }
+        if (!preferences.contains("core_url") && preferences.contains("base_url")) {
+            editor.putString("core_url", preferences.getString("base_url", ""));
+        }
+        editor.putBoolean("mobile_settings_migration_v1720", true).apply();
     }
 
     private void migrateAssistantDefaults() {
