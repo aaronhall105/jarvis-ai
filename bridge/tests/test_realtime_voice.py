@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import json
 import os
@@ -17,11 +18,20 @@ spec.loader.exec_module(module)
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, history: list[tuple[str, object]] | None = None) -> None:
         self.messages: list[dict] = []
+        self.audio_chunks: list[bytes] = []
+        self.history = history
 
     async def send_json(self, payload: dict) -> None:
         self.messages.append(payload)
+        if self.history is not None:
+            self.history.append(("client.json", payload.get("type") or ""))
+
+    async def send_bytes(self, payload: bytes) -> None:
+        self.audio_chunks.append(payload)
+        if self.history is not None:
+            self.history.append(("client.audio", payload))
 
 
 class FakeUpstream:
@@ -30,6 +40,33 @@ class FakeUpstream:
 
     async def send(self, payload: str) -> None:
         self.messages.append(json.loads(payload))
+
+
+class FakeRealtimeUpstream:
+    def __init__(
+        self,
+        events: list[dict],
+        history: list[tuple[str, object]] | None = None,
+    ) -> None:
+        self._events = [json.dumps(event) for event in events]
+        self.sent_messages: list[dict] = []
+        self.history = history
+
+    def __aiter__(self):
+        self._iterator = iter(self._events)
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return next(self._iterator)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def send(self, payload: str) -> None:
+        message = json.loads(payload)
+        self.sent_messages.append(message)
+        if self.history is not None:
+            self.history.append(("upstream", message.get("type") or ""))
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -61,9 +98,9 @@ model="gpt-realtime",
         )
         live = module.build_session_update(config, "cedar", "live", "high")
         live_vad = live["session"]["audio"]["input"]["turn_detection"]
-        self.assertEqual(live_vad["type"], "semantic_vad")
-        self.assertEqual(live_vad["eagerness"], "high")
+        self.assertEqual(live_vad["type"], "server_vad")
         self.assertFalse(live_vad["create_response"])
+        self.assertTrue(live_vad["interrupt_response"])
 
         standard = module.build_session_update(config, "cedar", "standard", "low")
         self.assertIsNone(standard["session"]["audio"]["input"]["turn_detection"])
@@ -348,6 +385,198 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
             transcript_messages,
             [{"type": "user.transcript", "text": "Lights on"}],
         )
+
+
+class RealtimeInterruptionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    def _proxy(self):
+        return module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="api-secret",
+                mobile_token="mobile-secret",
+                voice_pe_token="voice-pe-secret",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Aaron Amber Jarvis",
+            )
+        )
+
+    async def test_cancel_before_post_interrupt_audio_and_stale_audio_rejection(
+        self,
+    ) -> None:
+        proxy = self._proxy()
+        history: list[tuple[str, object]] = []
+        client = FakeClient(history)
+
+        def b64(value: bytes) -> str:
+            return base64.b64encode(value).decode("ascii")
+
+        events = [
+            {"type": "response.created", "response": {"id": "resp-old"}},
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-old",
+                "delta": b64(b"old-pre"),
+            },
+            {"type": "input_audio_buffer.speech_started"},
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-old",
+                "delta": b64(b"old-post"),
+            },
+            {"type": "response.created", "response": {"id": "resp-new"}},
+            {
+                "type": "response.output_audio.delta",
+                "delta": b64(b"stale-no-id"),
+            },
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-old",
+                "delta": b64(b"old-after-follow-up"),
+            },
+            {
+                "type": "response.output_audio.delta",
+                "response_id": "resp-new",
+                "delta": b64(b"new-ok"),
+            },
+        ]
+
+        upstream = FakeRealtimeUpstream(events, history)
+
+        async def brain(command: str, metadata: dict, on_delta):
+            return {"success": True, "response": "unused"}
+
+        state = {
+            "generation": 0,
+            "suppress_audio": False,
+            "voice_pe_session_started_at": module.time.monotonic(),
+        }
+
+        await proxy._openai_to_client(
+            client,
+            upstream,
+            brain,
+            {
+                "client_kind": "mobile",
+                "conversation_id": "conversation-1",
+                "user_name": "Aaron",
+            },
+            "realtime",
+            "live",
+            "marin",
+            set(),
+            state,
+        )
+
+        cancel_messages = [
+            message
+            for message in upstream.sent_messages
+            if message.get("type") == "response.cancel"
+        ]
+        self.assertEqual(len(cancel_messages), 1)
+        self.assertEqual(client.audio_chunks, [b"old-pre", b"new-ok"])
+        self.assertIn("resp-old", state.get("blocked_response_ids", set()))
+        self.assertEqual(state.get("audio_response_id"), "resp-new")
+
+        cancel_index = history.index(("upstream", "response.cancel"))
+        new_audio_index = history.index(("client.audio", b"new-ok"))
+        self.assertLess(cancel_index, new_audio_index)
+
+    async def test_speech_started_transcript_continues_same_conversation_context(
+        self,
+    ) -> None:
+        proxy = self._proxy()
+        client = FakeClient()
+        calls: list[tuple[str, dict]] = []
+
+        async def brain(command: str, metadata: dict, on_delta):
+            return {"success": True, "response": "unused"}
+
+        async def fake_start_brain_turn(*args):
+            calls.append((str(args[0]), dict(args[5])))
+
+        proxy._start_brain_turn = fake_start_brain_turn
+
+        upstream = FakeRealtimeUpstream(
+            [
+                {"type": "session.created", "session": {"id": "session-keep"}},
+                {"type": "session.updated", "session": {"id": "session-keep"}},
+                {"type": "input_audio_buffer.speech_started"},
+                {"type": "input_audio_buffer.speech_stopped"},
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "Turn on the kitchen light",
+                },
+            ]
+        )
+
+        state = {
+            "generation": 0,
+            "suppress_audio": False,
+            "voice_pe_session_started_at": module.time.monotonic(),
+        }
+
+        await proxy._openai_to_client(
+            client,
+            upstream,
+            brain,
+            {
+                "client_kind": "mobile",
+                "conversation_id": "conversation-keep",
+                "user_name": "Aaron",
+            },
+            "realtime",
+            "live",
+            "marin",
+            set(),
+            state,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "Turn on the kitchen light")
+        self.assertEqual(calls[0][1].get("conversation_id"), "conversation-keep")
+        self.assertEqual(calls[0][1].get("user_name"), "Aaron")
+
+        ready = next(message for message in client.messages if message.get("type") == "ready")
+        context = next(
+            message for message in client.messages if message.get("type") == "session.context"
+        )
+        self.assertEqual(ready.get("conversation_id"), "conversation-keep")
+        self.assertEqual(context.get("conversation_id"), "conversation-keep")
+
+    async def test_stale_generation_turn_never_emits_speech_response_create(self) -> None:
+        proxy = self._proxy()
+        client = FakeClient()
+        upstream = FakeUpstream()
+        state = {"generation": 1, "suppress_audio": False}
+
+        async def brain(command: str, metadata: dict, on_delta):
+            state["generation"] = 2
+            return {
+                "success": True,
+                "response": "This response must be suppressed as stale.",
+            }
+
+        await proxy._run_brain_turn(
+            1,
+            "Say hello",
+            True,
+            client,
+            upstream,
+            brain,
+            {"conversation_id": "conversation-1"},
+            "realtime",
+            "marin",
+            state,
+        )
+
+        self.assertFalse(
+            any(message.get("type") == "response.create" for message in upstream.messages)
+        )
+        self.assertEqual(proxy.total_discarded_stale_turns, 1)
 
 
 if __name__ == "__main__":

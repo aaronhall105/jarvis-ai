@@ -1438,6 +1438,12 @@ class RealtimeVoiceProxy:
             "generation": 0,
             "suppress_audio": False,
             "voice_pe_session_started_at": time.monotonic(),
+            "audio_response_id": None,
+            "last_response_id": None,
+            "blocked_response_ids": set(),
+            "awaiting_post_interrupt_audio_owner": False,
+            "post_interrupt_candidate_response_ids": set(),
+            "assistant_audio_active": False,
         }
         self.active_sessions += 1
         self.total_sessions += 1
@@ -1649,9 +1655,10 @@ class RealtimeVoiceProxy:
             if kind == "ping":
                 await self._send_json(client, {"type": "pong", "time": time.time()})
             elif kind == "cancel":
-                state["generation"] = int(state.get("generation", 0)) + 1
-                state["suppress_audio"] = True
-                await upstream.send(json.dumps({"type": "response.cancel"}))
+                await self._interrupt_active_audio(
+                    upstream,
+                    state,
+                )
             elif kind == "text":
                 text = str(payload.get("text") or "").strip()
                 if text:
@@ -1741,8 +1748,10 @@ class RealtimeVoiceProxy:
                     )
                     state["voice_pe_speech_started_at"] = time.monotonic()
 
-                state["generation"] = int(state.get("generation", 0)) + 1
-                state["suppress_audio"] = True
+                await self._interrupt_active_audio(
+                    upstream,
+                    state,
+                )
                 await self._send_json(client, {"type": "speech.started"})
             elif kind == "input_audio_buffer.speech_stopped":
                 if metadata.get("client_kind") == "voice_pe":
@@ -1976,18 +1985,9 @@ class RealtimeVoiceProxy:
                     if closure is not None:
                         closure_kind, closure_response = closure
 
-                        state["generation"] = (
-                            int(state.get("generation", 0))
-                            + 1
-                        )
-                        state["suppress_audio"] = True
-
-                        await upstream.send(
-                            json.dumps(
-                                {
-                                    "type": "response.cancel"
-                                }
-                            )
+                        await self._interrupt_active_audio(
+                            upstream,
+                            state,
                         )
 
                         await self._send_json(
@@ -2052,16 +2052,71 @@ class RealtimeVoiceProxy:
                             state,
                         )
             elif kind == "response.created":
+                response_id = self._event_response_id(event)
+                if response_id:
+                    state["last_response_id"] = response_id
+
+                if bool(state.get("awaiting_post_interrupt_audio_owner")):
+                    if response_id:
+                        post_interrupt_ids = self._state_string_set(
+                            state,
+                            "post_interrupt_candidate_response_ids",
+                        )
+                        post_interrupt_ids.add(response_id)
+                    continue
+
+                if response_id:
+                    state["audio_response_id"] = response_id
                 state["suppress_audio"] = False
             elif kind == "response.output_audio.delta":
-                if bool(state.get("suppress_audio")) or voice_mode == VOICE_MODE_HOME_ASSISTANT:
+                if voice_mode == VOICE_MODE_HOME_ASSISTANT:
                     continue
+
+                response_id = self._event_response_id(event)
+                blocked_response_ids = self._state_string_set(
+                    state,
+                    "blocked_response_ids",
+                )
+                if response_id and response_id in blocked_response_ids:
+                    continue
+
+                if bool(state.get("awaiting_post_interrupt_audio_owner")):
+                    if not response_id:
+                        continue
+                    post_interrupt_ids = self._state_string_set(
+                        state,
+                        "post_interrupt_candidate_response_ids",
+                    )
+                    if response_id not in post_interrupt_ids:
+                        continue
+                    state["audio_response_id"] = response_id
+                    state["awaiting_post_interrupt_audio_owner"] = False
+                    state["suppress_audio"] = False
+
+                allowed_response_id = str(
+                    state.get("audio_response_id")
+                    or ""
+                ).strip()
+                if (
+                    allowed_response_id
+                    and response_id
+                    and response_id != allowed_response_id
+                ):
+                    continue
+
+                if bool(state.get("suppress_audio")):
+                    continue
+
+                if response_id and not allowed_response_id:
+                    state["audio_response_id"] = response_id
+
                 encoded = event.get("delta")
                 if isinstance(encoded, str) and encoded:
                     try:
                         audio = base64.b64decode(encoded, validate=True)
                     except Exception:
                         continue
+                    state["assistant_audio_active"] = True
                     self.total_audio_output_bytes += len(audio)
                     await client.send_bytes(audio)
                     await asyncio.sleep(len(audio) / 48000.0)
@@ -2074,9 +2129,11 @@ class RealtimeVoiceProxy:
                 if transcript and voice_mode == VOICE_MODE_REALTIME:
                     await self._send_json(client, {"type": "assistant.transcript.done", "text": transcript})
             elif kind == "response.output_audio.done":
+                state["assistant_audio_active"] = False
                 if voice_mode == VOICE_MODE_REALTIME:
                     await self._send_json(client, {"type": "audio.done"})
             elif kind == "response.done":
+                state["assistant_audio_active"] = False
                 response = (
                     event.get("response")
                     if isinstance(
@@ -3502,6 +3559,10 @@ class RealtimeVoiceProxy:
             )
             return
 
+        if generation != int(state.get("generation", 0)):
+            self.total_discarded_stale_turns += 1
+            return
+
         if early_speech_sent:
             complete_spoken_response = (
                 SpeechRenderPolicy.spoken_text(
@@ -3645,6 +3706,79 @@ class RealtimeVoiceProxy:
                 )
             )
         )
+
+    @staticmethod
+    def _state_string_set(
+        state: dict[str, Any],
+        key: str,
+    ) -> set[str]:
+        raw = state.get(key)
+        if isinstance(raw, set):
+            return raw
+
+        values: set[str] = set()
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                value = str(item or "").strip()
+                if value:
+                    values.add(value)
+
+        state[key] = values
+        return values
+
+    @staticmethod
+    def _event_response_id(event: dict[str, Any]) -> str:
+        response_id = event.get("response_id")
+        if isinstance(response_id, str) and response_id.strip():
+            return response_id.strip()
+
+        response = event.get("response")
+        if isinstance(response, dict):
+            nested = response.get("id")
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+
+        return ""
+
+    async def _interrupt_active_audio(
+        self,
+        upstream: Any,
+        state: dict[str, Any],
+    ) -> None:
+        active_response_id = str(
+            state.get("audio_response_id")
+            or ""
+        ).strip()
+        last_response_id = str(
+            state.get("last_response_id")
+            or ""
+        ).strip()
+
+        state["generation"] = int(state.get("generation", 0)) + 1
+        state["suppress_audio"] = True
+        state["assistant_audio_active"] = False
+        state["awaiting_post_interrupt_audio_owner"] = True
+        state["audio_response_id"] = None
+        state["post_interrupt_candidate_response_ids"] = set()
+
+        stale_response_ids = self._state_string_set(
+            state,
+            "blocked_response_ids",
+        )
+        if active_response_id:
+            stale_response_ids.add(active_response_id)
+        if last_response_id:
+            stale_response_ids.add(last_response_id)
+
+        send = getattr(upstream, "send", None)
+        if callable(send):
+            await send(
+                json.dumps(
+                    {
+                        "type": "response.cancel"
+                    }
+                )
+            )
 
     @staticmethod
     async def _send_json(client: Any, payload: dict[str, Any]) -> None:

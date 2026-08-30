@@ -67,6 +67,27 @@ class VoiceSessionEngineTests(unittest.IsolatedAsyncioTestCase):
             "media_player.home_assistant_voice_09f0ef",
         )
 
+    async def test_interrupt_keeps_session_and_conversation_identity(self) -> None:
+        first = await self.engine.touch(
+            session_id="session-keep",
+            conversation_id="conversation-keep",
+            user_key="aaron",
+            endpoint_kind="mobile_app",
+            turn_index=1,
+        )
+        await self.engine.record_interrupt("session-keep", reason="speech_started")
+        second = await self.engine.touch(
+            session_id="session-keep",
+            conversation_id="conversation-keep",
+            user_key="aaron",
+            endpoint_kind="mobile_app",
+            turn_index=2,
+        )
+        self.assertEqual(second["session_id"], first["session_id"])
+        self.assertEqual(second["conversation_id"], first["conversation_id"])
+        self.assertEqual(second["started_at"], first["started_at"])
+        self.assertEqual(second["interrupt_count"], 1)
+
     async def test_multiple_interrupts_accumulate(self) -> None:
         await self.create()
         await self.engine.record_interrupt("session-1")
