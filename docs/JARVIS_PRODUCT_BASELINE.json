@@ -44,7 +44,10 @@
       "required": [
         "conversation engine",
         "memory",
+        "explicit principal-scoped personal memory",
         "durable follow-ups",
+        "structured recurring reminders",
+        "capability-backed condition watches",
         "grounded Home Assistant actions",
         "presence evidence",
         "proactive intelligence",
@@ -352,6 +355,9 @@
   "release_assertions": {
     "files": [
       "bridge/app/realtime_turn_ledger.py",
+      "bridge/app/followup_engine.py",
+      "bridge/app/followup_schedule.py",
+      "bridge/app/memory_engine.py",
       "bridge/app/external_agent_runtime.py",
       "bridge/app/google_integration.py",
       "bridge/app/integration_accounts.py",
@@ -367,11 +373,15 @@
       "android/jarvis-voice-client/wearprotocol/build.gradle.kts",
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/IntegrationsActivity.java",
       "docs/JARVIS_CONSOLIDATION_LINEAGE.json",
+      "docs/PERSONAL_ASSISTANT_V1.md",
       "android/jarvis-voice-client/app/src/main/res/drawable-xxxhdpi/control_delete_red.png"
     ],
     "markers": {
       "bridge/app/realtime_voice.py": ["turn.status", "turn.accepted", "turn.interrupted"],
-      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime", "JARVIS_SOURCE_SHA"],
+      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime", "JARVIS_SOURCE_SHA", "/api/personal-assistant/jobs"],
+      "bridge/app/followup_engine.py": ["personal.tasks.manage", "occurrence_index", "delivery_key=", "handle_command"],
+      "bridge/app/followup_schedule.py": ["resolve_recurrence", "next_recurrence"],
+      "bridge/app/memory_engine.py": ["handle_explicit_command"],
       "developer_gateway/app.py": ["Developer audit event=thread_start", "source_commit", "AUTHORITATIVE_WORKSPACE"],
       "developer_gateway/install.sh": ["jarvis/unified-production", "origin/$authoritative_branch", "SOURCE_COMMIT", "systemctl --user restart"],
       "developer_gateway/jarvis-developer.service": ["WorkingDirectory=%h/.local/share/jarvis-developer/current", "JARVIS_AUTHORITATIVE_WORKSPACE=__JARVIS_ROOT__"],

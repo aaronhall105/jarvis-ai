@@ -20,6 +20,7 @@ release instructions apply only to `jarvis/unified-production`.
 
 ### Capabilities and services
 
+- [Personal Assistant v1](PERSONAL_ASSISTANT_V1.md)
 - [Integrations & Accounts](INTEGRATIONS_ACCOUNTS_V1.md)
 - [External Agent Platform](EXTERNAL_AGENT_PLATFORM.md)
 - [Developer mode](developer-mode.md)

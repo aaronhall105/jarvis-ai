@@ -136,6 +136,12 @@ conditional work, email/reply monitoring, retries, cancellation, and
 idempotent completion. It persists before Jarvis promises future work and
 survives Core restarts.
 
+Natural-language reminders are normalized into exact timezone-aware timestamps;
+recurrence is persisted as a structured schedule. Explicit personal memory is
+handled by the same principal-scoped memory engine. Task status and management
+use authenticated Core APIs. See [Personal Assistant v1](docs/PERSONAL_ASSISTANT_V1.md)
+for supported commands, lifecycle guarantees, and current limitations.
+
 Home events, monitoring results, and scheduled work enter the same proactive
 engine and notification path. Results route to the originating principal and
 conversation; mobile notification is supplemental delivery rather than a

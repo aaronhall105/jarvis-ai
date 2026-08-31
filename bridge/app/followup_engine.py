@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import json
 import math
+import re
 import sqlite3
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -15,8 +16,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.connectors.audit import ActionReceiptStore, ReceiptStatus
 from app.connectors.credentials import redact_secrets, redact_text
+from app.followup_schedule import next_recurrence, resolve_recurrence, resolve_schedule
 
 
 MIN_EXTERNAL_INTERVAL_SECONDS = 10
@@ -39,6 +43,7 @@ VALID_FOLLOWUP_KINDS = {
     "periodic",
     "completion",
     "external_monitor",
+    "recurring",
 }
 VALID_FOLLOWUP_STATUSES = {
     "pending",
@@ -49,6 +54,7 @@ VALID_FOLLOWUP_STATUSES = {
     "failed",
     "cancelled",
     "expired",
+    "paused",
 }
 EXPLICIT_TARGET_COMPARISONS = {
     "equals",
@@ -74,6 +80,12 @@ class StateReader(Protocol):
     async def readable_entity_states(self, *, refresh: bool = True) -> list[dict[str, Any]]: ...
 
 
+class NotificationSender(Protocol):
+    async def __call__(
+        self, recipient: str, message: str, title: str = "Jarvis"
+    ) -> Mapping[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class ExternalMonitorEvaluation:
     """Verified observation returned by an injected external evaluator."""
@@ -83,6 +95,15 @@ class ExternalMonitorEvaluation:
     message: str | None = None
     provider_reference: str | None = None
     observed_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FollowUpCommandResult:
+    handled: bool
+    success: bool = True
+    response: str = ""
+    intent: str = "personal_task"
+    details: Mapping[str, Any] | None = None
 
 
 class ExternalMonitorEvaluator(Protocol):
@@ -110,6 +131,8 @@ class FollowUpEngine:
         poll_seconds: int = 2,
         external_evaluator: ExternalMonitorEvaluator | ExternalEvaluatorCallback | None = None,
         max_attempts: int = 3,
+        receipts: ActionReceiptStore | None = None,
+        notifier: NotificationSender | None = None,
     ) -> None:
         self.path = Path(database_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +140,8 @@ class FollowUpEngine:
         self.external_evaluator = external_evaluator
         self.poll_seconds = max(1, min(poll_seconds, 60))
         self.max_attempts = max(1, min(int(max_attempts), 10))
+        self.receipts = receipts
+        self.notifier = notifier
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._operation_lock = asyncio.Lock()
@@ -147,16 +172,31 @@ class FollowUpEngine:
                   delivery_state TEXT NOT NULL DEFAULT 'pending',
                   delivery_message TEXT, completion_status TEXT, cancelled_at TEXT,
                   request_fingerprint TEXT, poll_count INTEGER NOT NULL DEFAULT 0,
-                  max_polls INTEGER, expires_at TEXT
+                  max_polls INTEGER, expires_at TEXT,
+                  principal_id TEXT NOT NULL DEFAULT 'aaron', device_id TEXT,
+                  originating_endpoint TEXT, capability_id TEXT NOT NULL DEFAULT 'personal.reminder',
+                  schedule_json TEXT, occurrence_index INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT, paused_at TEXT, last_evaluated_at TEXT,
+                  last_observed_state_json TEXT, verified_at TEXT,
+                  notification_state TEXT NOT NULL DEFAULT 'not_requested'
                 );
                 CREATE INDEX IF NOT EXISTS idx_followup_due
                   ON followup_jobs(status, next_run_at);
+                CREATE TABLE IF NOT EXISTS followup_job_audit (
+                  audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  job_id TEXT NOT NULL, principal_id TEXT NOT NULL,
+                  operation TEXT NOT NULL, state TEXT NOT NULL,
+                  evidence_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_followup_audit_job
+                  ON followup_job_audit(job_id, audit_id DESC);
                 """
             )
             columns = {
                 str(row["name"])
                 for row in con.execute("PRAGMA table_info(followup_jobs)").fetchall()
             }
+            legacy_request_fingerprints = "principal_id" not in columns
             migrations = {
                 "max_attempts": "INTEGER NOT NULL DEFAULT 3",
                 "delivery_attempts": "INTEGER NOT NULL DEFAULT 0",
@@ -168,10 +208,33 @@ class FollowUpEngine:
                 "poll_count": "INTEGER NOT NULL DEFAULT 0",
                 "max_polls": "INTEGER",
                 "expires_at": "TEXT",
+                "principal_id": "TEXT NOT NULL DEFAULT 'aaron'",
+                "device_id": "TEXT",
+                "originating_endpoint": "TEXT",
+                "capability_id": "TEXT NOT NULL DEFAULT 'personal.reminder'",
+                "schedule_json": "TEXT",
+                "occurrence_index": "INTEGER NOT NULL DEFAULT 0",
+                "updated_at": "TEXT",
+                "paused_at": "TEXT",
+                "last_evaluated_at": "TEXT",
+                "last_observed_state_json": "TEXT",
+                "verified_at": "TEXT",
+                "notification_state": "TEXT NOT NULL DEFAULT 'not_requested'",
             }
             for column, definition in migrations.items():
                 if column not in columns:
                     con.execute(f"ALTER TABLE followup_jobs ADD COLUMN {column} {definition}")
+            if legacy_request_fingerprints:
+                # The fingerprint input gained principal/schedule ownership.
+                # Recompute lazily on the next idempotent request rather than
+                # rejecting valid retries of pre-v1 jobs.
+                con.execute("UPDATE followup_jobs SET request_fingerprint=NULL")
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_followup_principal
+                ON followup_jobs(principal_id, status, next_run_at)
+                """
+            )
 
             # Evaluation is safe to repeat. Delivery reuses a stable conversation
             # key, closing the crash window after a message commit.
@@ -189,6 +252,19 @@ class FollowUpEngine:
                 "AND status IN ('completed','failed','expired') "
                 "AND delivery_state='pending'"
             )
+            con.execute("UPDATE followup_jobs SET updated_at=created_at WHERE updated_at IS NULL")
+            # Recover the principal from the existing user-scoped conversation
+            # identifiers without changing any historical job identity.
+            rows = con.execute(
+                "SELECT job_id,conversation_id,principal_id FROM followup_jobs"
+            ).fetchall()
+            for row in rows:
+                if str(row["principal_id"] or "") in {"", "aaron"}:
+                    inferred = self._principal_from_conversation(str(row["conversation_id"]))
+                    con.execute(
+                        "UPDATE followup_jobs SET principal_id=? WHERE job_id=?",
+                        (inferred, row["job_id"]),
+                    )
 
     @staticmethod
     def _now() -> datetime:
@@ -208,6 +284,11 @@ class FollowUpEngine:
         payload: dict[str, Any],
         due_at: datetime,
         idempotency_key: str | None = None,
+        principal_id: str | None = None,
+        device_id: str | None = None,
+        originating_endpoint: str | None = None,
+        capability_id: str | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         conversation_id = str(conversation_id).strip()
         if not conversation_id:
@@ -216,6 +297,31 @@ class FollowUpEngine:
             raise ValueError("Unsupported follow-up type")
         if not isinstance(payload, dict):
             raise ValueError("Follow-up payload must be an object")
+        principal = str(principal_id or self._principal_from_conversation(conversation_id)).strip()
+        if not principal or len(principal) > 64:
+            raise ValueError("A valid principal is required for a follow-up")
+        inferred_principal = self._principal_from_conversation(conversation_id)
+        if conversation_id.startswith("usr:") and inferred_principal != principal:
+            raise ValueError("Follow-up principal does not own its conversation")
+        resolved_capability = str(
+            capability_id
+            or (
+                "personal.monitor"
+                if kind in {"condition", "periodic", "external_monitor"}
+                else "personal.reminder"
+            )
+        ).strip()
+        if not resolved_capability or len(resolved_capability) > 150:
+            raise ValueError("A valid capability is required for a follow-up")
+        schedule_json: str | None = None
+        if kind == "recurring":
+            if not isinstance(schedule, Mapping):
+                raise ValueError("Recurring follow-ups require a structured schedule")
+            schedule_json = json.dumps(dict(schedule), separators=(",", ":"), sort_keys=True)
+            if next_recurrence(schedule, after_utc=self._now()) is None:
+                raise ValueError("Recurring follow-up schedule is invalid")
+        elif schedule is not None:
+            raise ValueError("Only recurring follow-ups accept a recurrence schedule")
 
         resolved_payload = dict(payload)
         maximum = self.max_attempts
@@ -235,7 +341,47 @@ class FollowUpEngine:
             raise ValueError("Follow-up idempotency key is invalid")
         if redact_text(key, max_length=255) != key:
             raise ValueError("Follow-up idempotency keys may not contain secrets")
-        fingerprint = self._request_fingerprint(conversation_id, kind, resolved_payload)
+        fingerprint = self._request_fingerprint(
+            conversation_id, kind, resolved_payload, principal_id=principal, schedule=schedule
+        )
+        receipt_job_id = "new:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+        receipt_payload = {
+            "kind": kind,
+            "capability_id": resolved_capability,
+            "request_fingerprint": fingerprint,
+        }
+        with self._db() as con:
+            preexisting = con.execute(
+                "SELECT * FROM followup_jobs WHERE idempotency_key=?", (key,)
+            ).fetchone()
+        if preexisting is not None:
+            self._assert_idempotent_match(
+                preexisting, conversation_id, kind, fingerprint, principal
+            )
+            existing_job = self._row(preexisting)
+            receipt = await self._begin_mutation_receipt(
+                operation="create",
+                job_id=receipt_job_id,
+                principal_id=principal,
+                conversation_id=conversation_id,
+                request_id=key,
+                payload=receipt_payload,
+            )
+            if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                assert self.receipts is not None
+                receipt = await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.VERIFIED,
+                    provider_reference=str(existing_job["job_id"]),
+                    result={
+                        "job_id": existing_job["job_id"],
+                        "state": existing_job["status"],
+                        "next_run_at": existing_job["next_run_at"],
+                    },
+                    verification={"persisted": True, "principal_id": principal},
+                )
+            existing_job["action_receipt"] = receipt.as_dict() if receipt is not None else None
+            return existing_job
         max_polls = (
             int(resolved_payload["max_polls"])
             if kind == "external_monitor" and resolved_payload.get("max_polls") is not None
@@ -247,21 +393,25 @@ class FollowUpEngine:
             else None
         )
         job_id, now = str(uuid.uuid4()), self._iso(self._now())
+        receipt = await self._begin_mutation_receipt(
+            operation="create",
+            job_id=receipt_job_id,
+            principal_id=principal,
+            conversation_id=conversation_id,
+            request_id=key,
+            payload=receipt_payload,
+        )
         try:
             with self._db() as con:
-                existing = con.execute(
-                    "SELECT * FROM followup_jobs WHERE idempotency_key=?", (key,)
-                ).fetchone()
-                if existing is not None:
-                    self._assert_idempotent_match(existing, conversation_id, kind, fingerprint)
-                    return self._row(existing)
                 con.execute(
                     """
                     INSERT INTO followup_jobs(
                       job_id,conversation_id,kind,payload_json,status,created_at,
                       next_run_at,idempotency_key,max_attempts,delivery_state,
-                      request_fingerprint,poll_count,max_polls,expires_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                      request_fingerprint,poll_count,max_polls,expires_at,
+                      principal_id,device_id,originating_endpoint,capability_id,
+                      schedule_json,updated_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         job_id,
@@ -278,7 +428,21 @@ class FollowUpEngine:
                         0,
                         max_polls,
                         expires_at,
+                        principal,
+                        str(device_id).strip() if device_id else None,
+                        str(originating_endpoint).strip() if originating_endpoint else None,
+                        resolved_capability,
+                        schedule_json,
+                        now,
                     ),
+                )
+                self._audit_sync(
+                    con,
+                    job_id=job_id,
+                    principal_id=principal,
+                    operation="create",
+                    state="persisted",
+                    evidence={"kind": kind, "next_run_at": self._iso(due_at)},
                 )
         except sqlite3.IntegrityError:
             with self._db() as con:
@@ -286,16 +450,76 @@ class FollowUpEngine:
                     "SELECT * FROM followup_jobs WHERE idempotency_key=?", (key,)
                 ).fetchone()
             if existing is None:
+                if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                    assert self.receipts is not None
+                    await self.receipts.complete(
+                        receipt.action_id,
+                        status=ReceiptStatus.FAILED,
+                        error="Follow-up persistence failed",
+                    )
                 raise
-            self._assert_idempotent_match(existing, conversation_id, kind, fingerprint)
-            return self._row(existing)
-        return await self.get(job_id) or {}
+            self._assert_idempotent_match(existing, conversation_id, kind, fingerprint, principal)
+            raced = self._row(existing)
+            if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                assert self.receipts is not None
+                receipt = await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.VERIFIED,
+                    provider_reference=str(raced["job_id"]),
+                    result={
+                        "job_id": raced["job_id"],
+                        "state": raced["status"],
+                        "next_run_at": raced["next_run_at"],
+                    },
+                    verification={"persisted": True, "principal_id": principal},
+                )
+            raced["action_receipt"] = receipt.as_dict() if receipt is not None else None
+            return raced
+        except sqlite3.Error:
+            if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                assert self.receipts is not None
+                await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.FAILED,
+                    error="Follow-up persistence failed",
+                )
+            raise
+        persisted = await self.get(job_id, principal_id=principal)
+        if persisted is None:
+            if receipt is not None:
+                assert self.receipts is not None
+                await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.FAILED,
+                    error="Follow-up persistence verification failed",
+                )
+            raise RuntimeError("The follow-up was not durably persisted")
+        if receipt is not None:
+            assert self.receipts is not None
+            completed_receipt = await self.receipts.complete(
+                receipt.action_id,
+                status=ReceiptStatus.VERIFIED,
+                provider_reference=job_id,
+                result={
+                    "job_id": job_id,
+                    "state": persisted["status"],
+                    "next_run_at": persisted["next_run_at"],
+                },
+                verification={"persisted": True, "principal_id": principal},
+            )
+            persisted["action_receipt"] = completed_receipt.as_dict()
+        else:
+            persisted["action_receipt"] = None
+        return persisted
 
     @staticmethod
     def _request_fingerprint(
         conversation_id: str,
         kind: str,
         payload: Mapping[str, Any],
+        *,
+        principal_id: str | None = None,
+        schedule: Mapping[str, Any] | None = None,
     ) -> str:
         fingerprint_payload = dict(payload)
         if kind == "external_monitor":
@@ -308,6 +532,8 @@ class FollowUpEngine:
                 "conversation_id": conversation_id,
                 "kind": kind,
                 "payload": fingerprint_payload,
+                "principal_id": principal_id,
+                "schedule": dict(schedule) if schedule is not None else None,
             },
             separators=(",", ":"),
             sort_keys=True,
@@ -320,6 +546,7 @@ class FollowUpEngine:
         conversation_id: str,
         kind: str,
         fingerprint: str,
+        principal_id: str,
     ) -> None:
         existing_fingerprint = str(row["request_fingerprint"] or "")
         if not existing_fingerprint:
@@ -327,13 +554,99 @@ class FollowUpEngine:
                 str(row["conversation_id"]),
                 str(row["kind"]),
                 json.loads(str(row["payload_json"])),
+                principal_id=str(row["principal_id"] or ""),
+                schedule=(json.loads(str(row["schedule_json"])) if row["schedule_json"] else None),
             )
         if (
             str(row["conversation_id"]) != conversation_id
             or str(row["kind"]) != kind
+            or str(row["principal_id"] or "") != principal_id
             or existing_fingerprint != fingerprint
         ):
             raise ValueError("Follow-up idempotency key was already used for a different request")
+
+    @staticmethod
+    def _principal_from_conversation(conversation_id: str) -> str:
+        if conversation_id.startswith("usr:"):
+            parts = conversation_id.split(":", 2)
+            if len(parts) == 3 and parts[1]:
+                return parts[1][:64]
+        return "aaron"
+
+    async def _begin_mutation_receipt(
+        self,
+        *,
+        operation: str,
+        job_id: str,
+        principal_id: str,
+        conversation_id: str,
+        request_id: str,
+        payload: Mapping[str, Any],
+    ):
+        if self.receipts is None:
+            return None
+        claim = await self.receipts.begin(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            capability_id="personal.tasks.manage",
+            provider_id="jarvis_core",
+            target={"job_id": job_id, "principal_id": principal_id},
+            requested_operation=operation,
+            request_payload=payload,
+            idempotency_key=f"personal-task:{operation}:{request_id}",
+        )
+        return claim.receipt
+
+    async def _recover_mutation_receipt(
+        self,
+        *,
+        operation: str,
+        request_id: str | None,
+        job: Mapping[str, Any],
+        expected_state: str,
+    ) -> None:
+        """Complete only a previously-started local mutation after a retry."""
+
+        if self.receipts is None or request_id is None:
+            return
+        receipt = await self.receipts.get_by_idempotency_key(
+            f"personal-task:{operation}:{request_id}"
+        )
+        if receipt is None or receipt.status is not ReceiptStatus.STARTED:
+            return
+        await self.receipts.complete(
+            receipt.action_id,
+            status=ReceiptStatus.VERIFIED,
+            provider_reference=str(job["job_id"]),
+            result={"job_id": job["job_id"], "state": expected_state},
+            verification={"persisted": True},
+        )
+
+    def _audit_sync(
+        self,
+        con: sqlite3.Connection,
+        *,
+        job_id: str,
+        principal_id: str,
+        operation: str,
+        state: str,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        con.execute(
+            """
+            INSERT INTO followup_job_audit(
+              job_id,principal_id,operation,state,evidence_json,created_at
+            ) VALUES(?,?,?,?,?,?)
+            """,
+            (
+                job_id,
+                principal_id,
+                operation,
+                state,
+                json.dumps(dict(evidence or {}), separators=(",", ":"), sort_keys=True),
+                self._iso(self._now()),
+            ),
+        )
 
     def _normalise_external_payload(
         self, conversation_id: str, payload: dict[str, Any]
@@ -449,6 +762,7 @@ class FollowUpEngine:
         *,
         kind: str | None = None,
         conversation_id: str | None = None,
+        principal_id: str | None = None,
     ) -> dict[str, Any] | None:
         clauses = ["job_id=?"]
         values: list[Any] = [job_id]
@@ -460,6 +774,9 @@ class FollowUpEngine:
         if conversation_id is not None:
             clauses.append("conversation_id=?")
             values.append(conversation_id)
+        if principal_id is not None:
+            clauses.append("principal_id=?")
+            values.append(str(principal_id))
         with self._db() as con:
             row = con.execute(
                 "SELECT * FROM followup_jobs WHERE " + " AND ".join(clauses),
@@ -498,8 +815,14 @@ class FollowUpEngine:
         *,
         kind: str | None = None,
         conversation_id: str | None = None,
+        principal_id: str | None = None,
     ) -> dict[str, Any] | None:
-        return await self.get(job_id, kind=kind, conversation_id=conversation_id)
+        return await self.get(
+            job_id,
+            kind=kind,
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+        )
 
     async def list(
         self,
@@ -507,6 +830,7 @@ class FollowUpEngine:
         conversation_id: str | None = None,
         kind: str | None = None,
         status: str | None = None,
+        principal_id: str | None = None,
         limit: int = 100,
     ) -> List[dict[str, Any]]:
         clauses: list[str] = []
@@ -524,6 +848,9 @@ class FollowUpEngine:
                 raise ValueError("Unsupported follow-up status")
             clauses.append("status=?")
             values.append(status)
+        if principal_id is not None:
+            clauses.append("principal_id=?")
+            values.append(str(principal_id))
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         values.append(max(1, min(int(limit), 500)))
         with self._db() as con:
@@ -538,12 +865,14 @@ class FollowUpEngine:
         conversation_id: str | None = None,
         kind: str | None = None,
         status: str | None = None,
+        principal_id: str | None = None,
         limit: int = 100,
     ) -> List[dict[str, Any]]:
         return await self.list(
             conversation_id=conversation_id,
             kind=kind,
             status=status,
+            principal_id=principal_id,
             limit=limit,
         )
 
@@ -552,7 +881,7 @@ class FollowUpEngine:
             rows = con.execute(
                 """
                 SELECT * FROM followup_jobs WHERE conversation_id=?
-                AND status IN ('pending','executing','delivery_pending','delivering')
+                AND status IN ('pending','executing','delivery_pending','delivering','paused')
                 ORDER BY created_at DESC
                 """,
                 (conversation_id,),
@@ -565,6 +894,8 @@ class FollowUpEngine:
         *,
         kind: str | None = None,
         conversation_id: str | None = None,
+        principal_id: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Cancel work that has not atomically claimed its chat delivery."""
 
@@ -573,6 +904,8 @@ class FollowUpEngine:
                 job_id,
                 kind=kind,
                 conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
             )
 
     async def _cancel_locked(
@@ -581,6 +914,8 @@ class FollowUpEngine:
         *,
         kind: str | None = None,
         conversation_id: str | None = None,
+        principal_id: str | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any] | None:
         filters = ["job_id=?"]
         values: list[Any] = [job_id]
@@ -592,18 +927,65 @@ class FollowUpEngine:
         if conversation_id is not None:
             filters.append("conversation_id=?")
             values.append(conversation_id)
+        if principal_id is not None:
+            filters.append("principal_id=?")
+            values.append(str(principal_id))
         predicate = " AND ".join(filters)
+        current = await self.get(
+            job_id,
+            kind=kind,
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+        )
+        if current is None:
+            return None
+        if current["status"] == "cancelled":
+            await self._recover_mutation_receipt(
+                operation="cancel",
+                request_id=request_id,
+                job=current,
+                expected_state="cancelled",
+            )
+            return current
+        receipt = await self._begin_mutation_receipt(
+            operation="cancel",
+            job_id=job_id,
+            principal_id=str(current["principal_id"]),
+            conversation_id=str(current["conversation_id"]),
+            request_id=str(request_id or uuid.uuid4()),
+            payload={"operation": "cancel"},
+        )
         with self._db() as con:
-            con.execute(
+            changed = con.execute(
                 f"""
                 UPDATE followup_jobs SET status='cancelled',cancelled_at=?,
-                delivery_state='cancelled' WHERE {predicate}
-                AND status IN ('pending','executing','delivery_pending')
+                delivery_state='cancelled',updated_at=? WHERE {predicate}
+                AND status IN ('pending','executing','delivery_pending','paused')
                 """,
-                [self._iso(self._now()), *values],
-            )
+                [self._iso(self._now()), self._iso(self._now()), *values],
+            ).rowcount
+            if changed:
+                self._audit_sync(
+                    con,
+                    job_id=job_id,
+                    principal_id=str(current["principal_id"]),
+                    operation="cancel",
+                    state="verified",
+                    evidence={"previous_state": current["status"]},
+                )
             row = con.execute("SELECT * FROM followup_jobs WHERE " + predicate, values).fetchone()
-        return self._row(row) if row else None
+        updated = self._row(row) if row else None
+        if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+            assert self.receipts is not None
+            await self.receipts.complete(
+                receipt.action_id,
+                status=ReceiptStatus.VERIFIED if changed else ReceiptStatus.REJECTED,
+                provider_reference=job_id,
+                result={"job_id": job_id, "state": updated["status"] if updated else "missing"},
+                verification={"persisted": bool(changed)},
+                error=None if changed else "Job was not cancellable",
+            )
+        return updated
 
     async def cancel_for_conversation(self, conversation_id: str) -> int:
         """Cancel all runnable jobs before their conversation is removed."""
@@ -614,7 +996,7 @@ class FollowUpEngine:
                     """
                     SELECT job_id FROM followup_jobs
                     WHERE conversation_id=?
-                    AND status IN ('pending','executing','delivery_pending')
+                    AND status IN ('pending','executing','delivery_pending','paused')
                     """,
                     (conversation_id,),
                 ).fetchall()
@@ -624,7 +1006,7 @@ class FollowUpEngine:
                         UPDATE followup_jobs SET status='cancelled',cancelled_at=?,
                         delivery_state='cancelled',result_json=?
                         WHERE conversation_id=?
-                        AND status IN ('pending','executing','delivery_pending')
+                        AND status IN ('pending','executing','delivery_pending','paused')
                         """,
                         (
                             self._iso(self._now()),
@@ -641,11 +1023,252 @@ class FollowUpEngine:
                     )
             return len(rows)
 
+    async def pause(
+        self,
+        job_id: str,
+        *,
+        principal_id: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Pause a principal-owned monitor or recurrence at a durable boundary."""
+
+        return await self._change_state(
+            job_id,
+            principal_id=principal_id,
+            operation="pause",
+            from_states={"pending"},
+            to_state="paused",
+            request_id=request_id,
+        )
+
+    async def resume(
+        self,
+        job_id: str,
+        *,
+        principal_id: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Resume principal-owned work without replaying a past occurrence."""
+
+        job = await self.get(job_id, principal_id=principal_id)
+        if job is None:
+            return job
+        if job["status"] == "pending":
+            await self._recover_mutation_receipt(
+                operation="resume",
+                request_id=request_id,
+                job=job,
+                expected_state="pending",
+            )
+            return job
+        if job["status"] != "paused":
+            return job
+        next_run = self._now()
+        if job["kind"] == "recurring":
+            next_value = next_recurrence(job.get("schedule") or {}, after_utc=self._now())
+            if next_value is None:
+                raise ValueError("The recurring schedule is no longer valid")
+            next_run = next_value
+        return await self._change_state(
+            job_id,
+            principal_id=principal_id,
+            operation="resume",
+            from_states={"paused"},
+            to_state="pending",
+            request_id=request_id,
+            next_run_at=next_run,
+        )
+
+    async def _change_state(
+        self,
+        job_id: str,
+        *,
+        principal_id: str,
+        operation: str,
+        from_states: set[str],
+        to_state: str,
+        request_id: str | None,
+        next_run_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        async with self._operation_lock:
+            current = await self.get(job_id, principal_id=principal_id)
+            if current is None:
+                return current
+            if current["status"] == to_state:
+                await self._recover_mutation_receipt(
+                    operation=operation,
+                    request_id=request_id,
+                    job=current,
+                    expected_state=to_state,
+                )
+                return current
+            if current["status"] not in from_states:
+                return current
+            receipt = await self._begin_mutation_receipt(
+                operation=operation,
+                job_id=job_id,
+                principal_id=principal_id,
+                conversation_id=str(current["conversation_id"]),
+                request_id=str(request_id or uuid.uuid4()),
+                payload={"to": to_state},
+            )
+            now = self._iso(self._now())
+            with self._db() as con:
+                changed = con.execute(
+                    """
+                    UPDATE followup_jobs SET status=?,updated_at=?,paused_at=?,
+                    next_run_at=COALESCE(?,next_run_at)
+                    WHERE job_id=? AND principal_id=? AND status=?
+                    """,
+                    (
+                        to_state,
+                        now,
+                        now if to_state == "paused" else None,
+                        self._iso(next_run_at) if next_run_at else None,
+                        job_id,
+                        principal_id,
+                        current["status"],
+                    ),
+                ).rowcount
+                if changed:
+                    self._audit_sync(
+                        con,
+                        job_id=job_id,
+                        principal_id=principal_id,
+                        operation=operation,
+                        state="verified",
+                        evidence={"from": current["status"], "to": to_state},
+                    )
+            updated = await self.get(job_id, principal_id=principal_id)
+            if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                assert self.receipts is not None
+                await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.VERIFIED if changed else ReceiptStatus.REJECTED,
+                    provider_reference=job_id,
+                    result={"job_id": job_id, "state": updated["status"] if updated else "missing"},
+                    verification={"persisted": bool(changed)},
+                    error=None if changed else "Job state changed concurrently",
+                )
+            return updated
+
+    async def reschedule(
+        self,
+        job_id: str,
+        *,
+        principal_id: str,
+        due_at: datetime,
+        timezone_name: str,
+        schedule: Mapping[str, Any] | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Move pending work atomically so its old occurrence cannot execute."""
+
+        if due_at.tzinfo is None:
+            raise ValueError("The new schedule must include a timezone")
+        if due_at <= self._now():
+            raise ValueError("The new schedule must be in the future")
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("The new schedule timezone is invalid") from exc
+        async with self._operation_lock:
+            current = await self.get(job_id, principal_id=principal_id)
+            if current is None or current["status"] not in {"pending", "paused"}:
+                return current
+            if current["kind"] == "recurring" and schedule is None:
+                schedule = current.get("schedule")
+            schedule_json = (
+                json.dumps(dict(schedule), separators=(",", ":"), sort_keys=True)
+                if schedule is not None
+                else None
+            )
+            receipt = await self._begin_mutation_receipt(
+                operation="reschedule",
+                job_id=job_id,
+                principal_id=principal_id,
+                conversation_id=str(current["conversation_id"]),
+                request_id=str(request_id or uuid.uuid4()),
+                payload={"due_at": self._iso(due_at), "schedule": schedule},
+            )
+            payload = dict(current["payload"])
+            payload["timezone"] = timezone_name
+            with self._db() as con:
+                changed = con.execute(
+                    """
+                    UPDATE followup_jobs SET next_run_at=?,payload_json=?,schedule_json=?,
+                    status='pending',paused_at=NULL,updated_at=?,attempts=0
+                    WHERE job_id=? AND principal_id=? AND status IN ('pending','paused')
+                    """,
+                    (
+                        self._iso(due_at),
+                        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                        schedule_json,
+                        self._iso(self._now()),
+                        job_id,
+                        principal_id,
+                    ),
+                ).rowcount
+                if changed:
+                    self._audit_sync(
+                        con,
+                        job_id=job_id,
+                        principal_id=principal_id,
+                        operation="reschedule",
+                        state="verified",
+                        evidence={"next_run_at": self._iso(due_at)},
+                    )
+            updated = await self.get(job_id, principal_id=principal_id)
+            if receipt is not None and receipt.status is ReceiptStatus.STARTED:
+                assert self.receipts is not None
+                await self.receipts.complete(
+                    receipt.action_id,
+                    status=ReceiptStatus.VERIFIED if changed else ReceiptStatus.REJECTED,
+                    provider_reference=job_id,
+                    result={"job_id": job_id, "state": updated["status"] if updated else "missing"},
+                    verification={"persisted": bool(changed)},
+                    error=None if changed else "Job changed concurrently",
+                )
+            return updated
+
+    async def recent_completions(
+        self, *, principal_id: str, limit: int = 20
+    ) -> List[dict[str, Any]]:
+        values = (principal_id, max(1, min(int(limit), 100)))
+        with self._db() as con:
+            rows = con.execute(
+                """
+                SELECT * FROM followup_jobs WHERE principal_id=?
+                AND status IN ('completed','failed','expired')
+                ORDER BY COALESCE(delivered_at,updated_at,created_at) DESC LIMIT ?
+                """,
+                values,
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    async def audit(self, job_id: str, *, principal_id: str) -> List[dict[str, Any]]:
+        with self._db() as con:
+            rows = con.execute(
+                """
+                SELECT * FROM followup_job_audit
+                WHERE job_id=? AND principal_id=? ORDER BY audit_id
+                """,
+                (job_id, principal_id),
+            ).fetchall()
+        output: List[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = json.loads(item.pop("evidence_json") or "{}")
+            output.append(item)
+        return output
+
     @staticmethod
     def _row(row: sqlite3.Row) -> dict[str, Any]:
         data = dict(row)
         data["payload"] = json.loads(data.pop("payload_json"))
         data["result"] = json.loads(data.pop("result_json") or "{}")
+        data["schedule"] = json.loads(data.pop("schedule_json") or "null")
+        data["last_observed_state"] = json.loads(data.pop("last_observed_state_json") or "null")
         return data
 
     async def start(self) -> None:
@@ -707,6 +1330,22 @@ class FollowUpEngine:
             reason = "Follow-up worker stopped unexpectedly."
         else:
             reason = "Follow-up worker is not running."
+        counts: dict[str, int] = {}
+        next_row: sqlite3.Row | None = None
+        if database_healthy:
+            with self._db() as con:
+                counts = {
+                    str(row["status"]): int(row["count"])
+                    for row in con.execute(
+                        "SELECT status,COUNT(*) AS count FROM followup_jobs GROUP BY status"
+                    ).fetchall()
+                }
+                next_row = con.execute(
+                    """
+                    SELECT next_run_at,kind FROM followup_jobs
+                    WHERE status='pending' ORDER BY next_run_at LIMIT 1
+                    """
+                ).fetchone()
         return {
             "healthy": healthy,
             "status": "healthy" if healthy else "degraded",
@@ -718,8 +1357,645 @@ class FollowUpEngine:
                 "state": worker_state,
             },
             "database": {"healthy": database_healthy},
+            "jobs": {
+                "active": sum(
+                    counts.get(state, 0)
+                    for state in (
+                        "pending",
+                        "executing",
+                        "delivery_pending",
+                        "delivering",
+                        "paused",
+                    )
+                ),
+                "by_status": counts,
+                "next_run_at": str(next_row["next_run_at"]) if next_row else None,
+                "next_kind": str(next_row["kind"]) if next_row else None,
+            },
             "reason": reason,
         }
+
+    async def diagnostics(self, *, principal_id: str) -> dict[str, Any]:
+        """Return one principal's redaction-safe task diagnostics."""
+
+        with self._db() as con:
+            counts = {
+                str(row["status"]): int(row["count"])
+                for row in con.execute(
+                    """
+                    SELECT status,COUNT(*) AS count FROM followup_jobs
+                    WHERE principal_id=? GROUP BY status
+                    """,
+                    (principal_id,),
+                ).fetchall()
+            }
+            row = con.execute(
+                """
+                SELECT * FROM followup_jobs WHERE principal_id=? AND status='pending'
+                ORDER BY next_run_at LIMIT 1
+                """,
+                (principal_id,),
+            ).fetchone()
+        next_job = self._row(row) if row else None
+        return {
+            "principal_id": principal_id,
+            "active": sum(
+                counts.get(state, 0)
+                for state in (
+                    "pending",
+                    "executing",
+                    "delivery_pending",
+                    "delivering",
+                    "paused",
+                )
+            ),
+            "states": counts,
+            "next": (
+                {
+                    key: next_job.get(key)
+                    for key in (
+                        "job_id",
+                        "kind",
+                        "capability_id",
+                        "status",
+                        "next_run_at",
+                        "last_evaluated_at",
+                        "delivery_state",
+                        "notification_state",
+                    )
+                }
+                if next_job
+                else None
+            ),
+        }
+
+    async def handle_command(
+        self,
+        text: str,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        timezone_name: str,
+        request_id: str | None = None,
+        device_id: str | None = None,
+        originating_endpoint: str | None = None,
+    ) -> FollowUpCommandResult:
+        """Handle deterministic personal-task language through this durable store."""
+
+        if len(text) > 5_000:
+            return FollowUpCommandResult(handled=False)
+        value = " ".join(text.strip().rstrip(".!?").split())
+        lowered = value.casefold()
+
+        if re.fullmatch(
+            r"(?:what reminders do i have|what (?:tasks|reminders) (?:are )?scheduled|"
+            r"show (?:me )?my (?:tasks|reminders)|what are you monitoring for me)",
+            lowered,
+        ):
+            active = await self._principal_active_jobs(principal_id)
+            if "monitor" in lowered:
+                active = [job for job in active if self._is_monitor(job)]
+            if not active:
+                noun = "monitors" if "monitor" in lowered else "scheduled tasks"
+                return FollowUpCommandResult(True, response=f"You have no active {noun}.")
+            descriptions = [self._describe_job(job, timezone_name) for job in active[:8]]
+            return FollowUpCommandResult(
+                True,
+                response="Your active personal tasks are: " + "; ".join(descriptions) + ".",
+                intent="personal_task_list",
+                details={"jobs": active},
+            )
+
+        if re.fullmatch(r"what have you got scheduled for tomorrow", lowered):
+            try:
+                zone = ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError:
+                return FollowUpCommandResult(
+                    True,
+                    False,
+                    "I couldn’t verify your timezone, so I didn’t guess which tasks are tomorrow.",
+                    "personal_task_list",
+                )
+            tomorrow = self._now().astimezone(zone).date() + timedelta(days=1)
+            jobs = [
+                job
+                for job in await self._principal_active_jobs(principal_id)
+                if datetime.fromisoformat(str(job["next_run_at"])).astimezone(zone).date()
+                == tomorrow
+            ]
+            if not jobs:
+                return FollowUpCommandResult(
+                    True, response="You have nothing scheduled for tomorrow."
+                )
+            return FollowUpCommandResult(
+                True,
+                response="Tomorrow: "
+                + "; ".join(self._describe_job(job, timezone_name) for job in jobs)
+                + ".",
+                intent="personal_task_list",
+                details={"jobs": jobs},
+            )
+
+        management = re.match(
+            r"^(cancel|pause|resume)\s+(?:my\s+)?(.+?)(?:\s+(?:reminder|monitor|task))?$",
+            lowered,
+        )
+        if management:
+            operation, reference = management.group(1), management.group(2).strip()
+            candidates = await self._resolve_job_reference(
+                reference,
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                monitors_only=operation in {"pause", "resume"},
+            )
+            if len(candidates) != 1:
+                response = (
+                    "I couldn’t find that active task."
+                    if not candidates
+                    else "More than one task matches. Please name it more specifically."
+                )
+                return FollowUpCommandResult(True, False, response, "personal_task_manage")
+            job = candidates[0]
+            if operation == "cancel":
+                updated = await self.cancel(
+                    str(job["job_id"]),
+                    principal_id=principal_id,
+                    request_id=request_id,
+                )
+            elif operation == "pause":
+                updated = await self.pause(
+                    str(job["job_id"]),
+                    principal_id=principal_id,
+                    request_id=request_id,
+                )
+            else:
+                updated = await self.resume(
+                    str(job["job_id"]),
+                    principal_id=principal_id,
+                    request_id=request_id,
+                )
+            changed = (
+                updated is not None
+                and str(updated["status"])
+                == {
+                    "cancel": "cancelled",
+                    "pause": "paused",
+                    "resume": "pending",
+                }[operation]
+            )
+            return FollowUpCommandResult(
+                True,
+                changed,
+                (
+                    f"{operation.title()}d task {str(job['job_id'])[:8]}."
+                    if changed
+                    else f"I couldn’t {operation} that task in its current state."
+                ),
+                "personal_task_manage",
+                {"job": updated},
+            )
+
+        reschedule_match = re.match(
+            r"^(?:move|change|reschedule)\s+(.+?)\s+(?:to|for)\s+(.+)$", lowered
+        )
+        if reschedule_match:
+            reference, timing = reschedule_match.groups()
+            reference = re.sub(r"^(?:that|the|my)\s+", "", reference).strip()
+            reference = re.sub(r"\s+(?:reminder|task)$", "", reference).strip() or "that"
+            candidates = await self._resolve_job_reference(
+                reference,
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+            )
+            if len(candidates) != 1:
+                return FollowUpCommandResult(
+                    True,
+                    False,
+                    "I need one unambiguous pending task before I can reschedule it.",
+                    "personal_task_reschedule",
+                )
+            if re.fullmatch(r"\d{1,2}(?::\d{2})?\s*(?:am|pm)", timing):
+                timing = "at " + timing
+            resolved = resolve_schedule(
+                f"remind me {timing}", timezone_name=timezone_name, now_utc=self._now()
+            )
+            if resolved is None:
+                return FollowUpCommandResult(
+                    True,
+                    False,
+                    "I couldn’t resolve the new date and time, so the existing schedule is unchanged.",
+                    "personal_task_reschedule",
+                )
+            updated = await self.reschedule(
+                str(candidates[0]["job_id"]),
+                principal_id=principal_id,
+                due_at=resolved.due_utc,
+                timezone_name=timezone_name,
+                request_id=request_id,
+            )
+            return FollowUpCommandResult(
+                True,
+                updated is not None,
+                (
+                    f"Moved task {str(candidates[0]['job_id'])[:8]} to {resolved.description}."
+                    if updated is not None
+                    else "That task could not be rescheduled."
+                ),
+                "personal_task_reschedule",
+                {"job": updated},
+            )
+
+        periodic_monitor = await self._try_create_periodic_monitor(
+            value,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            device_id=device_id,
+            originating_endpoint=originating_endpoint,
+        )
+        if periodic_monitor is not None:
+            return periodic_monitor
+
+        recurrence = resolve_recurrence(value, timezone_name=timezone_name, now_utc=self._now())
+        if recurrence is not None:
+            schedule, due_at, message = recurrence
+            try:
+                job = await self.create(
+                    conversation_id=conversation_id,
+                    kind="recurring",
+                    payload={
+                        "message": message,
+                        "timezone": timezone_name,
+                        "notify": True,
+                    },
+                    due_at=due_at,
+                    idempotency_key=request_id,
+                    principal_id=principal_id,
+                    device_id=device_id,
+                    originating_endpoint=originating_endpoint,
+                    capability_id="personal.reminder",
+                    schedule=schedule.as_dict(),
+                )
+            except (RuntimeError, sqlite3.Error):
+                return self._persistence_failure("recurring task")
+            return FollowUpCommandResult(
+                True,
+                response=(
+                    f"Scheduled task {str(job['job_id'])[:8]} {schedule.description}; "
+                    f"the next occurrence is {self._local_due(job, timezone_name)}."
+                ),
+                intent="personal_task_recurring_create",
+                details={"job": job},
+            )
+
+        condition = await self._try_create_condition(
+            value,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            device_id=device_id,
+            originating_endpoint=originating_endpoint,
+        )
+        if condition is not None:
+            return condition
+
+        resolved = resolve_schedule(value, timezone_name=timezone_name, now_utc=self._now())
+        if resolved is not None:
+            try:
+                job = await self.create(
+                    conversation_id=conversation_id,
+                    kind="scheduled",
+                    payload={
+                        "message": resolved.reminder_text,
+                        "timezone": timezone_name,
+                        "notify": True,
+                    },
+                    due_at=resolved.due_utc,
+                    idempotency_key=request_id,
+                    principal_id=principal_id,
+                    device_id=device_id,
+                    originating_endpoint=originating_endpoint,
+                    capability_id="personal.reminder",
+                )
+            except (RuntimeError, sqlite3.Error):
+                return self._persistence_failure("reminder")
+            return FollowUpCommandResult(
+                True,
+                response=(f"Scheduled task {str(job['job_id'])[:8]} for {resolved.description}."),
+                intent="personal_task_reminder_create",
+                details={"job": job},
+            )
+        if lowered.startswith("remind me") or (
+            lowered.startswith("every ") and " remind me " in lowered
+        ):
+            return FollowUpCommandResult(
+                True,
+                False,
+                "I couldn’t resolve a complete future schedule, so no task was created.",
+                "personal_task_invalid_schedule",
+            )
+        return FollowUpCommandResult(handled=False)
+
+    @staticmethod
+    def _persistence_failure(noun: str) -> FollowUpCommandResult:
+        return FollowUpCommandResult(
+            True,
+            False,
+            f"I could not durably save that {noun}, so it was not created.",
+            "personal_task_persistence_failed",
+        )
+
+    async def _principal_active_jobs(self, principal_id: str) -> List[dict[str, Any]]:
+        with self._db() as con:
+            rows = con.execute(
+                """
+                SELECT * FROM followup_jobs WHERE principal_id=?
+                AND status IN ('pending','executing','delivery_pending','delivering','paused')
+                ORDER BY next_run_at,created_at
+                """,
+                (principal_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    @staticmethod
+    def _is_monitor(job: Mapping[str, Any]) -> bool:
+        return str(job.get("kind")) in {"condition", "periodic", "external_monitor"}
+
+    async def _resolve_job_reference(
+        self,
+        reference: str,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        monitors_only: bool = False,
+    ) -> List[dict[str, Any]]:
+        jobs = await self._principal_active_jobs(principal_id)
+        if monitors_only:
+            jobs = [job for job in jobs if self._is_monitor(job)]
+        reference = reference.strip().casefold()
+        if reference in {"that", "it", "last", "latest"}:
+            return [job for job in jobs if str(job.get("conversation_id")) == conversation_id]
+        identifier = re.fullmatch(r"(?:job\s+)?([0-9a-f]{4,36})", reference)
+        if identifier:
+            prefix = identifier.group(1)
+            return [job for job in jobs if str(job["job_id"]).startswith(prefix)]
+        terms = [term for term in re.findall(r"[a-z0-9_]+", reference) if len(term) > 2]
+        return [
+            job
+            for job in jobs
+            if all(
+                term
+                in " ".join(
+                    [
+                        str(job.get("kind") or ""),
+                        str((job.get("payload") or {}).get("message") or ""),
+                        str((job.get("payload") or {}).get("entity_id") or ""),
+                    ]
+                ).casefold()
+                for term in terms
+            )
+        ]
+
+    async def _try_create_condition(
+        self,
+        text: str,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        request_id: str | None,
+        device_id: str | None,
+        originating_endpoint: str | None,
+    ) -> FollowUpCommandResult | None:
+        lowered = text.casefold()
+        prefix = re.match(r"^(?:tell me|let me know)\s+(?:if|when)\s+(.+)$", lowered)
+        if prefix is None:
+            return None
+        condition_text = prefix.group(1).strip()
+        comparison, wanted = "equals", "on"
+        if condition_text.endswith(" changes") or condition_text.endswith(" changes state"):
+            query = re.sub(r"\s+changes(?: state)?$", "", condition_text).strip()
+            comparison, wanted = "changed", ""
+        elif condition_text.endswith(" comes back online"):
+            query = condition_text[: -len(" comes back online")].strip()
+            comparison, wanted = "not_equals", "unavailable"
+        elif condition_text.endswith(" gets home"):
+            query = condition_text[: -len(" gets home")].strip()
+            wanted = "home"
+        elif condition_text.endswith(" finishes"):
+            query = condition_text[: -len(" finishes")].strip()
+            wanted = "completed"
+        elif condition_text.endswith(" detects a person"):
+            query = condition_text[: -len(" detects a person")].strip()
+            wanted = "on"
+        else:
+            state_match = re.match(
+                r"^(.+?)\s+(?:is|becomes|reports)\s+([a-z0-9_-]+)$", condition_text
+            )
+            if state_match is None:
+                return FollowUpCommandResult(
+                    True,
+                    False,
+                    "I couldn’t resolve that condition to verified capability evidence, so I did not create a monitor.",
+                    "personal_monitor_create",
+                )
+            query, wanted = state_match.groups()
+        try:
+            states = await self.states.readable_entity_states(refresh=True)
+        except Exception:
+            return FollowUpCommandResult(
+                True,
+                False,
+                "Home Assistant is unavailable, so I did not create that monitor.",
+                "personal_monitor_create",
+            )
+        matches = self._match_entities(query, states)
+        if len(matches) != 1:
+            return FollowUpCommandResult(
+                True,
+                False,
+                (
+                    "I couldn’t find a current Home Assistant entity for that condition."
+                    if not matches
+                    else "More than one Home Assistant entity matches; please name the exact device."
+                ),
+                "personal_monitor_create",
+            )
+        entity = matches[0]
+        entity_id = str(entity.get("entity_id") or "")
+        payload: dict[str, Any] = {
+            "entity_id": entity_id,
+            "comparison": comparison,
+            "baseline": str(entity.get("state") or "unknown"),
+            "message": f"{entity.get('name') or entity_id} now satisfies your requested condition.",
+            "notify": True,
+        }
+        if comparison != "changed":
+            payload["state"] = wanted
+        if condition_text.endswith(" finishes"):
+            payload["states"] = ["completed", "finished"]
+        try:
+            job = await self.create(
+                conversation_id=conversation_id,
+                kind="condition",
+                payload=payload,
+                due_at=self._now(),
+                idempotency_key=request_id,
+                principal_id=principal_id,
+                device_id=device_id,
+                originating_endpoint=originating_endpoint,
+                capability_id="home_assistant.read_state",
+            )
+        except (RuntimeError, sqlite3.Error):
+            return self._persistence_failure("monitor")
+        return FollowUpCommandResult(
+            True,
+            response=(
+                f"Monitoring {entity.get('name') or entity_id} as task "
+                f"{str(job['job_id'])[:8]}; I’ll report verified evidence here."
+            ),
+            intent="personal_monitor_create",
+            details={"job": job},
+        )
+
+    async def _try_create_periodic_monitor(
+        self,
+        text: str,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        request_id: str | None,
+        device_id: str | None,
+        originating_endpoint: str | None,
+    ) -> FollowUpCommandResult | None:
+        lowered = text.casefold()
+        timed = re.match(
+            r"^every\s+(\d{1,4})\s+(minutes?|hours?)\s+check\s+"
+            r"(?:whether|if)\s+(.+?)(?:\s+has)?\s+changed$",
+            lowered,
+        )
+        interval_seconds = 3600
+        query: str | None = None
+        if timed:
+            amount = int(timed.group(1))
+            interval_seconds = amount * (3600 if timed.group(2).startswith("hour") else 60)
+            query = timed.group(3).strip()
+        else:
+            continuous = re.match(
+                r"^keep checking\s+(.+?)(?:\s+and\s+(?:tell|let)\s+me\s+"
+                r"when\s+it\s+changes)?$",
+                lowered,
+            )
+            if continuous:
+                query = continuous.group(1).strip()
+        if query is None:
+            return None
+        if not 60 <= interval_seconds <= 30 * 86400:
+            return FollowUpCommandResult(
+                True,
+                False,
+                "That monitoring interval is outside the supported safe range, so no monitor was created.",
+                "personal_monitor_create",
+            )
+        try:
+            states = await self.states.readable_entity_states(refresh=True)
+        except Exception:
+            return FollowUpCommandResult(
+                True,
+                False,
+                "Home Assistant is unavailable, so I did not create that monitor.",
+                "personal_monitor_create",
+            )
+        matches = self._match_entities(query, states)
+        if len(matches) != 1:
+            if not matches:
+                # A generic page/provider monitor belongs to the established
+                # External Agent path, which performs its own availability,
+                # read-only capability, baseline, and polling-policy checks.
+                return None
+            return FollowUpCommandResult(
+                True,
+                False,
+                "More than one Home Assistant entity matches; please name the exact device.",
+                "personal_monitor_create",
+            )
+        entity = matches[0]
+        entity_id = str(entity.get("entity_id") or "")
+        try:
+            job = await self.create(
+                conversation_id=conversation_id,
+                kind="periodic",
+                payload={
+                    "entity_id": entity_id,
+                    "comparison": "changed",
+                    "baseline": str(entity.get("state") or "unknown"),
+                    "interval_seconds": interval_seconds,
+                    "message": f"{entity.get('name') or entity_id} changed.",
+                    "notify": True,
+                },
+                due_at=self._now() + timedelta(seconds=interval_seconds),
+                idempotency_key=request_id,
+                principal_id=principal_id,
+                device_id=device_id,
+                originating_endpoint=originating_endpoint,
+                capability_id="home_assistant.read_state",
+            )
+        except (RuntimeError, sqlite3.Error):
+            return self._persistence_failure("monitor")
+        return FollowUpCommandResult(
+            True,
+            response=(
+                f"Monitoring {entity.get('name') or entity_id} every "
+                f"{interval_seconds // 60} minutes as task {str(job['job_id'])[:8]}."
+            ),
+            intent="personal_monitor_create",
+            details={"job": job},
+        )
+
+    @staticmethod
+    def _match_entities(query: str, states: List[dict[str, Any]]) -> List[dict[str, Any]]:
+        terms = [
+            term
+            for term in re.findall(r"[a-z0-9]+", query.casefold())
+            if term not in {"a", "an", "the", "this", "that", "device", "camera"}
+        ]
+        normalised = " ".join(terms)
+        if not normalised:
+            return []
+        ranked: List[tuple[int, dict[str, Any]]] = []
+        for entity in states:
+            entity_id = str(entity.get("entity_id") or "").casefold()
+            name = str(entity.get("name") or "").casefold()
+            searchable = " ".join(re.findall(r"[a-z0-9]+", f"{entity_id} {name}"))
+            score = 0
+            if query.casefold() == entity_id:
+                score = 200
+            elif normalised == " ".join(re.findall(r"[a-z0-9]+", name)):
+                score = 180
+            elif all(term in searchable for term in normalised.split()):
+                score = 100 + len(normalised)
+            if score:
+                ranked.append((score, entity))
+        if not ranked:
+            return []
+        highest = max(score for score, _ in ranked)
+        return [entity for score, entity in ranked if score == highest]
+
+    def _describe_job(self, job: Mapping[str, Any], timezone_name: str) -> str:
+        payload = job.get("payload") or {}
+        message = str(payload.get("message") or job.get("kind") or "task").rstrip(".")
+        return (
+            f"{str(job['job_id'])[:8]} ({job['status']}): {message}, "
+            f"next {self._local_due(job, timezone_name)}"
+        )
+
+    @staticmethod
+    def _local_due(job: Mapping[str, Any], timezone_name: str) -> str:
+        try:
+            zone = ZoneInfo(timezone_name)
+            due = datetime.fromisoformat(str(job["next_run_at"])).astimezone(zone)
+        except (ValueError, ZoneInfoNotFoundError):
+            return str(job.get("next_run_at") or "unknown")
+        return due.strftime("%A %d %B at %H:%M %Z")
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -754,6 +2030,12 @@ class FollowUpEngine:
             ).rowcount
         if not claimed:
             return
+        with self._db() as con:
+            con.execute(
+                "UPDATE followup_jobs SET last_evaluated_at=?,updated_at=? "
+                "WHERE job_id=? AND status='executing'",
+                (self._iso(self._now()), self._iso(self._now()), job["job_id"]),
+            )
         if job["kind"] == "external_monitor":
             terminal_reason = self._external_monitor_terminal_reason(job)
             if terminal_reason is not None:
@@ -802,6 +2084,20 @@ class FollowUpEngine:
             await self._handle_evaluation_failure(job, exc)
             return
 
+        observed = result.get("state", result.get("value"))
+        with self._db() as con:
+            con.execute(
+                """
+                UPDATE followup_jobs SET last_observed_state_json=?,updated_at=?
+                WHERE job_id=? AND status='executing'
+                """,
+                (
+                    json.dumps(observed, separators=(",", ":"), sort_keys=True),
+                    self._iso(self._now()),
+                    job["job_id"],
+                ),
+            )
+
         if not done:
             if job["kind"] == "external_monitor":
                 terminal_reason = self._external_monitor_terminal_reason(job)
@@ -812,11 +2108,13 @@ class FollowUpEngine:
                 con.execute(
                     """
                     UPDATE followup_jobs SET status='pending',next_run_at=?,
-                    result_json=?,attempts=0 WHERE job_id=? AND status='executing'
+                    result_json=?,attempts=0,updated_at=?
+                    WHERE job_id=? AND status='executing'
                     """,
                     (
                         self._iso(self._now() + timedelta(seconds=self._next_interval(job))),
                         json.dumps(result, separators=(",", ":"), sort_keys=True),
+                        self._iso(self._now()),
                         job["job_id"],
                     ),
                 )
@@ -1001,7 +2299,11 @@ class FollowUpEngine:
             await self.conversations.add_assistant_message(
                 str(job["conversation_id"]),
                 str(job.get("delivery_message") or ""),
-                delivery_key=f"followup:{job['job_id']}:delivery",
+                delivery_key=(
+                    f"followup:{job['job_id']}:occurrence:{job.get('occurrence_index', 0)}"
+                    if job.get("kind") == "recurring"
+                    else f"followup:{job['job_id']}:delivery"
+                ),
             )
         except Exception as exc:
             attempts = int(job.get("delivery_attempts") or 0) + 1
@@ -1042,23 +2344,109 @@ class FollowUpEngine:
                     )
             return
 
+        notification_state = "not_requested"
+        payload = job.get("payload") or {}
+        if self.notifier is not None and payload.get("notify") is True:
+            if str(job.get("notification_state") or "") == "attempting":
+                notification_state = "outcome_unknown"
+            else:
+                with self._db() as con:
+                    con.execute(
+                        "UPDATE followup_jobs SET notification_state='attempting',updated_at=? "
+                        "WHERE job_id=? AND status='delivering'",
+                        (self._iso(self._now()), job["job_id"]),
+                    )
+                try:
+                    notification = await self.notifier(
+                        str(job.get("principal_id") or ""),
+                        str(job.get("delivery_message") or ""),
+                        "Jarvis reminder",
+                    )
+                    if bool(notification.get("success")) or bool(
+                        notification.get("command_accepted")
+                    ):
+                        notification_state = "accepted_unverified"
+                    elif bool(notification.get("command_sent")):
+                        notification_state = "partially_accepted"
+                    else:
+                        notification_state = "failed"
+                except Exception:
+                    notification_state = "failed"
+
         completion = str(job.get("completion_status") or "failed")
         if completion not in {"completed", "failed", "expired"}:
             completion = "failed"
         with self._db() as con:
-            con.execute(
-                """
-                UPDATE followup_jobs SET status=?,delivered_at=?,
-                delivery_state='delivered' WHERE job_id=? AND status='delivering'
-                """,
-                (completion, self._iso(self._now()), job["job_id"]),
+            now = self._now()
+            if job.get("kind") == "recurring" and completion == "completed":
+                next_run = next_recurrence(job.get("schedule") or {}, after_utc=now)
+                if next_run is None:
+                    con.execute(
+                        """
+                        UPDATE followup_jobs SET status='failed',delivered_at=?,
+                        delivery_state='delivered',notification_state=?,updated_at=?
+                        WHERE job_id=? AND status='delivering'
+                        """,
+                        (
+                            self._iso(now),
+                            notification_state,
+                            self._iso(now),
+                            job["job_id"],
+                        ),
+                    )
+                else:
+                    con.execute(
+                        """
+                        UPDATE followup_jobs SET status='pending',next_run_at=?,
+                        delivered_at=?,delivery_state='pending',delivery_message=NULL,
+                        completion_status=NULL,occurrence_index=occurrence_index+1,
+                        notification_state=?,verified_at=?,updated_at=?,attempts=0
+                        WHERE job_id=? AND status='delivering'
+                        """,
+                        (
+                            self._iso(next_run),
+                            self._iso(now),
+                            notification_state,
+                            self._iso(now),
+                            self._iso(now),
+                            job["job_id"],
+                        ),
+                    )
+            else:
+                con.execute(
+                    """
+                    UPDATE followup_jobs SET status=?,delivered_at=?,
+                    delivery_state='delivered',notification_state=?,verified_at=?,updated_at=?
+                    WHERE job_id=? AND status='delivering'
+                    """,
+                    (
+                        completion,
+                        self._iso(now),
+                        notification_state,
+                        self._iso(now) if completion == "completed" else None,
+                        self._iso(now),
+                        job["job_id"],
+                    ),
+                )
+            self._audit_sync(
+                con,
+                job_id=str(job["job_id"]),
+                principal_id=str(job.get("principal_id") or "aaron"),
+                operation="deliver",
+                state=completion,
+                evidence={
+                    "conversation_delivery": "delivered",
+                    "notification_state": notification_state,
+                    "verified": completion == "completed",
+                    "occurrence_index": int(job.get("occurrence_index") or 0),
+                },
             )
 
     async def _evaluate(self, job: dict[str, Any]) -> tuple[bool, str, dict[str, Any]]:
         payload, kind = job["payload"], job["kind"]
         if kind == "external_monitor":
             return await self._evaluate_external_monitor(job)
-        if kind in {"time", "scheduled"}:
+        if kind in {"time", "scheduled", "recurring"}:
             return (
                 True,
                 str(payload.get("message") or "Your requested follow-up is due."),
@@ -1120,13 +2508,34 @@ class FollowUpEngine:
                     {"entity_id": entity_id, "state": state, "verified": changed},
                 )
             wanted = str(payload.get("state") or "on")
+            wanted_states = {
+                str(item) for item in payload.get("states") or [wanted] if str(item).strip()
+            }
+            if payload.get("comparison") == "not_equals":
+                verified = state != wanted
+                return (
+                    verified,
+                    str(
+                        payload.get("message")
+                        or f"{entity.get('name') or entity_id} is now {state}."
+                    ),
+                    {
+                        "entity_id": entity_id,
+                        "state": state,
+                        "comparison": "not_equals",
+                        "target": wanted,
+                        "verified": verified,
+                    },
+                )
+            matches = state in wanted_states
             return (
-                state == wanted,
+                matches,
                 str(payload.get("message") or f"{entity.get('name') or entity_id} is now {state}."),
                 {
                     "entity_id": entity_id,
                     "state": state,
-                    "verified": state == wanted,
+                    "target_states": sorted(wanted_states),
+                    "verified": matches,
                 },
             )
         baseline = str(payload.get("baseline") or "")

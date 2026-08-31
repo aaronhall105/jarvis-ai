@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Header, HTTPException, Query, WebSocket
@@ -37,7 +38,6 @@ from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
-from app.followup_schedule import parse_periodic_followup, resolve_schedule
 from app.intent_engine import IntentEngine, IntentError
 from app.house_awareness import HouseAwarenessEngine
 from app.home_assistant import (
@@ -154,6 +154,8 @@ followups = FollowUpEngine(
     conversations=conversations,
     states=tools,
     external_evaluator=(external_agent if settings.jarvis_external_agent_enabled else None),
+    receipts=external_agent.receipts,
+    notifier=tools.send_mobile_notification,
 )
 
 
@@ -169,6 +171,8 @@ async def _persist_external_monitor(
         payload=dict(payload),
         due_at=(datetime.now(timezone.utc) + timedelta(seconds=polling_interval_seconds)),
         idempotency_key=request_id,
+        principal_id=str(payload.get("principal_id") or "").strip() or None,
+        capability_id=str(payload.get("capability_id") or "personal.monitor"),
     )
 
 
@@ -457,182 +461,72 @@ class ImprovementCreateRequest(BaseModel):
     request: str = Field(min_length=3, max_length=2000)
 
 
-_FOLLOWUP_AFTER_PATTERN = re.compile(
-    r"^\s*(?:check again|tell me|remind me)\s+in\s+(\d{1,4})\s*(seconds?|minutes?)\s*[.!?]*$",
-    re.I,
-)
-_FOLLOWUP_CONDITION_PATTERN = re.compile(
-    r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) (?:is |comes )?([a-z0-9_]+)\s*[.!?]*$",
-    re.I,
-)
-_FOLLOWUP_CHANGE_PATTERN = re.compile(
-    r"^\s*(?:tell me|let me know) when ([a-z_]+\.[a-z0-9_]+) changes?\s*[.!?]*$", re.I
-)
-_FOLLOWUP_COMPLETION_PATTERN = re.compile(
-    r"^\s*(?:let me know|tell me|get back to me) when (?:it(?:'s| is)|that) (?:is )?(?:finished|done|completes?|completed)\s*[.!?]*$",
-    re.I,
-)
+class PersonalTaskMutationRequest(BaseModel):
+    request_id: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-async def _try_create_time_followup(text: str, conversation_id: str) -> dict[str, object] | None:
-    """Handle only explicit, harmless delayed checks before model generation."""
-    match = _FOLLOWUP_AFTER_PATTERN.match(text)
-    if match is None:
-        if _FOLLOWUP_COMPLETION_PATTERN.match(text):
-            active = [
-                job
-                for job in await followups.active_for_conversation(conversation_id)
-                if job.get("kind") != "completion"
-            ]
-            if len(active) != 1:
-                return {
-                    "success": False,
-                    "response": "I can’t identify one verified running job to watch.",
-                    "intent": "followup_unavailable",
-                }
-            source = active[0]
-            job = await followups.create(
-                conversation_id=conversation_id,
-                kind="completion",
-                payload={"source_type": "followup_job", "source_job_id": source["job_id"]},
-                due_at=datetime.now(timezone.utc),
-            )
-            return {
-                "success": True,
-                "response": "I’ll let you know here when that verified job finishes.",
-                "intent": "followup_completion",
-                "job": job,
-            }
-        resolved = resolve_schedule(
-            text,
-            timezone_name=os.getenv("JARVIS_TIMEZONE", "Europe/London"),
-        )
-        if resolved is not None:
-            job = await followups.create(
-                conversation_id=conversation_id,
-                kind="scheduled",
-                payload={
-                    "message": "Your scheduled Jarvis follow-up is due.",
-                    "timezone": resolved.timezone_name,
-                },
-                due_at=resolved.due_utc,
-            )
-            return {
-                "success": True,
-                "response": f"I’ll remind you {resolved.description}.",
-                "intent": "followup_scheduled",
-                "job": job,
-            }
-        condition = _FOLLOWUP_CONDITION_PATTERN.match(text)
-        change = _FOLLOWUP_CHANGE_PATTERN.match(text)
-        if change:
-            entity_id = change.group(1)
-            states = {
-                str(item.get("entity_id")): item
-                for item in await tools.readable_entity_states(refresh=True)
-            }
-            if entity_id not in states:
-                return {
-                    "success": False,
-                    "response": "I can’t monitor that because it is not a current Home Assistant entity.",
-                    "intent": "followup_unavailable",
-                }
-            job = await followups.create(
-                conversation_id=conversation_id,
-                kind="condition",
-                payload={
-                    "entity_id": entity_id,
-                    "comparison": "changed",
-                    "baseline": str(states[entity_id].get("state")),
-                },
-                due_at=datetime.now(timezone.utc),
-            )
-            return {
-                "success": True,
-                "response": f"I’ll let you know here when {entity_id} changes.",
-                "intent": "followup_condition",
-                "job": job,
-            }
-        if condition:
-            entity_id, wanted = condition.group(1), condition.group(2).lower()
-            wanted = {
-                "online": "on",
-                "available": "on",
-                "finished": "completed",
-                "completed": "completed",
-            }.get(wanted, wanted)
-            known = {
-                str(item.get("entity_id"))
-                for item in await tools.readable_entity_states(refresh=True)
-            }
-            if entity_id not in known:
-                return {
-                    "success": False,
-                    "response": "I can’t monitor that because it is not a current Home Assistant entity.",
-                    "intent": "followup_unavailable",
-                }
-            job = await followups.create(
-                conversation_id=conversation_id,
-                kind="condition",
-                payload={"entity_id": entity_id, "state": wanted},
-                due_at=datetime.now(timezone.utc),
-            )
-            return {
-                "success": True,
-                "response": f"I’ll let you know here when {entity_id} reports {wanted}.",
-                "intent": "followup_condition",
-                "job": job,
-            }
-        periodic = parse_periodic_followup(text)
-        if periodic:
-            entity_id, interval = periodic
-            states = {
-                str(item.get("entity_id")): item
-                for item in await tools.readable_entity_states(refresh=True)
-            }
-            if entity_id not in states or interval < 10:
-                return {
-                    "success": False,
-                    "response": "I can’t safely monitor that request.",
-                    "intent": "followup_unavailable",
-                }
-            job = await followups.create(
-                conversation_id=conversation_id,
-                kind="periodic",
-                payload={
-                    "entity_id": entity_id,
-                    "baseline": str(states[entity_id].get("state")),
-                    "interval_seconds": interval,
-                },
-                due_at=datetime.now(timezone.utc) + timedelta(seconds=interval),
-            )
-            return {
-                "success": True,
-                "response": f"I’ll monitor {entity_id} and update you here if it changes.",
-                "intent": "followup_periodic",
-                "job": job,
-            }
-        return None
-    amount, unit = int(match.group(1)), match.group(2).lower()
-    seconds = amount * (60 if unit.startswith("minute") else 1)
-    if seconds < 1 or seconds > 7 * 24 * 3600:
-        return {
-            "success": False,
-            "response": "I couldn’t safely schedule that delay.",
-            "intent": "followup_invalid",
-        }
-    job = await followups.create(
+class PersonalTaskRescheduleRequest(PersonalTaskMutationRequest):
+    due_at: datetime
+    timezone: str = Field(min_length=1, max_length=100)
+
+
+async def _try_handle_personal_task(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    request_id: str | None,
+    timezone_name: str,
+    endpoint: str | None,
+) -> dict[str, object] | None:
+    """Route personal work through the single durable follow-up lifecycle."""
+
+    command = await followups.handle_command(
+        text,
+        principal_id=actor.user_key,
         conversation_id=conversation_id,
-        kind="time",
-        payload={"message": "I completed the follow-up check you requested."},
-        due_at=datetime.now(timezone.utc) + timedelta(seconds=seconds),
+        timezone_name=timezone_name,
+        request_id=request_id,
+        device_id=actor.device_id,
+        originating_endpoint=endpoint,
     )
-    return {
-        "success": True,
-        "response": f"I’ll check again in {amount} {unit} and update you here.",
-        "intent": "followup_time",
-        "job": job,
+    if not command.handled:
+        return None
+    result: dict[str, object] = {
+        "success": command.success,
+        "response": command.response,
+        "intent": command.intent,
     }
+    if command.details is not None:
+        result.update(command.details)
+    return result
+
+
+async def _try_handle_explicit_memory(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+) -> dict[str, object] | None:
+    """Reliably handle explicit personal memory through the existing store."""
+    state = await dialogue.get(conversation_id)
+    focused = state.focus.get("memory") if isinstance(state.focus, dict) else None
+    focused_id = focused.get("id") if isinstance(focused, dict) else None
+    result = await memory.handle_explicit_command(
+        text,
+        owner_key=actor.user_key,
+        focused_memory_id=focused_id if isinstance(focused_id, int) else None,
+    )
+    if result is None:
+        return None
+    focus_memory = result.pop("focus_memory", None)
+    if isinstance(focus_memory, dict) and isinstance(focus_memory.get("id"), int):
+        state.focus["memory"] = {
+            "id": focus_memory["id"],
+            "subject": focus_memory.get("subject"),
+        }
+        await dialogue.save(state, "memory_focused", state.focus["memory"])
+    return result
 
 
 # EVENT LOOP STALL DIAGNOSTICS
@@ -1092,6 +986,116 @@ async def disconnect_mobile_google_account(
         raise HTTPException(status_code=404, detail="Google account not found.")
     external_agent.registry.invalidate_status("google", principal_id=principal)
     return {**result, "provider_id": "google"}
+
+
+@app.get("/api/personal-assistant/jobs")
+async def list_personal_tasks(
+    authorization: str | None = Header(default=None),
+    status: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    try:
+        jobs = await followups.list(
+            principal_id=principal_id, status=status, kind=kind, limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"principal_id": principal_id, "count": len(jobs), "jobs": jobs}
+
+
+@app.get("/api/personal-assistant/jobs/completions")
+async def recent_personal_task_completions(
+    authorization: str | None = Header(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    jobs = await followups.recent_completions(principal_id=principal_id, limit=limit)
+    return {"principal_id": principal_id, "count": len(jobs), "jobs": jobs}
+
+
+@app.get("/api/personal-assistant/jobs/diagnostics")
+async def personal_task_diagnostics(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await followups.diagnostics(principal_id=principal_id)
+
+
+@app.get("/api/personal-assistant/jobs/{job_id}")
+async def get_personal_task(
+    job_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    job = await followups.get(job_id, principal_id=principal_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Personal task not found")
+    return job
+
+
+@app.post("/api/personal-assistant/jobs/{job_id}/cancel")
+async def cancel_personal_task(
+    job_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    job = await followups.cancel(job_id, principal_id=principal_id, request_id=request.request_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Personal task not found")
+    return job
+
+
+@app.post("/api/personal-assistant/jobs/{job_id}/pause")
+async def pause_personal_task(
+    job_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    job = await followups.pause(job_id, principal_id=principal_id, request_id=request.request_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Personal task not found")
+    return job
+
+
+@app.post("/api/personal-assistant/jobs/{job_id}/resume")
+async def resume_personal_task(
+    job_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    job = await followups.resume(job_id, principal_id=principal_id, request_id=request.request_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Personal task not found")
+    return job
+
+
+@app.post("/api/personal-assistant/jobs/{job_id}/reschedule")
+async def reschedule_personal_task(
+    job_id: str,
+    request: PersonalTaskRescheduleRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    if request.due_at.tzinfo is None:
+        raise HTTPException(status_code=400, detail="due_at must include a timezone")
+    try:
+        job = await followups.reschedule(
+            job_id,
+            principal_id=principal_id,
+            due_at=request.due_at.astimezone(timezone.utc),
+            timezone_name=request.timezone,
+            request_id=request.request_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="Personal task not found")
+    return job
 
 
 @app.get("/api/integrations/actions")
@@ -1969,12 +1973,24 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
-    followup_result = await _try_create_time_followup(
+    memory_result = await _try_handle_explicit_memory(
         request.text,
-        storage_conversation_id,
+        actor=actor,
+        conversation_id=storage_conversation_id,
     )
-    if followup_result is not None:
-        response = str(followup_result["response"])
+    requested_timezone = str((trusted_context or {}).get("timezone") or "").strip()
+    personal_result = memory_result
+    if personal_result is None:
+        personal_result = await _try_handle_personal_task(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+            request_id=request.request_id,
+            timezone_name=requested_timezone or os.getenv("JARVIS_TIMEZONE", "Europe/London"),
+            endpoint=request.voice_endpoint_kind,
+        )
+    if personal_result is not None:
+        response = str(personal_result["response"])
         await conversations.add_user_message(
             conversation_id=storage_conversation_id,
             content=request.text,
@@ -1983,9 +1999,13 @@ async def _execute_ai_request(
             conversation_id=storage_conversation_id,
             content=response,
         )
-        followup_result.update(
+        personal_result.update(
             {
-                "model": "followup-engine",
+                "model": (
+                    "memory-engine"
+                    if str(personal_result.get("intent") or "").startswith("explicit_memory")
+                    else "followup-engine"
+                ),
                 "deterministic": True,
                 "tool_called": False,
                 "tool_rounds": 0,
@@ -1993,7 +2013,7 @@ async def _execute_ai_request(
                 "memory_used": False,
             }
         )
-        result = followup_result
+        result = personal_result
         result["conversation_id"] = external_conversation_id
         result["message_count"] = await conversations.message_count(storage_conversation_id)
         return result

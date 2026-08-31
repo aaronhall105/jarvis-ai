@@ -6,9 +6,10 @@ import calendar
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-DAYPART_HOURS = {"morning": 9, "afternoon": 14, "evening": 19}
+DAYPART_HOURS = {"morning": 9, "afternoon": 14, "evening": 19, "tonight": 19}
 WEEKDAYS = {name.lower(): index for index, name in enumerate(calendar.day_name)}
 MONTHS = {name.lower(): index for index, name in enumerate(calendar.month_name) if name}
 
@@ -18,6 +19,33 @@ class ResolvedSchedule:
     due_utc: datetime
     timezone_name: str
     description: str
+    reminder_text: str = "Your requested reminder is due."
+
+
+@dataclass(frozen=True, slots=True)
+class RecurrenceSchedule:
+    """A durable recurrence definition independent of the original wording."""
+
+    kind: str
+    timezone_name: str
+    description: str
+    hour: int | None = None
+    minute: int = 0
+    weekdays: tuple[int, ...] = ()
+    day_of_month: int | None = None
+    interval_seconds: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "kind": self.kind,
+            "timezone": self.timezone_name,
+            "description": self.description,
+            "hour": self.hour,
+            "minute": self.minute,
+            "weekdays": list(self.weekdays),
+            "day_of_month": self.day_of_month,
+            "interval_seconds": self.interval_seconds,
+        }
 
 
 def _clock(
@@ -37,6 +65,8 @@ def resolve_schedule(
     text: str, *, timezone_name: str = "Europe/London", now_utc: datetime | None = None
 ) -> ResolvedSchedule | None:
     """Resolve supported reminder language to one future canonical UTC instant."""
+    if len(text) > 5_000:
+        return None
     try:
         local_zone = ZoneInfo(timezone_name)
     except ZoneInfoNotFoundError:
@@ -48,8 +78,31 @@ def resolve_schedule(
     ):
         return None
 
+    relative = re.search(r"\bin\s+(\d{1,5})\s*(seconds?|minutes?|hours?|days?|weeks?)\b", value)
+    reminder_text = _reminder_text(value)
+    if relative:
+        amount = int(relative.group(1))
+        unit = relative.group(2)
+        multipliers = {
+            "second": 1,
+            "minute": 60,
+            "hour": 3600,
+            "day": 86400,
+            "week": 604800,
+        }
+        seconds = amount * multipliers[unit.rstrip("s")]
+        if not 1 <= seconds <= 10 * 366 * 86400:
+            return None
+        candidate = now + timedelta(seconds=seconds)
+        return ResolvedSchedule(
+            candidate.astimezone(timezone.utc),
+            timezone_name,
+            _relative_description(amount, unit),
+            reminder_text,
+        )
+
     time_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", value)
-    daypart_match = re.search(r"\b(morning|afternoon|evening)\b", value)
+    daypart_match = re.search(r"\b(morning|afternoon|evening|tonight)\b", value)
     daypart = daypart_match.group(1) if daypart_match else None
     clock = _clock(
         time_match.group(1) if time_match else None,
@@ -60,6 +113,13 @@ def resolve_schedule(
     if clock is None:
         return None
     hour, minute = clock
+    if (
+        time_match
+        and time_match.group(3) is None
+        and daypart in {"afternoon", "evening", "tonight"}
+        and 1 <= hour <= 11
+    ):
+        hour += 12
 
     target_date = None
     absolute = re.search(r"\b(?:on\s+)?(\d{1,2})\s+([a-z]+)(?:\s+(\d{4}))?\b", value)
@@ -83,6 +143,10 @@ def resolve_schedule(
         candidate = (now + timedelta(days=1)).replace(
             hour=hour, minute=minute, second=0, microsecond=0
         )
+    elif "today" in value:
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            return None
     else:
         weekday = next(
             (index for name, index in WEEKDAYS.items() if re.search(rf"\b{name}\b", value)), None
@@ -112,7 +176,174 @@ def resolve_schedule(
         candidate.astimezone(timezone.utc),
         timezone_name,
         candidate.strftime("%A %d %B at %H:%M %Z"),
+        reminder_text,
     )
+
+
+def _relative_description(amount: int, unit: str) -> str:
+    rendered_unit = unit.rstrip("s") if amount == 1 else unit.rstrip("s") + "s"
+    return f"in {amount} {rendered_unit}"
+
+
+def _reminder_text(value: str) -> str:
+    """Extract reminder content without retaining scheduling words as the message."""
+
+    cleaned = value.strip(" .!?")
+    if cleaned.startswith("remind me"):
+        cleaned = cleaned[len("remind me") :].strip()
+    # The content usually follows ``to`` or ``about``.  Taking the last marker
+    # avoids treating ``tomorrow``/``on Friday`` as the reminder itself.
+    marker = re.search(r"\b(?:to|about)\s+(.+)$", cleaned)
+    if marker:
+        content = marker.group(1).strip(" .!?")
+        if content:
+            return f"Reminder: {content}."
+    return "Your requested reminder is due."
+
+
+def resolve_recurrence(
+    text: str,
+    *,
+    timezone_name: str = "Europe/London",
+    now_utc: datetime | None = None,
+) -> tuple[RecurrenceSchedule, datetime, str] | None:
+    """Resolve supported recurring reminder language to a structured schedule."""
+
+    if len(text) > 5_000:
+        return None
+    try:
+        local_zone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return None
+    value = " ".join(text.casefold().strip(" .!?").split())
+    if not value.startswith("every ") and not value.startswith("remind me every "):
+        return None
+    explicit_reminder = value.startswith("remind me every ") or " remind me " in value
+    if not explicit_reminder:
+        return None
+    value = value[len("remind me ") :] if value.startswith("remind me ") else value
+    reminder_text = _recurring_reminder_text(value)
+    now = (now_utc or datetime.now(timezone.utc)).astimezone(local_zone)
+
+    interval = re.match(r"^every\s+(\d{1,4})\s+(hours?|minutes?)\b", value)
+    if interval:
+        amount = int(interval.group(1))
+        multiplier = 3600 if interval.group(2).startswith("hour") else 60
+        seconds = amount * multiplier
+        if not 60 <= seconds <= 30 * 86400:
+            return None
+        spec = RecurrenceSchedule(
+            kind="interval",
+            timezone_name=timezone_name,
+            description=f"every {amount} {interval.group(2)}",
+            interval_seconds=seconds,
+        )
+        return spec, (now + timedelta(seconds=seconds)).astimezone(timezone.utc), reminder_text
+
+    time_match = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", value)
+    daypart_match = re.search(r"\b(morning|afternoon|evening)\b", value)
+    clock = _clock(
+        time_match.group(1) if time_match else None,
+        time_match.group(2) if time_match else None,
+        time_match.group(3) if time_match else None,
+        DAYPART_HOURS.get(daypart_match.group(1) if daypart_match else "", 9),
+    )
+    if clock is None:
+        return None
+    hour, minute = clock
+
+    if value.startswith("every weekday ") or value.startswith("every weekday at "):
+        spec = RecurrenceSchedule(
+            kind="weekly",
+            timezone_name=timezone_name,
+            description=f"every weekday at {hour:02d}:{minute:02d}",
+            hour=hour,
+            minute=minute,
+            weekdays=(0, 1, 2, 3, 4),
+        )
+    else:
+        weekday = next(
+            (index for name, index in WEEKDAYS.items() if value.startswith(f"every {name} ")),
+            None,
+        )
+        if weekday is not None:
+            spec = RecurrenceSchedule(
+                kind="weekly",
+                timezone_name=timezone_name,
+                description=f"every {calendar.day_name[weekday]} at {hour:02d}:{minute:02d}",
+                hour=hour,
+                minute=minute,
+                weekdays=(weekday,),
+            )
+        else:
+            monthly = re.match(r"^every month on (?:the )?(\d{1,2})(?:st|nd|rd|th)?\b", value)
+            if monthly is None:
+                return None
+            day = int(monthly.group(1))
+            if not 1 <= day <= 31:
+                return None
+            spec = RecurrenceSchedule(
+                kind="monthly",
+                timezone_name=timezone_name,
+                description=f"every month on day {day} at {hour:02d}:{minute:02d}",
+                hour=hour,
+                minute=minute,
+                day_of_month=day,
+            )
+    next_run = next_recurrence(spec.as_dict(), after_utc=now.astimezone(timezone.utc))
+    return (spec, next_run, reminder_text) if next_run is not None else None
+
+
+def _recurring_reminder_text(value: str) -> str:
+    marker = re.search(r"\b(?:to|about)\s+(.+)$", value)
+    if marker:
+        content = marker.group(1).strip(" .!?")
+        if content:
+            return f"Recurring reminder: {content}."
+    return "Your recurring reminder is due."
+
+
+def next_recurrence(schedule: Mapping[str, Any], *, after_utc: datetime) -> datetime | None:
+    """Calculate the first occurrence strictly after a canonical UTC instant."""
+
+    if after_utc.tzinfo is None:
+        after_utc = after_utc.replace(tzinfo=timezone.utc)
+    kind = str(schedule.get("kind") or "")
+    if kind == "interval":
+        seconds = int(schedule.get("interval_seconds") or 0)
+        if not 60 <= seconds <= 30 * 86400:
+            return None
+        return after_utc.astimezone(timezone.utc) + timedelta(seconds=seconds)
+    try:
+        zone = ZoneInfo(str(schedule.get("timezone") or ""))
+    except ZoneInfoNotFoundError:
+        return None
+    hour_value = schedule.get("hour")
+    hour = int(hour_value) if isinstance(hour_value, (str, int)) else 9
+    minute = int(schedule.get("minute") or 0)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    local_after = after_utc.astimezone(zone)
+    for offset in range(0, 370):
+        day = local_after.date() + timedelta(days=offset)
+        if kind == "weekly":
+            weekdays = {int(item) for item in schedule.get("weekdays") or []}
+            if day.weekday() not in weekdays:
+                continue
+        elif kind == "monthly":
+            if day.day != int(schedule.get("day_of_month") or 0):
+                continue
+        else:
+            return None
+        candidate = datetime.combine(day, datetime.min.time(), zone).replace(
+            hour=hour, minute=minute
+        )
+        roundtrip = candidate.astimezone(timezone.utc).astimezone(zone)
+        if roundtrip.replace(tzinfo=None) != candidate.replace(tzinfo=None):
+            continue
+        if candidate > local_after:
+            return candidate.astimezone(timezone.utc)
+    return None
 
 
 # This parser is deliberately deterministic because it receives raw user text.
