@@ -734,6 +734,12 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
             if item["subject"] == "favourite takeaway"
         ]
         self.assertEqual(remaining_takeaway, [])
+        post_forget = await restarted.handle_explicit_command(
+            "Do you remember my favourite takeaway", owner_key="aaron"
+        )
+        self.assertEqual(post_forget["memories"], [])
+        self.assertIn("don’t have", post_forget["response"])
+        self.assertNotIn("purple", post_forget["response"].casefold())
         self.assertIsNone(
             await restarted.handle_explicit_command("Remember " + "a" * 10_000, owner_key="aaron")
         )

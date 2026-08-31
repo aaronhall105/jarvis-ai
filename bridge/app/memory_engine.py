@@ -1398,7 +1398,15 @@ class MemoryEngine:
         query: str,
         matches: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Prefer one exact personal subject over broader semantic matches."""
+        """Keep explicit recall focused on the subject the user named.
+
+        General memory search intentionally has broad semantic recall.  An
+        explicit question or forget command is narrower: matching one word in
+        two different memories must not be presented as evidence for the
+        requested fact.  Concept queries such as ``health conditions`` retain
+        their semantic expansion because those concepts are deliberately
+        defined above.
+        """
 
         normalized = " ".join(query.casefold().split())
         if normalized.startswith("my "):
@@ -1408,4 +1416,32 @@ class MemoryEngine:
             for item in matches
             if " ".join(str(item.get("subject") or "").casefold().split()) == normalized
         ]
-        return exact or matches
+        if exact:
+            return exact
+
+        ignored = {"about", "i", "me", "my", "that", "the", "told", "you"}
+        query_tokens = set(re.findall(r"[a-z0-9]+", normalized)) - ignored
+        if not query_tokens:
+            return matches
+        fully_matching = []
+        for item in matches:
+            candidate = " ".join(
+                (
+                    str(item.get("subject") or ""),
+                    str(item.get("content") or ""),
+                )
+            ).casefold()
+            candidate_tokens = set(re.findall(r"[a-z0-9]+", candidate))
+            if query_tokens.issubset(candidate_tokens):
+                fully_matching.append(item)
+        if fully_matching:
+            return fully_matching
+
+        semantic_concepts = {
+            name
+            for name, pattern in MemoryEngine._QUERY_CONCEPT_PATTERNS.items()
+            if name != "preference_profile" and pattern.search(normalized)
+        }
+        if semantic_concepts:
+            return matches
+        return matches if len(query_tokens) == 1 else []
