@@ -244,6 +244,27 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.handled)
         self.assertEqual(await self.engine.list(principal_id="aaron"), [])
 
+    async def test_adversarial_whitespace_commands_use_bounded_parsing(self):
+        padding = " " * 4_000
+        for command in (
+            f"pause {padding}unknown monitor",
+            f"move unknown reminder {padding}to Friday",
+            f"tell me when unknown device {padding}is online",
+            f"every 2 hours check whether unknown page {padding}has changed",
+        ):
+            await asyncio.wait_for(self._command(command), timeout=0.5)
+
+        memories = MemoryEngine(str(self.root / "bounded-memory.db"))
+        for command in (
+            f"Do you remember {padding}nothing",
+            f"Forget {padding}nothing",
+            f"Remember my {padding}preference is tea",
+        ):
+            await asyncio.wait_for(
+                memories.handle_explicit_command(command, owner_key="aaron"),
+                timeout=0.5,
+            )
+
     async def test_cancelled_task_never_executes(self):
         created = await self._command(
             "Remind me in 45 minutes to call the dentist", request_id="turn-cancel-create"
