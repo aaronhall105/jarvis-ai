@@ -1554,11 +1554,16 @@ class FollowUpEngine:
                     "resume": "pending",
                 }[operation]
             )
+            success_verb = {
+                "cancel": "Cancelled",
+                "pause": "Paused",
+                "resume": "Resumed",
+            }[operation]
             return FollowUpCommandResult(
                 True,
                 changed,
                 (
-                    f"{operation.title()}d task {str(job['job_id'])[:8]}."
+                    f"{success_verb} task {str(job['job_id'])[:8]}."
                     if changed
                     else f"I couldn’t {operation} that task in its current state."
                 ),
