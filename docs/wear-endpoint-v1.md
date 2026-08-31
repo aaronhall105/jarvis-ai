@@ -1,74 +1,117 @@
-# Jarvis Wear Endpoint v1
+# Jarvis Wear OS endpoint
 
-The v1.1 certification pass adds an inset-aware round-screen conversation UI,
-streamed user/assistant transcripts, native Wear text input, and end-to-end
-latency/audio diagnostics. Voice and typed turns share the active Core
-conversation ID. The monochrome `J A R V I S` wordmark replaces the former
-circular J artwork on phone and watch.
+The current Wear OS client is part of the unified `v19.0.0-alpha25` Android
+project. It is a microphone, speaker, Tile, and assistant endpoint for the same
+Jarvis Brain and conversation system used by the Phone.
 
-The Wear app is a microphone/speaker endpoint; the paired phone remains the Jarvis Core network and processing hub. Both APKs use `com.aaron.jarvisvoice` and must be signed with the same certificate so Google Play services permits their private Data Layer relationship.
+Phone and Watch use package `com.aaron.jarvisvoice`, the same production
+signing identity, and the shared `wearprotocol` module. They must be built from
+one approved source revision.
 
-## Architecture and audio routing
+## Architecture and routing
 
-`JarvisWearActivity`, the Tile, and the official voice-assistant session all start one `WearVoiceService` conversation. `WearConversationController` owns the `IDLE → LISTENING → PROCESSING → SPEAKING → LISTENING` lifecycle and a configurable eight-second no-speech timeout. The recorder exists only during an active listening state and is stopped/released in `IDLE`, processing, speaking, cancellation, failure, and disconnect states.
+`JarvisWearActivity`, `JarvisTileService`, and the assistant entry point start
+the Wear voice lifecycle through `WearVoiceService`. The controller owns
+listening, processing, speaking, cancellation, timeout, and disconnect state.
+Microphone and playback resources are released when they are no longer owned by
+the active Watch session.
 
-Audio is PCM16, mono, 24 kHz, matching Alpha19's realtime pipeline. `WearChannelManager` opens `/jarvis/watch/voice/v1` with the official Wear OS `ChannelClient`. The phone's `WearVoiceBridge` feeds watch microphone frames into the existing `JarvisRealtimeClient`. `AudioEndpointRouter` explicitly binds the session to `WATCH`; realtime response frames are then sent to `WearAudioPlayer` and never to phone `AudioTrack`. Phone sessions retain the existing phone sink. Session generations scope every frame, so cancellation flushes output and rejects stale audio.
+`WearChannelManager` uses the Wear OS Data Layer channel to move microphone,
+control, transcript, status, and audio messages between Watch and Phone. Shared
+protocol definitions live in `wearprotocol/`; do not create device-specific
+copies.
 
-The phone authenticates Watch sessions to Core with `endpoint=WATCH` and forces the realtime `LIVE` input mode because Core intentionally ignores raw PCM in `STANDARD` mode. It preserves the phone's existing conversation ID, so follow-up turns retain context. Starting a later phone session restores the phone's configured conversation mode and `endpoint=PHONE`.
+The Phone bridge connects Watch turns to the authenticated Core realtime
+runtime with endpoint kind `WATCH`. Core owns principal identity, conversation
+context, turn admission, memory, Brain processing, and response state. Response
+audio is routed to the active Watch endpoint rather than Phone playback.
+Generation and turn identifiers reject stale frames after cancellation or
+handover.
 
-The watch X sends the existing Core turn cancellation through `VoiceService`, stops capture/playback, ends the active interaction, and returns to Ready. The authenticated Core client and healthy Data Layer channel remain warm for the next explicit start; neither microphone is active while Ready. Natural closing phrases use the existing `ConversationEndPolicy`. Link/Core failures display a short error and safely end the watch session.
+A Watch turn uses the same Core conversation identifier as the paired Phone
+where appropriate. A later Phone turn can therefore continue the conversation
+without creating a second Watch-only history.
 
-## Install and pair
+## Build from unified-production
 
-Build and install phone and watch debug APKs from the same checkout/signing configuration. Pair the Galaxy Watch with the phone in its normal Wear OS companion app and ensure Google Play services is enabled on both. The Data Layer is not available when a Wear OS watch is paired to iOS.
+From the repository root:
 
 ```bash
-cd /home/aaron/jarvis-wear/android/jarvis-voice-client
-ANDROID_HOME=/home/aaron/Android/Sdk \
-ANDROID_SDK_ROOT=/home/aaron/Android/Sdk \
-./gradlew \
+cd android/jarvis-voice-client
+ANDROID_HOME=/path/to/Android/Sdk \
+ANDROID_SDK_ROOT=/path/to/Android/Sdk \
+./gradlew --no-daemon \
+  :wearprotocol:test \
+  :app:testDebugUnitTest :wear:testDebugUnitTest \
   :app:assembleDebug :wear:assembleDebug
 ```
 
-The APKs are:
+Debug APKs are generated at:
 
-- phone: `app/build/outputs/apk/debug/app-debug.apk`
-- watch: `wear/build/outputs/apk/debug/wear-debug.apk`
+- Phone: `app/build/outputs/apk/debug/app-debug.apk`
+- Watch: `wear/build/outputs/apk/debug/wear-debug.apk`
 
-Enable wireless debugging on the watch, pair ADB using the pairing address/code shown by Wear OS, and then connect using the separate debugging address:
+Production APKs are built and signed only by the approved tag-triggered release
+workflow. Do not use debug signing to update a production-installed app.
+
+## Pair and install for development
+
+Pair the Watch with the Phone through its normal Wear OS companion application
+and ensure Google Play services is available on both. Enable wireless debugging
+on the Watch, pair ADB using the displayed pairing address/code, then connect
+using the separate debugging address:
 
 ```bash
 adb pair WATCH_IP:PAIRING_PORT
 adb connect WATCH_IP:DEBUG_PORT
-adb -s WATCH_IP:DEBUG_PORT install -r wear/build/outputs/apk/debug/wear-debug.apk
+adb -s WATCH_IP:DEBUG_PORT install -r \
+  wear/build/outputs/apk/debug/wear-debug.apk
 ```
 
-Install the phone APK through the phone's own ADB serial if it is not already on the matching build:
+Use the Phone's own authorized serial for a matching debug Phone build:
 
 ```bash
 adb devices -l
 adb -s PHONE_SERIAL install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Both APKs must come from the same checkout and signing key. Release signing uses the same `JARVIS_SIGNING_*` environment variables in both modules. The default debug builds use the same local Android debug certificate automatically.
+Never uninstall or clear Phone/Watch application data as a workaround. Both
+clients must come from the same source revision and compatible signing identity.
 
-Add the **Jarvis** Tile from the watch Tile picker. Tapping it opens the conversation screen and starts listening after microphone permission is granted.
+## Tile and assistant
 
-For assistant launch, open the watch's default digital-assistant settings and select **Jarvis** if the device exposes third-party assistant selection. Jarvis declares the official `VoiceInteractionService`, session service, and `ACTION_ASSIST` entry point. Samsung One UI Watch support for assigning the long-press Home assistant shortcut varies and must be verified on the target watch. If Jarvis is not offered for long-press, assign its launcher activity to the supported Home-button double-press app shortcut. No accessibility service or Samsung-specific interception is used.
+Add the Jarvis Tile from the Watch Tile picker. Tapping it opens the
+conversation screen and requests microphone permission when needed.
 
-For development, the official Assistant role can also be requested over ADB where the watch build exposes Android's role command:
+For assistant launch, select Jarvis in the Watch digital-assistant settings when
+the device exposes third-party assistant selection. Samsung One UI Watch
+support for assigning the long-press Home shortcut varies by device/version and
+must be verified physically. A supported launcher double-press shortcut may be
+used when third-party long-press assignment is unavailable. Jarvis does not use
+an accessibility service or private Samsung interception.
+
+For development, the assistant role can be requested where Android exposes its
+role command:
 
 ```bash
 adb -s WATCH_IP:DEBUG_PORT shell cmd role add-role-holder \
   android.app.role.ASSISTANT com.aaron.jarvisvoice
 ```
 
-The no-speech timeout defaults to eight seconds and is bounded to 3–60 seconds. Three consecutive speech-level PCM frames disarm it; every new follow-up listening window rearms it. Product builds can change the `com.aaron.jarvisvoice.WATCH_INACTIVITY_TIMEOUT_MS` application metadata value without adding watch settings UI.
-
 ## Physical validation checklist
 
-- Verify microphone permission and foreground-service prompts on the target One UI Watch version.
-- Verify Tile installation/launch and round-screen layout.
-- Verify Assistant-role availability, long-press behavior, and Home double-press assignment.
-- Verify watch speaker routing, Bluetooth/Wi-Fi Data Layer handoff, immediate X cancellation, natural closing phrases, and eight-second no-speech timeout.
-- Check basic turn-taking first; enable/assess full-duplex barge-in only if the physical watch audio stack provides reliable echo control.
+- Confirm the installed Phone and Watch versions and signer match.
+- Confirm existing Watch settings remain after an in-place update.
+- Verify microphone and foreground-service permission flows.
+- Verify Tile installation, launch, and round-screen layout.
+- Verify assistant-role availability and configured hardware shortcut.
+- Verify Watch microphone input, Brain response, and Watch speaker playback.
+- Verify stop/interruption and stale-audio rejection.
+- Verify Bluetooth/Wi-Fi Data Layer handover and bounded channel timeout.
+- Start a conversation on Watch and continue it on Phone using the same Core
+  conversation.
+- Start a conversation on Phone and continue it on Watch where appropriate.
+- Confirm endpoint routing never plays Watch-owned audio through the Phone.
+
+Do not report Watch physical validation as passed unless these checks were
+performed on the target hardware.
