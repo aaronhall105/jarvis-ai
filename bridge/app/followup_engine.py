@@ -1496,12 +1496,23 @@ class FollowUpEngine:
                 details={"jobs": jobs},
             )
 
-        management = re.match(
-            r"^(cancel|pause|resume)\s+(?:my\s+)?(.+?)(?:\s+(?:reminder|monitor|task))?$",
-            lowered,
-        )
-        if management:
-            operation, reference = management.group(1), management.group(2).strip()
+        management: tuple[str, str] | None = None
+        for candidate_operation in ("cancel", "pause", "resume"):
+            prefix = candidate_operation + " "
+            if not lowered.startswith(prefix):
+                continue
+            reference = lowered[len(prefix) :].strip()
+            if reference.startswith("my "):
+                reference = reference[3:].strip()
+            for suffix in (" reminder", " monitor", " task"):
+                if reference.endswith(suffix):
+                    reference = reference[: -len(suffix)].strip()
+                    break
+            if reference:
+                management = (candidate_operation, reference)
+            break
+        if management is not None:
+            operation, reference = management
             candidates = await self._resolve_job_reference(
                 reference,
                 principal_id=principal_id,
@@ -1555,13 +1566,34 @@ class FollowUpEngine:
                 {"job": updated},
             )
 
-        reschedule_match = re.match(
-            r"^(?:move|change|reschedule)\s+(.+?)\s+(?:to|for)\s+(.+)$", lowered
-        )
-        if reschedule_match:
-            reference, timing = reschedule_match.groups()
-            reference = re.sub(r"^(?:that|the|my)\s+", "", reference).strip()
-            reference = re.sub(r"\s+(?:reminder|task)$", "", reference).strip() or "that"
+        reschedule_parts: tuple[str, str] | None = None
+        for operation_prefix in ("move ", "change ", "reschedule "):
+            if not lowered.startswith(operation_prefix):
+                continue
+            remainder = lowered[len(operation_prefix) :]
+            markers = [
+                (remainder.find(marker), marker)
+                for marker in (" to ", " for ")
+                if remainder.find(marker) >= 0
+            ]
+            if markers:
+                position, marker = min(markers)
+                reference = remainder[:position].strip()
+                timing = remainder[position + len(marker) :].strip()
+                if reference and timing:
+                    reschedule_parts = (reference, timing)
+            break
+        if reschedule_parts is not None:
+            reference, timing = reschedule_parts
+            for prefix in ("that ", "the ", "my "):
+                if reference.startswith(prefix):
+                    reference = reference[len(prefix) :].strip()
+                    break
+            for suffix in (" reminder", " task"):
+                if reference.endswith(suffix):
+                    reference = reference[: -len(suffix)].strip()
+                    break
+            reference = reference or "that"
             candidates = await self._resolve_job_reference(
                 reference,
                 principal_id=principal_id,
@@ -1767,13 +1799,17 @@ class FollowUpEngine:
         originating_endpoint: str | None,
     ) -> FollowUpCommandResult | None:
         lowered = text.casefold()
-        prefix = re.match(r"^(?:tell me|let me know)\s+(?:if|when)\s+(.+)$", lowered)
-        if prefix is None:
+        condition_text: str | None = None
+        for prefix in ("tell me if ", "tell me when ", "let me know if ", "let me know when "):
+            if lowered.startswith(prefix):
+                condition_text = lowered[len(prefix) :].strip()
+                break
+        if not condition_text:
             return None
-        condition_text = prefix.group(1).strip()
         comparison, wanted = "equals", "on"
         if condition_text.endswith(" changes") or condition_text.endswith(" changes state"):
-            query = re.sub(r"\s+changes(?: state)?$", "", condition_text).strip()
+            suffix = " changes state" if condition_text.endswith(" changes state") else " changes"
+            query = condition_text[: -len(suffix)].strip()
             comparison, wanted = "changed", ""
         elif condition_text.endswith(" comes back online"):
             query = condition_text[: -len(" comes back online")].strip()
@@ -1788,17 +1824,26 @@ class FollowUpEngine:
             query = condition_text[: -len(" detects a person")].strip()
             wanted = "on"
         else:
-            state_match = re.match(
-                r"^(.+?)\s+(?:is|becomes|reports)\s+([a-z0-9_-]+)$", condition_text
-            )
-            if state_match is None:
+            state_parts: tuple[str, str] | None = None
+            for marker in (" is ", " becomes ", " reports "):
+                if marker not in condition_text:
+                    continue
+                query_part, _, state_part = condition_text.rpartition(marker)
+                if (
+                    query_part.strip()
+                    and state_part
+                    and all(character.isalnum() or character in "_-" for character in state_part)
+                ):
+                    state_parts = (query_part.strip(), state_part)
+                break
+            if state_parts is None:
                 return FollowUpCommandResult(
                     True,
                     False,
                     "I couldn’t resolve that condition to verified capability evidence, so I did not create a monitor.",
                     "personal_monitor_create",
                 )
-            query, wanted = state_match.groups()
+            query, wanted = state_parts
         try:
             states = await self.states.readable_entity_states(refresh=True)
         except Exception:
@@ -1868,25 +1913,34 @@ class FollowUpEngine:
         originating_endpoint: str | None,
     ) -> FollowUpCommandResult | None:
         lowered = text.casefold()
-        timed = re.match(
-            r"^every\s+(\d{1,4})\s+(minutes?|hours?)\s+check\s+"
-            r"(?:whether|if)\s+(.+?)(?:\s+has)?\s+changed$",
-            lowered,
-        )
         interval_seconds = 3600
         query: str | None = None
-        if timed:
-            amount = int(timed.group(1))
-            interval_seconds = amount * (3600 if timed.group(2).startswith("hour") else 60)
-            query = timed.group(3).strip()
-        else:
-            continuous = re.match(
-                r"^keep checking\s+(.+?)(?:\s+and\s+(?:tell|let)\s+me\s+"
-                r"when\s+it\s+changes)?$",
-                lowered,
-            )
-            if continuous:
-                query = continuous.group(1).strip()
+        words = lowered.split()
+        if (
+            len(words) >= 7
+            and words[0] == "every"
+            and words[1].isdigit()
+            and len(words[1]) <= 4
+            and words[2] in {"minute", "minutes", "hour", "hours"}
+            and words[3] == "check"
+            and words[4] in {"whether", "if"}
+            and words[-1] == "changed"
+        ):
+            amount = int(words[1])
+            interval_seconds = amount * (3600 if words[2].startswith("hour") else 60)
+            query_words = words[5:-1]
+            if query_words and query_words[-1] == "has":
+                query_words = query_words[:-1]
+            query = " ".join(query_words).strip() or None
+        elif lowered.startswith("keep checking "):
+            query = lowered[len("keep checking ") :].strip()
+            for suffix in (
+                " and tell me when it changes",
+                " and let me when it changes",
+            ):
+                if query.endswith(suffix):
+                    query = query[: -len(suffix)].strip()
+                    break
         if query is None:
             return None
         if not 60 <= interval_seconds <= 30 * 86400:

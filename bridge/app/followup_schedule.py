@@ -191,14 +191,27 @@ def _reminder_text(value: str) -> str:
     cleaned = value.strip(" .!?")
     if cleaned.startswith("remind me"):
         cleaned = cleaned[len("remind me") :].strip()
-    # The content usually follows ``to`` or ``about``.  Taking the last marker
-    # avoids treating ``tomorrow``/``on Friday`` as the reminder itself.
-    marker = re.search(r"\b(?:to|about)\s+(.+)$", cleaned)
-    if marker:
-        content = marker.group(1).strip(" .!?")
-        if content:
-            return f"Reminder: {content}."
+    content = _content_after_last_marker(cleaned)
+    if content:
+        return f"Reminder: {content}."
     return "Your requested reminder is due."
+
+
+def _content_after_last_marker(value: str) -> str:
+    """Extract reminder content with bounded string scans, not backtracking."""
+
+    candidates: list[tuple[int, int]] = []
+    for prefix in ("to ", "about "):
+        if value.startswith(prefix):
+            candidates.append((0, len(prefix)))
+    for marker in (" to ", " about "):
+        position = value.rfind(marker)
+        if position >= 0:
+            candidates.append((position, len(marker)))
+    if not candidates:
+        return ""
+    position, marker_length = max(candidates)
+    return value[position + marker_length :].strip(" .!?")
 
 
 def resolve_recurrence(
@@ -295,11 +308,9 @@ def resolve_recurrence(
 
 
 def _recurring_reminder_text(value: str) -> str:
-    marker = re.search(r"\b(?:to|about)\s+(.+)$", value)
-    if marker:
-        content = marker.group(1).strip(" .!?")
-        if content:
-            return f"Recurring reminder: {content}."
+    content = _content_after_last_marker(value)
+    if content:
+        return f"Recurring reminder: {content}."
     return "Your recurring reminder is due."
 
 

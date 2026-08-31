@@ -1241,9 +1241,13 @@ class MemoryEngine:
                 "memories": personal,
             }
 
-        recall = re.match(r"^(?:do you remember|what do you remember about)\s+(.+)$", lowered)
-        if recall:
-            matches = await self.search(recall.group(1), limit=8, owner_key=owner)
+        recall_query: str | None = None
+        for prefix in ("do you remember ", "what do you remember about "):
+            if lowered.startswith(prefix):
+                recall_query = lowered[len(prefix) :].strip()
+                break
+        if recall_query:
+            matches = await self.search(recall_query, limit=8, owner_key=owner)
             personal = [
                 item
                 for item in matches
@@ -1265,11 +1269,16 @@ class MemoryEngine:
                 "focus_memory": personal[0] if personal else None,
             }
 
-        forget = re.match(
-            r"^(?:please\s+)?forget(?:\s+what i told you)?(?:\s+about)?\s+(.+)$", lowered
-        )
-        if forget:
-            query = forget.group(1).strip()
+        forget_text = lowered[7:].strip() if lowered.startswith("please ") else lowered
+        forget_query: str | None = None
+        if forget_text.startswith("forget "):
+            forget_query = forget_text[len("forget ") :].strip()
+            if forget_query.startswith("what i told you"):
+                forget_query = forget_query[len("what i told you") :].strip()
+            if forget_query.startswith("about "):
+                forget_query = forget_query[len("about ") :].strip()
+        if forget_query:
+            query = forget_query
             if query in {"that", "it"}:
                 candidates = [{"id": focused_memory_id}] if focused_memory_id is not None else []
             else:
@@ -1303,21 +1312,32 @@ class MemoryEngine:
                 "memory_id": memory_id,
             }
 
-        remember = re.match(
-            r"^(?:actually\s+)?(?:please\s+)?(?:remember|don['’]?t forget)\s+"
-            r"(?:that\s+)?(.+)$",
-            value,
-            re.I,
-        )
-        if remember is None or re.match(
-            r"^(?:to|when|where|who|what|why|how)\b", remember.group(1), re.I
-        ):
+        remember_text = value
+        for optional_prefix in ("actually ", "please "):
+            if remember_text.casefold().startswith(optional_prefix):
+                remember_text = remember_text[len(optional_prefix) :].strip()
+        fact: str | None = None
+        for prefix in ("remember ", "don't forget ", "don’t forget "):
+            if remember_text.casefold().startswith(prefix):
+                fact = remember_text[len(prefix) :].strip()
+                break
+        if fact is not None and fact.casefold().startswith("that "):
+            fact = fact[5:].strip()
+        first_word = fact.casefold().split(maxsplit=1)[0] if fact else ""
+        if not fact or first_word in {"to", "when", "where", "who", "what", "why", "how"}:
             return None
-        fact = remember.group(1).strip()
-        preference = re.match(r"^my\s+(.+?)\s+is\s+(.+)$", fact, re.I)
-        if preference:
-            subject = " ".join(preference.group(1).casefold().split())
-            content = f"My {preference.group(1).strip()} is {preference.group(2).strip()}."
+        preference_parts: tuple[str, str] | None = None
+        if fact.casefold().startswith("my "):
+            separator = fact.casefold().find(" is ", 3)
+            if separator >= 0:
+                preference_subject = fact[3:separator].strip()
+                preference_value = fact[separator + 4 :].strip()
+                if preference_subject and preference_value:
+                    preference_parts = (preference_subject, preference_value)
+        if preference_parts is not None:
+            preference_subject, preference_value = preference_parts
+            subject = " ".join(preference_subject.casefold().split())
+            content = f"My {preference_subject} is {preference_value}."
             category = (
                 "preference"
                 if any(
@@ -1326,10 +1346,9 @@ class MemoryEngine:
                 else "personal"
             )
         else:
-            prefers = re.match(r"^i prefer\s+(.+)$", fact, re.I)
-            if prefers:
+            if fact.casefold().startswith("i prefer ") and fact[9:].strip():
                 subject = "general preference"
-                content = f"I prefer {prefers.group(1).strip()}."
+                content = f"I prefer {fact[9:].strip()}."
                 category = "preference"
             else:
                 subject = " ".join(fact.casefold().split())[:150]
