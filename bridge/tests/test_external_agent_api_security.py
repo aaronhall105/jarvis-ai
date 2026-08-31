@@ -28,6 +28,14 @@ MOBILE_ACCOUNT_ROUTES = {
     ("post", "/api/integrations/mobile/google/start"),
     ("get", "/api/integrations/mobile/google/sessions/{session_id}"),
     ("delete", "/api/integrations/mobile/google/accounts/{account_id}"),
+    ("get", "/api/personal-assistant/jobs"),
+    ("get", "/api/personal-assistant/jobs/completions"),
+    ("get", "/api/personal-assistant/jobs/diagnostics"),
+    ("get", "/api/personal-assistant/jobs/{job_id}"),
+    ("post", "/api/personal-assistant/jobs/{job_id}/cancel"),
+    ("post", "/api/personal-assistant/jobs/{job_id}/pause"),
+    ("post", "/api/personal-assistant/jobs/{job_id}/resume"),
+    ("post", "/api/personal-assistant/jobs/{job_id}/reschedule"),
 }
 
 

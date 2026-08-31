@@ -26,7 +26,9 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 - Persistent conversations and Memory
 - Grounded Home Assistant reads and verified writes
 - Fresh presence evidence and room-aware grounding
-- Durable, retry-safe follow-ups delivered to the originating conversation
+- Timezone-aware reminders, structured recurrence, verified condition watches,
+  and retry-safe completion delivered once to the originating conversation
+- Principal-scoped explicit personal memory with correction, recall, and forget
 - Realtime turn admission, ledger, terminal states, response fencing, and recovery
 - Proactive intelligence, vision/camera support, health, and observability
 

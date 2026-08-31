@@ -112,6 +112,7 @@ upgrade workaround.
 - [Validation status](TESTED.md)
 - [Documentation index](docs/README.md)
 - [Product baseline](docs/JARVIS_PRODUCT_BASELINE.md)
+- [Personal Assistant v1](docs/PERSONAL_ASSISTANT_V1.md)
 - [Integrations & Accounts](docs/INTEGRATIONS_ACCOUNTS_V1.md)
 - [External Agent Platform](docs/EXTERNAL_AGENT_PLATFORM.md)
 - [Developer mode](docs/developer-mode.md)

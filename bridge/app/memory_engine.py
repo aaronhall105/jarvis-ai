@@ -1203,3 +1203,159 @@ class MemoryEngine:
             "visibility_modes": sorted(self.VALID_VISIBILITIES),
             "database": self.database_path.name,
         }
+
+    async def handle_explicit_command(
+        self,
+        text: str,
+        *,
+        owner_key: str,
+        focused_memory_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Handle explicit remember/recall/forget language without model inference."""
+
+        if len(text) > 5_000:
+            return None
+        value = " ".join(str(text).strip().rstrip(".!?").split())
+        lowered = value.casefold()
+        owner = self._owner(owner_key)
+        if re.fullmatch(r"what do you remember about me", lowered):
+            visible = await self.list_memories(limit=100, owner_key=owner)
+            personal = [
+                item
+                for item in visible
+                if str(item.get("subject_key") or "") == owner
+                and str(item.get("owner_key") or "") == owner
+            ]
+            return {
+                "success": True,
+                "response": (
+                    "I remember: "
+                    + "; ".join(
+                        str(item.get("content") or item.get("subject")) for item in personal[:12]
+                    )
+                    + "."
+                    if personal
+                    else "I don’t have any explicit personal memories saved for you."
+                ),
+                "intent": "explicit_memory_list",
+                "memories": personal,
+            }
+
+        recall = re.match(r"^(?:do you remember|what do you remember about)\s+(.+)$", lowered)
+        if recall:
+            matches = await self.search(recall.group(1), limit=8, owner_key=owner)
+            personal = [
+                item
+                for item in matches
+                if str(item.get("subject_key") or "") == owner
+                and str(item.get("owner_key") or "") == owner
+            ]
+            return {
+                "success": True,
+                "response": (
+                    "Yes. I remember: "
+                    + "; ".join(
+                        str(item.get("content") or item.get("subject")) for item in personal[:5]
+                    )
+                    if personal
+                    else "I don’t have an explicit memory about that for you."
+                ),
+                "intent": "explicit_memory_recall",
+                "memories": personal,
+                "focus_memory": personal[0] if personal else None,
+            }
+
+        forget = re.match(
+            r"^(?:please\s+)?forget(?:\s+what i told you)?(?:\s+about)?\s+(.+)$", lowered
+        )
+        if forget:
+            query = forget.group(1).strip()
+            if query in {"that", "it"}:
+                candidates = [{"id": focused_memory_id}] if focused_memory_id is not None else []
+            else:
+                matches = await self.search(query, limit=8, owner_key=owner)
+                candidates = [
+                    item
+                    for item in matches
+                    if str(item.get("owner_key") or "") == owner
+                    and str(item.get("subject_key") or "") == owner
+                ]
+            if len(candidates) != 1:
+                return {
+                    "success": False,
+                    "response": (
+                        "I couldn’t find an explicit personal memory matching that."
+                        if not candidates
+                        else "More than one personal memory matches. Please tell me which one to forget."
+                    ),
+                    "intent": "explicit_memory_forget",
+                }
+            memory_id = int(candidates[0]["id"])
+            deleted = await self.delete_by_id(memory_id, owner_key=owner)
+            return {
+                "success": deleted,
+                "response": (
+                    "I removed that personal memory."
+                    if deleted
+                    else "I could not verify that the memory was removed."
+                ),
+                "intent": "explicit_memory_forget",
+                "memory_id": memory_id,
+            }
+
+        remember = re.match(
+            r"^(?:actually\s+)?(?:please\s+)?(?:remember|don['’]?t forget)\s+"
+            r"(?:that\s+)?(.+)$",
+            value,
+            re.I,
+        )
+        if remember is None or re.match(
+            r"^(?:to|when|where|who|what|why|how)\b", remember.group(1), re.I
+        ):
+            return None
+        fact = remember.group(1).strip()
+        preference = re.match(r"^my\s+(.+?)\s+is\s+(.+)$", fact, re.I)
+        if preference:
+            subject = " ".join(preference.group(1).casefold().split())
+            content = f"My {preference.group(1).strip()} is {preference.group(2).strip()}."
+            category = (
+                "preference"
+                if any(
+                    token in subject for token in ("favourite", "favorite", "prefer", "preference")
+                )
+                else "personal"
+            )
+        else:
+            prefers = re.match(r"^i prefer\s+(.+)$", fact, re.I)
+            if prefers:
+                subject = "general preference"
+                content = f"I prefer {prefers.group(1).strip()}."
+                category = "preference"
+            else:
+                subject = " ".join(fact.casefold().split())[:150]
+                content = fact[0].upper() + fact[1:] + ("" if fact.endswith(".") else ".")
+                category = "personal"
+        try:
+            saved = await self.save(
+                category=category,
+                subject=subject,
+                content=content,
+                owner_key=owner,
+                subject_key=owner,
+                visibility="private",
+                source="explicit_user",
+                confidence=1.0,
+            )
+        except (MemoryError, sqlite3.Error):
+            return {
+                "success": False,
+                "response": "I could not durably save that memory, so I did not remember it.",
+                "intent": "explicit_memory_save_failed",
+            }
+        return {
+            "success": True,
+            "response": f"I saved that personal memory: {saved['content']}",
+            "intent": "explicit_memory_save",
+            "memory": saved,
+            "focus_memory": saved,
+        }
