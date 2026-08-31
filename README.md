@@ -1,117 +1,129 @@
 # Jarvis AI
 
 [![Jarvis CI](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml/badge.svg?branch=jarvis%2Funified-production)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml)
+[![CodeQL](https://github.com/aaronhall105/jarvis-ai/actions/workflows/codeql.yml/badge.svg?branch=jarvis%2Funified-production)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/codeql.yml)
 [![Android OTA release](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml/badge.svg)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml)
-[![Release](https://img.shields.io/badge/release-v19.0.0--alpha13-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13)
+[![Release](https://img.shields.io/badge/release-v19.0.0--alpha25-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha25)
 
-A self-hosted realtime AI assistant for Android and Home Assistant.
+Jarvis is a self-hosted unified AI assistant with one authoritative Brain/Core,
+an Android Phone client, a Wear OS client, Home Assistant capabilities,
+realtime voice, durable work, integrations, and controlled developer tooling.
 
-Jarvis combines an Android voice-and-chat client, a Docker-hosted AI Core and
-Home Assistant tooling. The Core remains authoritative for conversation,
-memory, model access and smart-home actions.
+> **Current product:** `v19.0.0-alpha25` on the sole long-lived and default
+> branch, `jarvis/unified-production`. Core application version is `3.7.0`
+> and realtime protocol version is `2`.
 
-> **Status:** Alpha prerelease. The current tested release is
-> `v19.0.0-alpha13`.
+## Product capabilities
 
-## Highlights
+- One Brain/Core owns identity, conversations, memory, planning, capability
+  resolution, verification, receipts, and responses.
+- Android Phone and Wear OS clients use the same authenticated realtime and
+  conversation architecture through the shared `wearprotocol` module.
+- Persistent conversations, long-term memory, durable follow-ups, monitoring,
+  recurring work, and restart recovery.
+- Realtime text and voice with turn IDs, delivery fencing, interruption,
+  barge-in, recovery, endpoint routing, and Phone/Watch continuity.
+- Android wake word, default-assistant role, compact overlay, chat history,
+  Developer mode, Integrations, diagnostics, and in-place OTA updates.
+- Grounded Home Assistant reads, presence evidence, verified writes, action
+  receipts, proactive household intelligence, vision, cameras, and Frigate.
+- External Agent connectors, Web/research provenance, SSRF protections,
+  capability health, and approval-aware action execution.
+- Principal-scoped Integrations & Accounts with encrypted credentials and
+  Google, Gmail, Calendar, and Contacts support when configured.
+- An authenticated Developer/Codex gateway and approval-gated self-improvement
+  lifecycle.
 
-- Typed and spoken conversations with streamed chat responses.
-- Android default-assistant support and a compact assistant overlay.
-- Offline wake phrase detection with bounded recovery and background re-arming.
-- Adaptive reply lengths so commands remain concise while detailed answers and
-  stories can complete normally.
-- Early speech from the first useful sentence, with bounded speech for long
-  replies.
-- Home Assistant entity discovery and controlled smart-home actions.
-- Persistent conversation context, room context and household awareness.
-- Proactive alerts, Core-first vision support and diagnostics.
-- Isolated testing, validation and rollback controls for releases.
+Google and Microsoft integrations report **Setup Required** until their
+credentials are configured and provider health is verified. Setup state is not
+reported as a connected account.
 
-## Architecture
+## Current architecture
 
 ```text
-Android client
-    │  WebSocket / HTTP
-    ▼
-Jarvis Core
-    ├── conversation and memory
-    ├── model orchestration
-    ├── Home Assistant tools
-    ├── proactive intelligence
-    └── vision and room context
-             │
-             ▼
-       Home Assistant
+Phone ───────────────┐
+                    ├── authenticated HTTP / shared realtime protocol
+Wear OS ─────────────┘                         │
+                                              ▼
+                                   Jarvis Brain / Core
+                         ┌────────────────────┼────────────────────┐
+                         │                    │                    │
+              Conversation + Memory     Planner + Registry   Durable Work
+                         │                    │                    │
+                         └────────── verification + receipts ──────┘
+                                              │
+                     ┌────────────────────────┼───────────────────────┐
+                     ▼                        ▼                       ▼
+              Home Assistant        External Agent / Web      Integrations
+             presence + vision       research + providers     Google + mail
+                                              │
+                                              ▼
+                            response to the originating endpoint
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the component boundaries and
-deployment model.
+Phone and Watch are clients of the same Brain; they do not maintain independent
+intelligence, identity, or server-side conversation truth. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for component ownership and data flow.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `bridge/` | Jarvis Core service, policies, tools and tests |
-| `android/jarvis-voice-client/` | Android assistant, chat UI and wake-word client |
+| `bridge/` | Jarvis Brain/Core APIs, policies, capabilities, realtime, persistence, and tests |
+| `android/jarvis-voice-client/app/` | Android Phone chat, voice, assistant, Integrations, Developer, and OTA client |
+| `android/jarvis-voice-client/wear/` | Wear OS activity, Tile, assistant, voice, and channel endpoint |
+| `android/jarvis-voice-client/wearprotocol/` | Shared Phone/Watch wire protocol |
+| `developer_gateway/` | Authenticated and audited Developer/Codex gateway |
 | `home_assistant/` | Home Assistant conversation integration and tests |
-| `config/` | Runtime configuration mounted into Jarvis Core |
-| `data/` | Persistent local databases and memory; excluded from Git |
-| `logs/` | Runtime logs; excluded from Git |
-| `tools/` | Installation, validation and maintenance utilities |
-| `docs/` | Current documentation and archived release material |
-| `.github/workflows/` | CI, security and Android build workflows |
+| `tools/` | Validation, release, deployment, recovery, and maintenance utilities |
+| `docs/` | Current product documentation and clearly labeled archives |
+| `.github/workflows/` | Unified CI, CodeQL, and tag-only Phone/Watch release pipeline |
+
+Production configuration, credentials, databases, conversations, memory, logs,
+and signing material live outside Git through private files and persistent
+runtime mounts.
 
 ## Quick start
 
 ```bash
-git clone \
-  --branch jarvis/unified-production \
+git clone --branch jarvis/unified-production \
   https://github.com/aaronhall105/jarvis-ai.git
-
 cd jarvis-ai
 cp .env.example .env
 ```
 
-Edit `.env` with the required model and Home Assistant settings, then start the
-Core:
+Configure only the services required by the deployment, keep `.env` private,
+then follow [INSTALL.md](INSTALL.md). Do not expose an unauthenticated Core to
+the public internet.
 
-```bash
-docker compose up -d --build
-curl -fsS http://localhost:8000/health
-```
+## Phone and Watch releases
 
-The service listens on port `8000` and persists `config`, `data` and `logs`
-through bind mounts.
-
-Full instructions are in [INSTALL.md](INSTALL.md).
-
-## Android application
-
-The current prerelease APK is attached to the
-[`v19.0.0-alpha13` release](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha13).
-
-Android source is located in:
-
-```text
-android/jarvis-voice-client/
-```
-
-The release workflow compiles unit tests and the debug APK using Java 17,
-Android SDK 36 and Gradle 9.4.1.
+The production-signed Phone and Watch APKs, checksums, public signing reports,
+inspection reports, product manifest, and OTA manifest are attached to the
+[v19.0.0-alpha25 prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha25).
+Install updates in place; do not uninstall or clear application data as an
+upgrade workaround.
 
 ## Documentation
 
 - [Installation](INSTALL.md)
 - [Architecture](ARCHITECTURE.md)
 - [Changelog](CHANGELOG.md)
-- [Current Alpha13 release notes](CHANGES_V19_0_0_ALPHA13.md)
+- [Validation status](TESTED.md)
 - [Documentation index](docs/README.md)
+- [Product baseline](docs/JARVIS_PRODUCT_BASELINE.md)
+- [Integrations & Accounts](docs/INTEGRATIONS_ACCOUNTS_V1.md)
+- [External Agent Platform](docs/EXTERNAL_AGENT_PLATFORM.md)
+- [Developer mode](docs/developer-mode.md)
+- [Android OTA releases](docs/ANDROID_OTA_RELEASES.md)
+- [Wear endpoint](docs/wear-endpoint-v1.md)
+- [Alpha25 release notes](docs/releases/CHANGES_V19_0_0_ALPHA25.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
 ## Security
 
-Never commit `.env`, access tokens, Home Assistant credentials, private keys,
-runtime databases or personal household data.
-
-Security reports should follow [SECURITY.md](SECURITY.md).
+Never commit `.env`, access or refresh tokens, OAuth codes, Home Assistant
+credentials, private keys, signing files, runtime databases, personal logs,
+conversation data, or household imagery. Report vulnerabilities through the
+private process in [SECURITY.md](SECURITY.md).

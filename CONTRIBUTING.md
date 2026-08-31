@@ -1,23 +1,57 @@
 # Contributing
 
-Jarvis AI is an actively developed personal assistant project.
+Jarvis is developed as one unified product. `jarvis/unified-production` is the
+sole long-lived and default branch for Core, Phone, Watch, release tooling, and
+documentation.
 
-## Before opening a change
+## Before changing Jarvis
 
 - Search existing issues and pull requests.
-- Keep each change focused on one problem.
-- Do not include secrets, private household data, access tokens or runtime
-  databases.
-- Describe the affected component: Core, Android or Home Assistant.
-- Include reproduction steps for defects.
-- Include validation evidence for code changes.
+- Start from the current `origin/jarvis/unified-production` head.
+- Keep each change bounded to one coherent purpose.
+- Identify affected components and shared protocol/API implications.
+- Preserve production data schemas and in-place client compatibility unless a
+  reviewed migration explicitly requires otherwise.
+- Never include credentials, tokens, household data, runtime databases, logs,
+  private signing material, or real OAuth values.
+- Add regression evidence for confirmed defects and meaningful behavior changes.
 
-## Development workflow
+## Branch and pull-request workflow
 
-1. Create a branch from `jarvis/unified-production`.
-2. Make a bounded change.
-3. Run the relevant Python or Android tests.
-4. Run `git diff --check`.
-5. Open a pull request describing behaviour, risk and rollback.
+Direct pushes are blocked by branch protection. When a pull request is needed:
 
-Do not force-push the production branch.
+1. Fetch and create a temporary branch from `jarvis/unified-production`.
+2. Make and validate the bounded change.
+3. Open a pull request back to `jarvis/unified-production`.
+4. Wait for required Core, quality/security, Android, and CodeQL checks.
+5. Resolve review conversations and merge through branch protection.
+6. Delete the temporary local and remote branch immediately after merge.
+
+Temporary branches are short-lived implementation vehicles, not permanent
+product lines. Do not recreate historical feature branches or establish a
+second release/deployment lineage. Never force-push the authoritative branch.
+
+## Validation
+
+Run checks proportional to the changed components. At minimum:
+
+```bash
+git diff --check
+python tools/verify_product_baseline.py --skip-ref
+```
+
+Code changes normally also require relevant Python tests, Ruff, mypy, security
+checks, Android/Wear tests or lint, and package/protocol checks. Documentation
+changes require reference and Markdown-link validation.
+
+Report physical Phone, Watch, Home Assistant, or deployment validation only when
+it actually occurred. Otherwise mark it as required.
+
+## Releases and deployment
+
+Only approved immutable `v*` tags at the current unified-production head may
+publish Phone/Watch releases and OTA metadata. Core and Developer production
+deployments must use a clean authoritative worktree at the exact remote head.
+
+Do not rotate signing keys, change package identity, recreate persistent data,
+or manually advance OTA metadata to bypass a failed gate.

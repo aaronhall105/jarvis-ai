@@ -1,6 +1,9 @@
 # Jarvis product baseline
 
-`jarvis/unified-production` is the sole authoritative source for future Jarvis Core deployments, Android and Wear builds, OTA manifests, and production releases.
+`jarvis/unified-production` is the sole authoritative source for future Jarvis
+Core deployments, Android and Wear builds, OTA manifests, and production
+releases. The current published product is `v19.0.0-alpha25`, with Core
+application version `3.7.0` and realtime protocol `2`.
 
 ## Lineage decision
 
@@ -67,9 +70,20 @@ are GitHub Release assets rather than a development branch. The
 product-baseline gate validates ground-truth source files, mandatory resources,
 manifest routes, runtime markers, and workflow restrictions.
 
-## Historical branch retention
+## Historical branch disposition
 
-The audited heads recorded in the machine-readable manifest must remain available until the unified Core, phone APK, Wear APK, OTA feed, GitHub CI, and on-device update have all been verified. After that point, archival tags should preserve each recorded head before any remote branch is deleted. The old `conversation-engine`, `jarvis/production-alpha14`, `jarvis/wear-v1`, `jarvis/unified-runtime-v1`, `jarvis/alpha19-production-hardening`, `jarvis/external-agent-platform`, and `jarvis/integrations-accounts-v1` branches are then candidates for deletion from active development, but their history is not to be removed as part of this reconciliation.
+Every historical feature branch recorded in the machine-readable baseline was
+audited before cleanup. Useful capabilities were reconciled into
+`jarvis/unified-production`; final heads and lineage decisions were preserved
+through archive tags, Git history, recovery evidence, and the consolidation
+lineage manifest. The historical branches were then deleted from active local
+and remote development.
+
+The only active long-lived branch is now `jarvis/unified-production`.
+Historical branch names and their original SHAs remain in the manifests as
+intentional reconciliation evidence. They must not be interpreted as current
+deployment, release, or contribution targets, and no workflow or active runtime
+may depend on them.
 
 The machine-readable authorities are
 [`JARVIS_PRODUCT_BASELINE.json`](JARVIS_PRODUCT_BASELINE.json) and the explicit
