@@ -1246,6 +1246,13 @@ class MemoryEngine:
             if lowered.startswith(prefix):
                 recall_query = lowered[len(prefix) :].strip()
                 break
+        direct_recall = False
+        if recall_query is None:
+            for prefix in ("what is my ", "what's my "):
+                if lowered.startswith(prefix):
+                    recall_query = lowered[len(prefix) :].strip()
+                    direct_recall = True
+                    break
         if recall_query:
             matches = await self.search(recall_query, limit=8, owner_key=owner)
             personal = [
@@ -1254,6 +1261,11 @@ class MemoryEngine:
                 if str(item.get("subject_key") or "") == owner
                 and str(item.get("owner_key") or "") == owner
             ]
+            # A direct "what is my ..." question is handled here only when a
+            # current explicit memory provides evidence.  Otherwise normal
+            # routing remains available for live state such as phone battery.
+            if direct_recall and not personal:
+                return None
             return {
                 "success": True,
                 "response": (

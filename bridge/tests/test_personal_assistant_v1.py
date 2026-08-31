@@ -274,6 +274,7 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
             "Cancel my dentist reminder", request_id="turn-cancel-mutate"
         )
         self.assertTrue(cancelled.success)
+        self.assertTrue(cancelled.response.startswith("Cancelled task "))
         self.now += timedelta(hours=1)
         await self.engine.run_once()
         current = await self.engine.get(job["job_id"], principal_id="aaron")
@@ -695,6 +696,14 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
             "Do you remember my favourite takeaway", owner_key="aaron"
         )
         self.assertIn("Chinese", recalled["response"])
+        direct_recall = await restarted.handle_explicit_command(
+            "What is my favourite takeaway?", owner_key="aaron"
+        )
+        self.assertIn("Chinese", direct_recall["response"])
+        self.assertEqual(direct_recall["intent"], "explicit_memory_recall")
+        self.assertIsNone(
+            await restarted.handle_explicit_command("What is my phone battery?", owner_key="aaron")
+        )
 
         corrected = await restarted.handle_explicit_command(
             "Actually remember my favourite takeaway is Indian", owner_key="aaron"
