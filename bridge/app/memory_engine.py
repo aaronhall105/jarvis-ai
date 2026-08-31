@@ -1261,6 +1261,7 @@ class MemoryEngine:
                 if str(item.get("subject_key") or "") == owner
                 and str(item.get("owner_key") or "") == owner
             ]
+            personal = self._prefer_exact_explicit_subject(recall_query, personal)
             # A direct "what is my ..." question is handled here only when a
             # current explicit memory provides evidence.  Otherwise normal
             # routing remains available for live state such as phone battery.
@@ -1301,6 +1302,7 @@ class MemoryEngine:
                     if str(item.get("owner_key") or "") == owner
                     and str(item.get("subject_key") or "") == owner
                 ]
+                candidates = self._prefer_exact_explicit_subject(query, candidates)
             if len(candidates) != 1:
                 return {
                     "success": False,
@@ -1390,3 +1392,20 @@ class MemoryEngine:
             "memory": saved,
             "focus_memory": saved,
         }
+
+    @staticmethod
+    def _prefer_exact_explicit_subject(
+        query: str,
+        matches: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Prefer one exact personal subject over broader semantic matches."""
+
+        normalized = " ".join(query.casefold().split())
+        if normalized.startswith("my "):
+            normalized = normalized[3:].strip()
+        exact = [
+            item
+            for item in matches
+            if " ".join(str(item.get("subject") or "").casefold().split()) == normalized
+        ]
+        return exact or matches

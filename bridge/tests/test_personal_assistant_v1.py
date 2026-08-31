@@ -696,10 +696,14 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
             "Do you remember my favourite takeaway", owner_key="aaron"
         )
         self.assertIn("Chinese", recalled["response"])
+        await restarted.handle_explicit_command(
+            "Remember my favourite colour is purple", owner_key="aaron"
+        )
         direct_recall = await restarted.handle_explicit_command(
             "What is my favourite takeaway?", owner_key="aaron"
         )
         self.assertIn("Chinese", direct_recall["response"])
+        self.assertNotIn("purple", direct_recall["response"].casefold())
         self.assertEqual(direct_recall["intent"], "explicit_memory_recall")
         self.assertIsNone(
             await restarted.handle_explicit_command("What is my phone battery?", owner_key="aaron")
@@ -710,17 +714,26 @@ class PersonalAssistantV1Tests(unittest.IsolatedAsyncioTestCase):
         )
         indian = corrected["memory"]
         self.assertEqual(indian["id"], chinese["id"])
-        current = await restarted.search("favourite takeaway", owner_key="aaron")
+        current = [
+            item
+            for item in await restarted.search("favourite takeaway", owner_key="aaron")
+            if item["subject"] == "favourite takeaway"
+        ]
         self.assertEqual(
             [item["content"] for item in current], ["My favourite takeaway is Indian."]
         )
 
         self.assertEqual(await restarted.search("favourite takeaway", owner_key="amber"), [])
         forgotten = await restarted.handle_explicit_command(
-            "Forget that", owner_key="aaron", focused_memory_id=indian["id"]
+            "Forget my favourite takeaway", owner_key="aaron", focused_memory_id=indian["id"]
         )
         self.assertTrue(forgotten["success"])
-        self.assertEqual(await restarted.search("favourite takeaway", owner_key="aaron"), [])
+        remaining_takeaway = [
+            item
+            for item in await restarted.search("favourite takeaway", owner_key="aaron")
+            if item["subject"] == "favourite takeaway"
+        ]
+        self.assertEqual(remaining_takeaway, [])
         self.assertIsNone(
             await restarted.handle_explicit_command("Remember " + "a" * 10_000, owner_key="aaron")
         )
