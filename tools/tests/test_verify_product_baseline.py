@@ -17,6 +17,16 @@ def test_manifest_identifies_single_authoritative_branch() -> None:
     assert Path(verify_product_baseline.MANIFEST).is_file()
 
 
+def test_deployment_has_no_retired_checkout_fallback() -> None:
+    deployment = (verify_product_baseline.ROOT / "tools/deploy_unified_core.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "JARVIS_PREVIOUS_LIVE_ROOT" not in deployment
+    assert "final persistent-data cutover" not in deployment
+    assert ".pre-cutover-" not in deployment
+    assert 'LIVE_ROOT="${JARVIS_LIVE_ROOT:-/home/aaron/.local/share/jarvis-runtime}"' in deployment
+
+
 def test_ground_truth_apks_resolve_to_one_existing_source_lineage() -> None:
     manifest = verify_product_baseline.load_manifest()
     phone = manifest["ground_truth_apks"]["phone"]

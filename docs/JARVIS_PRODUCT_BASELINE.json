@@ -381,7 +381,7 @@
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java": ["TurnRecoveryJournal", "TurnDeliveryFence", "turn.status"],
       "bridge/app/static/chat.html": ["jarvis-chat-tabs-v1", "chat-tab"],
       "tools/self_improvement_worker.py": ["AUTHORITATIVE_PRODUCTION_BRANCH", "Deployment is restricted to the authoritative"],
-      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check", "final persistent-data cutover", "docker run --rm --interactive", ".pre-cutover-"],
+      "tools/deploy_unified_core.sh": ["jarvis/unified-production", "origin/$AUTHORITATIVE_BRANCH", "--no-build jarvis-speaker-verifier jarvis-core", "PRAGMA quick_check", "Unexpected persistent mount"],
       "tools/install_adb_readiness.sh": ["__JARVIS_ROOT__", "systemctl --user restart jarvis-adb-readiness.service"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["releases/download/jarvis-", "update-manifest.json"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdatePreferences.java": ["installed_verified_manifest", "matchingVerifiedManifest", "currentVersionCode"],
@@ -419,7 +419,8 @@
     ],
     "forbidden_markers": {
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/UpdateManager.java": ["ota-feeds"],
-      ".github/workflows/android-ota-release.yml": ["git fetch origin ota-feeds", "push origin ota-feeds"]
+      ".github/workflows/android-ota-release.yml": ["git fetch origin ota-feeds", "push origin ota-feeds"],
+      "tools/deploy_unified_core.sh": ["JARVIS_PREVIOUS_LIVE_ROOT", "final persistent-data cutover", ".pre-cutover-"]
     }
   },
   "historical_branches": [
