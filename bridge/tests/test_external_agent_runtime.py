@@ -274,6 +274,65 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
     assert mobile_by_id["instagram"]["connected"] is False
 
 
+@pytest.mark.asyncio
+async def test_mobile_google_products_use_independent_verified_health(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    executable = [
+        item.capability_id
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    value.providers_snapshot = AsyncMock(  # type: ignore[method-assign]
+        return_value=[
+            {
+                "provider_id": "google",
+                "configured": True,
+                "authenticated": True,
+                "healthy": True,
+                "available": True,
+                "scopes": [],
+                "executable_capabilities": executable,
+                "setup_requirements": [],
+                "health_reason": "Calendar probe failed",
+            }
+        ]
+    )
+    value.google_connector.account_status = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    value.google_connector.credential_status = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "access_token_present": True,
+            "refresh_token_present": True,
+            "expires_at": "2026-09-01T12:00:00+00:00",
+            "expired": False,
+            "expires_soon": False,
+        }
+    )
+    value.google_connector._service_health["aaron"] = {
+        "gmail": {"granted": True, "healthy": True, "reason": None},
+        "calendar": {
+            "granted": True,
+            "healthy": False,
+            "reason": "Google API request failed with HTTP 503",
+        },
+        "contacts": {"granted": False, "healthy": False, "reason": "Permission required"},
+    }
+
+    snapshot = await value.mobile_integrations_snapshot(principal_id="aaron")
+    by_id = {item["provider_id"]: item for item in snapshot}
+
+    assert by_id["google"]["state"] == "Partial permissions"
+    assert by_id["gmail"]["state"] == "Connected"
+    assert by_id["gmail"]["connected"] is True
+    assert by_id["calendar"]["state"] == "Provider unavailable"
+    assert by_id["calendar"]["connected"] is False
+    assert by_id["contacts"]["state"] == "Permission required"
+    assert by_id["contacts"]["connected"] is False
+    diagnostic = str(by_id["google"]["credential_status"])
+    assert "access-super-secret" not in diagnostic
+    assert "refresh-super-secret" not in diagnostic
+
+
 def test_provider_or_quoted_prompt_injection_cannot_authorize_google_write() -> None:
     assert ExternalAgentRuntime._write_authorized("gmail.send", "Send it") is True
     assert (

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -80,6 +82,26 @@ async def test_oauth_state_is_one_time_expiring_encrypted_and_principal_scoped(
     with pytest.raises(OAuthSessionError, match="malformed"):
         await store.claim_oauth_callback(provider="google", state="x" * 20_000)
 
+    expired_state = secrets.token_urlsafe(48)
+    expired = await store.create_oauth_session(
+        provider="google",
+        principal_id="aaron",
+        redirect_uri="https://core.example/api/integrations/google/callback",
+        requested_scopes=("openid", "email"),
+        state=expired_state,
+        code_verifier="expired-verifier",
+    )
+    with store._db() as connection:
+        connection.execute(
+            "UPDATE integration_oauth_sessions SET expires_at=? WHERE session_id=?",
+            (
+                (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                expired.session_id,
+            ),
+        )
+    with pytest.raises(OAuthSessionError, match="expired"):
+        await store.claim_oauth_callback(provider="google", state=expired_state)
+
 
 @pytest.mark.asyncio
 async def test_accounts_are_isolated_and_credentials_are_never_in_status(
@@ -102,7 +124,16 @@ async def test_accounts_are_isolated_and_credentials_are_never_in_status(
     )
     row = await store.account(principal_id="aaron", provider="google", account_id=account_id)
     assert row is not None
+    assert bool(row["authenticated"]) is True
+    assert bool(row["healthy"]) is False
+    assert row["last_health_check"] is None
+    assert row["health_reason"] == "Provider health has not yet been verified"
     assert "access-secret" not in repr(dict(row))
+    credential_status = await store.credential_status(account_id)
+    assert credential_status["access_token_present"] is True
+    assert credential_status["refresh_token_present"] is True
+    assert "access-secret" not in json.dumps(credential_status)
+    assert "refresh-secret" not in json.dumps(credential_status)
     assert await store.delete_account(principal_id="amber", account_id=account_id) is False
     assert await store.delete_account(principal_id="aaron", account_id=account_id) is True
 

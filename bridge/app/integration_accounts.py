@@ -501,10 +501,10 @@ class IntegrationAccountStore:
                 json.dumps(sorted(set(scopes)), separators=(",", ":")),
                 encrypted,
                 1,
-                1,
-                None,
                 0,
-                now,
+                "Provider health has not yet been verified",
+                0,
+                None,
                 now,
                 now,
             )
@@ -522,10 +522,10 @@ class IntegrationAccountStore:
                     scopes_json=excluded.scopes_json,
                     encrypted_credentials=excluded.encrypted_credentials,
                     authenticated=1,
-                    healthy=1,
-                    health_reason=NULL,
+                    healthy=0,
+                    health_reason='Provider health has not yet been verified',
                     reauthorization_required=0,
-                    last_health_check=excluded.last_health_check,
+                    last_health_check=NULL,
                     updated_at=excluded.updated_at
                 """,
                 values,
@@ -605,14 +605,14 @@ class IntegrationAccountStore:
                 connection.execute(
                     """
                     UPDATE integration_accounts
-                    SET encrypted_credentials=?,authenticated=1,healthy=1,
-                        reauthorization_required=0,health_reason=NULL,
-                        last_health_check=?,updated_at=?,scopes_json=?
+                    SET encrypted_credentials=?,authenticated=1,healthy=0,
+                        reauthorization_required=0,
+                        health_reason='Provider health verification is pending',
+                        last_health_check=NULL,updated_at=?,scopes_json=?
                     WHERE account_id=?
                     """,
                     (
                         encrypted,
-                        now,
                         now,
                         json.dumps(sorted(set(scopes)), separators=(",", ":")),
                         account_id,
@@ -622,13 +622,37 @@ class IntegrationAccountStore:
                 connection.execute(
                     """
                     UPDATE integration_accounts
-                    SET encrypted_credentials=?,authenticated=1,healthy=1,
-                        reauthorization_required=0,health_reason=NULL,
-                        last_health_check=?,updated_at=?
+                    SET encrypted_credentials=?,authenticated=1,healthy=0,
+                        reauthorization_required=0,
+                        health_reason='Provider health verification is pending',
+                        last_health_check=NULL,updated_at=?
                     WHERE account_id=?
                     """,
-                    (encrypted, now, now, account_id),
+                    (encrypted, now, account_id),
                 )
+
+    async def credential_status(self, account_id: str) -> dict[str, Any]:
+        """Return expiry/readiness metadata without returning credential values."""
+
+        credentials = await self.account_credentials(account_id)
+        expires_at = str(credentials.get("expires_at") or "").strip() or None
+        expires: datetime | None = None
+        if expires_at:
+            try:
+                expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                expires = expires.astimezone(timezone.utc)
+            except ValueError:
+                expires = None
+        now = _utc_now()
+        return {
+            "access_token_present": bool(credentials.get("access_token")),
+            "refresh_token_present": bool(credentials.get("refresh_token")),
+            "expires_at": expires.isoformat() if expires is not None else expires_at,
+            "expired": bool(expires is not None and expires <= now),
+            "expires_soon": bool(expires is not None and expires <= now + timedelta(minutes=5)),
+        }
 
     async def mark_health(
         self,

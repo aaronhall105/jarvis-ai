@@ -5,6 +5,8 @@ import json
 import secrets
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -56,8 +58,30 @@ class GoogleFixture:
         self.refresh_revoked = False
         self.sent_verified = True
         self.calendar_verified = True
+        self.gmail_probe_status = 200
+        self.gmail_probe_timeout = False
+        self.gmail_search_status = 200
+        self.gmail_search_malformed = False
+        self.gmail_send_timeout = False
+        self.calendar_probe_status = 200
+        self.contacts_probe_status = 200
         self.archived = False
         self.event_deleted = False
+        self.calendar_events_override: list[dict[str, object]] | None = None
+        self.sent_message: dict[str, object] = {}
+        self.forward_message: dict[str, object] = {}
+        self.draft_message: dict[str, object] = {
+            "id": "draft-message",
+            "threadId": "thread-1",
+            "payload": {
+                "headers": [
+                    {"name": "To", "value": "john@example.test"},
+                    {"name": "Subject", "value": "Hello"},
+                ],
+                "mimeType": "text/plain",
+                "body": {"data": "RHJhZnQgb25seQ"},
+            },
+        }
         self.event: dict[str, object] = {
             "id": "event-1",
             "status": "confirmed",
@@ -94,21 +118,50 @@ class GoogleFixture:
                 },
             )
         if path == "/gmail/v1/users/me/drafts" and request.method == "POST":
+            sent = json.loads(request.content)
+            raw_message = sent.get("message") if isinstance(sent, dict) else None
+            if isinstance(raw_message, dict) and raw_message.get("raw"):
+                self.draft_message = self._message_from_raw(raw_message)
             return httpx.Response(200, json={"id": "draft-1", "message": {"id": "draft-message"}})
         if path == "/gmail/v1/users/me/drafts/draft-1" and request.method == "PUT":
+            sent = json.loads(request.content)
+            raw_message = sent.get("message") if isinstance(sent, dict) else None
+            if isinstance(raw_message, dict) and raw_message.get("raw"):
+                self.draft_message = self._message_from_raw(raw_message)
             return httpx.Response(200, json={"id": "draft-1", "message": {"id": "draft-message"}})
         if path == "/gmail/v1/users/me/drafts/draft-1":
-            return httpx.Response(200, json={"id": "draft-1", "message": {"id": "draft-message"}})
+            return httpx.Response(200, json={"id": "draft-1", "message": self.draft_message})
         if path == "/gmail/v1/users/me/drafts/send":
+            if self.gmail_send_timeout:
+                raise httpx.ReadTimeout("provider outcome is unknown", request=request)
+            self.sent_message = dict(self.draft_message)
+            self.sent_message["id"] = "sent-1"
             return httpx.Response(200, json={"id": "sent-1", "threadId": "thread-1"})
         if path == "/gmail/v1/users/me/messages/sent-1":
             labels = ["SENT"] if self.sent_verified else []
-            return httpx.Response(200, json={"id": "sent-1", "labelIds": labels})
+            return httpx.Response(200, json={**self.sent_message, "labelIds": labels})
         if path == "/gmail/v1/users/me/messages/forward-1":
-            return httpx.Response(200, json={"id": "forward-1", "labelIds": ["SENT"]})
+            return httpx.Response(
+                200,
+                json={**self.forward_message, "id": "forward-1", "labelIds": ["SENT"]},
+            )
         if path == "/gmail/v1/users/me/messages/send":
+            sent = json.loads(request.content)
+            if isinstance(sent, dict) and sent.get("raw"):
+                self.forward_message = self._message_from_raw(sent)
             return httpx.Response(200, json={"id": "forward-1", "threadId": "thread-2"})
         if path == "/gmail/v1/users/me/messages" and request.method == "GET":
+            if self.gmail_probe_timeout and request.url.params.get("maxResults") == "1":
+                raise httpx.ConnectTimeout("gmail probe timed out", request=request)
+            if self.gmail_probe_status != 200 and request.url.params.get("maxResults") == "1":
+                return httpx.Response(self.gmail_probe_status, json={"error": "gmail unavailable"})
+            if request.url.params.get("maxResults") != "1" and self.gmail_search_status != 200:
+                return httpx.Response(
+                    self.gmail_search_status,
+                    json={"error": "gmail search unavailable"},
+                )
+            if request.url.params.get("maxResults") != "1" and self.gmail_search_malformed:
+                return httpx.Response(200, text="not-json")
             return httpx.Response(
                 200,
                 json={"messages": [{"id": "message-2"}], "resultSizeEstimate": 1},
@@ -133,6 +186,13 @@ class GoogleFixture:
                         ],
                         "mimeType": "text/plain",
                         "body": {"data": "VGhlIGdhcmFnZSBjYW4gc2VlIHlvdSBGcmlkYXku"},
+                        "parts": [
+                            {
+                                "filename": "appointment.pdf",
+                                "mimeType": "application/pdf",
+                                "body": {"attachmentId": "attachment-1", "size": 321},
+                            }
+                        ],
                     },
                 },
             )
@@ -146,6 +206,10 @@ class GoogleFixture:
             ).json()
             return httpx.Response(200, json={"id": "thread-2", "messages": [message]})
         if path == "/calendar/v3/users/me/calendarList":
+            if self.calendar_probe_status != 200 and request.url.params.get("maxResults") == "1":
+                return httpx.Response(
+                    self.calendar_probe_status, json={"error": "calendar unavailable"}
+                )
             return httpx.Response(
                 200,
                 json={
@@ -161,12 +225,19 @@ class GoogleFixture:
                 },
             )
         if path == "/calendar/v3/calendars/primary/events" and request.method == "GET":
-            return httpx.Response(200, json={"items": [self.event]})
+            return httpx.Response(
+                200,
+                json={"items": self.calendar_events_override or [self.event]},
+            )
         if path == "/calendar/v3/calendars/primary/events" and request.method == "POST":
-            self.event = {"id": "event-1", "status": "confirmed", **json.loads(request.content)}
+            requested_event = json.loads(request.content)
+            requested_id = str(requested_event.get("id") or "")
+            if requested_id and requested_id == self.event.get("id"):
+                return httpx.Response(409, json={"error": "already exists"})
+            self.event = {"id": "event-1", "status": "confirmed", **requested_event}
             self.event_deleted = False
             return httpx.Response(200, json=self.event)
-        if path == "/calendar/v3/calendars/primary/events/event-1":
+        if path == f"/calendar/v3/calendars/primary/events/{self.event.get('id')}":
             if request.method == "DELETE":
                 self.event_deleted = True
                 return httpx.Response(204)
@@ -190,6 +261,7 @@ class GoogleFixture:
                     "names": [{"displayName": "John Smith"}],
                     "emailAddresses": [{"value": "john.one@example.test"}],
                     "phoneNumbers": [{"value": "+441111111111"}],
+                    "organizations": [{"name": "Example Ltd", "title": "Manager"}],
                 }
             }
             second = {
@@ -207,9 +279,36 @@ class GoogleFixture:
                 200,
                 json={"results": results},
             )
+        if path == "/v1/people/me/connections":
+            return httpx.Response(
+                self.contacts_probe_status,
+                json=(
+                    {"connections": []}
+                    if self.contacts_probe_status == 200
+                    else {"error": "contacts unavailable"}
+                ),
+            )
         if path == "/revoke":
             return httpx.Response(200)
         raise AssertionError(f"Unexpected Google request: {request.method} {request.url}")
+
+    @staticmethod
+    def _message_from_raw(raw_message: dict[str, object]) -> dict[str, object]:
+        encoded = str(raw_message["raw"])
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        parsed = BytesParser(policy=policy.default).parsebytes(decoded)
+        content = parsed.get_content()
+        body = content if isinstance(content, str) else content.decode(errors="replace")
+        body_encoded = base64.urlsafe_b64encode(body.encode()).decode().rstrip("=")
+        return {
+            "id": "draft-message",
+            "threadId": raw_message.get("threadId"),
+            "payload": {
+                "headers": [{"name": key, "value": str(value)} for key, value in parsed.items()],
+                "mimeType": "text/plain",
+                "body": {"data": body_encoded},
+            },
+        }
 
 
 async def connected_google(
@@ -300,6 +399,25 @@ async def test_partial_scopes_are_principal_isolated_and_capability_grounded(
 
 
 @pytest.mark.asyncio
+async def test_calendar_write_only_grant_uses_event_probe_not_calendar_list(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture((SCOPE_OPENID, SCOPE_EMAIL, SCOPE_CALENDAR_WRITE))
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    status = await connector.status_for_principal("aaron")
+
+    assert set(status.executable_capabilities or ()) == {
+        "calendar.create",
+        "calendar.update",
+        "calendar.cancel",
+    }
+    assert fixture.calls["GET /calendar/v3/calendars/primary/events"] >= 1
+    assert fixture.calls["GET /calendar/v3/users/me/calendarList"] == 0
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_gmail_and_calendar_writes_require_verified_receipts_and_are_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -357,6 +475,50 @@ async def test_gmail_and_calendar_writes_require_verified_receipts_and_are_idemp
     assert duplicate.status is ExecutionStatus.VERIFIED
     assert fixture.calls["POST /calendar/v3/calendars/primary/events"] == 1
     assert "access-super-secret" not in json.dumps(created.as_dict())
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_calendar_provider_idempotency_recovers_existing_matching_event(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    request = CapabilityRequest(
+        capability_id="calendar.create",
+        payload={
+            "summary": "Jarvis idempotency test",
+            "start": {"dateTime": "2026-09-04T15:00:00+01:00"},
+            "end": {"dateTime": "2026-09-04T16:00:00+01:00"},
+        },
+        principal_id="aaron",
+        conversation_id="usr:aaron:conversation-1",
+        confirmed=True,
+        idempotency_key="stable-calendar-event",
+    )
+
+    first_receipts = ActionReceiptStore(tmp_path / "receipts-first.db")
+    await first_receipts.initialize()
+    first_registry = ConnectorRegistry(receipt_store=first_receipts)
+    first_registry.register(connector)
+    first = await first_registry.execute(request, refresh_health=True)
+
+    # Model a restart after provider success but without access to the first
+    # local receipt. The deterministic provider ID turns the retry into a
+    # readback of the already-created matching event.
+    recovery_receipts = ActionReceiptStore(tmp_path / "receipts-recovery.db")
+    await recovery_receipts.initialize()
+    recovery_registry = ConnectorRegistry(receipt_store=recovery_receipts)
+    recovery_registry.register(connector)
+    recovered = await recovery_registry.execute(request, refresh_health=True)
+
+    assert first.status is ExecutionStatus.VERIFIED
+    assert recovered.status is ExecutionStatus.VERIFIED
+    assert first.provider_reference == recovered.provider_reference
+    assert fixture.calls["POST /calendar/v3/calendars/primary/events"] == 2
+    assert (
+        fixture.calls[f"GET /calendar/v3/calendars/primary/events/{first.provider_reference}"] >= 2
+    )
     await client.aclose()
 
 
@@ -426,6 +588,23 @@ async def test_gmail_search_returns_provider_message_summaries(tmp_path: Path) -
     assert result.data["messages"][0]["from"] == "Garage <garage@example.test>"
     assert result.data["messages"][0]["subject"] == "Appointment"
     assert "Friday" in result.data["messages"][0]["snippet"]
+    assert result.data["messages"][0]["attachments"] == [
+        {
+            "filename": "appointment.pdf",
+            "mime_type": "application/pdf",
+            "size": 321,
+            "attachment_id": "attachment-1",
+        }
+    ]
+
+    inbox = await registry.execute(
+        CapabilityRequest(
+            capability_id="gmail.search",
+            payload={},
+            principal_id="aaron",
+        )
+    )
+    assert inbox.data["query"] == "in:inbox"
     await client.aclose()
 
 
@@ -543,6 +722,13 @@ async def test_calendar_read_write_timezone_and_cancellation_surface_verified_ev
             principal_id="aaron",
         )
     )
+    event = await registry.execute(
+        CapabilityRequest(
+            capability_id="calendar.read",
+            payload={"event_id": "event-1"},
+            principal_id="aaron",
+        )
+    )
     search = await registry.execute(
         CapabilityRequest(
             capability_id="calendar.search",
@@ -585,13 +771,44 @@ async def test_calendar_read_write_timezone_and_cancellation_surface_verified_ev
 
     assert calendars.data["calendars"][0]["calendar_id"] == "primary"
     assert events.data["events"][0]["event_id"] == "event-1"
+    assert event.data["event"]["event_id"] == "event-1"
     assert search.data["events"][0]["summary"] == "Garage"
+    assert search.data["resolved"] is True
+    assert search.data["ambiguous"] is False
     assert availability.data["calendars"]["primary"]["busy"] == []
     assert timezone_result.data["time_zone"] == "Europe/London"
     assert updated.status is ExecutionStatus.VERIFIED
     assert updated.data["event"]["summary"] == "Updated Garage"
     assert cancelled.status is ExecutionStatus.VERIFIED
     assert cancelled.data["status"] == "deleted"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_calendar_search_marks_multiple_events_ambiguous(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    fixture.calendar_events_override = [
+        {**fixture.event, "id": "event-1", "summary": "Dentist consultation"},
+        {**fixture.event, "id": "event-2", "summary": "Dentist follow-up"},
+    ]
+    receipts = ActionReceiptStore(tmp_path / "receipts.db")
+    registry = ConnectorRegistry(receipt_store=receipts)
+    registry.register(connector)
+
+    result = await registry.execute(
+        CapabilityRequest(
+            capability_id="calendar.search",
+            payload={"query": "Dentist"},
+            principal_id="aaron",
+        ),
+        refresh_health=True,
+    )
+
+    assert result.data["count"] == 2
+    assert result.data["resolved"] is False
+    assert result.data["ambiguous"] is True
+    assert result.provider_reference is None
     await client.aclose()
 
 
@@ -617,6 +834,63 @@ async def test_gmail_rejects_multiple_or_header_injection_recipients(tmp_path: P
         )
         assert result.status.value == "failed"
     assert fixture.calls["POST /gmail/v1/users/me/drafts"] == 0
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_failures_are_truthful_and_writes_are_never_blindly_retried(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    search_capability = next(
+        item for item in connector.capabilities if item.capability_id == "gmail.search"
+    )
+    send_capability = next(
+        item for item in connector.capabilities if item.capability_id == "gmail.send"
+    )
+
+    fixture.gmail_search_status = 429
+    rate_limited = await connector.execute(
+        search_capability,
+        CapabilityRequest(
+            capability_id="gmail.search",
+            payload={"query": "in:inbox"},
+            principal_id="aaron",
+        ),
+    )
+    assert rate_limited.status.value == "failed"
+    assert rate_limited.retryable is True
+    assert "HTTP 429" in str(rate_limited.error)
+
+    fixture.gmail_search_status = 200
+    fixture.gmail_search_malformed = True
+    malformed = await connector.execute(
+        search_capability,
+        CapabilityRequest(
+            capability_id="gmail.search",
+            payload={"query": "in:inbox"},
+            principal_id="aaron",
+        ),
+    )
+    assert malformed.status.value == "failed"
+    assert malformed.retryable is False
+    assert malformed.error == "Google API returned malformed JSON"
+
+    fixture.gmail_search_malformed = False
+    fixture.gmail_send_timeout = True
+    unknown = await connector.execute(
+        send_capability,
+        CapabilityRequest(
+            capability_id="gmail.send",
+            payload={"draft_id": "draft-1"},
+            principal_id="aaron",
+            confirmed=True,
+        ),
+    )
+    assert unknown.status.value == "outcome_unknown"
+    assert unknown.error == "Google provider transport failed"
+    assert fixture.calls["POST /gmail/v1/users/me/drafts/send"] == 1
     await client.aclose()
 
 
@@ -675,9 +949,121 @@ async def test_contacts_unique_and_duplicate_results_preserve_provider_details(
 
     assert unique.data["resolved"] is True
     assert unique.data["contact"]["email_addresses"] == ["john.one@example.test"]
+    assert unique.data["contact"]["organization"] == {
+        "name": "Example Ltd",
+        "title": "Manager",
+    }
     assert unique.data["contact"]["phone_numbers"] == ["+441111111111"]
     assert duplicate.data["count"] == 1
     assert duplicate.data["contacts"][0]["resource_name"] == "people/1"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tokens_are_not_healthy_until_each_granted_product_is_probed(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    store, _, connector, client = await connected_google(tmp_path, fixture)
+    row = await store.account(principal_id="aaron", provider="google")
+    assert row is not None
+    assert bool(row["authenticated"]) is True
+    assert bool(row["healthy"]) is False
+    assert row["last_health_check"] is None
+
+    fixture.calendar_probe_status = 503
+    status = await connector.status_for_principal("aaron")
+    services = connector.service_health("aaron")
+    credential_status = await connector.credential_status("aaron")
+
+    assert status.available is True
+    assert "gmail.search" in (status.executable_capabilities or ())
+    assert "contacts.resolve" in (status.executable_capabilities or ())
+    assert "calendar.list" not in (status.executable_capabilities or ())
+    assert services["gmail"]["healthy"] is True
+    assert services["calendar"]["healthy"] is False
+    assert services["contacts"]["healthy"] is True
+    assert credential_status is not None
+    assert credential_status["access_token_present"] is True
+    assert credential_status["refresh_token_present"] is True
+    assert "access-super-secret" not in json.dumps(credential_status)
+    assert "refresh-super-secret" not in json.dumps(credential_status)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_product_api_403_degrades_only_that_service_without_revoking_account(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    store, _, connector, client = await connected_google(tmp_path, fixture)
+    fixture.gmail_probe_status = 403
+
+    status = await connector.status_for_principal("aaron")
+    account = await connector.account_status("aaron")
+
+    assert status.authenticated is True
+    assert status.available is True
+    assert not any(
+        capability.startswith("gmail.") for capability in status.executable_capabilities or ()
+    )
+    assert account is not None and account.reauthorization_required is False
+    assert connector.service_health("aaron")["gmail"]["healthy"] is False
+    stored = await store.account(principal_id="aaron", provider="google")
+    assert stored is not None and bool(stored["authenticated"]) is True
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_product_probe_transport_failure_is_safe_degraded_state(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    fixture.gmail_probe_timeout = True
+
+    status = await connector.status_for_principal("aaron")
+    gmail = connector.service_health("aaron")["gmail"]
+
+    assert status.available is True
+    assert not any(
+        capability.startswith("gmail.") for capability in status.executable_capabilities or ()
+    )
+    assert gmail["healthy"] is False
+    assert gmail["last_error_category"] == "transport_unavailable"
+    assert gmail["last_probe_at"] is not None
+    assert gmail["last_successful_probe_at"] is None
+    assert "timed out" not in json.dumps(gmail)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_credential_diagnostic_fails_closed_when_envelope_cannot_decrypt(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    store, _, connector, client = await connected_google(tmp_path, fixture)
+    row = await store.account(principal_id="aaron", provider="google")
+    assert row is not None
+    connection = store._db()
+    try:
+        connection.execute(
+            "UPDATE integration_accounts SET encrypted_credentials=? WHERE account_id=?",
+            ("v1.invalid-envelope", row["account_id"]),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = await connector.credential_status("aaron")
+
+    assert status == {
+        "access_token_present": False,
+        "refresh_token_present": False,
+        "expires_at": None,
+        "expired": False,
+        "expires_soon": False,
+        "error_category": "credential_unavailable",
+    }
+    assert "invalid-envelope" not in json.dumps(status)
     await client.aclose()
 
 

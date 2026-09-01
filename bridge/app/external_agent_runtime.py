@@ -553,6 +553,8 @@ class ExternalAgentRuntime:
         google = statuses.get("google") or {}
         google_capabilities = set(google.get("executable_capabilities") or ())
         account = await self.google_connector.account_status(principal)
+        google_service_health = self.google_connector.service_health(principal)
+        credential_status = await self.google_connector.credential_status(principal)
 
         def account_state(
             provider_id: str,
@@ -567,12 +569,15 @@ class ExternalAgentRuntime:
             available = potential & google_capabilities
             google_healthy = bool(google.get("available"))
             available_health = google_healthy and bool(available)
+            service = google_service_health.get(capability_prefix) or {}
             if google_healthy and available == potential:
                 state = "Connected"
             elif google_healthy and available:
                 state = "Partial permissions"
             elif account is not None and account.reauthorization_required:
                 state = "Reconnect required"
+            elif service.get("granted") and not service.get("healthy"):
+                state = "Provider unavailable"
             elif google.get("configured") and google.get("authenticated"):
                 state = "Permission required"
             elif google.get("configured"):
@@ -588,7 +593,7 @@ class ExternalAgentRuntime:
                 "granted_capabilities": sorted(available),
                 "missing_capabilities": sorted(potential - available),
                 "setup_requirements": list(google.get("setup_requirements") or ()),
-                "health_reason": google.get("health_reason"),
+                "health_reason": service.get("reason") or google.get("health_reason"),
             }
 
         if google.get("available"):
@@ -612,6 +617,7 @@ class ExternalAgentRuntime:
                 "connected": bool(google.get("available")),
                 "healthy": bool(google.get("available")),
                 "account": account.as_dict() if account is not None else None,
+                "credential_status": credential_status,
                 "granted_scopes": list(google.get("scopes") or ()),
                 "granted_capabilities": sorted(google_capabilities),
                 "setup_requirements": list(google.get("setup_requirements") or ()),
