@@ -30,6 +30,7 @@ from app.connectors.base import (
 )
 from app.connectors.credentials import redact_text
 from app.integration_accounts import (
+    CredentialEncryptionUnavailable,
     CredentialCipher,
     IntegrationAccount,
     IntegrationAccountStore,
@@ -81,6 +82,7 @@ _GOOGLE_ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "gmail.forward": "message_id, to (verified email), body",
     "gmail.archive": "message_id",
     "calendar.list": "events=true with optional calendar_id/timeMin/timeMax/limit, or limit",
+    "calendar.read": "event_id and optional calendar_id",
     "calendar.search": "query with optional calendar_id/timeMin/timeMax/limit",
     "calendar.availability": "timeMin, timeMax, optional timeZone/calendar_ids",
     "calendar.timezone": "no arguments",
@@ -146,13 +148,32 @@ def _decode_b64url(value: str) -> bytes:
 
 
 class GoogleProviderError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        reauthorization_required: bool | None = None,
+        outcome_unknown: bool = False,
+        retryable: bool | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self._reauthorization_required = reauthorization_required
+        self.outcome_unknown = bool(outcome_unknown)
+        self._retryable = retryable
 
     @property
     def reauthorization_required(self) -> bool:
-        return self.status_code in {400, 401, 403}
+        if self._reauthorization_required is not None:
+            return self._reauthorization_required
+        return self.status_code in {400, 401}
+
+    @property
+    def retryable(self) -> bool:
+        if self._retryable is not None:
+            return self._retryable
+        return self.status_code == 429 or bool(self.status_code and self.status_code >= 500)
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +573,7 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
         ),
         write("gmail.archive", "Archive Gmail message", (SCOPE_GMAIL_MODIFY,)),
         read("calendar.list", "List Google calendars and events", (SCOPE_CALENDAR_READ,)),
+        read("calendar.read", "Read Google Calendar event", (SCOPE_CALENDAR_READ,)),
         read("calendar.search", "Search Google Calendar events", (SCOPE_CALENDAR_READ,)),
         read(
             "calendar.availability",
@@ -598,16 +620,22 @@ class GoogleTokenManager:
                 reauthorization_required=True,
             )
             raise GoogleProviderError("Google reauthorization is required", status_code=401)
-        response = await self.client.post(
-            GOOGLE_TOKEN_ENDPOINT,
-            data={
-                "client_id": self.config.client_id.strip(),
-                "client_secret": self.config.client_secret.strip(),
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-            headers={"Accept": "application/json"},
-        )
+        try:
+            response = await self.client.post(
+                GOOGLE_TOKEN_ENDPOINT,
+                data={
+                    "client_id": self.config.client_id.strip(),
+                    "client_secret": self.config.client_secret.strip(),
+                    "refresh_token": refresh_token,
+                    "grant_type": "refresh_token",
+                },
+                headers={"Accept": "application/json"},
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise GoogleProviderError(
+                "Google token refresh transport failed",
+                retryable=True,
+            ) from exc
         try:
             payload = response.json()
         except (json.JSONDecodeError, ValueError):
@@ -626,7 +654,9 @@ class GoogleTokenManager:
                 reauthorization_required=reauth,
             )
             raise GoogleProviderError(
-                "Google token refresh failed", status_code=response.status_code
+                "Google token refresh failed",
+                status_code=response.status_code,
+                reauthorization_required=reauth,
             )
         access_token = str(payload.get("access_token") or "")
         if not access_token:
@@ -694,6 +724,8 @@ class GoogleConnector(Connector):
             accounts=accounts,
             client=self.client,
         )
+        self._service_health: dict[str, dict[str, dict[str, Any]]] = {}
+        self._verified_capabilities: dict[str, tuple[str, ...]] = {}
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -731,11 +763,25 @@ class GoogleConnector(Connector):
             identity = await self._request(principal, "GET", GOOGLE_USERINFO_ENDPOINT)
             if str(identity.get("sub") or "") != row["provider_subject"]:
                 raise GoogleProviderError("Google account identity changed")
+            service_health, executable = await self._probe_services(principal, scopes)
+            self._service_health[principal] = service_health
+            self._verified_capabilities[principal] = executable
+            healthy = bool(executable)
+            failed_services = sorted(
+                name
+                for name, item in service_health.items()
+                if item["granted"] and not item["healthy"]
+            )
+            reason = (
+                "Some Google services are unavailable: " + ", ".join(failed_services)
+                if failed_services
+                else (None if healthy else "No granted Google capability passed a provider probe")
+            )
             await self.accounts.mark_health(
                 row["account_id"],
                 authenticated=True,
-                healthy=True,
-                reason=None,
+                healthy=healthy,
+                reason=reason,
             )
         except GoogleProviderError as exc:
             reauth = exc.reauthorization_required
@@ -758,21 +804,142 @@ class GoogleConnector(Connector):
                 potential_capabilities=tuple(item.capability_id for item in self.capabilities),
                 executable_capabilities=(),
             )
-        executable = tuple(
-            item.capability_id
-            for item in self.capabilities
-            if item.required_scopes.issubset(scopes)
-        )
         return ProviderStatus(
             provider_id=self.provider_id,
             name=self.name,
             configured=True,
             authenticated=True,
-            healthy=True,
+            healthy=healthy,
+            health_reason=reason,
             scopes=scopes,
             potential_capabilities=tuple(item.capability_id for item in self.capabilities),
             executable_capabilities=executable,
         )
+
+    async def _probe_services(
+        self,
+        principal: str,
+        scopes: frozenset[str],
+    ) -> tuple[dict[str, dict[str, Any]], tuple[str, ...]]:
+        """Probe each granted Google product before exposing its capabilities."""
+
+        calendar_probe_url = (
+            f"{CALENDAR_API}/users/me/calendarList"
+            if SCOPE_CALENDAR_READ in scopes
+            else f"{CALENDAR_API}/calendars/primary/events"
+        )
+        calendar_probe_params: Mapping[str, Any] = (
+            {"maxResults": 1}
+            if SCOPE_CALENDAR_READ in scopes
+            else {"maxResults": 1, "singleEvents": "true", "orderBy": "startTime"}
+        )
+        probes: Mapping[str, tuple[frozenset[str], str, Mapping[str, Any] | None]] = {
+            "gmail": (
+                frozenset({SCOPE_GMAIL_READ, SCOPE_GMAIL_MODIFY, SCOPE_GMAIL_COMPOSE}),
+                (
+                    f"{GMAIL_API}/messages"
+                    if SCOPE_GMAIL_READ in scopes or SCOPE_GMAIL_MODIFY in scopes
+                    else f"{GMAIL_API}/drafts"
+                ),
+                {"maxResults": 1},
+            ),
+            "calendar": (
+                frozenset({SCOPE_CALENDAR_READ, SCOPE_CALENDAR_WRITE}),
+                calendar_probe_url,
+                calendar_probe_params,
+            ),
+            "contacts": (
+                frozenset({SCOPE_CONTACTS_READ}),
+                f"{PEOPLE_API}/people/me/connections",
+                {"personFields": "names", "pageSize": 1},
+            ),
+        }
+        health: dict[str, dict[str, Any]] = {}
+        executable: list[str] = []
+        checked_at = _iso()
+        capabilities_by_service = {
+            service: tuple(
+                item
+                for item in self.capabilities
+                if item.capability_id.startswith(service + ".")
+                and item.required_scopes.issubset(scopes)
+            )
+            for service in probes
+        }
+        for service, (service_scopes, url, params) in probes.items():
+            granted = bool(scopes & service_scopes) and bool(capabilities_by_service[service])
+            if not granted:
+                health[service] = {
+                    "granted": False,
+                    "healthy": False,
+                    "reason": "Permission required",
+                    "last_probe_at": None,
+                    "last_successful_probe_at": None,
+                    "last_error_category": "permission_required",
+                }
+                continue
+            try:
+                await self._request(principal, "GET", url, params=params)
+            except GoogleProviderError as exc:
+                if exc.reauthorization_required:
+                    raise
+                health[service] = {
+                    "granted": True,
+                    "healthy": False,
+                    "reason": redact_text(exc, max_length=300),
+                    "last_probe_at": checked_at,
+                    "last_successful_probe_at": None,
+                    "last_error_category": self._provider_error_category(exc),
+                }
+                continue
+            health[service] = {
+                "granted": True,
+                "healthy": True,
+                "reason": None,
+                "last_probe_at": checked_at,
+                "last_successful_probe_at": checked_at,
+                "last_error_category": None,
+            }
+            executable.extend(item.capability_id for item in capabilities_by_service[service])
+        return health, tuple(dict.fromkeys(executable))
+
+    @staticmethod
+    def _provider_error_category(error: GoogleProviderError) -> str:
+        if error.reauthorization_required:
+            return "reauthentication_required"
+        if error.status_code == 403:
+            return "permission_or_policy_rejected"
+        if error.status_code == 429:
+            return "rate_limited"
+        if error.status_code is not None and error.status_code >= 500:
+            return "provider_unavailable"
+        if error.retryable:
+            return "transport_unavailable"
+        return "malformed_or_rejected_response"
+
+    def service_health(self, principal_id: str) -> dict[str, dict[str, Any]]:
+        return {
+            key: dict(value)
+            for key, value in self._service_health.get(str(principal_id).strip(), {}).items()
+        }
+
+    async def credential_status(self, principal_id: str) -> dict[str, Any] | None:
+        row = await self.accounts.account(principal_id=principal_id, provider="google")
+        if row is None:
+            return None
+        try:
+            return await self.accounts.credential_status(str(row["account_id"]))
+        except (CredentialEncryptionUnavailable, ValueError):
+            # This endpoint is diagnostic only. Fail closed without leaking the
+            # credential envelope, key state, or provider token material.
+            return {
+                "access_token_present": False,
+                "refresh_token_present": False,
+                "expires_at": None,
+                "expired": False,
+                "expires_soon": False,
+                "error_category": "credential_unavailable",
+            }
 
     def _status_unconfigured(self, reason: str) -> ProviderStatus:
         requirements = self.oauth.setup_requirements or ("Connect Google",)
@@ -793,12 +960,10 @@ class GoogleConnector(Connector):
         if row is None:
             return None
         scopes = frozenset(json.loads(row["scopes_json"]))
-        available = tuple(
-            item.capability_id
-            for item in self.capabilities
-            if item.required_scopes.issubset(scopes)
-            and bool(row["authenticated"])
-            and bool(row["healthy"])
+        available = (
+            self._verified_capabilities.get(str(principal_id).strip(), ())
+            if bool(row["authenticated"]) and bool(row["healthy"])
+            else ()
         )
         by_id = {item.capability_id: item for item in self.capabilities}
         return IntegrationAccount(
@@ -884,6 +1049,7 @@ class GoogleConnector(Connector):
             "gmail.forward": self._gmail_forward,
             "gmail.archive": self._gmail_archive,
             "calendar.list": self._calendar_list,
+            "calendar.read": self._calendar_read,
             "calendar.search": self._calendar_search,
             "calendar.availability": self._calendar_availability,
             "calendar.timezone": self._calendar_timezone,
@@ -897,9 +1063,21 @@ class GoogleConnector(Connector):
         if handler is None:
             return ConnectorResult.failed("Unsupported Google capability")
         try:
-            data, reference = await handler(principal, dict(request.payload))
+            payload = dict(request.payload)
+            payload["_jarvis_idempotency_key"] = request.idempotency_key or request.request_id
+            data, reference = await handler(principal, payload)
             return ConnectorResult.succeeded(data, provider_reference=reference)
-        except (GoogleProviderError, ValueError, KeyError) as exc:
+        except GoogleProviderError as exc:
+            safe = redact_text(exc, max_length=800)
+            if capability.access is CapabilityAccess.WRITE and exc.outcome_unknown:
+                return ConnectorResult.outcome_unknown(safe)
+            return ConnectorResult.failed(safe, retryable=exc.retryable)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            safe = "Google provider transport failed: " + redact_text(exc, max_length=500)
+            if capability.access is CapabilityAccess.WRITE:
+                return ConnectorResult.outcome_unknown(safe)
+            return ConnectorResult.failed(safe, retryable=True)
+        except (ValueError, KeyError) as exc:
             return ConnectorResult.failed(redact_text(exc, max_length=800))
 
     async def verify(
@@ -918,16 +1096,47 @@ class GoogleConnector(Connector):
                     principal,
                     "GET",
                     f"{GMAIL_API}/drafts/{reference}",
-                    params={"format": "metadata"},
+                    params={"format": "full"},
                 )
                 if str(payload.get("id") or "") != reference:
                     return VerificationResult.unverified("Draft verification mismatch")
+                raw_message = payload.get("message")
+                message = raw_message if isinstance(raw_message, Mapping) else {}
+                raw_payload = message.get("payload")
+                message_payload = raw_payload if isinstance(raw_payload, Mapping) else {}
+                summary = self._message_summary(message)
+                body = self._body_text(message_payload)
+                expected_body = str(request.payload.get("body") or "")
+                if body.replace("\r\n", "\n").rstrip("\n") != expected_body.replace(
+                    "\r\n", "\n"
+                ).rstrip("\n"):
+                    return VerificationResult.unverified("Draft body verification mismatch")
+                if capability.capability_id == "gmail.draft":
+                    try:
+                        expected_recipient = self._recipient(str(request.payload.get("to") or ""))
+                        observed_recipient = self._recipient(str(summary.get("to") or ""))
+                        expected_subject = self._safe_subject(
+                            str(request.payload.get("subject") or "")
+                        )
+                    except ValueError as exc:
+                        return VerificationResult.unverified(str(exc))
+                    if observed_recipient.casefold() != expected_recipient.casefold():
+                        return VerificationResult.unverified(
+                            "Draft recipient verification mismatch"
+                        )
+                    if str(summary.get("subject") or "") != expected_subject:
+                        return VerificationResult.unverified("Draft subject verification mismatch")
+                elif str(message.get("threadId") or "") != str(result.data.get("thread_id") or ""):
+                    return VerificationResult.unverified("Reply thread verification mismatch")
             elif capability.capability_id in {"gmail.send", "gmail.forward"}:
                 payload = await self._request(
                     principal,
                     "GET",
                     f"{GMAIL_API}/messages/{reference}",
-                    params={"format": "metadata"},
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": ["To", "Subject"],
+                    },
                 )
                 if str(payload.get("id") or "") != reference:
                     return VerificationResult.unverified("Sent message verification mismatch")
@@ -935,6 +1144,16 @@ class GoogleConnector(Connector):
                     return VerificationResult.unverified(
                         "Gmail did not verify the message in Sent mail"
                     )
+                summary = self._message_summary(payload)
+                try:
+                    observed_recipient = self._recipient(str(summary.get("to") or ""))
+                    expected_recipient = self._recipient(str(result.data.get("recipient") or ""))
+                except ValueError as exc:
+                    return VerificationResult.unverified(str(exc))
+                if observed_recipient.casefold() != expected_recipient.casefold():
+                    return VerificationResult.unverified("Sent recipient verification mismatch")
+                if str(summary.get("subject") or "") != str(result.data.get("subject") or ""):
+                    return VerificationResult.unverified("Sent subject verification mismatch")
             elif capability.capability_id == "gmail.archive":
                 payload = await self._request(
                     principal,
@@ -996,15 +1215,7 @@ class GoogleConnector(Connector):
         json_body: Mapping[str, Any] | None = None,
     ) -> httpx.Response:
         token = await self.tokens.access_token(principal)
-        response = await self.client.request(
-            method,
-            url,
-            params=params,
-            json=json_body,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        )
-        if response.status_code == 401:
-            token = await self.tokens.access_token(principal, force_refresh=True)
+        try:
             response = await self.client.request(
                 method,
                 url,
@@ -1012,6 +1223,28 @@ class GoogleConnector(Connector):
                 json=json_body,
                 headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
             )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise GoogleProviderError(
+                "Google provider transport failed",
+                outcome_unknown=method.upper() not in {"GET", "HEAD", "OPTIONS"},
+                retryable=True,
+            ) from exc
+        if response.status_code == 401:
+            token = await self.tokens.access_token(principal, force_refresh=True)
+            try:
+                response = await self.client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                )
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                raise GoogleProviderError(
+                    "Google provider transport failed after token refresh",
+                    outcome_unknown=method.upper() not in {"GET", "HEAD", "OPTIONS"},
+                    retryable=True,
+                ) from exc
         return response
 
     async def _request(
@@ -1100,7 +1333,33 @@ class GoogleConnector(Connector):
             "date": headers.get("date"),
             "message_id_header": headers.get("message-id"),
             "reply_to": headers.get("reply-to"),
+            "attachments": GoogleConnector._attachment_metadata(payload),
         }
+
+    @staticmethod
+    def _attachment_metadata(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+        attachments: list[dict[str, Any]] = []
+
+        def visit(part: Mapping[str, Any]) -> None:
+            filename = str(part.get("filename") or "").strip()
+            raw_body = part.get("body")
+            body = raw_body if isinstance(raw_body, Mapping) else {}
+            attachment_id = str(body.get("attachmentId") or "").strip()
+            if filename or attachment_id:
+                attachments.append(
+                    {
+                        "filename": filename or None,
+                        "mime_type": str(part.get("mimeType") or "") or None,
+                        "size": max(0, int(body.get("size") or 0)),
+                        "attachment_id": attachment_id or None,
+                    }
+                )
+            for child in part.get("parts") or ():
+                if isinstance(child, Mapping) and len(attachments) < 100:
+                    visit(child)
+
+        visit(payload)
+        return attachments[:100]
 
     @staticmethod
     def _recipient(value: str) -> str:
@@ -1154,7 +1413,9 @@ class GoogleConnector(Connector):
     async def _gmail_search(
         self, principal: str, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None]:
-        query = self._required(payload, "query", max_length=1_000)
+        query = str(payload.get("query") or "in:inbox").strip()
+        if len(query) > 1_000:
+            raise ValueError("query is too long")
         result = await self._request(
             principal,
             "GET",
@@ -1354,6 +1615,20 @@ class GoogleConnector(Connector):
         self, principal: str, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None]:
         draft_id = self._required(payload, "draft_id", max_length=300)
+        draft = await self._request(
+            principal,
+            "GET",
+            f"{GMAIL_API}/drafts/{self._segment(draft_id)}",
+            params={"format": "full"},
+        )
+        raw_message = draft.get("message")
+        message = raw_message if isinstance(raw_message, Mapping) else {}
+        raw_payload = message.get("payload")
+        message_payload = raw_payload if isinstance(raw_payload, Mapping) else {}
+        summary = self._message_summary(message)
+        recipient = self._recipient(str(summary.get("to") or ""))
+        subject = self._safe_subject(str(summary.get("subject") or ""))
+        body_digest = hashlib.sha256(self._body_text(message_payload).encode("utf-8")).hexdigest()
         result = await self._request(
             principal,
             "POST",
@@ -1366,6 +1641,9 @@ class GoogleConnector(Connector):
         return {
             "message_id": reference,
             "thread_id": result.get("threadId"),
+            "recipient": recipient,
+            "subject": subject,
+            "body_sha256": body_digest,
             "status": "sent",
         }, reference
 
@@ -1395,7 +1673,12 @@ class GoogleConnector(Connector):
         reference = str(result.get("id") or "")
         if not reference:
             raise GoogleProviderError("Gmail did not return a sent message ID")
-        return {"message_id": reference, "status": "sent"}, reference
+        return {
+            "message_id": reference,
+            "recipient": self._recipient(self._required(payload, "to", max_length=320)),
+            "subject": self._safe_subject(subject),
+            "status": "sent",
+        }, reference
 
     async def _gmail_archive(
         self, principal: str, payload: dict[str, Any]
@@ -1477,7 +1760,25 @@ class GoogleConnector(Connector):
         events = [
             self._event(item) for item in result.get("items") or () if isinstance(item, Mapping)
         ]
-        return {"calendar_id": calendar_id, "events": events, "count": len(events)}, None
+        return {
+            "calendar_id": calendar_id,
+            "events": events,
+            "count": len(events),
+            "resolved": len(events) == 1,
+            "ambiguous": len(events) > 1,
+        }, (str(events[0].get("event_id") or "") if len(events) == 1 else None)
+
+    async def _calendar_read(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        calendar_id = str(payload.get("calendar_id") or "primary")
+        event_id = self._required(payload, "event_id", max_length=500)
+        result = await self._request(
+            principal,
+            "GET",
+            f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events/{self._segment(event_id)}",
+        )
+        return {"calendar_id": calendar_id, "event": self._event(result)}, event_id
 
     async def _calendar_availability(
         self, principal: str, payload: dict[str, Any]
@@ -1530,21 +1831,63 @@ class GoogleConnector(Connector):
         }
         if not isinstance(event["start"], Mapping) or not isinstance(event["end"], Mapping):
             raise ValueError("start and end must be structured calendar date/time objects")
-        for key in ("description", "location", "attendees"):
+        for boundary in ("start", "end"):
+            rendered = event[boundary]
+            assert isinstance(rendered, Mapping)
+            if not isinstance(rendered.get("dateTime") or rendered.get("date"), str):
+                raise ValueError(f"{boundary} must contain dateTime or date")
+        for key in ("description", "location"):
             if payload.get(key) is not None:
-                event[key] = payload[key]
+                event[key] = GoogleConnector._required(payload, key, max_length=10_000)
+        attendees = payload.get("attendees")
+        if attendees is not None:
+            if not isinstance(attendees, Sequence) or isinstance(attendees, (str, bytes)):
+                raise ValueError("attendees must be an array")
+            if len(attendees) > 100:
+                raise ValueError("attendees exceeds the supported limit")
+            verified_attendees: list[dict[str, str]] = []
+            for attendee in attendees:
+                if not isinstance(attendee, Mapping):
+                    raise ValueError("Each attendee must be an object")
+                verified_attendees.append(
+                    {"email": GoogleConnector._recipient(str(attendee.get("email") or ""))}
+                )
+            event["attendees"] = verified_attendees
         return event
 
     async def _calendar_create(
         self, principal: str, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None]:
         calendar_id = str(payload.get("calendar_id") or "primary")
-        result = await self._request(
-            principal,
-            "POST",
-            f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events",
-            json_body=self._event_body(payload),
-        )
+        event_body = self._event_body(payload)
+        idempotency_key = str(payload.get("_jarvis_idempotency_key") or "").strip()
+        deterministic_event_id = ""
+        if idempotency_key:
+            deterministic_event_id = (
+                "j" + hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:40]
+            )
+            event_body["id"] = deterministic_event_id
+        try:
+            result = await self._request(
+                principal,
+                "POST",
+                f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events",
+                json_body=event_body,
+            )
+        except GoogleProviderError as exc:
+            if exc.status_code != 409 or not deterministic_event_id:
+                raise
+            result = await self._request(
+                principal,
+                "GET",
+                f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events/"
+                f"{self._segment(deterministic_event_id)}",
+            )
+            expected = {key: value for key, value in event_body.items() if key != "id"}
+            if not self._contains_expected(result, expected):
+                raise GoogleProviderError(
+                    "Existing Google Calendar event did not match the idempotent request"
+                ) from exc
         reference = str(result.get("id") or "")
         if not reference:
             raise GoogleProviderError("Google Calendar did not return an event ID")
@@ -1582,13 +1925,22 @@ class GoogleConnector(Connector):
     ) -> tuple[dict[str, Any], str | None]:
         calendar_id = str(payload.get("calendar_id") or "primary")
         event_id = self._required(payload, "event_id", max_length=500)
-        await self._request(
+        response = await self._raw_request(
             principal,
             "DELETE",
             f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events/{self._segment(event_id)}",
-            expected=(204,),
         )
-        return {"calendar_id": calendar_id, "event_id": event_id, "status": "deleted"}, event_id
+        if response.status_code not in {204, 404, 410}:
+            raise GoogleProviderError(
+                f"Google API request failed with HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
+        return {
+            "calendar_id": calendar_id,
+            "event_id": event_id,
+            "status": "deleted",
+            "already_absent": response.status_code in {404, 410},
+        }, event_id
 
     async def _contacts_search(
         self, principal: str, payload: dict[str, Any]
@@ -1600,7 +1952,7 @@ class GoogleConnector(Connector):
             f"{PEOPLE_API}/people:searchContacts",
             params={
                 "query": query,
-                "readMask": "names,emailAddresses,phoneNumbers,metadata",
+                "readMask": "names,emailAddresses,phoneNumbers,organizations,metadata",
                 "pageSize": min(self._limit(payload), 30),
             },
         )
@@ -1645,6 +1997,9 @@ class GoogleConnector(Connector):
     @staticmethod
     def _contact(person: Mapping[str, Any]) -> dict[str, Any]:
         names = [item for item in person.get("names") or () if isinstance(item, Mapping)]
+        organizations = [
+            item for item in person.get("organizations") or () if isinstance(item, Mapping)
+        ]
         emails = [
             str(item.get("value")).strip()
             for item in person.get("emailAddresses") or ()
@@ -1660,6 +2015,14 @@ class GoogleConnector(Connector):
             "display_name": names[0].get("displayName") if names else None,
             "email_addresses": list(dict.fromkeys(item for item in emails if item))[:100],
             "phone_numbers": list(dict.fromkeys(item for item in phones if item))[:100],
+            "organization": (
+                {
+                    "name": organizations[0].get("name"),
+                    "title": organizations[0].get("title"),
+                }
+                if organizations
+                else None
+            ),
         }
 
 
