@@ -2,6 +2,14 @@
   "schema_version": 2,
   "authoritative_branch": "jarvis/unified-production",
   "audited_at_utc": "2026-08-30",
+  "current_release": {
+    "version_name": "19.0.0-alpha26",
+    "version_code": 190280,
+    "core_application_version": "3.7.0",
+    "realtime_protocol": 2,
+    "phone_package": "com.aaron.jarvisvoice",
+    "production_signer_sha256": "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"
+  },
   "ground_truth_apks": {
     "phone": {
       "name": "jarvis-phone-19.0.0-alpha21-release.apk",

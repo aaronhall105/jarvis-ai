@@ -87,29 +87,69 @@ def verify_assertions(manifest: dict[str, Any]) -> list[str]:
     return errors
 
 
-def verify_android_identity() -> list[str]:
+def verify_android_identity(manifest: dict[str, Any] | None = None) -> list[str]:
     errors: list[str] = []
+    manifest = manifest or load_manifest()
+    release = manifest["current_release"]
+    expected_version = str(release["version_name"])
+    expected_code = int(release["version_code"])
+    expected_package = str(release["phone_package"])
     build = (ROOT / "android/jarvis-voice-client/app/build.gradle.kts").read_text()
-    if 'applicationId = "com.aaron.jarvisvoice"' not in build:
-        errors.append("Android applicationId is not com.aaron.jarvisvoice")
+    wear_build = (ROOT / "android/jarvis-voice-client/wear/build.gradle.kts").read_text()
+    jarvis_version = (
+        ROOT
+        / "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisVersion.java"
+    ).read_text()
+    core_version = (ROOT / "bridge/app/version.py").read_text()
+    if f'applicationId = "{expected_package}"' not in build:
+        errors.append(f"Android applicationId is not {expected_package}")
+    if f'applicationId = "{expected_package}"' not in wear_build:
+        errors.append(f"Wear applicationId is not {expected_package}")
     match = re.search(r"versionCode\s*=\s*(\d+)", build)
-    if match is None or int(match.group(1)) <= 190240:
-        errors.append("Android versionCode is not newer than alpha22")
+    if match is None or int(match.group(1)) != expected_code:
+        errors.append(f"Android versionCode is not current release code {expected_code}")
+    required_markers = {
+        "Phone build": (build, f'versionName = "{expected_version}"'),
+        "Wear build": (wear_build, f'versionName = "{expected_version}"'),
+        "Wear versionCode": (wear_build, f"versionCode = {expected_code}"),
+        "JarvisVersion": (jarvis_version, f'RELEASE = "{expected_version}"'),
+        "Core release": (core_version, f'JARVIS_RELEASE = "{expected_version}"'),
+        "Core application version": (
+            core_version,
+            f'CORE_APPLICATION_VERSION = "{release["core_application_version"]}"',
+        ),
+        "Core realtime protocol": (
+            core_version,
+            f"REALTIME_PROTOCOL_VERSION = {release['realtime_protocol']}",
+        ),
+    }
+    for label, (content, marker) in required_markers.items():
+        if marker not in content:
+            errors.append(f"{label} does not match current release identity: {marker}")
     return errors
 
 
-def verify_release_workflows() -> list[str]:
+def verify_release_workflows(manifest: dict[str, Any] | None = None) -> list[str]:
     errors: list[str] = []
+    manifest = manifest or load_manifest()
     obsolete = ROOT / ".github/workflows/android-jarvis-assistant-v18.4.1.yml"
     if obsolete.exists():
         errors.append("obsolete conversation-engine Android release workflow still exists")
     ota = ROOT / ".github/workflows/android-ota-release.yml"
+    ota_content = ""
     if not ota.is_file():
         errors.append("authoritative Android OTA workflow is missing")
-    elif "workflow_dispatch:" in ota.read_text(encoding="utf-8"):
+    else:
+        ota_content = ota.read_text(encoding="utf-8")
+    if ota.is_file() and "workflow_dispatch:" in ota_content:
         errors.append("OTA publishing must be tag-only, not manually dispatched from a branch")
-    elif "ota-feeds" in ota.read_text(encoding="utf-8"):
+    elif ota.is_file() and "ota-feeds" in ota_content:
         errors.append("OTA publishing still depends on the obsolete ota-feeds branch")
+    if (
+        ota.is_file()
+        and str(manifest["current_release"]["production_signer_sha256"]) not in ota_content
+    ):
+        errors.append("OTA workflow production signer does not match the current release baseline")
     if (ROOT / ".github/workflows/wear-v1-signed-pair.yml").exists():
         errors.append("duplicate signed-pair release workflow still exists")
     return errors
@@ -129,7 +169,11 @@ def main() -> int:
     )
     args = parser.parse_args()
     manifest = load_manifest()
-    errors = verify_assertions(manifest) + verify_android_identity() + verify_release_workflows()
+    errors = (
+        verify_assertions(manifest)
+        + verify_android_identity(manifest)
+        + verify_release_workflows(manifest)
+    )
     if not args.skip_ref:
         errors += verify_authoritative_ref(allow_dirty=args.allow_dirty)
     if errors:
