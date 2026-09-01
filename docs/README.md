@@ -16,7 +16,7 @@ release instructions apply only to `jarvis/unified-production`.
 - [Machine-readable product baseline](JARVIS_PRODUCT_BASELINE.json)
 - [Contributing](../CONTRIBUTING.md)
 - [Security](../SECURITY.md)
-- [Alpha26 release notes](releases/CHANGES_V19_0_0_ALPHA26.md)
+- [Alpha27 release notes](releases/CHANGES_V19_0_0_ALPHA27.md)
 
 ### Capabilities and services
 

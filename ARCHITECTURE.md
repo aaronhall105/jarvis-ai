@@ -181,5 +181,5 @@ Core/Phone/Watch source SHAs in the product and OTA manifests. Channel metadata
 is hosted as validated GitHub Release assets; no development branch stores
 mutable OTA state.
 
-The current published product is `v19.0.0-alpha26`, Core application version
+The current published product is `v19.0.0-alpha27`, Core application version
 `3.7.0`, realtime protocol `2`.
