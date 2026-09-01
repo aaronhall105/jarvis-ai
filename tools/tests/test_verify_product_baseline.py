@@ -14,6 +14,16 @@ def test_repository_satisfies_mandatory_product_assertions() -> None:
 def test_manifest_identifies_single_authoritative_branch() -> None:
     manifest = verify_product_baseline.load_manifest()
     assert manifest["authoritative_branch"] == "jarvis/unified-production"
+    assert manifest["current_release"] == {
+        "version_name": "19.0.0-alpha26",
+        "version_code": 190280,
+        "core_application_version": "3.7.0",
+        "realtime_protocol": 2,
+        "phone_package": "com.aaron.jarvisvoice",
+        "production_signer_sha256": (
+            "009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac"
+        ),
+    }
     assert Path(verify_product_baseline.MANIFEST).is_file()
 
 

@@ -2,7 +2,7 @@
 
 `jarvis/unified-production` is the sole authoritative source for future Jarvis
 Core deployments, Android and Wear builds, OTA manifests, and production
-releases. The current published product is `v19.0.0-alpha25`, with Core
+releases. The current published product is `v19.0.0-alpha26`, with Core
 application version `3.7.0` and realtime protocol `2`.
 
 ## Lineage decision
