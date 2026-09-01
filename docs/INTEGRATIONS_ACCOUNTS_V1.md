@@ -15,6 +15,13 @@ deterministic provider responses. This does **not** mean a deployment is connect
 has an OAuth client and a user completes consent, Android and Core must report **Setup required**.
 Microsoft remains Setup required and is not part of Google Personal Integrations v1.
 
+Before alpha27 release preparation, the production Google account completed live identity,
+Gmail read/search/draft/reply-draft, Calendar read/free-busy/create/update/cancel, credential
+restart-persistence, and exactly-once durable Gmail-monitor validation. Contacts provider health
+and live no-result behavior passed; live unique and ambiguous resolution remained data-limited
+because the connected account did not contain suitable test contacts. These results are specific
+to that validated deployment and do not cause an unconfigured installation to report Connected.
+
 Connection state is evidence based:
 
 - **Setup required / Not connected**: host OAuth configuration or a principal account is absent.

@@ -1,6 +1,6 @@
 # Installing Jarvis
 
-These instructions cover the current unified prerelease, `v19.0.0-alpha26`,
+These instructions cover the current unified prerelease, `v19.0.0-alpha27`,
 from the sole long-lived branch `jarvis/unified-production`. Core application
 version is `3.7.0`; realtime protocol version is `2`.
 
@@ -90,7 +90,7 @@ Do not expose an unauthenticated Core directly to the public internet.
 ## 4. Install or update the Phone client
 
 Download the production-signed Phone APK and its checksum from the
-[v19.0.0-alpha26 release](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha26).
+[v19.0.0-alpha27 release](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha27).
 The package is `com.aaron.jarvisvoice`.
 
 Install it over the existing Jarvis application. Do not uninstall Jarvis or
