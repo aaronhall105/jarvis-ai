@@ -231,6 +231,7 @@ public final class IntegrationsActivity extends Activity {
                 List.of(),
                 List.of(),
                 "",
+                "",
                 false,
                 false,
                 false

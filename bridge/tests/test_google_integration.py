@@ -67,6 +67,8 @@ class GoogleFixture:
         self.contacts_probe_status = 200
         self.archived = False
         self.event_deleted = False
+        self.calendar_cancel_tombstone = False
+        self.calendar_normalize_utc = False
         self.calendar_events_override: list[dict[str, object]] | None = None
         self.sent_message: dict[str, object] = {}
         self.forward_message: dict[str, object] = {}
@@ -235,16 +237,34 @@ class GoogleFixture:
             if requested_id and requested_id == self.event.get("id"):
                 return httpx.Response(409, json={"error": "already exists"})
             self.event = {"id": "event-1", "status": "confirmed", **requested_event}
+            if self.calendar_normalize_utc:
+                for boundary in ("start", "end"):
+                    value = self.event.get(boundary)
+                    if isinstance(value, dict) and str(value.get("dateTime") or "").endswith(
+                        "+00:00"
+                    ):
+                        value["dateTime"] = str(value["dateTime"])[:-6] + "Z"
             self.event_deleted = False
             return httpx.Response(200, json=self.event)
         if path == f"/calendar/v3/calendars/primary/events/{self.event.get('id')}":
             if request.method == "DELETE":
                 self.event_deleted = True
+                if self.calendar_cancel_tombstone:
+                    self.event["status"] = "cancelled"
                 return httpx.Response(204)
             if request.method == "PATCH":
                 self.event.update(json.loads(request.content))
+                if self.calendar_normalize_utc:
+                    for boundary in ("start", "end"):
+                        value = self.event.get(boundary)
+                        if isinstance(value, dict) and str(value.get("dateTime") or "").endswith(
+                            "+00:00"
+                        ):
+                            value["dateTime"] = str(value["dateTime"])[:-6] + "Z"
                 return httpx.Response(200, json=self.event)
             if self.event_deleted:
+                if self.calendar_cancel_tombstone:
+                    return httpx.Response(200, json=self.event)
                 return httpx.Response(404, json={"error": "not found"})
             observed = dict(self.event)
             if not self.calendar_verified:
@@ -252,7 +272,7 @@ class GoogleFixture:
             return httpx.Response(200, json=observed)
         if path == "/calendar/v3/freeBusy":
             return httpx.Response(200, json={"calendars": {"primary": {"busy": []}}})
-        if path == "/calendar/v3/settings/timezone":
+        if path == "/calendar/v3/users/me/settings/timezone":
             return httpx.Response(200, json={"value": "Europe/London"})
         if path == "/v1/people:searchContacts":
             first = {
@@ -781,6 +801,45 @@ async def test_calendar_read_write_timezone_and_cancellation_surface_verified_ev
     assert updated.data["event"]["summary"] == "Updated Garage"
     assert cancelled.status is ExecutionStatus.VERIFIED
     assert cancelled.data["status"] == "deleted"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_calendar_verification_accepts_normalized_utc_and_cancelled_tombstone(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    fixture.calendar_normalize_utc = True
+    fixture.calendar_cancel_tombstone = True
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    receipts = ActionReceiptStore(tmp_path / "receipts.db")
+    registry = ConnectorRegistry(receipt_store=receipts)
+    registry.register(connector)
+    request = CapabilityRequest(
+        capability_id="calendar.create",
+        payload={
+            "summary": "Jarvis Integration Test",
+            "start": {"dateTime": "2026-09-04T15:00:00+00:00", "timeZone": "UTC"},
+            "end": {"dateTime": "2026-09-04T16:00:00+00:00", "timeZone": "UTC"},
+        },
+        principal_id="aaron",
+        confirmed=True,
+        idempotency_key="normalized-calendar-event",
+    )
+
+    created = await registry.execute(request, refresh_health=True)
+    cancelled = await registry.execute(
+        CapabilityRequest(
+            capability_id="calendar.cancel",
+            payload={"event_id": created.provider_reference},
+            principal_id="aaron",
+            confirmed=True,
+            idempotency_key="cancel-normalized-calendar-event",
+        )
+    )
+
+    assert created.status is ExecutionStatus.VERIFIED
+    assert cancelled.status is ExecutionStatus.VERIFIED
     await client.aclose()
 
 

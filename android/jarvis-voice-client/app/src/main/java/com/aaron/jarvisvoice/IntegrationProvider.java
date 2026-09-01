@@ -17,6 +17,7 @@ public final class IntegrationProvider {
     public final List<String> setupRequirements;
     public final List<String> grantedCapabilities;
     public final String accountId;
+    public final String accountEmail;
     public final boolean canConnect;
     public final boolean canReconnect;
     public final boolean canDisconnect;
@@ -31,6 +32,7 @@ public final class IntegrationProvider {
         List<String> setupRequirements,
         List<String> grantedCapabilities,
         String accountId,
+        String accountEmail,
         boolean canConnect,
         boolean canReconnect,
         boolean canDisconnect
@@ -44,6 +46,7 @@ public final class IntegrationProvider {
         this.setupRequirements = List.copyOf(setupRequirements);
         this.grantedCapabilities = List.copyOf(grantedCapabilities);
         this.accountId = accountId;
+        this.accountEmail = accountEmail;
         this.canConnect = canConnect;
         this.canReconnect = canReconnect;
         this.canDisconnect = canDisconnect;
@@ -52,19 +55,29 @@ public final class IntegrationProvider {
     public static IntegrationProvider fromJson(JSONObject value) {
         JSONObject account = value.optJSONObject("account");
         return new IntegrationProvider(
-            value.optString("provider_id", ""),
-            value.optString("name", "Integration"),
-            value.optString("state", "Setup required"),
+            optionalString(value, "provider_id", ""),
+            optionalString(value, "name", "Integration"),
+            optionalString(value, "state", "Setup required"),
             value.optBoolean("connected", false),
             value.optBoolean("healthy", false),
-            value.optString("health_reason", ""),
+            optionalString(value, "health_reason", ""),
             strings(value.optJSONArray("setup_requirements")),
             strings(value.optJSONArray("granted_capabilities")),
-            account == null ? "" : account.optString("account_id", ""),
+            account == null ? "" : optionalString(account, "account_id", ""),
+            account == null ? "" : optionalString(account, "account_email", ""),
             value.optBoolean("can_connect", false),
             value.optBoolean("can_reconnect", false),
             value.optBoolean("can_disconnect", false)
         );
+    }
+
+    private static String optionalString(JSONObject value, String key, String fallback) {
+        if (value == null || !value.has(key) || value.isNull(key)) return fallback;
+        Object raw = value.opt(key);
+        if (raw == null || raw == JSONObject.NULL) return fallback;
+        String rendered = String.valueOf(raw).trim();
+        if (rendered.isBlank() || "null".equalsIgnoreCase(rendered)) return fallback;
+        return rendered;
     }
 
     private static List<String> strings(JSONArray values) {
@@ -82,6 +95,9 @@ public final class IntegrationProvider {
         if (!setupRequirements.isEmpty()) return setupRequirements.get(0);
         if ("Partial permissions".equals(state)) {
             return grantedCapabilities.size() + " capabilities currently granted";
+        }
+        if (healthy && "google".equals(id) && !accountEmail.isBlank()) {
+            return "Connected as " + accountEmail;
         }
         return healthy ? "Provider health verified by Jarvis Core" : "Not available to Jarvis";
     }
