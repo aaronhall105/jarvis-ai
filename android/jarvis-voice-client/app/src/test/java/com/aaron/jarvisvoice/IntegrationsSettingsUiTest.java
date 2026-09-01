@@ -127,6 +127,7 @@ public final class IntegrationsSettingsUiTest {
             List.of(),
             List.of(),
             "",
+            "",
             false,
             false,
             false

@@ -46,6 +46,40 @@ public final class IntegrationProviderTest {
         assertEquals("Connector unavailable", provider.detail());
     }
 
+    @Test public void jsonNullNeverRendersAsLiteralNull() throws Exception {
+        JSONObject value = new JSONObject()
+            .put("provider_id", "gmail")
+            .put("name", "Gmail")
+            .put("state", "Connected")
+            .put("connected", true)
+            .put("healthy", true)
+            .put("health_reason", JSONObject.NULL);
+
+        IntegrationProvider provider = IntegrationProvider.fromJson(value);
+
+        assertEquals("", provider.healthReason);
+        assertFalse(provider.detail().toLowerCase().contains("null"));
+        assertEquals("Provider health verified by Jarvis Core", provider.detail());
+    }
+
+    @Test public void connectedGoogleUsesVerifiedAccountEmailAsDetail() throws Exception {
+        JSONObject value = new JSONObject()
+            .put("provider_id", "google")
+            .put("name", "Google")
+            .put("state", "Connected")
+            .put("connected", true)
+            .put("healthy", true)
+            .put("health_reason", JSONObject.NULL)
+            .put("account", new JSONObject()
+                .put("account_id", "account-1")
+                .put("account_email", "aaron@example.test"));
+
+        IntegrationProvider provider = IntegrationProvider.fromJson(value);
+
+        assertEquals("aaron@example.test", provider.accountEmail);
+        assertEquals("Connected as aaron@example.test", provider.detail());
+    }
+
     @Test public void googleOAuthUrlRequiresExactGoogleOriginAndPkceParameters() {
         String valid = "https://accounts.google.com/o/oauth2/v2/auth"
             + "?response_type=code&client_id=client&state=state&code_challenge=challenge";

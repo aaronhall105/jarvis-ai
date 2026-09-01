@@ -1711,6 +1711,14 @@ class ExternalAgentRuntime:
             )
         if metadata.provider_id != str(provider).strip():
             raise RuntimeError("Monitor provider does not own the requested capability")
+        provider_account_id: str | None = None
+        if metadata.provider_id == "google":
+            if not resolved_principal:
+                raise RuntimeError("A Google monitor requires an authenticated principal")
+            account = await self.google_connector.account_status(resolved_principal)
+            if account is None or not account.authenticated:
+                raise RuntimeError("A connected Google account is required for this monitor")
+            provider_account_id = account.account_id
         interval = int(polling_interval_seconds)
         minimum_interval = int(metadata.minimum_poll_interval_seconds or 0)
         if interval < minimum_interval or interval > 2_592_000:
@@ -1750,6 +1758,7 @@ class ExternalAgentRuntime:
             "max_attempts": max(1, min(int(max_attempts), 10)),
             "conversation_id": scoped_conversation,
             "principal_id": resolved_principal,
+            "provider_account_id": provider_account_id,
             "value_path": selected_path,
             "poll_count": 0,
             "max_polls": int(metadata.maximum_monitor_polls or 1),
@@ -1974,6 +1983,7 @@ class ExternalAgentRuntime:
             "comparison",
             "polling_interval_seconds",
             "principal_id",
+            "provider_account_id",
             "label",
             "max_attempts",
             "max_polls",
@@ -2011,6 +2021,13 @@ class ExternalAgentRuntime:
             )
         if metadata.provider_id != provider_id:
             raise RuntimeError("Monitor provider does not own the requested capability")
+        if provider_id == "google":
+            expected_account = str(monitor.get("provider_account_id") or "").strip()
+            if not principal_id or not expected_account:
+                raise RuntimeError("Google monitor account binding is missing")
+            current_account = await self.google_connector.account_status(principal_id)
+            if current_account is None or current_account.account_id != expected_account:
+                raise RuntimeError("Google monitor account binding no longer matches")
 
         raw_arguments = monitor.get("arguments")
         payload = dict(raw_arguments) if isinstance(raw_arguments, Mapping) else {}

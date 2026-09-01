@@ -708,6 +708,62 @@ async def test_monitor_never_promises_success_without_persisted_job_identity(run
 
 
 @pytest.mark.asyncio
+async def test_google_monitor_pins_connected_provider_account(runtime):
+    value, _, _, _ = runtime
+    created: list[dict[str, object]] = []
+    capability = CapabilityMetadata(
+        capability_id="gmail.search",
+        provider_id="google",
+        name="Search Gmail messages",
+        access=CapabilityAccess.READ,
+        repeatable=True,
+        minimum_poll_interval_seconds=300,
+        maximum_monitor_polls=20,
+        monitor_ttl_seconds=86_400,
+        monitor_value_paths=("latest_message_id",),
+    )
+
+    async def persist(conversation_id, payload, interval, request_id):
+        created.append(dict(payload))
+        return {
+            "job_id": "google-monitor-1",
+            "status": "pending",
+            "next_run_at": "2026-09-01T19:00:00+00:00",
+        }
+
+    value.set_monitor_creator(persist)
+    value.registry.get_capability = AsyncMock(return_value=capability)  # type: ignore[method-assign]
+    value.google_connector.account_status = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(account_id="google-account-1", authenticated=True)
+    )
+    actual_evaluator = value.evaluate_external_monitor
+    value.evaluate_external_monitor = AsyncMock(  # type: ignore[method-assign]
+        return_value={"value": None, "verified": True}
+    )
+
+    result = await value.create_external_monitor(
+        conversation_id="same-chat",
+        principal_id="aaron",
+        provider="google",
+        capability_id="gmail.search",
+        arguments={"query": 'subject:"JARVIS-MONITOR-TEST"'},
+        value_path="latest_message_id",
+        comparison="changed",
+        polling_interval_seconds=300,
+        request_id="google-monitor-request",
+    )
+
+    assert result["job_id"] == "google-monitor-1"
+    assert created[0]["provider_account_id"] == "google-account-1"
+    value.evaluate_external_monitor = actual_evaluator  # type: ignore[method-assign]
+    value.google_connector.account_status = AsyncMock(  # type: ignore[method-assign]
+        return_value=SimpleNamespace(account_id="different-account", authenticated=True)
+    )
+    with pytest.raises(RuntimeError, match="account binding no longer matches"):
+        await value.evaluate_external_monitor(created[0])
+
+
+@pytest.mark.asyncio
 async def test_ordered_monitor_refuses_non_numeric_web_observation(runtime):
     value, _, _, _ = runtime
 

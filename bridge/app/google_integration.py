@@ -1177,7 +1177,7 @@ class GoogleConnector(Connector):
                     if capability.capability_id == "calendar.create"
                     else request.payload.get("changes")
                 )
-                if not isinstance(expected, Mapping) or not self._contains_expected(
+                if not isinstance(expected, Mapping) or not self._calendar_fields_match(
                     payload, expected
                 ):
                     return VerificationResult.unverified(
@@ -1190,8 +1190,20 @@ class GoogleConnector(Connector):
                     "GET",
                     f"{CALENDAR_API}/calendars/{self._segment(calendar_id)}/events/{self._segment(reference)}",
                 )
-                if response.status_code not in {404, 410}:
-                    return VerificationResult.unverified("Calendar event still exists")
+                if response.status_code == 200:
+                    try:
+                        tombstone = response.json()
+                    except (json.JSONDecodeError, ValueError):
+                        tombstone = None
+                    if (
+                        not isinstance(tombstone, Mapping)
+                        or str(tombstone.get("status") or "").casefold() != "cancelled"
+                    ):
+                        return VerificationResult.unverified("Calendar event still exists")
+                elif response.status_code not in {404, 410}:
+                    return VerificationResult.unverified(
+                        f"Calendar cancellation readback failed with HTTP {response.status_code}"
+                    )
             else:
                 return VerificationResult.unverified("Capability has no write verification")
         except GoogleProviderError as exc:
@@ -1299,6 +1311,49 @@ class GoogleConnector(Connector):
                 )
             )
         return actual == expected
+
+    @classmethod
+    def _calendar_fields_match(
+        cls,
+        actual: Mapping[str, Any],
+        expected: Mapping[str, Any],
+    ) -> bool:
+        """Compare event fields while accepting equivalent RFC 3339 timestamps."""
+
+        for key, value in expected.items():
+            if key not in actual:
+                return False
+            if key in {"start", "end"}:
+                if not cls._calendar_boundary_matches(actual[key], value):
+                    return False
+            elif not cls._contains_expected(actual[key], value):
+                return False
+        return True
+
+    @staticmethod
+    def _calendar_boundary_matches(actual: Any, expected: Any) -> bool:
+        if not isinstance(actual, Mapping) or not isinstance(expected, Mapping):
+            return False
+        if expected.get("date") is not None:
+            return str(actual.get("date") or "") == str(expected.get("date") or "")
+        expected_value = str(expected.get("dateTime") or "").strip()
+        actual_value = str(actual.get("dateTime") or "").strip()
+        if not expected_value or not actual_value:
+            return False
+
+        def parse(value: str) -> datetime | None:
+            rendered = value[:-1] + "+00:00" if value.endswith("Z") else value
+            try:
+                parsed = datetime.fromisoformat(rendered)
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo is not None else None
+
+        expected_time = parse(expected_value)
+        actual_time = parse(actual_value)
+        if expected_time is None or actual_time is None:
+            return actual_value == expected_value
+        return actual_time.astimezone(timezone.utc) == expected_time.astimezone(timezone.utc)
 
     @staticmethod
     def _required(payload: Mapping[str, Any], key: str, *, max_length: int = 10_000) -> str:
@@ -1805,7 +1860,11 @@ class GoogleConnector(Connector):
     async def _calendar_timezone(
         self, principal: str, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None]:
-        result = await self._request(principal, "GET", f"{CALENDAR_API}/settings/timezone")
+        result = await self._request(
+            principal,
+            "GET",
+            f"{CALENDAR_API}/users/me/settings/timezone",
+        )
         return {"time_zone": result.get("value")}, None
 
     @staticmethod
