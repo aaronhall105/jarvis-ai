@@ -115,6 +115,11 @@ def google_model_tool(executable_capabilities: Sequence[str]) -> dict[str, Any] 
             "scope, confirmation, idempotency, receipt and verification policy. "
             "Never invent an email, phone number, message ID, draft ID or event ID. "
             "Draft and reply create drafts only; gmail.send is the only draft-send action. "
+            "For a new email the user explicitly says to send, first call gmail.draft "
+            "with the stated recipient, subject and body, then call gmail.send with "
+            "the verified draft_id returned by that first call. The recipient domain "
+            "does not select the sender provider: a connected Gmail account may send "
+            "to Outlook, Hotmail, Yahoo or another valid email domain. "
             "Argument contracts: " + guidance
         ),
         "parameters": {
