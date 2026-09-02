@@ -961,6 +961,7 @@ class ExternalAgentRuntime:
             )
         }
         lowered = str(text or "").casefold()
+        direct_literal_email_send = "@" in lowered and "send" in lowered and "email" in lowered
         cancel_monitor_intent = any(
             phrase in lowered
             for phrase in (
@@ -1213,20 +1214,24 @@ class ExternalAgentRuntime:
                     "strict": True,
                 }
             )
-        if any(
-            phrase in lowered
-            for phrase in (
-                " and ",
-                "sort it",
-                "sort me",
-                "sort this",
-                "plan it",
-                "organise",
+        if not direct_literal_email_send and (
+            any(
+                phrase in lowered
+                for phrase in (
+                    " and ",
+                    "sort it",
+                    "sort me",
+                    "sort this",
+                    "plan it",
+                    "organise",
+                )
             )
-        ) or (
-            google_tool is not None
-            and any(
-                word in lowered for word in ("email", "gmail", "calendar", "appointment", "contact")
+            or (
+                google_tool is not None
+                and any(
+                    word in lowered
+                    for word in ("email", "gmail", "calendar", "appointment", "contact")
+                )
             )
         ):
             definitions.append(self._planner_tool())
@@ -1479,7 +1484,7 @@ class ExternalAgentRuntime:
                 break
         word_set = set(words)
         required: Mapping[str, frozenset[str]] = {
-            "gmail.draft": frozenset({"draft", "compose", "write"}),
+            "gmail.draft": frozenset({"draft", "compose", "write", "send"}),
             "gmail.reply": frozenset({"reply", "respond", "draft"}),
             "gmail.send": frozenset({"send"}),
             "gmail.forward": frozenset({"forward"}),

@@ -993,3 +993,85 @@ async def test_concurrent_monitor_replay_captures_only_one_provider_baseline(run
     assert first["job_id"] == second["job_id"]
     assert {first["reused"], second["reused"]} == {False, True}
     assert price.calls == 1
+
+
+def test_explicit_send_authorizes_preparatory_gmail_draft() -> None:
+    user_text = "Send an email to amber.gill1992@outlook.com asking if she is available for dinner."
+
+    assert (
+        ExternalAgentRuntime._write_authorized(
+            "gmail.draft",
+            user_text,
+        )
+        is True
+    )
+    assert (
+        ExternalAgentRuntime._write_authorized(
+            "gmail.send",
+            user_text,
+        )
+        is True
+    )
+    assert (
+        ExternalAgentRuntime._plan_recipient_authorized(
+            "amber.gill1992@outlook.com",
+            user_text=user_text,
+            steps_by_id={},
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_literal_address_send_prefers_direct_google_tool(runtime) -> None:
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[
+            SimpleNamespace(capability_id="gmail.draft"),
+            SimpleNamespace(capability_id="gmail.send"),
+        ]
+    )
+
+    tools = await value.openai_tools(
+        ("Send an email to amber.gill1992@outlook.com asking if she is available for dinner."),
+        principal_id="aaron",
+    )
+
+    names = {item["name"] for item in tools}
+
+    assert "google_integration" in names
+    assert "create_personal_plan" not in names
+
+    google_tool = next(item for item in tools if item["name"] == "google_integration")
+    capabilities = google_tool["parameters"]["properties"]["capability_id"]["enum"]
+
+    assert "gmail.draft" in capabilities
+    assert "gmail.send" in capabilities
+    assert "first call gmail.draft" in google_tool["description"]
+    assert "recipient domain" in google_tool["description"]
+
+
+@pytest.mark.asyncio
+async def test_non_literal_email_goal_keeps_planner_available(runtime) -> None:
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[
+            SimpleNamespace(capability_id="contacts.resolve"),
+            SimpleNamespace(capability_id="gmail.draft"),
+            SimpleNamespace(capability_id="gmail.send"),
+        ]
+    )
+
+    tools = await value.openai_tools(
+        "Email Amber about dinner.",
+        principal_id="aaron",
+    )
+
+    names = {item["name"] for item in tools}
+
+    assert "google_integration" in names
+    assert "create_personal_plan" in names
