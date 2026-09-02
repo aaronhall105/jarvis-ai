@@ -373,6 +373,37 @@ def test_provider_or_quoted_prompt_injection_cannot_authorize_google_write() -> 
 
 
 @pytest.mark.asyncio
+async def test_direct_google_write_accepts_display_name_for_user_stated_recipient(
+    runtime, monkeypatch
+):
+    value, _, _, _ = runtime
+    execute = AsyncMock(
+        return_value=SimpleNamespace(as_dict=lambda: {"success": True, "status": "verified"})
+    )
+    monkeypatch.setattr(value.registry, "execute", execute)
+
+    result = await value._execute_google_model_tool(
+        {
+            "capability_id": "gmail.draft",
+            "arguments": {
+                "to": "Amber <amber@example.test>",
+                "subject": "Dinner",
+                "body": "Are you available for dinner?",
+            },
+        },
+        conversation_id="usr:aaron:conversation-1",
+        principal_id="aaron",
+        request_id="display-recipient-test",
+        user_text=("Send an email to amber@example.test asking if she is available for dinner."),
+    )
+
+    assert result["status"] == "verified"
+    request = execute.await_args.args[0]
+    assert request.confirmed is True
+    assert request.capability_id == "gmail.draft"
+
+
+@pytest.mark.asyncio
 async def test_direct_google_write_rejects_model_invented_recipient_and_attendee(runtime):
     value, _, _, _ = runtime
     with pytest.raises(ValueError, match="recipient not stated"):
@@ -993,6 +1024,26 @@ async def test_concurrent_monitor_replay_captures_only_one_provider_baseline(run
     assert first["job_id"] == second["job_id"]
     assert {first["reused"], second["reused"]} == {False, True}
     assert price.calls == 1
+
+
+def test_recipient_authorization_normalizes_display_name_without_weakening_guard() -> None:
+    user_text = "Send an email to amber@example.test asking if she is available for dinner."
+
+    assert ExternalAgentRuntime._plan_recipient_authorized(
+        "Amber <amber@example.test>",
+        user_text=user_text,
+        steps_by_id={},
+    )
+    assert not ExternalAgentRuntime._plan_recipient_authorized(
+        "Mallory <invented@example.test>",
+        user_text=user_text,
+        steps_by_id={},
+    )
+    assert not ExternalAgentRuntime._plan_recipient_authorized(
+        "Amber <amber@example.test>, invented@example.test",
+        user_text=user_text,
+        steps_by_id={},
+    )
 
 
 def test_explicit_send_authorizes_preparatory_gmail_draft() -> None:
