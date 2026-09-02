@@ -1515,8 +1515,11 @@ class ExternalAgentRuntime:
                 and source.get("capability_id") == "contacts.resolve"
                 and path.startswith("contact.email_addresses.")
             )
-        recipient = str(value or "").strip().casefold()
-        return bool(recipient and recipient in str(user_text or "").casefold())
+        try:
+            recipient = GoogleConnector._recipient(str(value or "")).casefold()
+        except ValueError:
+            return False
+        return recipient in str(user_text or "").casefold()
 
     async def _execute_google_model_tool(
         self,
@@ -1543,8 +1546,12 @@ class ExternalAgentRuntime:
                 )
             confirmed = True
         if capability_id in {"gmail.draft", "gmail.forward"}:
-            recipient = str(payload.get("to") or "").strip().casefold()
-            if recipient and recipient not in str(user_text or "").casefold():
+            recipient = payload.get("to")
+            if recipient and not self._plan_recipient_authorized(
+                recipient,
+                user_text=user_text,
+                steps_by_id={},
+            ):
                 raise ValueError(
                     "A recipient not stated by the user must come from a verified plan step"
                 )
