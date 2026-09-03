@@ -88,6 +88,20 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
         result = await self.engine.interpret("where is amebr", [], self.actor)
         self.assertEqual(result.interpreted_text.casefold(), "where is amber")
 
+    async def test_email_literal_is_not_split_by_understanding(self):
+        original = "Send an email to amber.gill1992@outlook.com asking if she's free for dinner."
+
+        result = await self.engine.interpret(original, [], self.actor)
+
+        self.assertIn(
+            "amber.gill1992@outlook.com",
+            result.interpreted_text,
+        )
+        self.assertNotIn(
+            "amber. gill1992@outlook. com",
+            result.interpreted_text,
+        )
+
     def test_write_action_detection_is_public_and_conservative(self):
         self.assertTrue(self.engine.is_write_action("turn off the television"))
         self.assertTrue(self.engine.is_write_action("send Amber a notification"))

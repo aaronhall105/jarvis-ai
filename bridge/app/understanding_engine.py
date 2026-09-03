@@ -338,8 +338,25 @@ class UnderstandingEngine:
 
     @staticmethod
     def _restore_spacing(text: str) -> str:
+        email_pattern = re.compile(
+            r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+            r"(?![A-Za-z0-9.-])"
+        )
+        protected: list[str] = []
+
+        def protect(match: re.Match[str]) -> str:
+            protected.append(match.group(0))
+            return f"\ufff0{len(protected) - 1}\ufff1"
+
+        text = email_pattern.sub(protect, text)
         text = re.sub(r"\s+([,.;!?])", r"\1", text)
         text = re.sub(r"([,.;!?])(\S)", r"\1 \2", text)
+
+        for index, email in enumerate(protected):
+            text = text.replace(f"\ufff0{index}\ufff1", email)
+
         return re.sub(r"\s+", " ", text).strip()
 
     async def interpret(

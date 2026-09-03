@@ -93,6 +93,28 @@ class _Fetcher:
         self.closed = True
 
 
+def test_literal_recipient_authorization_requires_exact_email():
+    original = "Send an email to amber.gill1992@outlook.com asking if she is free for dinner."
+
+    assert ExternalAgentRuntime._plan_recipient_authorized(
+        "amber.gill1992@outlook.com",
+        user_text=original,
+        steps_by_id={},
+    )
+    assert ExternalAgentRuntime._plan_recipient_authorized(
+        "Amber <amber.gill1992@outlook.com>",
+        user_text=original,
+        steps_by_id={},
+    )
+
+    # A suffix of the user's real address must never inherit authorization.
+    assert not ExternalAgentRuntime._plan_recipient_authorized(
+        "gill1992@outlook.com",
+        user_text=original,
+        steps_by_id={},
+    )
+
+
 def test_ai_ask_wires_original_text_into_external_authorization():
     source = inspect.getsource(AIEngine.ask)
 

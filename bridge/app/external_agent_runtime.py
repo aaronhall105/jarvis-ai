@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 import weakref
@@ -1497,6 +1498,24 @@ class ExternalAgentRuntime:
         return verbs is not None and bool(word_set & verbs)
 
     @staticmethod
+    def _literal_user_emails(user_text: str) -> frozenset[str]:
+        """Return complete literal email addresses stated in the user's request."""
+
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
+            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+            r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+            r"(?![A-Za-z0-9.-])"
+        )
+        addresses: set[str] = set()
+        for match in pattern.finditer(str(user_text or "")):
+            try:
+                addresses.add(GoogleConnector._recipient(match.group(0)).casefold())
+            except ValueError:
+                continue
+        return frozenset(addresses)
+
+    @staticmethod
     def _plan_recipient_authorized(
         value: Any,
         *,
@@ -1519,7 +1538,7 @@ class ExternalAgentRuntime:
             recipient = GoogleConnector._recipient(str(value or "")).casefold()
         except ValueError:
             return False
-        return recipient in str(user_text or "").casefold()
+        return recipient in ExternalAgentRuntime._literal_user_emails(user_text)
 
     async def _execute_google_model_tool(
         self,
@@ -1563,12 +1582,19 @@ class ExternalAgentRuntime:
             if attendees is not None:
                 if not isinstance(attendees, Sequence) or isinstance(attendees, (str, bytes)):
                     raise ValueError("Calendar attendees must be an array")
-                current_request = str(user_text or "").casefold()
+                literal_emails = self._literal_user_emails(user_text)
                 for attendee in attendees:
                     if not isinstance(attendee, Mapping):
                         raise ValueError("Each calendar attendee must be an object")
-                    email = str(attendee.get("email") or "").strip().casefold()
-                    if not email or email not in current_request:
+                    try:
+                        email = GoogleConnector._recipient(
+                            str(attendee.get("email") or "")
+                        ).casefold()
+                    except ValueError as exc:
+                        raise ValueError(
+                            "Each calendar attendee must contain one valid email address"
+                        ) from exc
+                    if email not in literal_emails:
                         raise ValueError(
                             "An attendee not stated by the user must come from a verified plan step"
                         )
