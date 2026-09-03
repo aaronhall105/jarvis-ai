@@ -2312,6 +2312,7 @@ class AIEngine:
         conversation_id: str,
         actor: UserContext,
         request_id: str | None = None,
+        authorization_text: str | None = None,
     ) -> dict[str, Any]:
         request_id = str(request_id or uuid.uuid4())
         try:
@@ -2367,13 +2368,16 @@ class AIEngine:
                                 "use Home Assistant administration capabilities."
                             ),
                         )
+                authoritative_user_text = (
+                    authorization_text if authorization_text is not None else user_text
+                )
                 result = await external_runtime.execute_model_tool(
                     name,
                     arguments,
                     conversation_id=conversation_id,
                     principal_id=actor.user_key,
                     request_id=request_id,
-                    user_text=user_text,
+                    user_text=authoritative_user_text,
                 )
                 return {
                     "tool": name,
@@ -6277,6 +6281,7 @@ class AIEngine:
                         conversation_id=resolved_conversation_id,
                         actor=actor,
                         request_id=resolved_request_id,
+                        authorization_text=raw_user_text,
                     )
 
                 completed_calls.append(completed)

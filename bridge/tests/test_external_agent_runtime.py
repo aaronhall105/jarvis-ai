@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from dataclasses import dataclass
 from datetime import timedelta
 from types import SimpleNamespace
@@ -90,6 +91,44 @@ class _Fetcher:
 
     async def aclose(self):
         self.closed = True
+
+
+def test_ai_ask_wires_original_text_into_external_authorization():
+    source = inspect.getsource(AIEngine.ask)
+
+    assert "user_text = understanding.interpreted_text" in source
+    assert "authorization_text=raw_user_text" in source
+
+
+@pytest.mark.asyncio
+async def test_external_write_authorization_uses_original_user_text():
+    engine = AIEngine.__new__(AIEngine)
+    runtime = SimpleNamespace(
+        execute_model_tool=AsyncMock(return_value={"success": True, "status": "verified"})
+    )
+    engine.external_runtime = runtime
+
+    original = "Send an email to person.name@example.test asking if they are free for dinner."
+    interpreted = "Send an email to person. name@example. test asking if they are free for dinner."
+
+    result = await engine._execute_function(
+        name="google_integration",
+        arguments_json=(
+            '{"capability_id":"gmail.draft","arguments":'
+            '{"to":"person.name@example.test","subject":"Dinner",'
+            '"body":"Are you free for dinner?"}}'
+        ),
+        user_text=interpreted,
+        authorised_tools={"google_integration"},
+        conversation_id="usr:aaron:conversation-1",
+        actor=SimpleNamespace(user_key="aaron"),
+        request_id="authorization-source-test",
+        authorization_text=original,
+    )
+
+    assert result["result"]["status"] == "verified"
+    runtime.execute_model_tool.assert_awaited_once()
+    assert runtime.execute_model_tool.await_args.kwargs["user_text"] == original
 
 
 @pytest.mark.asyncio
