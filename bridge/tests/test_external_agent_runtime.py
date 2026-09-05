@@ -93,6 +93,72 @@ class _Fetcher:
         self.closed = True
 
 
+def test_gmail_write_authorization_requires_explicit_current_intent():
+    authorize = ExternalAgentRuntime._write_authorized
+
+    # Read/query language must never authorize a reply write.
+    assert not authorize("gmail.reply", "Have I got any reply?")
+    assert not authorize("gmail.reply", "Did she reply yet?")
+    assert authorize(
+        "gmail.reply",
+        "Reply to that email saying thanks",
+    )
+    assert authorize(
+        "gmail.reply",
+        "Can you reply to that email please?",
+    )
+
+    assert authorize("gmail.mark_read", "Mark that email as read")
+    assert not authorize("gmail.mark_read", "Read that email")
+
+    assert authorize("gmail.mark_unread", "Mark it unread")
+
+    assert authorize("gmail.star", "Star that email")
+    assert authorize("gmail.star", "Add a star to that message")
+    assert authorize("gmail.unstar", "Unstar that email")
+    assert authorize("gmail.unstar", "Remove the star")
+
+    assert authorize(
+        "gmail.mark_important",
+        "Mark that email important",
+    )
+    assert authorize(
+        "gmail.mark_not_important",
+        "Mark that email as not important",
+    )
+
+    assert authorize(
+        "gmail.move",
+        "Move that email to Receipts",
+    )
+    assert not authorize(
+        "gmail.move",
+        "Move my calendar appointment to Friday",
+    )
+
+    assert authorize(
+        "gmail.trash",
+        "Delete that email",
+    )
+    assert authorize(
+        "gmail.trash",
+        "Trash it",
+    )
+    assert not authorize(
+        "gmail.trash",
+        "Delete my calendar appointment",
+    )
+
+    assert authorize(
+        "gmail.restore",
+        "Restore that email",
+    )
+    assert authorize(
+        "gmail.restore",
+        "Untrash it",
+    )
+
+
 def test_literal_recipient_authorization_requires_exact_email():
     original = "Send an email to amber.gill1992@outlook.com asking if she is free for dinner."
 

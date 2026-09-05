@@ -1557,31 +1557,196 @@ class ExternalAgentRuntime:
 
     @staticmethod
     def _write_authorized(capability_id: str, user_text: str) -> bool:
-        """Recognize explicit user authority; model/provider content cannot grant it."""
+        """Recognize explicit CURRENT user authority for an external write."""
 
         request_prefix = str(user_text or "")[:5_000]
+
+        # Do not let quoted/body content grant authority for another action.
         for separator in ("\n", "\r", ":", "?", "!", '"'):
             request_prefix = request_prefix.partition(separator)[0]
+
         normalised = "".join(
             character.casefold() if character.isalnum() else " " for character in request_prefix
         )
+
         words = normalised.split()[:32]
-        content_markers = {"body", "contains", "reads", "said", "says", "saying", "tells"}
+
+        content_markers = {
+            "body",
+            "contains",
+            "reads",
+            "said",
+            "says",
+            "saying",
+            "tells",
+        }
+
         for index, word in enumerate(words):
             if word in content_markers:
                 words = words[:index]
                 break
+
         word_set = set(words)
+        authority_text = " ".join(words)
+
+        # ----------------------------------------------------
+        # Gmail actions whose intent needs phrase-level checks.
+        # ----------------------------------------------------
+
+        if capability_id == "gmail.reply":
+            # A noun/query such as "Have I got any reply?" is NOT
+            # permission to create a reply draft.
+            return bool(
+                re.search(
+                    r"^(?:please\s+)?(?:reply|respond)\b|"
+                    r"^(?:can|could|would|will)\s+you\s+"
+                    r"(?:please\s+)?(?:reply|respond)\b|"
+                    r"\bdraft\s+(?:a\s+)?reply\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.mark_read":
+            return bool(
+                re.search(
+                    r"\bmark(?:\s+(?:this|that|the|it|email|message)){0,3}"
+                    r"\s+(?:as\s+)?read\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.mark_unread":
+            return bool(
+                re.search(
+                    r"\bmark(?:\s+(?:this|that|the|it|email|message)){0,3}"
+                    r"\s+(?:as\s+)?unread\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.star":
+            return bool(
+                re.search(
+                    r"\bstar(?:\s+(?:this|that|the|it|email|message)){0,3}\b",
+                    authority_text,
+                )
+            ) or bool(re.search(r"\badd\s+(?:a\s+)?star\b", authority_text))
+
+        if capability_id == "gmail.unstar":
+            return "unstar" in word_set or bool(
+                re.search(
+                    r"\bremove\s+(?:the\s+|a\s+)?star\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.mark_important":
+            return bool(
+                re.search(
+                    r"\bmark(?:\s+(?:this|that|the|it|email|message)){0,3}"
+                    r"\s+(?:as\s+)?important\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.mark_not_important":
+            return bool(
+                re.search(
+                    r"\bmark(?:\s+(?:this|that|the|it|email|message)){0,3}"
+                    r"\s+(?:as\s+)?not\s+important\b",
+                    authority_text,
+                )
+            ) or bool(
+                re.search(
+                    r"\bremove\s+(?:the\s+)?important(?:\s+marker)?\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.move":
+            # "move" alone is ambiguous with calendar/event operations.
+            return "move" in word_set and bool(
+                word_set
+                & {
+                    "email",
+                    "message",
+                    "gmail",
+                    "inbox",
+                }
+            )
+
+        if capability_id == "gmail.trash":
+            # "delete" is allowed only when the CURRENT request identifies
+            # email/message context. "trash" itself is Gmail-specific enough.
+            return bool(word_set & {"trash", "bin"}) or (
+                bool(word_set & {"delete", "remove"})
+                and bool(
+                    word_set
+                    & {
+                        "email",
+                        "message",
+                        "gmail",
+                        "inbox",
+                    }
+                )
+            )
+
+        if capability_id == "gmail.restore":
+            return "untrash" in word_set or (
+                bool(word_set & {"restore", "undelete"})
+                and bool(
+                    word_set
+                    & {
+                        "email",
+                        "message",
+                        "gmail",
+                        "trash",
+                    }
+                )
+            )
+
+        # ----------------------------------------------------
+        # Existing explicit command verbs.
+        # ----------------------------------------------------
+
         required: Mapping[str, frozenset[str]] = {
-            "gmail.draft": frozenset({"draft", "compose", "write", "send"}),
-            "gmail.reply": frozenset({"reply", "respond", "draft"}),
+            "gmail.draft": frozenset(
+                {
+                    "draft",
+                    "compose",
+                    "write",
+                    "send",
+                }
+            ),
             "gmail.send": frozenset({"send"}),
             "gmail.forward": frozenset({"forward"}),
             "gmail.archive": frozenset({"archive"}),
-            "calendar.create": frozenset({"add", "book", "create", "put", "schedule"}),
-            "calendar.update": frozenset({"change", "move", "reschedule", "update"}),
-            "calendar.cancel": frozenset({"cancel", "delete", "remove"}),
+            "calendar.create": frozenset(
+                {
+                    "add",
+                    "book",
+                    "create",
+                    "put",
+                    "schedule",
+                }
+            ),
+            "calendar.update": frozenset(
+                {
+                    "change",
+                    "move",
+                    "reschedule",
+                    "update",
+                }
+            ),
+            "calendar.cancel": frozenset(
+                {
+                    "cancel",
+                    "delete",
+                    "remove",
+                }
+            ),
         }
+
         verbs = required.get(capability_id)
         return verbs is not None and bool(word_set & verbs)
 
