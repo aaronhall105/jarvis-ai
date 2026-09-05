@@ -2315,6 +2315,7 @@ class AIEngine:
         actor: UserContext,
         request_id: str | None = None,
         authorization_text: str | None = None,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any]:
         request_id = str(request_id or uuid.uuid4())
         try:
@@ -2380,6 +2381,7 @@ class AIEngine:
                     principal_id=actor.user_key,
                     request_id=request_id,
                     user_text=authoritative_user_text,
+                    history=history,
                 )
                 return {
                     "tool": name,
@@ -6290,6 +6292,7 @@ class AIEngine:
                         actor=actor,
                         request_id=resolved_request_id,
                         authorization_text=raw_user_text,
+                        history=history,
                     )
 
                 completed_calls.append(completed)

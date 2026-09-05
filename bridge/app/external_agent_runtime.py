@@ -805,6 +805,95 @@ class ExternalAgentRuntime:
 
         return False
 
+    @staticmethod
+    def _current_gmail_context(text: str) -> bool:
+        """Return whether the current request explicitly identifies Gmail/email."""
+
+        lowered = " ".join(str(text or "").casefold().split())
+        words = {word.strip(".,!?()[]{}:;\\\"'") for word in lowered.split()}
+        return bool(
+            words
+            & {
+                "email",
+                "emails",
+                "gmail",
+                "inbox",
+                "mail",
+            }
+        )
+
+    @classmethod
+    def _gmail_management_write_capabilities(
+        cls,
+        text: str,
+    ) -> tuple[str, ...]:
+        """Return mailbox writes explicitly authorized by CURRENT text only."""
+
+        capabilities = (
+            "gmail.reply",
+            "gmail.archive",
+            "gmail.mark_read",
+            "gmail.mark_unread",
+            "gmail.star",
+            "gmail.unstar",
+            "gmail.mark_important",
+            "gmail.mark_not_important",
+            "gmail.move",
+            "gmail.trash",
+            "gmail.restore",
+        )
+        return tuple(
+            capability_id
+            for capability_id in capabilities
+            if cls._write_authorized(capability_id, text)
+        )
+
+    @classmethod
+    def _contextual_gmail_management_capabilities(
+        cls,
+        text: str,
+        history: Sequence[Mapping[str, str]],
+    ) -> tuple[str, ...]:
+        """Use history only to establish Gmail context, never write authority."""
+
+        if not cls._recent_gmail_context(history):
+            return ()
+        return cls._gmail_management_write_capabilities(text)
+
+    @classmethod
+    def _gmail_write_context_authorized(
+        cls,
+        capability_id: str,
+        user_text: str,
+        history: Sequence[Mapping[str, str]] = (),
+    ) -> bool:
+        """Require current Gmail context or a recent Gmail referent for shorthand."""
+
+        mailbox_writes = {
+            "gmail.reply",
+            "gmail.archive",
+            "gmail.mark_read",
+            "gmail.mark_unread",
+            "gmail.star",
+            "gmail.unstar",
+            "gmail.mark_important",
+            "gmail.mark_not_important",
+            "gmail.move",
+            "gmail.trash",
+            "gmail.restore",
+        }
+
+        if capability_id not in mailbox_writes:
+            return True
+
+        if cls._current_gmail_context(user_text):
+            return True
+
+        if not cls._recent_gmail_context(history):
+            return False
+
+        return capability_id in cls._gmail_management_write_capabilities(user_text)
+
     @classmethod
     def _contextual_gmail_follow_up(
         cls,
@@ -814,6 +903,10 @@ class ExternalAgentRuntime:
         """Recognise a read-only Gmail follow-up from recent conversation."""
 
         if not cls._recent_gmail_context(history):
+            return False
+
+        # A current reply command is a write request, not a reply-status query.
+        if cls._write_authorized("gmail.reply", text):
             return False
 
         value = " ".join(str(text or "").casefold().split())
@@ -847,6 +940,12 @@ class ExternalAgentRuntime:
                 )
             )
             or cls._contextual_gmail_follow_up(text, history)
+            or bool(
+                cls._contextual_gmail_management_capabilities(
+                    text,
+                    history,
+                )
+            )
         )
 
     @staticmethod
@@ -907,13 +1006,28 @@ class ExternalAgentRuntime:
             if self.requires_live_web(text)
             else ""
         )
-        gmail_requirement = (
-            " This is a contextual Gmail follow-up. Use live Gmail search, "
-            "thread or message evidence before answering whether a reply was "
-            "received. Never answer this from conversation memory alone."
-            if self._contextual_gmail_follow_up(text, history)
-            else ""
+        gmail_management = self._contextual_gmail_management_capabilities(
+            text,
+            history,
         )
+        if gmail_management:
+            gmail_requirement = (
+                " This is a contextual Gmail mailbox action. Conversation "
+                "history may identify the email referent but does not authorize "
+                "the write. Resolve the exact live message or thread using Gmail "
+                "read/search evidence before mutation; never invent message IDs "
+                "or label IDs. If the referent is ambiguous, ask instead of "
+                "guessing. The only mailbox writes authorized by the current "
+                "request are: " + ", ".join(gmail_management) + "."
+            )
+        elif self._contextual_gmail_follow_up(text, history):
+            gmail_requirement = (
+                " This is a contextual Gmail follow-up. Use live Gmail search, "
+                "thread or message evidence before answering whether a reply was "
+                "received. Never answer this from conversation memory alone."
+            )
+        else:
+            gmail_requirement = ""
         return (
             "Live external-provider status for this turn follows. Setup-only "
             "providers are not capabilities and no action may be claimed without "
@@ -999,7 +1113,10 @@ class ExternalAgentRuntime:
         if lowered.strip().startswith("email ") and ("gmail", "Gmail") not in requested:
             requested.insert(0, ("gmail", "Gmail"))
 
-        if not requested and self._contextual_gmail_follow_up(text, history):
+        if not requested and (
+            self._contextual_gmail_follow_up(text, history)
+            or self._contextual_gmail_management_capabilities(text, history)
+        ):
             requested.append(("gmail", "Gmail"))
 
         if not requested:
@@ -1062,7 +1179,14 @@ class ExternalAgentRuntime:
 
         google_executable = sorted(executable)
 
-        if self._contextual_gmail_follow_up(text, history):
+        contextual_read = self._contextual_gmail_follow_up(
+            text,
+            history,
+        )
+        gmail_management = self._gmail_management_write_capabilities(text)
+        gmail_context = self._current_gmail_context(text) or self._recent_gmail_context(history)
+
+        if contextual_read:
             google_executable = [
                 capability_id
                 for capability_id in google_executable
@@ -1072,6 +1196,21 @@ class ExternalAgentRuntime:
                     "gmail.read",
                     "gmail.thread",
                 }
+            ]
+        elif gmail_management and gmail_context:
+            allowed_gmail = {
+                "gmail.search",
+                "gmail.read",
+                "gmail.thread",
+                *gmail_management,
+            }
+            if "gmail.move" in gmail_management:
+                allowed_gmail.add("gmail.labels")
+
+            google_executable = [
+                capability_id
+                for capability_id in google_executable
+                if capability_id in allowed_gmail
             ]
 
         google_tool = google_model_tool(google_executable)
@@ -1413,6 +1552,7 @@ class ExternalAgentRuntime:
         principal_id: str,
         request_id: str | None = None,
         user_text: str = "",
+        history: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any]:
         if name == GOOGLE_MODEL_TOOL:
             return await self._execute_google_model_tool(
@@ -1421,6 +1561,7 @@ class ExternalAgentRuntime:
                 principal_id=principal_id,
                 request_id=request_id,
                 user_text=user_text,
+                history=history,
             )
         if name == "web_search":
             return await self.search(
@@ -1451,13 +1592,23 @@ class ExternalAgentRuntime:
             steps_by_id = {str(step.get("step_id") or ""): step for step in proposed_steps}
             for step in proposed_steps:
                 capability_id = str(step.get("capability_id") or "")
-                if str(step.get("access") or "read") == "write" and not self._write_authorized(
-                    capability_id,
-                    user_text,
-                ):
-                    raise ValueError(
-                        f"The user's request did not explicitly authorize {capability_id}"
-                    )
+                if str(step.get("access") or "read") == "write":
+                    if not self._write_authorized(
+                        capability_id,
+                        user_text,
+                    ):
+                        raise ValueError(
+                            f"The user's request did not explicitly authorize {capability_id}"
+                        )
+                    if not self._gmail_write_context_authorized(
+                        capability_id,
+                        user_text,
+                        history,
+                    ):
+                        raise ValueError(
+                            "The current request did not establish Gmail context "
+                            f"for {capability_id}"
+                        )
                 step_arguments = step.get("arguments")
                 payload = step_arguments if isinstance(step_arguments, Mapping) else {}
                 if capability_id in {"gmail.draft", "gmail.forward"} and not (
@@ -1663,23 +1814,9 @@ class ExternalAgentRuntime:
                 )
             )
 
-        if capability_id == "gmail.move":
-            # "move" alone is ambiguous with calendar/event operations.
-            return "move" in word_set and bool(
-                word_set
-                & {
-                    "email",
-                    "message",
-                    "gmail",
-                    "inbox",
-                }
-            )
-
-        if capability_id == "gmail.trash":
-            # "delete" is allowed only when the CURRENT request identifies
-            # email/message context. "trash" itself is Gmail-specific enough.
-            return bool(word_set & {"trash", "bin"}) or (
-                bool(word_set & {"delete", "remove"})
+        if capability_id == "gmail.archive":
+            return (
+                "archive" in word_set
                 and bool(
                     word_set
                     & {
@@ -1689,19 +1826,76 @@ class ExternalAgentRuntime:
                         "inbox",
                     }
                 )
+            ) or bool(
+                re.search(
+                    r"\barchive\s+(?:it|that|this|one)\b",
+                    authority_text,
+                )
             )
 
-        if capability_id == "gmail.restore":
-            return "untrash" in word_set or (
-                bool(word_set & {"restore", "undelete"})
+        if capability_id == "gmail.move":
+            return (
+                "move" in word_set
                 and bool(
                     word_set
                     & {
                         "email",
                         "message",
                         "gmail",
-                        "trash",
+                        "inbox",
                     }
+                )
+            ) or bool(
+                re.search(
+                    r"\bmove\s+(?:it|that|this|one)\s+to\b",
+                    authority_text,
+                )
+            )
+
+        if capability_id == "gmail.trash":
+            return (
+                bool(word_set & {"trash", "bin"})
+                or (
+                    bool(word_set & {"delete", "remove"})
+                    and bool(
+                        word_set
+                        & {
+                            "email",
+                            "message",
+                            "gmail",
+                            "inbox",
+                        }
+                    )
+                )
+                or bool(
+                    re.search(
+                        r"\b(?:delete|remove)\s+(?:it|that|this|one)\b",
+                        authority_text,
+                    )
+                )
+            )
+
+        if capability_id == "gmail.restore":
+            return (
+                "untrash" in word_set
+                or (
+                    bool(word_set & {"restore", "undelete"})
+                    and bool(
+                        word_set
+                        & {
+                            "email",
+                            "message",
+                            "gmail",
+                            "trash",
+                        }
+                    )
+                )
+                or bool(
+                    re.search(
+                        r"\b(?:restore|undelete)\s+"
+                        r"(?:it|that|this|one)\b",
+                        authority_text,
+                    )
                 )
             )
 
@@ -1720,7 +1914,6 @@ class ExternalAgentRuntime:
             ),
             "gmail.send": frozenset({"send"}),
             "gmail.forward": frozenset({"forward"}),
-            "gmail.archive": frozenset({"archive"}),
             "calendar.create": frozenset(
                 {
                     "add",
@@ -1801,6 +1994,7 @@ class ExternalAgentRuntime:
         principal_id: str,
         request_id: str | None,
         user_text: str,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any]:
         capability_id = str(arguments.get("capability_id") or "").strip()
         payload_value = arguments.get("arguments")
@@ -1815,6 +2009,14 @@ class ExternalAgentRuntime:
             if not self._write_authorized(capability_id, user_text):
                 raise ValueError(
                     "The user's current request did not explicitly authorize this write"
+                )
+            if not self._gmail_write_context_authorized(
+                capability_id,
+                user_text,
+                history,
+            ):
+                raise ValueError(
+                    "The current request did not establish Gmail context for this write"
                 )
             confirmed = True
         if capability_id in {"gmail.draft", "gmail.forward"}:

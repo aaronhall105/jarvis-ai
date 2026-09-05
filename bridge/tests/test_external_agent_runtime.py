@@ -186,6 +186,7 @@ def test_ai_ask_wires_original_text_into_external_authorization():
 
     assert "user_text = understanding.interpreted_text" in source
     assert "authorization_text=raw_user_text" in source
+    assert "history=history" in source
 
 
 @pytest.mark.asyncio
@@ -198,6 +199,17 @@ async def test_external_write_authorization_uses_original_user_text():
 
     original = "Send an email to person.name@example.test asking if they are free for dinner."
     interpreted = "Send an email to person. name@example. test asking if they are free for dinner."
+
+    history = [
+        {
+            "role": "user",
+            "content": "Earlier email context only.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the referenced email.",
+        },
+    ]
 
     result = await engine._execute_function(
         name="google_integration",
@@ -212,11 +224,19 @@ async def test_external_write_authorization_uses_original_user_text():
         actor=SimpleNamespace(user_key="aaron"),
         request_id="authorization-source-test",
         authorization_text=original,
+        history=history,
     )
 
     assert result["result"]["status"] == "verified"
     runtime.execute_model_tool.assert_awaited_once()
-    assert runtime.execute_model_tool.await_args.kwargs["user_text"] == original
+
+    forwarded = runtime.execute_model_tool.await_args.kwargs
+
+    # Write authority remains the immutable original CURRENT request.
+    assert forwarded["user_text"] == original
+
+    # History is a separate contextual channel and cannot replace authority.
+    assert forwarded["history"] == history
 
 
 @pytest.mark.asyncio
@@ -399,6 +419,144 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
     assert mobile_by_id["google"]["connected"] is False
     assert mobile_by_id["microsoft"]["connected"] is False
     assert mobile_by_id["instagram"]["connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_contextual_gmail_management_requires_recent_email_context(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": "Show me the latest email from the garage.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the latest message from the garage.",
+        },
+    ]
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    # --------------------------------------------------------
+    # "Star it" works only because recent history establishes
+    # the Gmail referent. History identifies WHAT; the current
+    # message itself authorizes the STAR write.
+    # --------------------------------------------------------
+    assert value.is_external_request("Star it") is False
+    assert value.is_external_request("Star it", history) is True
+
+    star_tools = await value.openai_tools(
+        "Star it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    star_google = next(item for item in star_tools if item["name"] == "google_integration")
+
+    star_capabilities = set(star_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert star_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.star",
+    }
+
+    assert ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.star",
+        "Star it",
+        history,
+    )
+    assert not ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.star",
+        "Star it",
+        (),
+    )
+
+    # --------------------------------------------------------
+    # Archive shorthand follows the same rule.
+    # --------------------------------------------------------
+    archive_tools = await value.openai_tools(
+        "Archive it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    archive_google = next(item for item in archive_tools if item["name"] == "google_integration")
+
+    archive_capabilities = set(archive_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert archive_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.archive",
+    }
+
+    # --------------------------------------------------------
+    # Move additionally exposes gmail.labels so the model must
+    # resolve an existing label rather than inventing an ID.
+    # --------------------------------------------------------
+    move_tools = await value.openai_tools(
+        "Move it to Receipts",
+        principal_id="aaron",
+        history=history,
+    )
+
+    move_google = next(item for item in move_tools if item["name"] == "google_integration")
+
+    move_capabilities = set(move_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert move_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.labels",
+        "gmail.move",
+    }
+
+    # --------------------------------------------------------
+    # "Delete it" means Gmail Trash only when Gmail context
+    # exists. It must not become a generic destructive action.
+    # --------------------------------------------------------
+    assert value.is_external_request("Delete it") is False
+    assert value.is_external_request("Delete it", history) is True
+
+    trash_tools = await value.openai_tools(
+        "Delete it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    trash_google = next(item for item in trash_tools if item["name"] == "google_integration")
+
+    trash_capabilities = set(trash_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert trash_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.trash",
+    }
+
+    assert ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.trash",
+        "Delete it",
+        history,
+    )
+    assert not ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.trash",
+        "Delete it",
+        (),
+    )
 
 
 @pytest.mark.asyncio
