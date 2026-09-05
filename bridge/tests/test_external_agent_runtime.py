@@ -336,6 +336,76 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
 
 
 @pytest.mark.asyncio
+async def test_contextual_gmail_reply_follow_up_is_read_only(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": (
+                "Send an email to amber.gill1992@outlook.com asking if she wants to go for dinner."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "Done — I've sent it, Aaron.",
+        },
+    ]
+
+    current = "Have I got any reply?"
+
+    # The same sentence by itself is ordinary conversation.
+    assert value.is_external_request(current) is False
+
+    # With recent email context it becomes a live Gmail read request.
+    assert value.is_external_request(current, history) is True
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    tools = await value.openai_tools(
+        current,
+        principal_id="aaron",
+        history=history,
+    )
+
+    google_tool = next(item for item in tools if item["name"] == "google_integration")
+
+    capabilities = set(google_tool["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    # Previous conversation context must not grant write authority.
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.send",
+        current,
+    )
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.archive",
+        current,
+    )
+
+    context = await value.model_context(
+        current,
+        principal_id="aaron",
+        history=history,
+    )
+
+    assert context is not None
+    assert "contextual Gmail follow-up" in context
+
+
+@pytest.mark.asyncio
 async def test_mobile_google_products_use_independent_verified_health(runtime):
     value, _, _, _ = runtime
     await value.initialize()

@@ -784,11 +784,69 @@ class ExternalAgentRuntime:
         return execution.as_dict()
 
     @staticmethod
-    def is_external_request(text: str) -> bool:
+    def _recent_gmail_context(
+        history: Sequence[Mapping[str, str]],
+    ) -> bool:
+        """Return whether recent conversation establishes an email context."""
+
+        for item in reversed(tuple(history)[-10:]):
+            role = str(item.get("role") or "").casefold()
+            if role not in {"user", "assistant"}:
+                continue
+
+            content = f" {str(item.get('content') or '').casefold()} "
+            if (
+                " gmail " in content
+                or " email " in content
+                or " inbox " in content
+                or "@" in content
+            ):
+                return True
+
+        return False
+
+    @classmethod
+    def _contextual_gmail_follow_up(
+        cls,
+        text: str,
+        history: Sequence[Mapping[str, str]],
+    ) -> bool:
+        """Recognise a read-only Gmail follow-up from recent conversation."""
+
+        if not cls._recent_gmail_context(history):
+            return False
+
+        value = " ".join(str(text or "").casefold().split())
+
+        return bool(
+            re.search(
+                r"\b(?:reply|replies|replied|response|responded|answered)\b|"
+                r"\bheard\s+back\b|"
+                r"\bgot\s+back\s+to\s+(?:me|us)\b|"
+                r"\bwhat\s+did\s+(?:she|he|they|amber|aaron)\s+say\b",
+                value,
+            )
+        )
+
+    @classmethod
+    def is_external_request(
+        cls,
+        text: str,
+        history: Sequence[Mapping[str, str]] = (),
+    ) -> bool:
         lowered = str(text or "").casefold()
-        words = {word.strip(".,!?()[]{}:;\"'") for word in lowered.split()}
-        return bool(words & _EXTERNAL_SERVICE_WORDS) or any(
-            phrase in lowered for phrase in (*_CURRENT_WEB_PHRASES, *_EXTERNAL_REQUEST_PHRASES)
+        words = {word.strip(".,!?()[]{}:;\\\"'") for word in lowered.split()}
+
+        return (
+            bool(words & _EXTERNAL_SERVICE_WORDS)
+            or any(
+                phrase in lowered
+                for phrase in (
+                    *_CURRENT_WEB_PHRASES,
+                    *_EXTERNAL_REQUEST_PHRASES,
+                )
+            )
+            or cls._contextual_gmail_follow_up(text, history)
         )
 
     @staticmethod
@@ -803,8 +861,9 @@ class ExternalAgentRuntime:
         text: str,
         *,
         principal_id: str | None = None,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> str | None:
-        if not self.enabled or not self.is_external_request(text):
+        if not self.enabled or not self.is_external_request(text, history):
             return None
         providers = await self.providers_snapshot(principal_id=principal_id)
         lowered = str(text or "").casefold()
@@ -848,6 +907,13 @@ class ExternalAgentRuntime:
             if self.requires_live_web(text)
             else ""
         )
+        gmail_requirement = (
+            " This is a contextual Gmail follow-up. Use live Gmail search, "
+            "thread or message evidence before answering whether a reply was "
+            "received. Never answer this from conversation memory alone."
+            if self._contextual_gmail_follow_up(text, history)
+            else ""
+        )
         return (
             "Live external-provider status for this turn follows. Setup-only "
             "providers are not capabilities and no action may be claimed without "
@@ -858,6 +924,7 @@ class ExternalAgentRuntime:
             "call sources independent unless the evidence establishes that.\n"
             + "\n".join(lines)
             + requirement
+            + gmail_requirement
         )
 
     async def unavailable_service_reply(
@@ -865,6 +932,7 @@ class ExternalAgentRuntime:
         text: str,
         *,
         principal_id: str | None = None,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> str | None:
         """Return a deterministic read/account limitation for explicit services."""
 
@@ -930,6 +998,10 @@ class ExternalAgentRuntime:
         ]
         if lowered.strip().startswith("email ") and ("gmail", "Gmail") not in requested:
             requested.insert(0, ("gmail", "Gmail"))
+
+        if not requested and self._contextual_gmail_follow_up(text, history):
+            requested.append(("gmail", "Gmail"))
+
         if not requested:
             return None
         statuses = {
@@ -952,8 +1024,9 @@ class ExternalAgentRuntime:
         text: str,
         *,
         principal_id: str | None = None,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> list[dict[str, Any]]:
-        if not self.enabled or not self.is_external_request(text):
+        if not self.enabled or not self.is_external_request(text, history):
             return []
         executable = {
             item.capability_id
@@ -986,7 +1059,22 @@ class ExternalAgentRuntime:
         )
         monitor_management_intent = cancel_monitor_intent or list_monitor_intent
         definitions: list[dict[str, Any]] = []
-        google_tool = google_model_tool(sorted(executable))
+
+        google_executable = sorted(executable)
+
+        if self._contextual_gmail_follow_up(text, history):
+            google_executable = [
+                capability_id
+                for capability_id in google_executable
+                if capability_id
+                in {
+                    "gmail.search",
+                    "gmail.read",
+                    "gmail.thread",
+                }
+            ]
+
+        google_tool = google_model_tool(google_executable)
         if google_tool is not None and not monitor_management_intent:
             definitions.append(google_tool)
         if "web.search" in executable and not monitor_management_intent:
