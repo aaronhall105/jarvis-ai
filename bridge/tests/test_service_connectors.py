@@ -412,11 +412,24 @@ class UnavailableConnectorTests(unittest.IsolatedAsyncioTestCase):
                 "gmail.search",
                 "gmail.read",
                 "gmail.thread",
+                "gmail.labels",
                 "gmail.draft",
                 "gmail.reply",
                 "gmail.send",
+                "gmail.forward",
+                "gmail.archive",
+                "gmail.mark_read",
+                "gmail.mark_unread",
+                "gmail.star",
+                "gmail.unstar",
+                "gmail.mark_important",
+                "gmail.mark_not_important",
+                "gmail.move",
+                "gmail.trash",
+                "gmail.restore",
             }.issubset(potential)
         )
+        self.assertNotIn("gmail.label", potential)
 
     async def test_social_setup_capabilities_are_provider_specific_and_noncolliding(self):
         social_ids = []

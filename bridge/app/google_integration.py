@@ -81,6 +81,16 @@ _GOOGLE_ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "gmail.send": "draft_id; sends the existing draft",
     "gmail.forward": "message_id, to (verified email), body",
     "gmail.archive": "message_id",
+    "gmail.labels": "no arguments; lists available Gmail labels",
+    "gmail.mark_read": "message_id",
+    "gmail.mark_unread": "message_id",
+    "gmail.star": "message_id",
+    "gmail.unstar": "message_id",
+    "gmail.mark_important": "message_id",
+    "gmail.mark_not_important": "message_id",
+    "gmail.move": "message_id and label (exact Gmail label name)",
+    "gmail.trash": "message_id; moves the message to Trash",
+    "gmail.restore": "message_id; restores the message from Trash",
     "calendar.list": "events=true with optional calendar_id/timeMin/timeMax/limit, or limit",
     "calendar.read": "event_id and optional calendar_id",
     "calendar.search": "query with optional calendar_id/timeMin/timeMax/limit",
@@ -577,6 +587,66 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
             (SCOPE_GMAIL_READ, SCOPE_GMAIL_COMPOSE),
         ),
         write("gmail.archive", "Archive Gmail message", (SCOPE_GMAIL_MODIFY,)),
+        read("gmail.labels", "List Gmail labels", (SCOPE_GMAIL_READ,)),
+        write(
+            "gmail.mark_read",
+            "Mark Gmail message read",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.mark_unread",
+            "Mark Gmail message unread",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.star",
+            "Star Gmail message",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.unstar",
+            "Remove Gmail star",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.mark_important",
+            "Mark Gmail message important",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.mark_not_important",
+            "Remove Gmail important marker",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
+        write(
+            "gmail.move",
+            "Move Gmail message to label",
+            (SCOPE_GMAIL_MODIFY,),
+        ),
+        write(
+            "gmail.trash",
+            "Move Gmail message to Trash",
+            (SCOPE_GMAIL_MODIFY,),
+        ),
+        write(
+            "gmail.restore",
+            "Restore Gmail message from Trash",
+            (SCOPE_GMAIL_MODIFY,),
+            confirmation=ConfirmationMode.NONE,
+            risk=RiskLevel.MEDIUM,
+        ),
         read("calendar.list", "List Google calendars and events", (SCOPE_CALENDAR_READ,)),
         read("calendar.read", "Read Google Calendar event", (SCOPE_CALENDAR_READ,)),
         read("calendar.search", "Search Google Calendar events", (SCOPE_CALENDAR_READ,)),
@@ -1053,6 +1123,16 @@ class GoogleConnector(Connector):
             "gmail.send": self._gmail_send,
             "gmail.forward": self._gmail_forward,
             "gmail.archive": self._gmail_archive,
+            "gmail.labels": self._gmail_labels,
+            "gmail.mark_read": self._gmail_mark_read,
+            "gmail.mark_unread": self._gmail_mark_unread,
+            "gmail.star": self._gmail_star,
+            "gmail.unstar": self._gmail_unstar,
+            "gmail.mark_important": self._gmail_mark_important,
+            "gmail.mark_not_important": self._gmail_mark_not_important,
+            "gmail.move": self._gmail_move,
+            "gmail.trash": self._gmail_trash,
+            "gmail.restore": self._gmail_restore,
             "calendar.list": self._calendar_list,
             "calendar.read": self._calendar_read,
             "calendar.search": self._calendar_search,
@@ -1159,15 +1239,53 @@ class GoogleConnector(Connector):
                     return VerificationResult.unverified("Sent recipient verification mismatch")
                 if str(summary.get("subject") or "") != str(result.data.get("subject") or ""):
                     return VerificationResult.unverified("Sent subject verification mismatch")
-            elif capability.capability_id == "gmail.archive":
+            elif capability.capability_id in {
+                "gmail.archive",
+                "gmail.mark_read",
+                "gmail.mark_unread",
+                "gmail.star",
+                "gmail.unstar",
+                "gmail.mark_important",
+                "gmail.mark_not_important",
+                "gmail.move",
+                "gmail.trash",
+                "gmail.restore",
+            }:
                 payload = await self._request(
                     principal,
                     "GET",
                     f"{GMAIL_API}/messages/{reference}",
                     params={"format": "metadata"},
                 )
-                if "INBOX" in (payload.get("labelIds") or []):
+                labels = set(payload.get("labelIds") or ())
+                capability_id = capability.capability_id
+
+                if capability_id == "gmail.archive" and "INBOX" in labels:
                     return VerificationResult.unverified("Message still has the INBOX label")
+                if capability_id == "gmail.mark_read" and "UNREAD" in labels:
+                    return VerificationResult.unverified("Message is still unread")
+                if capability_id == "gmail.mark_unread" and "UNREAD" not in labels:
+                    return VerificationResult.unverified("Message was not marked unread")
+                if capability_id == "gmail.star" and "STARRED" not in labels:
+                    return VerificationResult.unverified("Message was not starred")
+                if capability_id == "gmail.unstar" and "STARRED" in labels:
+                    return VerificationResult.unverified("Message is still starred")
+                if capability_id == "gmail.mark_important" and "IMPORTANT" not in labels:
+                    return VerificationResult.unverified("Message was not marked important")
+                if capability_id == "gmail.mark_not_important" and "IMPORTANT" in labels:
+                    return VerificationResult.unverified("Message is still marked important")
+                if capability_id == "gmail.move":
+                    target_label_id = str(result.data.get("target_label_id") or "")
+                    if not target_label_id or target_label_id not in labels:
+                        return VerificationResult.unverified(
+                            "Message does not have the requested target label"
+                        )
+                    if target_label_id != "INBOX" and "INBOX" in labels:
+                        return VerificationResult.unverified("Message is still in Inbox after move")
+                if capability_id == "gmail.trash" and "TRASH" not in labels:
+                    return VerificationResult.unverified("Message was not moved to Trash")
+                if capability_id == "gmail.restore" and "TRASH" in labels:
+                    return VerificationResult.unverified("Message is still in Trash")
             elif capability.capability_id in {"calendar.create", "calendar.update"}:
                 calendar_id = str(result.data.get("calendar_id") or "primary")
                 payload = await self._request(
@@ -1754,6 +1872,222 @@ class GoogleConnector(Connector):
             "message_id": message_id,
             "label_ids": list(result.get("labelIds") or ()),
             "status": "archived",
+        }, message_id
+
+    async def _gmail_labels(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        result = await self._request(
+            principal,
+            "GET",
+            f"{GMAIL_API}/labels",
+        )
+        labels = [
+            {
+                "label_id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "type": str(item.get("type") or ""),
+                "message_list_visibility": item.get("messageListVisibility"),
+                "label_list_visibility": item.get("labelListVisibility"),
+            }
+            for item in result.get("labels") or ()
+            if isinstance(item, Mapping) and item.get("id") and item.get("name")
+        ]
+        labels.sort(key=lambda item: item["name"].casefold())
+        return {
+            "labels": labels,
+            "count": len(labels),
+        }, "gmail-labels"
+
+    async def _gmail_modify_labels(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+        *,
+        add: Sequence[str] = (),
+        remove: Sequence[str] = (),
+        status: str,
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", max_length=300)
+
+        add_labels = list(dict.fromkeys(str(item) for item in add if str(item)))
+        remove_labels = list(dict.fromkeys(str(item) for item in remove if str(item)))
+
+        if not add_labels and not remove_labels:
+            raise ValueError("At least one Gmail label change is required")
+
+        body: dict[str, Any] = {}
+        if add_labels:
+            body["addLabelIds"] = add_labels
+        if remove_labels:
+            body["removeLabelIds"] = remove_labels
+
+        result = await self._request(
+            principal,
+            "POST",
+            f"{GMAIL_API}/messages/{self._segment(message_id)}/modify",
+            json_body=body,
+        )
+
+        return {
+            "message_id": message_id,
+            "label_ids": list(result.get("labelIds") or ()),
+            "status": status,
+        }, message_id
+
+    async def _gmail_mark_read(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            remove=("UNREAD",),
+            status="read",
+        )
+
+    async def _gmail_mark_unread(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            add=("UNREAD",),
+            status="unread",
+        )
+
+    async def _gmail_star(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            add=("STARRED",),
+            status="starred",
+        )
+
+    async def _gmail_unstar(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            remove=("STARRED",),
+            status="unstarred",
+        )
+
+    async def _gmail_mark_important(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            add=("IMPORTANT",),
+            status="important",
+        )
+
+    async def _gmail_mark_not_important(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        return await self._gmail_modify_labels(
+            principal,
+            payload,
+            remove=("IMPORTANT",),
+            status="not_important",
+        )
+
+    async def _gmail_move(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", max_length=300)
+        requested_label = self._required(payload, "label", max_length=500)
+
+        catalog, _ = await self._gmail_labels(principal, {})
+        matches = [
+            item
+            for item in catalog.get("labels") or ()
+            if str(item.get("name") or "").casefold() == requested_label.casefold()
+        ]
+
+        if not matches:
+            raise ValueError(f"Gmail label {requested_label!r} does not exist")
+        if len(matches) != 1:
+            raise ValueError(f"Gmail label {requested_label!r} is ambiguous")
+
+        target = matches[0]
+        target_id = str(target.get("label_id") or "")
+        target_name = str(target.get("name") or "")
+        target_type = str(target.get("type") or "").casefold()
+
+        if not target_id:
+            raise ValueError("Gmail returned an invalid target label")
+
+        # Folder-like move semantics are supported for user labels and Inbox.
+        # Trash has its own explicit capability and is never treated as a label move.
+        if target_type == "system" and target_id != "INBOX":
+            raise ValueError("Only user labels or Inbox can be used as Gmail move targets")
+
+        add = (target_id,)
+        remove: tuple[str, ...] = () if target_id == "INBOX" else ("INBOX",)
+
+        result, reference = await self._gmail_modify_labels(
+            principal,
+            {"message_id": message_id},
+            add=add,
+            remove=remove,
+            status="moved",
+        )
+        result["target_label_id"] = target_id
+        result["target_label"] = target_name
+        return result, reference
+
+    async def _gmail_trash(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", max_length=300)
+        result = await self._request(
+            principal,
+            "POST",
+            f"{GMAIL_API}/messages/{self._segment(message_id)}/trash",
+        )
+        return {
+            "message_id": message_id,
+            "label_ids": list(result.get("labelIds") or ()),
+            "status": "trashed",
+        }, message_id
+
+    async def _gmail_restore(
+        self,
+        principal: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", max_length=300)
+        result = await self._request(
+            principal,
+            "POST",
+            f"{GMAIL_API}/messages/{self._segment(message_id)}/untrash",
+        )
+        return {
+            "message_id": message_id,
+            "label_ids": list(result.get("labelIds") or ()),
+            "status": "restored",
         }, message_id
 
     async def _calendar_list(
