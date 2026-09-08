@@ -787,13 +787,20 @@ class ExternalAgentRuntime:
     def _recent_gmail_context(
         history: Sequence[Mapping[str, str]],
     ) -> bool:
-        """Return whether recent conversation establishes an email context."""
+        """Return whether the immediately preceding exchange is about email.
 
-        for item in reversed(tuple(history)[-10:]):
-            role = str(item.get("role") or "").casefold()
-            if role not in {"user", "assistant"}:
-                continue
+        Older Gmail mentions cannot safely bind a shorthand referent after the
+        conversation has moved on to another subject.  Limit context to the last
+        user/assistant exchange so commands such as ``Delete it`` cannot target
+        Gmail merely because email appeared somewhere in the history window.
+        """
 
+        conversational_items = [
+            item
+            for item in history
+            if str(item.get("role") or "").casefold() in {"user", "assistant"}
+        ]
+        for item in conversational_items[-2:]:
             content = f" {str(item.get('content') or '').casefold()} "
             if (
                 " gmail " in content

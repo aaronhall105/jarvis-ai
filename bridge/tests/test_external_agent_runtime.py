@@ -560,6 +560,57 @@ async def test_contextual_gmail_management_requires_recent_email_context(runtime
 
 
 @pytest.mark.asyncio
+async def test_contextual_gmail_management_does_not_cross_a_newer_calendar_referent(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": "Show me the latest email from the garage.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the latest email from the garage.",
+        },
+        {
+            "role": "user",
+            "content": "Show me Friday's calendar appointment.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the Friday calendar event.",
+        },
+    ]
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    for current, capability_id in (
+        ("Delete it", "gmail.trash"),
+        ("Move it to Friday", "gmail.move"),
+    ):
+        assert value.is_external_request(current, history) is False
+        assert not ExternalAgentRuntime._gmail_write_context_authorized(
+            capability_id,
+            current,
+            history,
+        )
+        assert (
+            await value.openai_tools(
+                current,
+                principal_id="aaron",
+                history=history,
+            )
+            == []
+        )
+
+
+@pytest.mark.asyncio
 async def test_contextual_gmail_reply_follow_up_is_read_only(runtime):
     value, _, _, _ = runtime
     await value.initialize()
