@@ -324,6 +324,8 @@ def render_home_state_evidence(
             continue
         if call.get("tool") == "search_entity_states":
             resolution = str(result.get("resolution") or "").casefold()
+            arguments = call.get("arguments")
+            domain = arguments.get("domain") if isinstance(arguments, Mapping) else None
             raw_entities = [
                 entity for entity in result.get("entities") or () if isinstance(entity, Mapping)
             ]
@@ -332,6 +334,10 @@ def render_home_state_evidence(
             ]
             if referenced_entities:
                 for entity in referenced_entities:
+                    add_entity(entity)
+                continue
+            if resolution == "ambiguous" and domain and generic_area_request(domain):
+                for entity in raw_entities:
                     add_entity(entity)
                 continue
             if resolution in {"ambiguous", "zero"}:
