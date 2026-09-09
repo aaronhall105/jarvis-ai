@@ -366,6 +366,7 @@ class DialogueManager:
         person: dict[str, Any] | None = None
         presence_source: dict[str, Any] | None = None
         area: dict[str, Any] | None = None
+        gmail_reply: dict[str, Any] | None = None
         action: str | None = None
 
         for call in calls:
@@ -468,6 +469,25 @@ class DialogueManager:
                         "area_name": result.get("area_name"),
                     }
 
+            elif (
+                tool == "check_recent_gmail_reply"
+                and result.get("success") is True
+                and result.get("live_evidence_available") is True
+                and result.get("clarification_required") is not True
+                and result.get("recipient")
+                and result.get("sent_message_id")
+                and result.get("thread_id")
+            ):
+                gmail_reply = {
+                    "recipient": result.get("recipient"),
+                    "recipient_name": result.get("recipient_name"),
+                    "sent_message_id": result.get("sent_message_id"),
+                    "thread_id": result.get("thread_id"),
+                    "send_receipt_action_id": result.get("send_receipt_action_id"),
+                    "anchor_source": result.get("anchor_source"),
+                    "observed_at": self._iso(self._utc_now()),
+                }
+
         if devices:
             deduplicated: list[dict[str, Any]] = []
             seen: set[str] = set()
@@ -503,6 +523,13 @@ class DialogueManager:
             state.focus = {
                 **state.focus,
                 "area": area,
+                "intent": intent,
+                "updated_at": self._iso(self._utc_now()),
+            }
+        if gmail_reply:
+            state.focus = {
+                **state.focus,
+                "gmail_reply": gmail_reply,
                 "intent": intent,
                 "updated_at": self._iso(self._utc_now()),
             }

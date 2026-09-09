@@ -2413,6 +2413,10 @@ class AIEngine:
                 authoritative_user_text = (
                     authorization_text if authorization_text is not None else user_text
                 )
+                dialogue_focus: Mapping[str, Any] | None = None
+                if name == "check_recent_gmail_reply":
+                    dialogue_state = await self.dialogue.get(conversation_id)
+                    dialogue_focus = dict(dialogue_state.focus)
                 result = await external_runtime.execute_model_tool(
                     name,
                     arguments,
@@ -2421,6 +2425,7 @@ class AIEngine:
                     request_id=request_id,
                     user_text=authoritative_user_text,
                     history=history,
+                    dialogue_focus=dialogue_focus,
                 )
                 return {
                     "tool": name,

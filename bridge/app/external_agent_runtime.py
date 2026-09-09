@@ -1996,6 +1996,7 @@ class ExternalAgentRuntime:
         request_id: str | None = None,
         user_text: str = "",
         history: Sequence[Mapping[str, str]] = (),
+        dialogue_focus: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if name == GOOGLE_MODEL_TOOL:
             return await self._execute_google_model_tool(
@@ -2167,6 +2168,7 @@ class ExternalAgentRuntime:
                 principal_id=principal_id,
                 user_text=user_text,
                 history=history,
+                dialogue_focus=dialogue_focus,
             )
         if name == "create_recent_gmail_reply_monitor":
             return await self._create_recent_gmail_reply_monitor(
@@ -2457,6 +2459,7 @@ class ExternalAgentRuntime:
         principal_id: str,
         user_text: str,
         history: Sequence[Mapping[str, str]] = (),
+        dialogue_focus: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Resolve an exact sent anchor, then inspect its Gmail thread live."""
 
@@ -2476,8 +2479,31 @@ class ExternalAgentRuntime:
         recipient_name: str | None = current_name or history_name
         recipient_hints = current_recipients or history_recipients
 
-        if not current_recipients and current_name:
-            normalised_name = re.sub(r"[^a-z0-9]+", "", current_name.casefold())
+        focused_anchor: tuple[str, str, str, str | None] | None = None
+        if not current_recipients and current_name is None:
+            raw_focus = (dialogue_focus or {}).get("gmail_reply")
+            if isinstance(raw_focus, Mapping):
+                try:
+                    focused_recipient = GoogleConnector._recipient(
+                        str(raw_focus.get("recipient") or "")
+                    ).casefold()
+                except ValueError:
+                    focused_recipient = ""
+                focused_message_id = str(raw_focus.get("sent_message_id") or "").strip()
+                focused_thread_id = str(raw_focus.get("thread_id") or "").strip()
+                if focused_recipient and focused_message_id and focused_thread_id:
+                    focused_anchor = (
+                        focused_recipient,
+                        focused_message_id,
+                        focused_thread_id,
+                        str(raw_focus.get("send_receipt_action_id") or "").strip() or None,
+                    )
+                    recipient_name = (
+                        str(raw_focus.get("recipient_name") or "").strip() or recipient_name
+                    )
+
+        def receipt_recipients_for_name(name: str) -> frozenset[str]:
+            normalised_name = re.sub(r"[^a-z0-9]+", "", name.casefold())
             receipt_addresses: set[str] = set()
             for receipt in (*same_conversation, *recent):
                 if (
@@ -2499,8 +2525,12 @@ class ExternalAgentRuntime:
                 }
                 if normalised_name and normalised_name in local_tokens:
                     receipt_addresses.add(address)
+            return frozenset(receipt_addresses)
+
+        if focused_anchor is None and not current_recipients and current_name:
+            receipt_addresses = receipt_recipients_for_name(current_name)
             if len(receipt_addresses) == 1:
-                recipient_hints = frozenset(receipt_addresses)
+                recipient_hints = receipt_addresses
             else:
                 recipient_hints, recipient_name, resolution = await self._resolve_reply_contact(
                     name=current_name,
@@ -2509,14 +2539,18 @@ class ExternalAgentRuntime:
                 )
                 if resolution is not None:
                     return resolution
-        elif not recipient_hints and history_name:
-            recipient_hints, recipient_name, resolution = await self._resolve_reply_contact(
-                name=history_name,
-                conversation_id=scoped_conversation,
-                principal_id=principal_id,
-            )
-            if resolution is not None:
-                return resolution
+        elif focused_anchor is None and not recipient_hints and history_name:
+            receipt_addresses = receipt_recipients_for_name(history_name)
+            if len(receipt_addresses) == 1:
+                recipient_hints = receipt_addresses
+            else:
+                recipient_hints, recipient_name, resolution = await self._resolve_reply_contact(
+                    name=history_name,
+                    conversation_id=scoped_conversation,
+                    principal_id=principal_id,
+                )
+                if resolution is not None:
+                    return resolution
 
         def eligible(receipt: ActionReceipt) -> tuple[ActionReceipt, str] | None:
             result = receipt.result
@@ -2550,7 +2584,10 @@ class ExternalAgentRuntime:
         ]
 
         anchor: tuple[ActionReceipt, str, str] | None = None
-        if same_matches and (current_recipients or len(same_matches) == 1):
+        if focused_anchor is not None:
+            recipient, sent_message_id, thread_id, receipt_action_id = focused_anchor
+            anchor_source = "conversation_reply_focus"
+        elif same_matches and (current_recipients or len(same_matches) == 1):
             anchor = same_matches[0][0], same_matches[0][1], "same_conversation_receipt"
         elif len(same_matches) > 1:
             whom = recipient_name or "that recipient"
@@ -2589,14 +2626,15 @@ class ExternalAgentRuntime:
                 ),
             }
 
-        receipt_action_id: str | None = None
-        if anchor is not None:
+        if focused_anchor is None:
+            receipt_action_id = None
+        if focused_anchor is None and anchor is not None:
             anchor_receipt, recipient, anchor_source = anchor
             result = anchor_receipt.result
             sent_message_id = str(result["message_id"])
             thread_id = str(result["thread_id"])
             receipt_action_id = str(anchor_receipt.action_id)
-        else:
+        elif focused_anchor is None:
             if len(recipient_hints) != 1:
                 return {
                     "success": True,

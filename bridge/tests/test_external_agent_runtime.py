@@ -1318,6 +1318,75 @@ async def test_pronoun_reply_referents_use_separate_read_only_history(runtime, q
 
 
 @pytest.mark.asyncio
+async def test_history_name_resolves_unique_durable_send_without_contacts(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    await _record_verified_send(
+        value,
+        conversation_id="usr:aaron:old-mobile-chat",
+        recipient="amber.gill1992@outlook.com",
+        suffix="history-name",
+    )
+    value.receipts = ActionReceiptStore(value.receipts.path)
+    value.registry.execute = AsyncMock(return_value=_reply_status())
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="new-mobile-chat",
+        principal_id="aaron",
+        user_text="Has she replied yet?",
+        history=[
+            {"role": "user", "content": "Has Amber replied?"},
+            {"role": "assistant", "content": "I’ll check."},
+        ],
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is True
+    calls = [item.args[0] for item in value.registry.execute.await_args_list]
+    assert [item.capability_id for item in calls] == ["gmail.reply_status"]
+    assert result["recipient"] == "amber.gill1992@outlook.com"
+
+
+@pytest.mark.asyncio
+async def test_structured_reply_focus_keeps_exact_thread_with_multiple_sends(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    for suffix in ("older", "focused"):
+        await _record_verified_send(
+            value,
+            conversation_id=f"usr:aaron:{suffix}",
+            recipient="amber.gill1992@outlook.com",
+            suffix=suffix,
+        )
+    value.registry.execute = AsyncMock(return_value=_reply_status())
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="current-mobile-chat",
+        principal_id="aaron",
+        user_text="Did I get a reply to that email?",
+        history=[{"role": "user", "content": "Has Amber replied?"}],
+        dialogue_focus={
+            "gmail_reply": {
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber Gill",
+                "sent_message_id": "sent-focused",
+                "thread_id": "thread-focused",
+                "send_receipt_action_id": "send-action-focused",
+            }
+        },
+    )
+
+    assert result["success"] is True
+    assert result["anchor_source"] == "conversation_reply_focus"
+    request = value.registry.execute.await_args.args[0]
+    assert request.capability_id == "gmail.reply_status"
+    assert request.payload == {
+        "thread_id": "thread-focused",
+        "sent_message_id": "sent-focused",
+    }
+
+
+@pytest.mark.asyncio
 async def test_named_reply_referent_uses_durable_receipt_after_restart_and_new_chat(runtime):
     value, _, _, _ = runtime
     await value.initialize()
@@ -1502,6 +1571,16 @@ async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
         execute_model_tool=AsyncMock(return_value={"success": True, "reply_received": False})
     )
     engine.external_runtime = runtime
+    reply_focus = {
+        "gmail_reply": {
+            "recipient": "amber.gill1992@outlook.com",
+            "sent_message_id": "sent-1",
+            "thread_id": "thread-1",
+        }
+    }
+    engine.dialogue = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(focus=reply_focus))
+    )
     exact = (
         "Check my Gmail inbox and tell me if I have received a reply to the email "
         "you just sent to amber.gill1992@outlook.com."
@@ -1532,6 +1611,7 @@ async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
         request_id="reply-status-request",
         user_text=exact,
         history=history,
+        dialogue_focus=reply_focus,
     )
 
 
