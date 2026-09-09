@@ -205,12 +205,15 @@ def present_user_response(
     technical = (
         technical_output_requested(request_text) if allow_technical is None else allow_technical
     )
-    text = raw.strip() if technical else html.unescape(raw).strip()
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r" *\n *", "\n", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
     if technical:
-        return text
+        return raw.strip()
+    lines = [" ".join(line.split()) for line in html.unescape(raw).strip().splitlines()]
+    normalised_lines: list[str] = []
+    for line in lines:
+        if not line and normalised_lines and not normalised_lines[-1]:
+            continue
+        normalised_lines.append(line)
+    text = "\n".join(normalised_lines)
 
     lowered = text.casefold()
     if "no principal-owned verified gmail send receipt matched" in lowered:
