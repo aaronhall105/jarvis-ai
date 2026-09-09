@@ -113,6 +113,112 @@ class ExternalFollowUpIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(evaluator.calls))
         self.assertEqual(2, status["poll_count"])
 
+    async def test_continuous_important_monitor_dedupes_across_restart(self):
+        evaluator = SequenceEvaluator(
+            {"verified": True, "value": ["message-1"]},
+            {"verified": True, "value": ["message-2", "message-1"]},
+            {"verified": True, "value": ["message-2", "message-1"]},
+            {"verified": True, "value": ["message-3", "message-2", "message-1"]},
+        )
+        path = self.tmp.name + "/important-jobs.db"
+        engine = FollowUpEngine(
+            path,
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        job = await engine.create(
+            conversation_id="same-chat",
+            kind="external_monitor",
+            payload=self.payload(
+                provider="google",
+                capability_id="gmail.important_status",
+                query={"query": "in:inbox"},
+                baseline=["message-1"],
+                comparison={"operator": "new_items"},
+                continuous=True,
+            ),
+            due_at=engine._now() - timedelta(seconds=1),
+        )
+
+        await engine.run_once()
+        self.assertEqual([], await self.conversations.get_messages("same-chat"))
+        self.force_due(engine, job["job_id"])
+        await engine.run_once()
+        self.assertEqual("pending", (await engine.get(job["job_id"]))["status"])
+        self.assertEqual(
+            ["I found new Gmail matching your attention rules."],
+            [item["content"] for item in await self.conversations.get_messages("same-chat")],
+        )
+
+        restarted = FollowUpEngine(
+            path,
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        self.force_due(restarted, job["job_id"])
+        await restarted.run_once()
+        self.assertEqual(1, len(await self.conversations.get_messages("same-chat")))
+        self.force_due(restarted, job["job_id"])
+        await restarted.run_once()
+        messages = await self.conversations.get_messages("same-chat")
+        self.assertEqual(2, len(messages))
+        self.assertTrue(
+            all("matching your attention rules" in item["content"] for item in messages)
+        )
+
+    async def test_reply_monitor_survives_restart_and_delivers_only_live_change(self):
+        evaluator = SequenceEvaluator(
+            {"verified": True, "value": 0},
+            {"verified": True, "value": 0},
+            {"verified": True, "value": 1},
+        )
+        path = self.tmp.name + "/reply-jobs.db"
+        engine = FollowUpEngine(
+            path,
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        job = await engine.create(
+            conversation_id="same-chat",
+            kind="external_monitor",
+            payload=self.payload(
+                provider="google",
+                capability_id="gmail.reply_status",
+                query={"thread_id": "thread-1", "sent_message_id": "sent-1"},
+                baseline=0,
+                comparison={"operator": "increased"},
+            ),
+            due_at=engine._now() - timedelta(seconds=1),
+        )
+        await engine.run_once()
+        self.assertEqual([], await self.conversations.get_messages("same-chat"))
+
+        restarted = FollowUpEngine(
+            path,
+            self.conversations,
+            States(),
+            poll_seconds=1,
+            external_evaluator=evaluator,
+        )
+        self.force_due(restarted, job["job_id"])
+        await restarted.run_once()
+        self.assertEqual([], await self.conversations.get_messages("same-chat"))
+        self.force_due(restarted, job["job_id"])
+        await restarted.run_once()
+
+        messages = await self.conversations.get_messages("same-chat")
+        self.assertEqual(
+            ["I verified a new inbound reply in the monitored Gmail thread."],
+            [item["content"] for item in messages],
+        )
+        self.assertEqual("completed", (await restarted.get(job["job_id"]))["status"])
+
     async def test_provider_failure_retries_without_claiming_change(self):
         evaluator = SequenceEvaluator(
             RuntimeError("provider timeout token=must-not-persist"),

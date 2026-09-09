@@ -43,6 +43,7 @@ from app.connectors import (
     ConfirmationMode,
     ConnectorRegistry,
     ExecutionStatus,
+    ReceiptStatus,
     VerificationMode,
     redact_secrets,
 )
@@ -363,6 +364,7 @@ class ExternalAgentRuntime:
         self._monitor_lookup = monitor_lookup
         self._monitor_lister = monitor_lister
         self._monitor_canceller = monitor_canceller
+        self._email_policies: Any | None = None
         self._monitor_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
@@ -461,6 +463,11 @@ class ExternalAgentRuntime:
         self._monitor_lookup = lookup
         self._monitor_lister = lister
         self._monitor_canceller = canceller
+
+    def set_email_policy_engine(self, engine: Any) -> None:
+        """Attach the durable email-policy service after composition."""
+
+        self._email_policies = engine
 
     async def providers_snapshot(
         self,
@@ -829,15 +836,132 @@ class ExternalAgentRuntime:
             }
         )
 
+    @staticmethod
+    def _gmail_priority_intent(text: str) -> bool:
+        value = " ".join(str(text or "").casefold().split())
+        return bool(
+            re.search(
+                r"\b(?:prioriti[sz]e|priority|urgent|needs? my attention|"
+                r"need(?:s)? attention|important emails?|anything important|ignore for now)\b",
+                value,
+            )
+        )
+
     @classmethod
-    def _gmail_management_write_capabilities(
+    def _current_gmail_service_request(cls, text: str) -> bool:
+        """Distinguish mailbox requests from generic uses of the word email."""
+
+        if not cls._current_gmail_context(text):
+            return False
+        value = " ".join(str(text or "").casefold().split())
+        words = {word.strip(".,!?()[]{}:;\\\"'") for word in value.split()}
+        if words & {"gmail", "inbox", "emails", "mail"}:
+            return True
+        if value.startswith("email "):
+            return True
+        generic_web_subject = bool(
+            re.search(
+                r"\b(?:research|standards?|technology|marketing|security|protocols?)\b",
+                value,
+            )
+        )
+        mailbox_language = bool(
+            re.search(
+                r"\b(?:my|check|read|show|find|latest|unread|received|sent|archive|"
+                r"trash|delete|move|star|reply|forward|draft|send)\b",
+                value,
+            )
+        )
+        return mailbox_language or not generic_web_subject
+
+    @staticmethod
+    def _gmail_briefing_intent(text: str) -> bool:
+        value = " ".join(str(text or "").casefold().split())
+        return bool(re.search(r"\b(?:inbox|email|gmail) briefing\b", value))
+
+    @staticmethod
+    def _email_retention_intent(text: str) -> bool:
+        value = " ".join(str(text or "").casefold().split())
+        return bool(
+            re.search(
+                r"\b(?:email|emails|gmail|inbox)\b.*\b(?:older than|after)\b.*\bdays?\b|"
+                r"\b(?:pause|resume|change|disable|list|show)\b.*"
+                r"\b(?:email|gmail|inbox) retention\b",
+                value,
+            )
+        )
+
+    @staticmethod
+    def _reply_monitor_intent(text: str) -> bool:
+        value = " ".join(str(text or "").casefold().split())
+        return bool(
+            re.search(
+                r"\b(?:monitor|watch|notify me|let me know|tell me when|keep an eye)\b"
+                r".{0,80}\b(?:reply|replies|response|responds|heard back)\b",
+                value,
+            )
+        )
+
+    @staticmethod
+    def _important_email_monitor_intent(text: str) -> bool:
+        value = " ".join(str(text or "").casefold().split())
+        return bool(
+            re.search(
+                r"\b(?:monitor|watch|notify me|let me know|tell me|alert me|keep an eye)\b"
+                r".{0,80}\b(?:important|urgent|needs? (?:my )?attention)\b"
+                r".{0,40}\b(?:email|emails|gmail|inbox)\b|"
+                r"\b(?:important|urgent)\b.{0,40}\b(?:email|emails)\b"
+                r".{0,80}\b(?:notify|alert|monitor|watch)\b",
+                value,
+            )
+        )
+
+    @classmethod
+    def _gmail_reply_read_intent(cls, text: str) -> bool:
+        """Recognise a current reply-status question without granting reply authority."""
+
+        if cls._write_authorized("gmail.reply", text):
+            return False
+        value = " ".join(str(text or "").casefold().split())
+        return bool(
+            re.search(
+                r"\b(?:have i (?:got|received)|have we (?:got|received)|do i have|"
+                r"did [a-z0-9@._+' -]{1,60}|has [a-z0-9@._+' -]{1,60})\b"
+                r".{0,60}\b(?:reply|replies|replied|response|responded|answered)\b|"
+                r"\b(?:received|got) (?:any |a )?(?:reply|response)\b|"
+                r"\bheard back\b",
+                value,
+            )
+        )
+
+    @classmethod
+    def _contextual_gmail_read(
         cls,
         text: str,
-    ) -> tuple[str, ...]:
-        """Return mailbox writes explicitly authorized by CURRENT text only."""
+        history: Sequence[Mapping[str, str]],
+    ) -> bool:
+        if not cls._recent_gmail_context(history):
+            return False
+        value = " ".join(str(text or "").casefold().split())
+        return cls._contextual_gmail_follow_up(text, history) or bool(
+            re.search(
+                r"\b(?:read (?:it|that|this)|summari[sz]e (?:it|that|this)|"
+                r"what did (?:she|he|they) say|anything urgent|"
+                r"what (?:needs?|need) (?:my )?attention|"
+                r"what can i ignore|prioriti[sz]e (?:it|them|those))\b",
+                value,
+            )
+        )
+
+    @classmethod
+    def _gmail_write_capabilities(cls, text: str) -> tuple[str, ...]:
+        """Return every Gmail write authorized by current immutable text."""
 
         capabilities = (
+            "gmail.draft",
             "gmail.reply",
+            "gmail.send",
+            "gmail.forward",
             "gmail.archive",
             "gmail.mark_read",
             "gmail.mark_unread",
@@ -853,6 +977,32 @@ class ExternalAgentRuntime:
             capability_id
             for capability_id in capabilities
             if cls._write_authorized(capability_id, text)
+        )
+
+    @classmethod
+    def _gmail_management_write_capabilities(
+        cls,
+        text: str,
+    ) -> tuple[str, ...]:
+        """Return mailbox writes explicitly authorized by CURRENT text only."""
+
+        management = {
+            "gmail.reply",
+            "gmail.archive",
+            "gmail.mark_read",
+            "gmail.mark_unread",
+            "gmail.star",
+            "gmail.unstar",
+            "gmail.mark_important",
+            "gmail.mark_not_important",
+            "gmail.move",
+            "gmail.trash",
+            "gmail.restore",
+        }
+        return tuple(
+            capability_id
+            for capability_id in cls._gmail_write_capabilities(text)
+            if capability_id in management
         )
 
     @classmethod
@@ -939,6 +1089,9 @@ class ExternalAgentRuntime:
 
         return (
             bool(words & _EXTERNAL_SERVICE_WORDS)
+            or cls._current_gmail_context(text)
+            or cls._gmail_reply_read_intent(text)
+            or cls._gmail_priority_intent(text)
             or any(
                 phrase in lowered
                 for phrase in (
@@ -946,7 +1099,7 @@ class ExternalAgentRuntime:
                     *_EXTERNAL_REQUEST_PHRASES,
                 )
             )
-            or cls._contextual_gmail_follow_up(text, history)
+            or cls._contextual_gmail_read(text, history)
             or bool(
                 cls._contextual_gmail_management_capabilities(
                     text,
@@ -1027,11 +1180,15 @@ class ExternalAgentRuntime:
                 "guessing. The only mailbox writes authorized by the current "
                 "request are: " + ", ".join(gmail_management) + "."
             )
-        elif self._contextual_gmail_follow_up(text, history):
+        elif (
+            self._contextual_gmail_read(text, history)
+            or self._gmail_reply_read_intent(text)
+            or self._gmail_priority_intent(text)
+        ):
             gmail_requirement = (
-                " This is a contextual Gmail follow-up. Use live Gmail search, "
-                "thread or message evidence before answering whether a reply was "
-                "received. Never answer this from conversation memory alone."
+                " This is a contextual Gmail follow-up/read. Use live Gmail search, thread "
+                "or message evidence before answering. Never report mailbox state "
+                "or a received reply from conversation memory alone."
             )
         else:
             gmail_requirement = ""
@@ -1121,7 +1278,10 @@ class ExternalAgentRuntime:
             requested.insert(0, ("gmail", "Gmail"))
 
         if not requested and (
-            self._contextual_gmail_follow_up(text, history)
+            self._contextual_gmail_read(text, history)
+            or self._gmail_reply_read_intent(text)
+            or self._gmail_priority_intent(text)
+            or self._current_gmail_service_request(text)
             or self._contextual_gmail_management_capabilities(text, history)
         ):
             requested.append(("gmail", "Gmail"))
@@ -1182,27 +1342,104 @@ class ExternalAgentRuntime:
             )
         )
         monitor_management_intent = cancel_monitor_intent or list_monitor_intent
+        retention_intent = self._email_retention_intent(text)
+        briefing_intent = self._gmail_briefing_intent(text)
+        reply_monitor_intent = self._reply_monitor_intent(text) and (
+            self._current_gmail_context(text) or self._recent_gmail_context(history)
+        )
+        important_monitor_intent = self._important_email_monitor_intent(text)
         definitions: list[dict[str, Any]] = []
 
         google_executable = sorted(executable)
 
-        contextual_read = self._contextual_gmail_follow_up(
+        contextual_read = self._contextual_gmail_read(
             text,
             history,
         )
+        reply_read_intent = self._gmail_reply_read_intent(text)
+        current_gmail_request = self._current_gmail_service_request(text)
         gmail_management = self._gmail_management_write_capabilities(text)
+        gmail_writes = self._gmail_write_capabilities(text)
         gmail_context = self._current_gmail_context(text) or self._recent_gmail_context(history)
+        domain_text = lowered
+        for literal_email in self._literal_user_emails(text):
+            domain_text = domain_text.replace(literal_email, " ")
+        current_google_domains: set[str] = set()
+        if any(term in domain_text for term in ("calendar", "diary")) or (
+            not self._current_gmail_context(text)
+            and any(term in domain_text for term in ("appointment", "schedule"))
+        ):
+            current_google_domains.add("calendar")
+        if re.search(r"\bcontacts?\b|\baddress book\b", domain_text):
+            current_google_domains.add("contacts")
+        priority_read_intent = self._gmail_priority_intent(text) and not current_google_domains
 
-        if contextual_read:
-            google_executable = [
-                capability_id
-                for capability_id in google_executable
-                if capability_id
-                in {
+        def include_explicit_google_domains(allowed: set[str]) -> set[str]:
+            """Add only currently requested non-Gmail Google capabilities."""
+
+            scoped = set(allowed)
+            for capability_id in executable:
+                metadata = self.registry.capability_definition(capability_id)
+                if metadata is None or metadata.provider_id != "google":
+                    continue
+                domain = capability_id.partition(".")[0]
+                if domain not in current_google_domains:
+                    continue
+                if metadata.access is CapabilityAccess.READ or self._write_authorized(
+                    capability_id,
+                    text,
+                ):
+                    scoped.add(capability_id)
+            return scoped
+
+        explicit_web_intent = bool(
+            re.search(
+                r"\b(?:web|website|internet|online|research|investigate)\b|https?://",
+                lowered,
+            )
+        )
+        narrow_gmail_intent = not explicit_web_intent and bool(
+            contextual_read
+            or reply_read_intent
+            or priority_read_intent
+            or current_gmail_request
+            or gmail_management
+            or retention_intent
+            or reply_monitor_intent
+            or important_monitor_intent
+        )
+
+        if (
+            contextual_read
+            or reply_read_intent
+            or priority_read_intent
+            or (current_gmail_request and not gmail_writes)
+        ):
+            if self._gmail_priority_intent(text):
+                allowed_reads = {
+                    "gmail.prioritize",
+                    "gmail.read",
+                    "gmail.thread",
+                }
+            elif self._gmail_briefing_intent(text):
+                allowed_reads = {
+                    "gmail.briefing",
+                    "gmail.read",
+                    "gmail.thread",
+                }
+            else:
+                allowed_reads = {
                     "gmail.search",
                     "gmail.read",
                     "gmail.thread",
                 }
+                if "label" in lowered:
+                    allowed_reads.add("gmail.labels")
+            allowed_reads = include_explicit_google_domains(allowed_reads)
+            google_executable = [
+                capability_id
+                for capability_id in google_executable
+                if capability_id in allowed_reads
             ]
         elif gmail_management and gmail_context:
             allowed_gmail = {
@@ -1213,17 +1450,185 @@ class ExternalAgentRuntime:
             }
             if "gmail.move" in gmail_management:
                 allowed_gmail.add("gmail.labels")
+            allowed_gmail = include_explicit_google_domains(allowed_gmail)
 
             google_executable = [
                 capability_id
                 for capability_id in google_executable
                 if capability_id in allowed_gmail
             ]
+        elif gmail_writes and self._current_gmail_context(text):
+            allowed_google = {
+                "gmail.search",
+                "gmail.read",
+                "gmail.thread",
+                *gmail_writes,
+            }
+            if "gmail.move" in gmail_writes:
+                allowed_google.add("gmail.labels")
+            if "@" not in lowered and ({"gmail.draft", "gmail.forward"} & set(gmail_writes)):
+                allowed_google.add("contacts.resolve")
+            allowed_google = include_explicit_google_domains(allowed_google)
+            google_executable = [
+                capability_id
+                for capability_id in google_executable
+                if capability_id in allowed_google
+            ]
+        elif current_google_domains:
+            allowed_google = include_explicit_google_domains(set())
+            google_executable = [
+                capability_id
+                for capability_id in google_executable
+                if capability_id in allowed_google
+            ]
+        else:
+            google_executable = []
 
         google_tool = google_model_tool(google_executable)
-        if google_tool is not None and not monitor_management_intent:
+        if (
+            google_tool is not None
+            and not monitor_management_intent
+            and not retention_intent
+            and not reply_monitor_intent
+            and not important_monitor_intent
+            and not (briefing_intent and self._email_policies is not None)
+        ):
             definitions.append(google_tool)
-        if "web.search" in executable and not monitor_management_intent:
+        if briefing_intent and self._email_policies is not None:
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "get_email_briefing",
+                    "description": (
+                        "Read a live evidence-backed Gmail inbox briefing and persist its "
+                        "verified observation watermark for the next briefing. This is read-only."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": ["string", "null"], "maxLength": 1000},
+                            "limit": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 100,
+                            },
+                        },
+                        "required": ["query", "limit"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
+        if (
+            self._contextual_gmail_follow_up(text, history)
+            and "gmail.reply_status" in executable
+            and not monitor_management_intent
+            and not retention_intent
+            and not reply_monitor_intent
+        ):
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "check_recent_gmail_reply",
+                    "description": (
+                        "Check live Gmail for an inbound reply using the latest verified "
+                        "gmail.send receipt in this same conversation. Prefer this over "
+                        "sender or subject guessing. This is read-only."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
+        if (
+            reply_monitor_intent
+            and "gmail.reply_status" in executable
+            and self._monitor_creator is not None
+        ):
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "create_recent_gmail_reply_monitor",
+                    "description": (
+                        "Persist a durable reply monitor anchored to the latest verified "
+                        "Gmail send receipt in this same conversation. This never guesses "
+                        "a thread or message ID."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "polling_interval_seconds": {
+                                "type": "integer",
+                                "minimum": 300,
+                                "maximum": 2592000,
+                            }
+                        },
+                        "required": ["polling_interval_seconds"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
+        if (
+            important_monitor_intent
+            and "gmail.important_status" in executable
+            and self._monitor_creator is not None
+        ):
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "create_important_gmail_monitor",
+                    "description": (
+                        "Persist a continuous principal-scoped monitor for new Gmail "
+                        "that bounded provider evidence says needs attention. It dedupes "
+                        "by provider message IDs and does not mutate mail."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "polling_interval_seconds": {
+                                "type": "integer",
+                                "minimum": 300,
+                                "maximum": 2592000,
+                            }
+                        },
+                        "required": ["polling_interval_seconds"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
+        if retention_intent and self._email_policies is not None:
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "manage_email_retention_policy",
+                    "description": (
+                        "Create, list, pause, resume, change, or disable the durable "
+                        "Inbox-to-Gmail-Trash retention policy. Creation persists a "
+                        "standing policy; it never permanently deletes mail."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": ["create", "list", "pause", "resume", "change", "disable"],
+                            },
+                            "policy_id": {"type": ["string", "null"]},
+                            "retention_days": {"type": ["integer", "null"], "minimum": 1},
+                        },
+                        "required": ["operation", "policy_id", "retention_days"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
+        if "web.search" in executable and not monitor_management_intent and not narrow_gmail_intent:
             definitions.append(
                 {
                     "type": "function",
@@ -1249,9 +1654,12 @@ class ExternalAgentRuntime:
                 }
             )
         if "web.fetch" in executable and (
-            "http://" in lowered
-            or "https://" in lowered
-            or any(word in lowered for word in ("open the page", "fetch", "read this page"))
+            not narrow_gmail_intent
+            and (
+                "http://" in lowered
+                or "https://" in lowered
+                or any(word in lowered for word in ("open the page", "fetch", "read this page"))
+            )
         ):
             definitions.append(
                 {
@@ -1267,8 +1675,10 @@ class ExternalAgentRuntime:
                     "strict": True,
                 }
             )
-        if "web.search" in executable and any(
-            word in lowered for word in ("research", "investigate", "compare", "shortlist")
+        if (
+            "web.search" in executable
+            and not narrow_gmail_intent
+            and any(word in lowered for word in ("research", "investigate", "compare", "shortlist"))
         ):
             definitions.append(
                 {
@@ -1306,6 +1716,8 @@ class ExternalAgentRuntime:
         if (
             self._monitor_creator is not None
             and monitor_capabilities
+            and not reply_monitor_intent
+            and not important_monitor_intent
             and not cancel_monitor_intent
             and not list_monitor_intent
             and any(
@@ -1449,23 +1861,35 @@ class ExternalAgentRuntime:
                     "strict": True,
                 }
             )
-        if not direct_literal_email_send and (
-            any(
-                phrase in lowered
-                for phrase in (
-                    " and ",
-                    "sort it",
-                    "sort me",
-                    "sort this",
-                    "plan it",
-                    "organise",
+        if (
+            not retention_intent
+            and (
+                not narrow_gmail_intent
+                or (
+                    bool(gmail_writes)
+                    and "@" not in lowered
+                    and "contacts.resolve" in google_executable
                 )
             )
-            or (
-                google_tool is not None
-                and any(
-                    word in lowered
-                    for word in ("email", "gmail", "calendar", "appointment", "contact")
+            and not direct_literal_email_send
+            and (
+                any(
+                    phrase in lowered
+                    for phrase in (
+                        " and ",
+                        "sort it",
+                        "sort me",
+                        "sort this",
+                        "plan it",
+                        "organise",
+                    )
+                )
+                or (
+                    google_tool is not None
+                    and any(
+                        word in lowered
+                        for word in ("email", "gmail", "calendar", "appointment", "contact")
+                    )
                 )
             )
         ):
@@ -1711,7 +2135,325 @@ class ExternalAgentRuntime:
                 conversation_id=conversation_id,
                 job_id=str(arguments.get("job_id") or ""),
             )
+        if name == "manage_email_retention_policy":
+            return await self._manage_email_retention_policy(
+                arguments,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+            )
+        if name == "get_email_briefing":
+            return await self._get_email_briefing(
+                arguments,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+            )
+        if name == "check_recent_gmail_reply":
+            return await self._check_recent_gmail_reply(
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                user_text=user_text,
+            )
+        if name == "create_recent_gmail_reply_monitor":
+            return await self._create_recent_gmail_reply_monitor(
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+                polling_interval_seconds=int(arguments.get("polling_interval_seconds") or 900),
+            )
+        if name == "create_important_gmail_monitor":
+            return await self._create_important_gmail_monitor(
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+                polling_interval_seconds=int(arguments.get("polling_interval_seconds") or 900),
+            )
         raise ValueError(f"Unsupported external agent tool: {name}")
+
+    async def _get_email_briefing(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        principal_id: str,
+    ) -> dict[str, Any]:
+        engine = self._email_policies
+        if engine is None:
+            raise RuntimeError("Durable email briefing is unavailable")
+        return await engine.briefing(
+            principal_id=principal_id,
+            conversation_id=self.planner_executor.scope_conversation(
+                conversation_id,
+                principal_id,
+            ),
+            query=str(arguments.get("query") or "in:inbox"),
+            limit=int(arguments.get("limit") or 50),
+        )
+
+    async def _verified_gmail_send_anchor(
+        self,
+        *,
+        conversation_id: str,
+        principal_id: str,
+        user_text: str,
+    ) -> tuple[Any, str] | None:
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            principal_id,
+        )
+        receipts = await self.receipts.list_recent(
+            limit=100,
+            conversation_id=scoped_conversation,
+        )
+        literal_recipients = self._literal_user_emails(user_text)
+        for receipt in receipts:
+            result = receipt.result
+            if (
+                receipt.status is not ReceiptStatus.VERIFIED
+                or receipt.capability_id != "gmail.send"
+                or str(result.get("status") or "") != "sent"
+                or not result.get("message_id")
+                or not result.get("thread_id")
+            ):
+                continue
+            try:
+                recipient = GoogleConnector._recipient(
+                    str(result.get("recipient") or "")
+                ).casefold()
+            except ValueError:
+                continue
+            if not literal_recipients or recipient in literal_recipients:
+                return receipt, recipient
+        return None
+
+    async def _create_recent_gmail_reply_monitor(
+        self,
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+        polling_interval_seconds: int,
+    ) -> dict[str, Any]:
+        if not self._reply_monitor_intent(user_text):
+            raise ValueError("The current request did not authorize reply monitoring")
+        anchor = await self._verified_gmail_send_anchor(
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            user_text=user_text,
+        )
+        if anchor is None:
+            raise ValueError(
+                "No verified sent Gmail message in this conversation matched the monitor request"
+            )
+        receipt, recipient = anchor
+        sent = receipt.result
+        return await self.create_external_monitor(
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            provider="google",
+            capability_id="gmail.reply_status",
+            arguments={
+                "thread_id": str(sent["thread_id"]),
+                "sent_message_id": str(sent["message_id"]),
+            },
+            value_path="reply_count",
+            comparison={"operator": "increased"},
+            polling_interval_seconds=polling_interval_seconds,
+            label=f"Reply from {recipient}",
+            notify=True,
+            request_id=request_id,
+        )
+
+    async def _create_important_gmail_monitor(
+        self,
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+        polling_interval_seconds: int,
+    ) -> dict[str, Any]:
+        if not self._important_email_monitor_intent(user_text):
+            raise ValueError("The current request did not authorize important-email monitoring")
+        return await self.create_external_monitor(
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            provider="google",
+            capability_id="gmail.important_status",
+            arguments={
+                "query": "in:inbox {is:important is:starred is:unread}",
+                "limit": 50,
+            },
+            value_path="attention_message_ids",
+            comparison={"operator": "new_items"},
+            polling_interval_seconds=polling_interval_seconds,
+            label="Important Gmail",
+            continuous=True,
+            notify=True,
+            request_id=request_id,
+        )
+
+    async def _check_recent_gmail_reply(
+        self,
+        *,
+        conversation_id: str,
+        principal_id: str,
+        user_text: str,
+    ) -> dict[str, Any]:
+        """Resolve a sent anchor from verified receipts, then inspect Gmail live."""
+
+        anchor = await self._verified_gmail_send_anchor(
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            user_text=user_text,
+        )
+        if anchor is None:
+            return {
+                "success": False,
+                "live_evidence_available": False,
+                "reply_received": None,
+                "error": (
+                    "No verified sent Gmail message in this conversation matched the request"
+                ),
+            }
+        anchor_receipt, recipient = anchor
+        result = anchor_receipt.result
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            principal_id,
+        )
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="gmail.reply_status",
+                payload={
+                    "thread_id": str(result["thread_id"]),
+                    "sent_message_id": str(result["message_id"]),
+                },
+                request_id=str(uuid.uuid4()),
+                conversation_id=scoped_conversation,
+                principal_id=principal_id,
+                operation="check_reply_after_verified_send",
+                target=str(result["thread_id"]),
+            ),
+            refresh_health=True,
+        )
+        if not execution.success:
+            return {
+                "success": False,
+                "live_evidence_available": False,
+                "reply_received": None,
+                "error": execution.error or "Gmail reply status could not be verified",
+            }
+        evidence = dict(execution.data)
+        return {
+            "success": True,
+            "live_evidence_available": True,
+            "reply_received": evidence.get("reply_received") is True,
+            "recipient": recipient,
+            "sent_message_id": result["message_id"],
+            "thread_id": result["thread_id"],
+            "reply_count": int(evidence.get("reply_count") or 0),
+            "replies": list(evidence.get("replies") or ()),
+            "provider_reference": execution.provider_reference,
+            "evidence": evidence.get("evidence"),
+        }
+
+    async def _manage_email_retention_policy(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+    ) -> dict[str, Any]:
+        engine = self._email_policies
+        if engine is None:
+            raise RuntimeError("Durable email retention is unavailable")
+        operation = str(arguments.get("operation") or "").strip().casefold()
+        if operation == "list":
+            policies = await engine.list(principal_id=principal_id)
+            return {"success": True, "count": len(policies), "policies": policies}
+
+        policy_id = str(arguments.get("policy_id") or "").strip()
+        authority = " ".join(str(user_text or "").casefold().split())
+        if operation == "create":
+            days = int(arguments.get("retention_days") or 0)
+            stated_days = {int(value) for value in re.findall(r"\b(\d{1,4})\s+days?\b", authority)}
+            if (
+                days not in stated_days
+                or not self._email_retention_intent(user_text)
+                or not self._write_authorized("gmail.trash", user_text)
+            ):
+                raise ValueError(
+                    "The current request must explicitly authorize the retention days and Trash policy"
+                )
+            policy = await engine.create_retention_policy(
+                principal_id=principal_id,
+                conversation_id=self.planner_executor.scope_conversation(
+                    conversation_id,
+                    principal_id,
+                ),
+                retention_days=days,
+                request_id=request_id,
+            )
+        else:
+            if not policy_id:
+                raise ValueError("Email retention policy_id is required")
+            verbs = {
+                "pause": ("pause", "stop"),
+                "resume": ("resume", "restart", "enable"),
+                "change": ("change", "update", "set"),
+                "disable": ("disable", "cancel", "turn off"),
+            }
+            operation_verbs = verbs.get(operation, ())
+            negated = any(
+                re.search(
+                    rf"\b(?:do not|don t|dont|never)\s+(?:please\s+)?(?:\w+\s+){{0,3}}"
+                    rf"{re.escape(verb)}\b",
+                    authority,
+                )
+                for verb in operation_verbs
+            )
+            if (
+                not operation_verbs
+                or negated
+                or not any(verb in authority for verb in operation_verbs)
+            ):
+                raise ValueError("The current request did not authorize that policy change")
+            if operation == "change":
+                days = int(arguments.get("retention_days") or 0)
+                stated_days = {
+                    int(value) for value in re.findall(r"\b(\d{1,4})\s+days?\b", authority)
+                }
+                if days not in stated_days:
+                    raise ValueError("The new retention period was not stated by the user")
+                policy = await engine.change(
+                    policy_id,
+                    principal_id=principal_id,
+                    retention_days=days,
+                )
+            else:
+                policy = await getattr(engine, operation)(
+                    policy_id,
+                    principal_id=principal_id,
+                )
+            if policy is None:
+                raise ValueError("Email retention policy was not found for this principal")
+        persisted = await engine.get(policy["policy_id"], principal_id=principal_id)
+        if persisted is None or persisted["status"] != policy["status"]:
+            raise RuntimeError("Email retention policy persistence could not be verified")
+        return {
+            "success": True,
+            "persisted": True,
+            "policy": persisted,
+            "operation": operation,
+            "permanent_delete": False,
+        }
 
     @staticmethod
     def _write_authorized(capability_id: str, user_text: str) -> bool:
@@ -1746,6 +2488,35 @@ class ExternalAgentRuntime:
 
         word_set = set(words)
         authority_text = " ".join(words)
+
+        negated_actions: Mapping[str, tuple[str, ...]] = {
+            "gmail.reply": (r"reply", r"respond"),
+            "gmail.draft": (r"draft", r"compose", r"write", r"email"),
+            "gmail.send": (r"send", r"email"),
+            "gmail.forward": (r"forward",),
+            "gmail.archive": (r"archive",),
+            "gmail.mark_read": (r"mark(?:\s+\w+){0,3}\s+read",),
+            "gmail.mark_unread": (r"mark(?:\s+\w+){0,3}\s+unread",),
+            "gmail.star": (r"star", r"add(?:\s+a)?\s+star"),
+            "gmail.unstar": (r"unstar", r"remove(?:\s+the|\s+a)?\s+star"),
+            "gmail.mark_important": (r"mark(?:\s+\w+){0,3}\s+important",),
+            "gmail.mark_not_important": (
+                r"mark(?:\s+\w+){0,3}\s+not\s+important",
+                r"remove(?:\s+the)?\s+important",
+            ),
+            "gmail.move": (r"move",),
+            "gmail.trash": (r"trash", r"delete", r"remove"),
+            "gmail.restore": (r"restore", r"undelete", r"untrash"),
+            "calendar.create": (r"add", r"book", r"create", r"put", r"schedule"),
+            "calendar.update": (r"change", r"move", r"reschedule", r"update"),
+            "calendar.cancel": (r"cancel", r"delete", r"remove"),
+        }
+        negative_prefix = r"\b(?:do not|don t|dont|never)\s+(?:please\s+)?(?:\w+\s+){0,3}"
+        if any(
+            re.search(negative_prefix + marker + r"\b", authority_text)
+            for marker in negated_actions.get(capability_id, ())
+        ):
+            return False
 
         # ----------------------------------------------------
         # Gmail actions whose intent needs phrase-level checks.
@@ -1828,7 +2599,9 @@ class ExternalAgentRuntime:
                     word_set
                     & {
                         "email",
+                        "emails",
                         "message",
+                        "messages",
                         "gmail",
                         "inbox",
                     }
@@ -1847,7 +2620,9 @@ class ExternalAgentRuntime:
                     word_set
                     & {
                         "email",
+                        "emails",
                         "message",
+                        "messages",
                         "gmail",
                         "inbox",
                     }
@@ -1868,7 +2643,9 @@ class ExternalAgentRuntime:
                         word_set
                         & {
                             "email",
+                            "emails",
                             "message",
+                            "messages",
                             "gmail",
                             "inbox",
                         }
@@ -1891,7 +2668,9 @@ class ExternalAgentRuntime:
                         word_set
                         & {
                             "email",
+                            "emails",
                             "message",
+                            "messages",
                             "gmail",
                             "trash",
                         }
@@ -1905,6 +2684,12 @@ class ExternalAgentRuntime:
                     )
                 )
             )
+
+        if capability_id in {"gmail.draft", "gmail.send"} and re.match(
+            r"^(?:please\s+)?email\b",
+            authority_text,
+        ):
+            return True
 
         # ----------------------------------------------------
         # Existing explicit command verbs.
@@ -2186,6 +2971,8 @@ class ExternalAgentRuntime:
         max_attempts: int = 3,
         expires_at: str | None = None,
         notify_if_unchanged: bool = False,
+        continuous: bool = False,
+        notify: bool = False,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         creator = self._monitor_creator
@@ -2265,6 +3052,8 @@ class ExternalAgentRuntime:
             "expires_at": configured_expiry.isoformat(),
             "deadline_requested": bool(expires_at),
             "notify_if_unchanged": bool(notify_if_unchanged),
+            "continuous": bool(continuous),
+            "notify": bool(notify),
         }
         for key, value in (
             ("query", query),
@@ -2412,6 +3201,7 @@ class ExternalAgentRuntime:
             "greater_than",
             "contains",
             "truthy",
+            "new_items",
         }
         if operator not in allowed:
             raise ValueError(f"Unsupported external monitor comparison: {operator or 'missing'}")
@@ -2489,6 +3279,8 @@ class ExternalAgentRuntime:
             "max_polls",
             "deadline_requested",
             "notify_if_unchanged",
+            "continuous",
+            "notify",
         )
         if not all(stored.get(key) == requested.get(key) for key in identity_keys):
             return False

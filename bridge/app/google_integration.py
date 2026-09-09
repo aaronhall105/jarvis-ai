@@ -10,7 +10,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
-from email.utils import formatdate, getaddresses
+from email.utils import formatdate, getaddresses, parsedate_to_datetime
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -76,6 +76,10 @@ _GOOGLE_ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "gmail.search": "query (Gmail search syntax), optional limit",
     "gmail.read": "message_id",
     "gmail.thread": "thread_id, or query and optional limit",
+    "gmail.reply_status": "exact thread_id and sent_message_id; checks only later inbound replies",
+    "gmail.prioritize": "optional query and limit; returns bounded evidence-backed priorities",
+    "gmail.important_status": "optional query and limit; returns provider IDs needing attention",
+    "gmail.briefing": "optional query, limit and since_epoch for an evidence-backed inbox briefing",
     "gmail.draft": "to (verified email), subject, body; optional draft_id",
     "gmail.reply": "message_id and body; creates a draft and does not send",
     "gmail.send": "draft_id; sends the existing draft",
@@ -565,6 +569,34 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
             (SCOPE_GMAIL_READ,),
             repeatable=True,
             value_paths=("latest_message_id", "thread_ids", "count"),
+        ),
+        read(
+            "gmail.reply_status",
+            "Check for inbound Gmail replies after an exact sent message",
+            (SCOPE_GMAIL_READ,),
+            repeatable=True,
+            value_paths=("latest_reply_message_id", "reply_message_ids", "reply_count"),
+        ),
+        read(
+            "gmail.prioritize",
+            "Prioritize Gmail inbox from provider evidence",
+            (SCOPE_GMAIL_READ,),
+        ),
+        read(
+            "gmail.important_status",
+            "Observe Gmail messages that need attention",
+            (SCOPE_GMAIL_READ,),
+            repeatable=True,
+            value_paths=(
+                "latest_attention_message_id",
+                "attention_message_ids",
+                "attention_count",
+            ),
+        ),
+        read(
+            "gmail.briefing",
+            "Create an evidence-backed Gmail inbox briefing",
+            (SCOPE_GMAIL_READ,),
         ),
         write(
             "gmail.draft",
@@ -1118,6 +1150,10 @@ class GoogleConnector(Connector):
             "gmail.search": self._gmail_search,
             "gmail.read": self._gmail_read,
             "gmail.thread": self._gmail_thread,
+            "gmail.reply_status": self._gmail_reply_status,
+            "gmail.prioritize": self._gmail_prioritize,
+            "gmail.important_status": self._gmail_important_status,
+            "gmail.briefing": self._gmail_briefing,
             "gmail.draft": self._gmail_draft,
             "gmail.reply": self._gmail_reply,
             "gmail.send": self._gmail_send,
@@ -1503,6 +1539,17 @@ class GoogleConnector(Connector):
         return {
             "message_id": message.get("id"),
             "thread_id": message.get("threadId"),
+            "history_id": message.get("historyId"),
+            "internal_date_ms": (
+                int(message["internalDate"])
+                if str(message.get("internalDate") or "").isdigit()
+                else None
+            ),
+            "size_estimate": (
+                int(message["sizeEstimate"])
+                if str(message.get("sizeEstimate") or "").isdigit()
+                else None
+            ),
             "label_ids": list(message.get("labelIds") or ()),
             "snippet": str(message.get("snippet") or "")[:2_000],
             "from": headers.get("from"),
@@ -1678,6 +1725,308 @@ class GoogleConnector(Connector):
             params={"format": "full"},
         )
         return self._thread_summary(thread, fallback_id=thread_id), thread_id
+
+    async def _gmail_reply_status(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        thread_id = self._required(payload, "thread_id", max_length=300)
+        sent_message_id = self._required(payload, "sent_message_id", max_length=300)
+        thread, _ = await self._gmail_thread(principal, {"thread_id": thread_id})
+        messages = [
+            dict(item) for item in thread.get("messages") or () if isinstance(item, Mapping)
+        ]
+        anchor_index = next(
+            (
+                index
+                for index, item in enumerate(messages)
+                if str(item.get("message_id") or "") == sent_message_id
+            ),
+            None,
+        )
+        if anchor_index is None:
+            raise ValueError("The exact sent message was not found in the Gmail thread")
+        anchor_labels = {str(item) for item in messages[anchor_index].get("label_ids") or ()}
+        if "SENT" not in anchor_labels:
+            raise ValueError("The reply-status anchor is not verified as a Sent message")
+        replies = [
+            item
+            for item in messages[anchor_index + 1 :]
+            if not ({str(label) for label in item.get("label_ids") or ()} & {"SENT", "DRAFT"})
+        ]
+        reply_ids = [str(item["message_id"]) for item in replies if item.get("message_id")]
+        return {
+            "thread_id": thread_id,
+            "sent_message_id": sent_message_id,
+            "reply_received": bool(reply_ids),
+            "reply_count": len(reply_ids),
+            "reply_message_ids": reply_ids,
+            "latest_reply_message_id": reply_ids[-1] if reply_ids else None,
+            "replies": replies,
+            "evidence": {
+                "anchor_found": True,
+                "anchor_sent_label_present": True,
+                "subsequent_inbound_only": True,
+            },
+        }, thread_id
+
+    @staticmethod
+    def _message_timestamp(message: Mapping[str, Any]) -> datetime | None:
+        internal = message.get("internal_date_ms")
+        if isinstance(internal, int) and internal >= 0:
+            try:
+                return datetime.fromtimestamp(internal / 1000, tz=timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                return None
+        header = str(message.get("date") or "").strip()
+        if not header:
+            return None
+        try:
+            parsed = parsedate_to_datetime(header)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _priority_evidence(
+        cls,
+        message: Mapping[str, Any],
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Classify bounded metadata while keeping labels as provider truth."""
+
+        labels = {str(item) for item in message.get("label_ids") or ()}
+        subject = str(message.get("subject") or "").casefold()
+        sender = str(message.get("from") or "").casefold()
+        text = f" {subject} {sender} "
+        score = 0
+        reasons: list[dict[str, Any]] = []
+
+        def add(points: int, signal: str, source: str) -> None:
+            nonlocal score
+            score += points
+            reasons.append({"signal": signal, "weight": points, "source": source})
+
+        for label, points in (("IMPORTANT", 40), ("STARRED", 25), ("UNREAD", 15)):
+            if label in labels:
+                add(points, label.casefold(), "gmail_label")
+
+        thread_activity = max(1, int(message.get("thread_activity_count") or 1))
+        if thread_activity > 1:
+            add(min(10, thread_activity * 2), "active_thread", "provider_thread_ids")
+        recipient_header_present = bool(str(message.get("to") or "").strip())
+        sender_header_present = bool(str(message.get("from") or "").strip())
+
+        bounded_categories: tuple[tuple[str, tuple[str, ...], int], ...] = (
+            (
+                "account/security",
+                ("security alert", "verify your", "password", "sign-in", "login", "2fa"),
+                35,
+            ),
+            (
+                "urgent/action required",
+                ("urgent", "action required", "respond by", "deadline", "overdue"),
+                30,
+            ),
+            (
+                "finance/bill/receipt",
+                ("invoice", "receipt", "payment", "bill", "statement", "refund"),
+                20,
+            ),
+            (
+                "appointment/calendar",
+                ("appointment", "booking", "reservation", "meeting", "calendar"),
+                18,
+            ),
+            (
+                "delivery/order",
+                ("delivery", "dispatched", "shipped", "tracking", "order"),
+                14,
+            ),
+        )
+        category = "other"
+        for candidate, markers, points in bounded_categories:
+            matched = next((marker for marker in markers if marker in text), None)
+            if matched:
+                category = candidate
+                add(points, matched, "bounded_metadata_rule")
+                break
+        if category == "other" and subject.lstrip().startswith("re:") and "SENT" not in labels:
+            category = "reply received"
+            add(20, "inbound_re_subject", "bounded_metadata_rule")
+        elif category == "other" and "CATEGORY_PERSONAL" in labels:
+            category = "personal"
+            add(10, "category_personal", "gmail_label")
+        elif category == "other" and (
+            "CATEGORY_PROMOTIONS" in labels
+            or "CATEGORY_UPDATES" in labels
+            or "unsubscribe" in text
+            or "newsletter" in text
+        ):
+            category = "newsletter/low priority"
+            add(-15, "bulk_mail_signal", "gmail_label_or_bounded_metadata_rule")
+
+        timestamp = cls._message_timestamp(message)
+        age_hours: float | None = None
+        if timestamp is not None:
+            age_hours = max(0.0, (now - timestamp).total_seconds() / 3600)
+            if age_hours <= 24:
+                add(5, "received_within_24h", "provider_timestamp")
+            elif age_hours >= 24 * 14:
+                add(-10, "older_than_14d", "provider_timestamp")
+
+        bounded_score = max(0, min(score, 100))
+        level = (
+            "urgent" if bounded_score >= 70 else "attention" if bounded_score >= 40 else "normal"
+        )
+        return {
+            "score": bounded_score,
+            "level": level,
+            "category": category,
+            "reasons": reasons,
+            "provider_labels": sorted(labels),
+            "age_hours": round(age_hours, 1) if age_hours is not None else None,
+            "provider_context": {
+                "sender_header_present": sender_header_present,
+                "recipient_header_present": recipient_header_present,
+                "thread_activity_count": thread_activity,
+                "in_inbox": "INBOX" in labels,
+            },
+            "classification": {
+                "method": "bounded_metadata_rules",
+                "version": "gmail-priority-v1",
+                "provider_truth": False,
+                "mutates_mailbox": False,
+            },
+        }
+
+    async def _gmail_prioritize(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        query = str(payload.get("query") or "in:inbox").strip()
+        search, reference = await self._gmail_search(
+            principal,
+            {"query": query, "limit": self._limit(payload, default=50)},
+        )
+        now = _utc_now()
+        source_messages = [
+            dict(item) for item in search.get("messages") or () if isinstance(item, Mapping)
+        ]
+        thread_counts: dict[str, int] = {}
+        for item in source_messages:
+            thread_id = str(item.get("thread_id") or "").strip()
+            if thread_id:
+                thread_counts[thread_id] = thread_counts.get(thread_id, 0) + 1
+        messages = []
+        for item in source_messages:
+            enriched = dict(item)
+            thread_id = str(enriched.get("thread_id") or "").strip()
+            enriched["thread_activity_count"] = thread_counts.get(thread_id, 1)
+            enriched["priority"] = self._priority_evidence(enriched, now=now)
+            messages.append(enriched)
+        messages.sort(
+            key=lambda item: (
+                int((item.get("priority") or {}).get("score") or 0),
+                int(item.get("internal_date_ms") or 0),
+            ),
+            reverse=True,
+        )
+        return {
+            "query": query,
+            "count": len(messages),
+            "matched_count": int(search.get("count") or 0),
+            "result_size_estimate": int(search.get("result_size_estimate") or 0),
+            "partial_details": int(search.get("count") or 0) > len(messages),
+            "messages": messages,
+            "needs_attention": [
+                item for item in messages if (item["priority"]["level"] in {"urgent", "attention"})
+            ],
+            "classification_policy": {
+                "method": "bounded_metadata_rules",
+                "version": "gmail-priority-v1",
+                "provider_labels_are_authoritative": True,
+                "classification_is_provider_truth": False,
+                "automatic_mutation": False,
+            },
+            "observed_at": now.isoformat(),
+        }, reference
+
+    async def _gmail_briefing(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        query = str(payload.get("query") or "in:inbox").strip()
+        since_epoch = payload.get("since_epoch")
+        if since_epoch is not None:
+            since = int(since_epoch)
+            if since < 0:
+                raise ValueError("since_epoch must not be negative")
+            query = f"({query}) after:{since}"
+        prioritised, reference = await self._gmail_prioritize(
+            principal,
+            {"query": query, "limit": self._limit(payload, default=50)},
+        )
+        messages = prioritised["messages"]
+        return {
+            "query": query,
+            "observed_at": prioritised["observed_at"],
+            "since_epoch": since_epoch,
+            "new_since_previous_available": since_epoch is not None,
+            "counts": {
+                "total": len(messages),
+                "unread": sum("UNREAD" in item.get("label_ids", ()) for item in messages),
+                "important": sum("IMPORTANT" in item.get("label_ids", ()) for item in messages),
+                "starred": sum("STARRED" in item.get("label_ids", ()) for item in messages),
+                "needs_attention": len(prioritised["needs_attention"]),
+            },
+            "coverage": {
+                "detailed_messages": len(messages),
+                "matched_messages": int(prioritised.get("matched_count") or len(messages)),
+                "result_size_estimate": int(
+                    prioritised.get("result_size_estimate") or len(messages)
+                ),
+                "partial_details": bool(prioritised.get("partial_details")),
+            },
+            "needs_attention": prioritised["needs_attention"],
+            "replies": [
+                item for item in messages if item["priority"]["category"] == "reply received"
+            ],
+            "appointments": [
+                item for item in messages if item["priority"]["category"] == "appointment/calendar"
+            ],
+            "filing_candidates": [
+                item
+                for item in messages
+                if item["priority"]["category"]
+                in {"finance/bill/receipt", "delivery/order", "newsletter/low priority"}
+            ],
+            "classification_policy": prioritised["classification_policy"],
+        }, reference
+
+    async def _gmail_important_status(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        query = str(payload.get("query") or "in:inbox {is:important is:starred is:unread}").strip()
+        prioritised, reference = await self._gmail_prioritize(
+            principal,
+            {"query": query, "limit": self._limit(payload, default=50)},
+        )
+        attention = [
+            dict(item)
+            for item in prioritised["needs_attention"]
+            if isinstance(item, Mapping) and item.get("message_id")
+        ]
+        message_ids = [str(item["message_id"]) for item in attention]
+        return {
+            "query": query,
+            "attention_count": len(message_ids),
+            "attention_message_ids": message_ids,
+            "latest_attention_message_id": message_ids[0] if message_ids else None,
+            "messages": attention,
+            "classification_policy": prioritised["classification_policy"],
+            "observed_at": prioritised["observed_at"],
+        }, reference
 
     @classmethod
     def _thread_summary(
