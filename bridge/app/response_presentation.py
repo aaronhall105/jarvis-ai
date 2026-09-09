@@ -205,6 +205,120 @@ def render_gmail_reply_status(result: Mapping[str, Any]) -> str:
     return f"Yeah, {name} replied, but there wasn’t any message text."
 
 
+def _readable_state(value: Any) -> str:
+    state = str(value or "unknown").strip().casefold().replace("_", " ")
+    return "away" if state == "not home" else state
+
+
+def _entity_name(entity: Mapping[str, Any]) -> str:
+    attributes = entity.get("attributes")
+    attribute_name = attributes.get("friendly_name") if isinstance(attributes, Mapping) else None
+    name = str(entity.get("name") or entity.get("friendly_name") or attribute_name or "").strip()
+    return name or "That device"
+
+
+def render_home_state_evidence(
+    calls: Sequence[Mapping[str, Any]],
+    *,
+    request_text: str,
+) -> str | None:
+    """Render Home Assistant read evidence without allowing model overclaims."""
+
+    if technical_output_requested(request_text):
+        return None
+    for call in reversed(calls):
+        if call.get("tool") not in {
+            "search_entity_states",
+            "list_area_states",
+            "get_entity_state",
+        }:
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping) or result.get("success") is not True:
+            continue
+        if call.get("tool") == "get_entity_state":
+            raw_entities = [result.get("entity")]
+        else:
+            raw_entities = list(result.get("entities") or ())
+        entities = [item for item in raw_entities if isinstance(item, Mapping)]
+        if not entities:
+            return "I couldn’t find a matching current state."
+
+        known: list[tuple[str, str]] = []
+        unavailable: list[str] = []
+        for entity in entities[:5]:
+            name = _entity_name(entity)
+            state = _readable_state(entity.get("display_value") or entity.get("state"))
+            if state in {"", "unknown", "unavailable"} or entity.get("available") is False:
+                unavailable.append(name)
+            else:
+                known.append((name, state))
+
+        normalised_request = " ".join(str(request_text or "").casefold().split()).strip("?!. ")
+        asks_on = normalised_request.startswith(("is ", "are ")) and normalised_request.endswith(
+            " on"
+        )
+        if asks_on and known:
+            switched_on = [name for name, state in known if state == "on"]
+            switched_off = [name for name, state in known if state == "off"]
+            if switched_on:
+                names = ", ".join(switched_on)
+                return f"Yes — {names} {'is' if len(switched_on) == 1 else 'are'} on."
+            if switched_off and unavailable:
+                off_names = ", ".join(switched_off)
+                unknown_names = ", ".join(unavailable)
+                return (
+                    f"{off_names} {'is' if len(switched_off) == 1 else 'are'} off, "
+                    f"but I can’t confirm {unknown_names} because "
+                    f"{'it’s' if len(unavailable) == 1 else 'they’re'} unavailable."
+                )
+            if switched_off and len(switched_off) == len(known):
+                names = ", ".join(switched_off)
+                return f"No, {names} {'is' if len(switched_off) == 1 else 'are'} off."
+
+        parts = [f"{name} is {state}" for name, state in known]
+        parts.extend(f"I can’t confirm {name} because it’s unavailable" for name in unavailable)
+        return ". ".join(parts) + "."
+    return None
+
+
+def render_presence_evidence(
+    result: Mapping[str, Any],
+    *,
+    person_name: str,
+    first_person: bool = False,
+    explain: bool = False,
+) -> str:
+    """Render verified presence naturally while retaining meaningful uncertainty."""
+
+    person = result.get("person")
+    state = _readable_state(person.get("state") if isinstance(person, Mapping) else None)
+    if state in {"", "unknown", "unavailable"}:
+        return (
+            "I can’t confirm your location right now."
+            if first_person
+            else (f"I can’t confirm {person_name}’s location right now.")
+        )
+    location = "at home" if state == "home" else "away" if state == "away" else f"at {state}"
+    natural = f"You’re {location}." if first_person else f"{person_name}’s {location}."
+    conflicts = [item for item in result.get("conflicts") or () if isinstance(item, Mapping)]
+    if conflicts:
+        details = ", ".join(
+            f"{_entity_name(item)} says {_readable_state(item.get('state'))}" for item in conflicts
+        )
+        subject = "you are" if first_person else f"{person_name} is"
+        return (
+            f"Home Assistant says {subject} {location}, but {details}, "
+            "so I can’t confirm that properly."
+        )
+    if not explain:
+        return natural
+    source = result.get("source")
+    if isinstance(source, Mapping) and source:
+        return natural[:-1] + f", based on {_entity_name(source)}."
+    return natural[:-1] + ", but Home Assistant doesn’t show which tracker reported it."
+
+
 def present_user_response(
     value: str,
     *,
@@ -257,5 +371,7 @@ __all__ = [
     "present_error",
     "present_user_response",
     "render_gmail_reply_status",
+    "render_home_state_evidence",
+    "render_presence_evidence",
     "technical_output_requested",
 ]

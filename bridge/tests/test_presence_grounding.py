@@ -281,9 +281,11 @@ class PresenceGroundingTests(unittest.IsolatedAsyncioTestCase):
         reply = await engine._direct_person_location_reply("Where am I?", actor)
         self.assertIsNotNone(reply)
         text, calls = reply
-        self.assertIn("Home Assistant currently reports Aaron is at home", text)
-        self.assertIn("Aaron Phone currently reports not_home", text)
-        self.assertIn("physical presence", text)
+        self.assertEqual(
+            "Home Assistant says you are at home, but Aaron Phone says away, "
+            "so I can’t confirm that properly.",
+            text,
+        )
         self.assertNotIn("generic presence", text.casefold())
         self.assertEqual("inspect_presence", calls[0]["tool"])
 

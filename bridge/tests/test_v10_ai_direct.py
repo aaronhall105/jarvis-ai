@@ -35,6 +35,24 @@ class DirectStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(text, "Amber is at home.")
         self.assertEqual(calls[0]["tool"], "search_entity_states")
 
+    async def test_person_location_fast_path_yields_to_explicit_raw_request(self):
+        engine = AIEngine.__new__(AIEngine)
+        engine.tools = FakeTools()
+        actor = UserContext.from_request(
+            user_id="aaron",
+            user_name="Aaron",
+            user_is_admin=True,
+            device_id=None,
+            voice_mode=False,
+        )
+
+        reply = await engine._direct_person_location_reply(
+            "Where is Amber? Show me the raw JSON.",
+            actor,
+        )
+
+        self.assertIsNone(reply)
+
 
 if __name__ == "__main__":
     unittest.main()

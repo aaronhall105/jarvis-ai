@@ -34,7 +34,13 @@ from app.registry import RegistryEngine
 from app.runtime_observability import runtime_metrics
 from app.speech_corrections import SpeechCorrectionEngine
 from app.reply_policy import ReplyBudgetPolicy
-from app.response_presentation import present_user_response, render_gmail_reply_status
+from app.response_presentation import (
+    present_user_response,
+    render_gmail_reply_status,
+    render_home_state_evidence,
+    render_presence_evidence,
+    technical_output_requested,
+)
 from app.tool_engine import ToolEngine
 from app.tool_outcomes import request_tool_success
 from app.tone_engine import ToneEngine, ToneProfile
@@ -3658,6 +3664,8 @@ class AIEngine:
         actor: UserContext,
         conversation_id: str | None = None,
     ) -> tuple[str, list[dict[str, Any]]] | None:
+        if technical_output_requested(user_text):
+            return None
         location_request = bool(_PERSON_LOCATION_PATTERN.search(user_text))
         evidence_followup = bool(_PRESENCE_EVIDENCE_FOLLOWUP_PATTERN.search(user_text))
         if not location_request and not evidence_followup:
@@ -3694,30 +3702,15 @@ class AIEngine:
             state = str(person.get("state") or "unknown").strip()
             if state in {"unknown", "unavailable", ""}:
                 return f"{owner}'s location is currently unavailable.", [call]
-            reported = (
-                "at home" if state == "home" else "away" if state == "not_home" else f"at {state}"
-            )
-            source = evidence.get("source") or {}
-            conflicts = list(evidence.get("conflicts") or [])
-            if source:
-                source_name = str(source.get("name") or source.get("entity_id"))
-                reply = (
-                    f"Home Assistant currently reports {owner} is {reported}; "
-                    f"its source attribute points to {source_name}."
-                )
-                if conflicts:
-                    conflict_text = ", ".join(
-                        f"{item.get('name') or item.get('entity_id')} currently reports "
-                        f"{item.get('state') if item.get('state') is not None else 'no live state'}"
-                        for item in conflicts
-                    )
-                    reply += (
-                        f" However, {conflict_text}. I can only confirm Home "
-                        "Assistant's reported state, not physical presence."
-                    )
-                return reply, [call]
             return (
-                f"Home Assistant currently reports {owner} is {reported}, but it does not expose enough evidence to establish which tracker caused that state.",
+                render_presence_evidence(
+                    evidence,
+                    person_name=owner,
+                    first_person=bool(
+                        re.search(r"\b(?:where am i|where['’]?s my)\b", user_text, re.I)
+                    ),
+                    explain=evidence_followup,
+                ),
                 [call],
             )
         result = await self.tools.search_entity_states(
@@ -6453,6 +6446,14 @@ class AIEngine:
         reply_status_reply = verified_gmail_reply_status_reply(completed_calls)
         if reply_status_reply is not None:
             final_reply = reply_status_reply
+
+        if decision.intent == RequestIntent.STATE_QUERY:
+            home_state_reply = render_home_state_evidence(
+                completed_calls,
+                request_text=raw_user_text,
+            )
+            if home_state_reply is not None:
+                final_reply = home_state_reply
 
         if external_runtime is not None:
             try:
