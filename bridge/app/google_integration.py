@@ -2244,7 +2244,7 @@ class GoogleConnector(Connector):
             for item in result.get("labels") or ()
             if isinstance(item, Mapping) and item.get("id") and item.get("name")
         ]
-        labels.sort(key=lambda item: item["name"].casefold())
+        labels.sort(key=lambda item: str(item["name"]).casefold())
         return {
             "labels": labels,
             "count": len(labels),

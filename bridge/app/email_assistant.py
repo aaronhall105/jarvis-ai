@@ -8,7 +8,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -418,7 +418,7 @@ class EmailAssistantPolicyEngine:
             )
         return await self.get(policy_id, principal_id=principal_id)
 
-    async def run_due(self, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    async def run_due(self, *, now: datetime | None = None) -> Sequence[dict[str, Any]]:
         current = (now or self._now()).astimezone(timezone.utc)
         with self._db() as connection:
             rows = connection.execute(
@@ -835,7 +835,7 @@ class EmailAssistantPolicyEngine:
                 "next_run_at": self._iso(next_run),
             }
 
-    async def audit(self, policy_id: str, *, principal_id: str) -> list[dict[str, Any]]:
+    async def audit(self, policy_id: str, *, principal_id: str) -> Sequence[dict[str, Any]]:
         with self._db() as connection:
             rows = connection.execute(
                 "SELECT * FROM email_policy_audit WHERE policy_id=? AND principal_id=? "
