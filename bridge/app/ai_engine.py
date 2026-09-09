@@ -2084,6 +2084,7 @@ class AIEngine:
         decision: RoutingDecision,
         actor: UserContext,
         user_text: str = "",
+        history: Sequence[Mapping[str, str]] = (),
     ) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = []
 
@@ -2116,6 +2117,7 @@ class AIEngine:
                 await external_runtime.openai_tools(
                     user_text,
                     principal_id=actor.user_key,
+                    history=history,
                 )
             )
 
@@ -2313,6 +2315,7 @@ class AIEngine:
         actor: UserContext,
         request_id: str | None = None,
         authorization_text: str | None = None,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any]:
         request_id = str(request_id or uuid.uuid4())
         try:
@@ -2378,6 +2381,7 @@ class AIEngine:
                     principal_id=actor.user_key,
                     request_id=request_id,
                     user_text=authoritative_user_text,
+                    history=history,
                 )
                 return {
                     "tool": name,
@@ -6152,6 +6156,7 @@ class AIEngine:
                 external_context = await external_runtime.model_context(
                     user_text,
                     principal_id=actor.user_key,
+                    history=history,
                 )
             except Exception:
                 logger.exception("External provider context lookup failed")
@@ -6169,7 +6174,12 @@ class AIEngine:
             }
         )
 
-        tool_definitions = await self._openai_tools(decision, actor, user_text)
+        tool_definitions = await self._openai_tools(
+            decision,
+            actor,
+            user_text,
+            history,
+        )
 
         if code_awareness_requested and self.code_awareness is not None:
             tool_definitions.extend(self.code_awareness.openai_tools())
@@ -6282,6 +6292,7 @@ class AIEngine:
                         actor=actor,
                         request_id=resolved_request_id,
                         authorization_text=raw_user_text,
+                        history=history,
                     )
 
                 completed_calls.append(completed)
@@ -6392,6 +6403,7 @@ class AIEngine:
                 unavailable_service = await external_runtime.unavailable_service_reply(
                     user_text,
                     principal_id=actor.user_key,
+                    history=history,
                 )
             except Exception:
                 logger.exception("External service availability guard failed")

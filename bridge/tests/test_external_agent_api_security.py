@@ -36,6 +36,13 @@ MOBILE_ACCOUNT_ROUTES = {
     ("post", "/api/personal-assistant/jobs/{job_id}/pause"),
     ("post", "/api/personal-assistant/jobs/{job_id}/resume"),
     ("post", "/api/personal-assistant/jobs/{job_id}/reschedule"),
+    ("post", "/api/email-assistant/retention"),
+    ("get", "/api/email-assistant/retention"),
+    ("get", "/api/email-assistant/retention/{policy_id}"),
+    ("post", "/api/email-assistant/retention/{policy_id}/pause"),
+    ("post", "/api/email-assistant/retention/{policy_id}/resume"),
+    ("post", "/api/email-assistant/retention/{policy_id}/change"),
+    ("post", "/api/email-assistant/retention/{policy_id}/disable"),
 }
 
 

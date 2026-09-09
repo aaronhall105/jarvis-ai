@@ -36,6 +36,7 @@ from app.config import get_settings
 from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
+from app.email_assistant import EmailAssistantPolicyEngine
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.intent_engine import IntentEngine, IntentError
@@ -149,6 +150,11 @@ external_agent = ExternalAgentRuntime(
     google_android_return_uri=settings.jarvis_google_android_return_uri,
     data_directory=data_directory,
 )
+email_policies = EmailAssistantPolicyEngine(
+    data_directory / "jarvis_email_policies.db",
+    external_agent.registry,
+)
+external_agent.set_email_policy_engine(email_policies)
 followups = FollowUpEngine(
     database_path=str(data_directory / "jarvis_followups.db"),
     conversations=conversations,
@@ -470,6 +476,17 @@ class PersonalTaskRescheduleRequest(PersonalTaskMutationRequest):
     timezone: str = Field(min_length=1, max_length=100)
 
 
+class EmailRetentionCreateRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=300)
+    retention_days: int = Field(default=30, ge=1, le=3650)
+    interval_seconds: int = Field(default=86_400, ge=3600, le=2_592_000)
+    request_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class EmailRetentionChangeRequest(BaseModel):
+    retention_days: int = Field(ge=1, le=3650)
+
+
 async def _try_handle_personal_task(
     text: str,
     *,
@@ -684,10 +701,12 @@ async def lifespan(_: FastAPI):
 
     try:
         await followups.start()
+        await email_policies.start()
         await proactive_engine.start()
         await vision_engine.start()
         yield
     finally:
+        await email_policies.stop()
         await followups.stop()
         await vision_engine.stop()
         await proactive_engine.stop()
@@ -731,11 +750,13 @@ async def health_ready() -> JSONResponse:
     config = configuration_report(settings, realtime)
     external_health = await external_agent.health_snapshot()
     followup_health = await followups.health_snapshot()
+    email_policy_health = await email_policies.health_snapshot()
     conversation_health = await conversations.health_snapshot()
     external_database = external_health.get("database") or {}
     database_healthy = (
         bool(external_database.get("healthy"))
         and bool(followup_health.get("database_healthy"))
+        and bool(email_policy_health.get("database_healthy"))
         and bool(conversation_health.get("healthy"))
     )
     ready = bool(
@@ -744,6 +765,7 @@ async def health_ready() -> JSONResponse:
         and _external_agent_state.get("initialized")
         and external_health.get("healthy")
         and followup_health.get("healthy")
+        and email_policy_health.get("healthy")
         and database_healthy
     )
     payload = {
@@ -763,10 +785,12 @@ async def health_ready() -> JSONResponse:
             "available_provider_count": external_health.get("available_provider_count"),
         },
         "followup_worker": followup_health,
+        "email_policy_worker": email_policy_health,
         "database": {
             "healthy": database_healthy,
             "external_agent": external_database,
             "followups": followup_health.get("database"),
+            "email_policies": email_policy_health.get("database"),
             "conversations": conversation_health,
         },
         "realtime_voice": {
@@ -810,6 +834,15 @@ async def system_status() -> dict[str, object]:
             "error": "follow-up status unavailable",
         }
     try:
+        email_policy_status: dict[str, object] = await email_policies.health_snapshot()
+    except Exception:
+        logger.exception("Email policy status failed")
+        runtime_metrics.record_error("email_policies", "email policy status unavailable")
+        email_policy_status = {
+            "healthy": False,
+            "error": "email policy status unavailable",
+        }
+    try:
         conversation_status: dict[str, object] = await conversations.health_snapshot()
     except Exception:
         logger.exception("Conversation database status failed")
@@ -824,6 +857,7 @@ async def system_status() -> dict[str, object]:
     database_healthy = (
         bool(external_database.get("healthy"))
         and bool(followup_status.get("database_healthy"))
+        and bool(email_policy_status.get("database_healthy"))
         and bool(conversation_status.get("healthy"))
     )
     return {
@@ -839,10 +873,12 @@ async def system_status() -> dict[str, object]:
             **external_status,
         },
         "followup_worker": followup_status,
+        "email_policy_worker": email_policy_status,
         "database": {
             "healthy": database_healthy,
             "external_agent": external_database,
             "followups": followup_status.get("database"),
+            "email_policies": email_policy_status.get("database"),
             "conversations": conversation_status,
         },
         "realtime_voice": realtime,
@@ -1096,6 +1132,103 @@ async def reschedule_personal_task(
     if job is None:
         raise HTTPException(status_code=404, detail="Personal task not found")
     return job
+
+
+@app.post("/api/email-assistant/retention")
+async def create_email_retention_policy(
+    request: EmailRetentionCreateRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    _, scoped_conversation = scope_conversation_id(request.conversation_id, principal_id)
+    try:
+        return await email_policies.create_retention_policy(
+            principal_id=principal_id,
+            conversation_id=scoped_conversation,
+            retention_days=request.retention_days,
+            interval_seconds=request.interval_seconds,
+            request_id=request.request_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/email-assistant/retention")
+async def list_email_retention_policies(
+    status: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    try:
+        policies = await email_policies.list(principal_id=principal_id, status=status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"principal_id": principal_id, "count": len(policies), "policies": policies}
+
+
+@app.get("/api/email-assistant/retention/{policy_id}")
+async def get_email_retention_policy(
+    policy_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    policy = await email_policies.get(policy_id, principal_id=principal_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Email retention policy not found")
+    return policy
+
+
+@app.post("/api/email-assistant/retention/{policy_id}/pause")
+async def pause_email_retention_policy(
+    policy_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    policy = await email_policies.pause(policy_id, principal_id=principal_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Email retention policy not found")
+    return policy
+
+
+@app.post("/api/email-assistant/retention/{policy_id}/resume")
+async def resume_email_retention_policy(
+    policy_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    policy = await email_policies.resume(policy_id, principal_id=principal_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Email retention policy not found")
+    return policy
+
+
+@app.post("/api/email-assistant/retention/{policy_id}/change")
+async def change_email_retention_policy(
+    policy_id: str,
+    request: EmailRetentionChangeRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    policy = await email_policies.change(
+        policy_id,
+        principal_id=principal_id,
+        retention_days=request.retention_days,
+    )
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Email retention policy not found")
+    return policy
+
+
+@app.post("/api/email-assistant/retention/{policy_id}/disable")
+async def disable_email_retention_policy(
+    policy_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    policy = await email_policies.disable(policy_id, principal_id=principal_id)
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Email retention policy not found")
+    return policy
 
 
 @app.get("/api/integrations/actions")

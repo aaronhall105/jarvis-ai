@@ -35,6 +35,7 @@ VALID_EXTERNAL_COMPARISONS = {
     "greater_than",
     "contains",
     "truthy",
+    "new_items",
 }
 VALID_FOLLOWUP_KINDS = {
     "time",
@@ -715,6 +716,14 @@ class FollowUpEngine:
         if notify_if_unchanged and expires_at is None:
             raise ValueError("A no-change reminder requires an expiry deadline")
         payload["notify_if_unchanged"] = notify_if_unchanged
+        continuous = payload.get("continuous", False)
+        if not isinstance(continuous, bool):
+            raise ValueError("External monitor continuous must be a boolean")
+        payload["continuous"] = continuous
+        notify = payload.get("notify", False)
+        if not isinstance(notify, bool):
+            raise ValueError("External monitor notify must be a boolean")
+        payload["notify"] = notify
         # Legacy callers could supply arbitrary notification wording.  Monitor
         # delivery is generated from verified evidence, so that text is neither
         # persisted nor used.
@@ -2361,6 +2370,10 @@ class FollowUpEngine:
                 delivery_key=(
                     f"followup:{job['job_id']}:occurrence:{job.get('occurrence_index', 0)}"
                     if job.get("kind") == "recurring"
+                    or (
+                        job.get("kind") == "external_monitor"
+                        and (job.get("payload") or {}).get("continuous") is True
+                    )
                     else f"followup:{job['job_id']}:delivery"
                 ),
             )
@@ -2437,7 +2450,50 @@ class FollowUpEngine:
             completion = "failed"
         with self._db() as con:
             now = self._now()
-            if job.get("kind") == "recurring" and completion == "completed":
+            delivery_audit_state = completion
+            if (
+                job.get("kind") == "external_monitor"
+                and payload.get("continuous") is True
+                and completion == "completed"
+            ):
+                result = job.get("result") or {}
+                if "value" not in result:
+                    delivery_audit_state = "failed"
+                    con.execute(
+                        "UPDATE followup_jobs SET status='failed',delivered_at=?,"
+                        "delivery_state='delivered',notification_state=?,updated_at=? "
+                        "WHERE job_id=? AND status='delivering'",
+                        (
+                            self._iso(now),
+                            notification_state,
+                            self._iso(now),
+                            job["job_id"],
+                        ),
+                    )
+                else:
+                    delivery_audit_state = "continued"
+                    next_payload = dict(payload)
+                    next_payload["baseline"] = result["value"]
+                    con.execute(
+                        """
+                        UPDATE followup_jobs SET status='pending',next_run_at=?,
+                        payload_json=?,delivered_at=?,delivery_state='pending',
+                        delivery_message=NULL,completion_status=NULL,
+                        occurrence_index=occurrence_index+1,notification_state=?,
+                        verified_at=?,updated_at=?,attempts=0,delivery_attempts=0
+                        WHERE job_id=? AND status='delivering'
+                        """,
+                        (
+                            self._iso(now + timedelta(seconds=self._next_interval(job))),
+                            json.dumps(next_payload, separators=(",", ":"), sort_keys=True),
+                            self._iso(now),
+                            notification_state,
+                            self._iso(now),
+                            self._iso(now),
+                            job["job_id"],
+                        ),
+                    )
+            elif job.get("kind") == "recurring" and completion == "completed":
                 next_run = next_recurrence(job.get("schedule") or {}, after_utc=now)
                 if next_run is None:
                     con.execute(
@@ -2492,7 +2548,7 @@ class FollowUpEngine:
                 job_id=str(job["job_id"]),
                 principal_id=str(job.get("principal_id") or "aaron"),
                 operation="deliver",
-                state=completion,
+                state=delivery_audit_state,
                 evidence={
                     "conversation_delivery": "delivered",
                     "notification_state": notification_state,
@@ -2694,6 +2750,10 @@ class FollowUpEngine:
             value,
             job["payload"]["comparison"],
         )
+        if job["payload"]["capability_id"] == "gmail.important_status":
+            message = "I found new Gmail matching your attention rules."
+        elif job["payload"]["capability_id"] == "gmail.reply_status":
+            message = "I verified a new inbound reply in the monitored Gmail thread."
         return changed, message, result
 
     @classmethod
@@ -2768,6 +2828,10 @@ class FollowUpEngine:
             raise ValueError("Ordered external monitors require a numeric baseline")
         if operator == "truthy" and bool(baseline):
             raise ValueError("External monitor baseline already satisfies its comparison")
+        if operator == "new_items" and (
+            not isinstance(baseline, list) or any(not isinstance(item, str) for item in baseline)
+        ):
+            raise ValueError("new_items monitors require a list of provider identifiers")
 
     @staticmethod
     def _render_monitor_value(value: Any) -> str:
@@ -2802,6 +2866,7 @@ class FollowUpEngine:
                 ),
                 "contains": ("The monitored external value now contains the configured target."),
                 "truthy": "The monitored external condition became true.",
+                "new_items": "The monitored external result contains new items.",
             }
             if operator in neutral_messages:
                 return neutral_messages[operator]
@@ -2861,4 +2926,10 @@ class FollowUpEngine:
                 raise RuntimeError("External monitor value does not support containment") from exc
         if operator == "truthy":
             return bool(current)
+        if operator == "new_items":
+            if not isinstance(current, list) or not isinstance(expected, list):
+                raise RuntimeError("new_items monitors require lists of provider identifiers")
+            if any(not isinstance(item, str) for item in [*current, *expected]):
+                raise RuntimeError("new_items monitors require string provider identifiers")
+            return bool(set(current) - set(expected))
         raise RuntimeError("External monitor comparison could not be evaluated")

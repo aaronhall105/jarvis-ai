@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
+from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -66,6 +67,7 @@ class GoogleFixture:
         self.calendar_probe_status = 200
         self.contacts_probe_status = 200
         self.archived = False
+        self.message_labels: set[str] = {"INBOX", "UNREAD"}
         self.event_deleted = False
         self.calendar_cancel_tombstone = False
         self.calendar_normalize_utc = False
@@ -168,16 +170,63 @@ class GoogleFixture:
                 200,
                 json={"messages": [{"id": "message-2"}], "resultSizeEstimate": 1},
             )
+        if path == "/gmail/v1/users/me/labels" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "labels": [
+                        {"id": "INBOX", "name": "Inbox", "type": "system"},
+                        {
+                            "id": "Label_Receipts",
+                            "name": "Receipts",
+                            "type": "user",
+                            "messageListVisibility": "show",
+                            "labelListVisibility": "labelShow",
+                        },
+                    ]
+                },
+            )
         if path == "/gmail/v1/users/me/messages/message-2/modify":
-            self.archived = True
-            return httpx.Response(200, json={"id": "message-2", "labelIds": []})
+            sent = json.loads(request.content or b"{}")
+            for label in sent.get("addLabelIds") or ():
+                self.message_labels.add(str(label))
+            for label in sent.get("removeLabelIds") or ():
+                self.message_labels.discard(str(label))
+            self.archived = "INBOX" not in self.message_labels
+            return httpx.Response(
+                200,
+                json={
+                    "id": "message-2",
+                    "labelIds": sorted(self.message_labels),
+                },
+            )
+        if path == "/gmail/v1/users/me/messages/message-2/trash":
+            self.message_labels.discard("INBOX")
+            self.message_labels.add("TRASH")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "message-2",
+                    "labelIds": sorted(self.message_labels),
+                },
+            )
+        if path == "/gmail/v1/users/me/messages/message-2/untrash":
+            self.message_labels.discard("TRASH")
+            self.message_labels.add("INBOX")
+            return httpx.Response(
+                200,
+                json={
+                    "id": "message-2",
+                    "labelIds": sorted(self.message_labels),
+                },
+            )
         if path == "/gmail/v1/users/me/messages/message-2":
             return httpx.Response(
                 200,
                 json={
                     "id": "message-2",
                     "threadId": "thread-2",
-                    "labelIds": [] if self.archived else ["INBOX"],
+                    "labelIds": sorted(self.message_labels),
                     "snippet": "The garage can see you Friday.",
                     "payload": {
                         "headers": [
@@ -366,6 +415,150 @@ def test_google_oauth_config_rejects_redirect_and_android_return_attacks() -> No
     assert not GoogleOAuthConfig(
         "id", "secret", "https://core.example/callback?next=https://evil.example"
     ).configured
+
+
+def test_gmail_priority_is_bounded_explainable_and_never_a_mutation() -> None:
+    now = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+    message = {
+        "message_id": "message-security",
+        "thread_id": "thread-security",
+        "label_ids": ["INBOX", "UNREAD", "IMPORTANT"],
+        "subject": "Security alert: verify your sign-in",
+        "from": "Provider <security@example.test>",
+        "internal_date_ms": int((now - timedelta(hours=2)).timestamp() * 1000),
+    }
+
+    priority = GoogleConnector._priority_evidence(message, now=now)
+
+    assert priority["level"] == "urgent"
+    assert priority["category"] == "account/security"
+    assert priority["score"] <= 100
+    assert priority["provider_labels"] == ["IMPORTANT", "INBOX", "UNREAD"]
+    assert priority["classification"] == {
+        "method": "bounded_metadata_rules",
+        "version": "gmail-priority-v1",
+        "provider_truth": False,
+        "mutates_mailbox": False,
+    }
+    assert {item["source"] for item in priority["reasons"]} >= {
+        "gmail_label",
+        "bounded_metadata_rule",
+        "provider_timestamp",
+    }
+    assert priority["provider_context"] == {
+        "sender_header_present": True,
+        "recipient_header_present": False,
+        "thread_activity_count": 1,
+        "in_inbox": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_gmail_briefing_is_evidence_backed_and_does_not_invent_a_schedule(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    connector._gmail_prioritize = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            {
+                "observed_at": "2026-09-08T12:00:00+00:00",
+                "messages": [
+                    {
+                        "message_id": "reply-1",
+                        "label_ids": ["INBOX", "UNREAD", "IMPORTANT"],
+                        "priority": {"category": "reply received", "level": "attention"},
+                    },
+                    {
+                        "message_id": "receipt-1",
+                        "label_ids": ["INBOX"],
+                        "priority": {"category": "finance/bill/receipt", "level": "normal"},
+                    },
+                ],
+                "needs_attention": [
+                    {
+                        "message_id": "reply-1",
+                        "label_ids": ["INBOX", "UNREAD", "IMPORTANT"],
+                        "priority": {"category": "reply received", "level": "attention"},
+                    }
+                ],
+                "classification_policy": {
+                    "provider_labels_are_authoritative": True,
+                    "classification_is_provider_truth": False,
+                    "automatic_mutation": False,
+                },
+            },
+            "reply-1",
+        )
+    )
+
+    briefing, reference = await connector._gmail_briefing(
+        "aaron",
+        {"query": "in:inbox", "limit": 20, "since_epoch": 1_788_800_000},
+    )
+
+    assert reference == "reply-1"
+    assert briefing["counts"] == {
+        "total": 2,
+        "unread": 1,
+        "important": 1,
+        "starred": 0,
+        "needs_attention": 1,
+    }
+    assert [item["message_id"] for item in briefing["replies"]] == ["reply-1"]
+    assert [item["message_id"] for item in briefing["filing_candidates"]] == ["receipt-1"]
+    assert briefing["new_since_previous_available"] is True
+    assert "schedule" not in briefing
+    connector._gmail_prioritize.assert_awaited_once_with(
+        "aaron",
+        {"query": "(in:inbox) after:1788800000", "limit": 20},
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reply_status_requires_exact_sent_anchor_and_only_returns_later_inbound(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    connector._gmail_thread = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    {"message_id": "older-inbound", "label_ids": ["INBOX"]},
+                    {"message_id": "sent-anchor", "label_ids": ["SENT"]},
+                    {"message_id": "draft", "label_ids": ["DRAFT"]},
+                    {"message_id": "later-sent", "label_ids": ["SENT"]},
+                    {
+                        "message_id": "inbound-reply",
+                        "label_ids": ["INBOX", "UNREAD"],
+                        "from": "Amber <amber@example.test>",
+                    },
+                ],
+            },
+            "thread-1",
+        )
+    )
+
+    result, reference = await connector._gmail_reply_status(
+        "aaron",
+        {"thread_id": "thread-1", "sent_message_id": "sent-anchor"},
+    )
+
+    assert reference == "thread-1"
+    assert result["reply_received"] is True
+    assert result["reply_message_ids"] == ["inbound-reply"]
+    assert result["reply_count"] == 1
+    assert result["evidence"]["subsequent_inbound_only"] is True
+
+    with pytest.raises(ValueError, match="exact sent message"):
+        await connector._gmail_reply_status(
+            "aaron",
+            {"thread_id": "thread-1", "sent_message_id": "invented"},
+        )
+    await client.aclose()
     assert not GoogleOAuthConfig(
         "id",
         "secret",
@@ -412,6 +605,11 @@ async def test_partial_scopes_are_principal_isolated_and_capability_grounded(
         "gmail.search",
         "gmail.read",
         "gmail.thread",
+        "gmail.reply_status",
+        "gmail.labels",
+        "gmail.prioritize",
+        "gmail.important_status",
+        "gmail.briefing",
     }
     assert other.available is False
     assert other.executable_capabilities == ()
@@ -717,6 +915,115 @@ async def test_gmail_read_thread_draft_edit_reply_forward_and_archive(
     assert archived.status is ExecutionStatus.VERIFIED
     assert fixture.calls["POST /gmail/v1/users/me/messages/send"] == 1
     assert fixture.calls["POST /gmail/v1/users/me/messages/message-2/modify"] == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_mailbox_management_primitives_are_verified(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    receipts = ActionReceiptStore(tmp_path / "receipts.db")
+    await receipts.initialize()
+
+    registry = ConnectorRegistry(receipt_store=receipts)
+    registry.register(connector)
+
+    labels = await registry.execute(
+        CapabilityRequest(
+            capability_id="gmail.labels",
+            payload={},
+            principal_id="aaron",
+        ),
+        refresh_health=True,
+    )
+
+    async def write(
+        capability_id: str,
+        payload: dict[str, object],
+    ):
+        return await registry.execute(
+            CapabilityRequest(
+                capability_id=capability_id,
+                payload=payload,
+                principal_id="aaron",
+                confirmed=True,
+                idempotency_key=f"test-{capability_id}",
+            )
+        )
+
+    marked_read = await write(
+        "gmail.mark_read",
+        {"message_id": "message-2"},
+    )
+    marked_unread = await write(
+        "gmail.mark_unread",
+        {"message_id": "message-2"},
+    )
+    starred = await write(
+        "gmail.star",
+        {"message_id": "message-2"},
+    )
+    unstarred = await write(
+        "gmail.unstar",
+        {"message_id": "message-2"},
+    )
+    important = await write(
+        "gmail.mark_important",
+        {"message_id": "message-2"},
+    )
+    not_important = await write(
+        "gmail.mark_not_important",
+        {"message_id": "message-2"},
+    )
+    moved = await write(
+        "gmail.move",
+        {
+            "message_id": "message-2",
+            "label": "Receipts",
+        },
+    )
+    trashed = await write(
+        "gmail.trash",
+        {"message_id": "message-2"},
+    )
+    restored = await write(
+        "gmail.restore",
+        {"message_id": "message-2"},
+    )
+
+    assert labels.success is True
+    assert any(item["name"] == "Receipts" for item in labels.data["labels"])
+
+    for execution in (
+        marked_read,
+        marked_unread,
+        starred,
+        unstarred,
+        important,
+        not_important,
+        moved,
+        trashed,
+        restored,
+    ):
+        assert execution.status is ExecutionStatus.VERIFIED
+
+    assert marked_read.data["status"] == "read"
+    assert marked_unread.data["status"] == "unread"
+    assert starred.data["status"] == "starred"
+    assert unstarred.data["status"] == "unstarred"
+    assert important.data["status"] == "important"
+    assert not_important.data["status"] == "not_important"
+    assert moved.data["status"] == "moved"
+    assert moved.data["target_label"] == "Receipts"
+    assert trashed.data["status"] == "trashed"
+    assert restored.data["status"] == "restored"
+
+    assert fixture.calls["POST /gmail/v1/users/me/messages/message-2/trash"] == 1
+    assert fixture.calls["POST /gmail/v1/users/me/messages/message-2/untrash"] == 1
+
     await client.aclose()
 
 

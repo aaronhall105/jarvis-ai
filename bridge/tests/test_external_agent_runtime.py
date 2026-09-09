@@ -19,6 +19,7 @@ from app.connectors import (
     Connector,
     ConnectorResult,
     ProviderStatus,
+    ReceiptStatus,
 )
 from app.conversation_engine import ConversationEngine
 from app.followup_engine import FollowUpEngine
@@ -93,6 +94,76 @@ class _Fetcher:
         self.closed = True
 
 
+def test_gmail_write_authorization_requires_explicit_current_intent():
+    authorize = ExternalAgentRuntime._write_authorized
+
+    # Read/query language must never authorize a reply write.
+    assert not authorize("gmail.reply", "Have I got any reply?")
+    assert not authorize("gmail.reply", "Did she reply yet?")
+    assert authorize(
+        "gmail.reply",
+        "Reply to that email saying thanks",
+    )
+    assert authorize(
+        "gmail.reply",
+        "Can you reply to that email please?",
+    )
+
+    assert authorize("gmail.mark_read", "Mark that email as read")
+    assert not authorize("gmail.mark_read", "Read that email")
+
+    assert authorize("gmail.mark_unread", "Mark it unread")
+    assert not authorize("gmail.mark_unread", "Do not mark it unread")
+
+    assert authorize("gmail.star", "Star that email")
+    assert not authorize("gmail.star", "Don't star that email")
+    assert authorize("gmail.star", "Add a star to that message")
+    assert authorize("gmail.unstar", "Unstar that email")
+    assert authorize("gmail.unstar", "Remove the star")
+    assert not authorize("gmail.archive", "Never archive that email")
+    assert not authorize("gmail.trash", "Do not delete emails after 30 days")
+
+    assert authorize(
+        "gmail.mark_important",
+        "Mark that email important",
+    )
+    assert authorize(
+        "gmail.mark_not_important",
+        "Mark that email as not important",
+    )
+
+    assert authorize(
+        "gmail.move",
+        "Move that email to Receipts",
+    )
+    assert not authorize(
+        "gmail.move",
+        "Move my calendar appointment to Friday",
+    )
+
+    assert authorize(
+        "gmail.trash",
+        "Delete that email",
+    )
+    assert authorize(
+        "gmail.trash",
+        "Trash it",
+    )
+    assert not authorize(
+        "gmail.trash",
+        "Delete my calendar appointment",
+    )
+
+    assert authorize(
+        "gmail.restore",
+        "Restore that email",
+    )
+    assert authorize(
+        "gmail.restore",
+        "Untrash it",
+    )
+
+
 def test_literal_recipient_authorization_requires_exact_email():
     original = "Send an email to amber.gill1992@outlook.com asking if she is free for dinner."
 
@@ -120,6 +191,7 @@ def test_ai_ask_wires_original_text_into_external_authorization():
 
     assert "user_text = understanding.interpreted_text" in source
     assert "authorization_text=raw_user_text" in source
+    assert "history=history" in source
 
 
 @pytest.mark.asyncio
@@ -132,6 +204,17 @@ async def test_external_write_authorization_uses_original_user_text():
 
     original = "Send an email to person.name@example.test asking if they are free for dinner."
     interpreted = "Send an email to person. name@example. test asking if they are free for dinner."
+
+    history = [
+        {
+            "role": "user",
+            "content": "Earlier email context only.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the referenced email.",
+        },
+    ]
 
     result = await engine._execute_function(
         name="google_integration",
@@ -146,11 +229,19 @@ async def test_external_write_authorization_uses_original_user_text():
         actor=SimpleNamespace(user_key="aaron"),
         request_id="authorization-source-test",
         authorization_text=original,
+        history=history,
     )
 
     assert result["result"]["status"] == "verified"
     runtime.execute_model_tool.assert_awaited_once()
-    assert runtime.execute_model_tool.await_args.kwargs["user_text"] == original
+
+    forwarded = runtime.execute_model_tool.await_args.kwargs
+
+    # Write authority remains the immutable original CURRENT request.
+    assert forwarded["user_text"] == original
+
+    # History is a separate contextual channel and cannot replace authority.
+    assert forwarded["history"] == history
 
 
 @pytest.mark.asyncio
@@ -333,6 +424,594 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
     assert mobile_by_id["google"]["connected"] is False
     assert mobile_by_id["microsoft"]["connected"] is False
     assert mobile_by_id["instagram"]["connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_contextual_gmail_management_requires_recent_email_context(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": "Show me the latest email from the garage.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the latest message from the garage.",
+        },
+    ]
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    # --------------------------------------------------------
+    # "Star it" works only because recent history establishes
+    # the Gmail referent. History identifies WHAT; the current
+    # message itself authorizes the STAR write.
+    # --------------------------------------------------------
+    assert value.is_external_request("Star it") is False
+    assert value.is_external_request("Star it", history) is True
+
+    star_tools = await value.openai_tools(
+        "Star it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    star_google = next(item for item in star_tools if item["name"] == "google_integration")
+
+    star_capabilities = set(star_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert star_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.star",
+    }
+
+    assert ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.star",
+        "Star it",
+        history,
+    )
+    assert not ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.star",
+        "Star it",
+        (),
+    )
+
+    # --------------------------------------------------------
+    # Archive shorthand follows the same rule.
+    # --------------------------------------------------------
+    archive_tools = await value.openai_tools(
+        "Archive it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    archive_google = next(item for item in archive_tools if item["name"] == "google_integration")
+
+    archive_capabilities = set(archive_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert archive_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.archive",
+    }
+
+    # --------------------------------------------------------
+    # Move additionally exposes gmail.labels so the model must
+    # resolve an existing label rather than inventing an ID.
+    # --------------------------------------------------------
+    move_tools = await value.openai_tools(
+        "Move it to Receipts",
+        principal_id="aaron",
+        history=history,
+    )
+
+    move_google = next(item for item in move_tools if item["name"] == "google_integration")
+
+    move_capabilities = set(move_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert move_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.labels",
+        "gmail.move",
+    }
+
+    # --------------------------------------------------------
+    # "Delete it" means Gmail Trash only when Gmail context
+    # exists. It must not become a generic destructive action.
+    # --------------------------------------------------------
+    assert value.is_external_request("Delete it") is False
+    assert value.is_external_request("Delete it", history) is True
+
+    trash_tools = await value.openai_tools(
+        "Delete it",
+        principal_id="aaron",
+        history=history,
+    )
+
+    trash_google = next(item for item in trash_tools if item["name"] == "google_integration")
+
+    trash_capabilities = set(trash_google["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert trash_capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+        "gmail.trash",
+    }
+
+    assert ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.trash",
+        "Delete it",
+        history,
+    )
+    assert not ExternalAgentRuntime._gmail_write_context_authorized(
+        "gmail.trash",
+        "Delete it",
+        (),
+    )
+
+
+@pytest.mark.asyncio
+async def test_contextual_gmail_management_does_not_cross_a_newer_calendar_referent(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": "Show me the latest email from the garage.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the latest email from the garage.",
+        },
+        {
+            "role": "user",
+            "content": "Show me Friday's calendar appointment.",
+        },
+        {
+            "role": "assistant",
+            "content": "I found the Friday calendar event.",
+        },
+    ]
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    for current, capability_id in (
+        ("Delete it", "gmail.trash"),
+        ("Move it to Friday", "gmail.move"),
+    ):
+        assert value.is_external_request(current, history) is False
+        assert not ExternalAgentRuntime._gmail_write_context_authorized(
+            capability_id,
+            current,
+            history,
+        )
+        assert (
+            await value.openai_tools(
+                current,
+                principal_id="aaron",
+                history=history,
+            )
+            == []
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_gmail_reads_and_priorities_expose_only_needed_reads(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    web_search = value.registry.capability_definition("web.search")
+    assert web_search is not None
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[*gmail_capabilities, web_search]
+    )
+
+    inbox = await value.openai_tools("Check my Gmail inbox", principal_id="aaron")
+    assert {item["name"] for item in inbox} == {"google_integration"}
+    inbox_google = next(item for item in inbox if item["name"] == "google_integration")
+    assert set(inbox_google["parameters"]["properties"]["capability_id"]["enum"]) == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    recent = await value.openai_tools("What emails have I had today?", principal_id="aaron")
+    assert {item["name"] for item in recent} == {"google_integration"}
+
+    priority = await value.openai_tools(
+        "What emails need my attention?",
+        principal_id="aaron",
+    )
+    assert {item["name"] for item in priority} == {"google_integration"}
+    priority_google = next(item for item in priority if item["name"] == "google_integration")
+    assert set(priority_google["parameters"]["properties"]["capability_id"]["enum"]) == {
+        "gmail.prioritize",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    urgent = await value.openai_tools("Anything urgent?", principal_id="aaron")
+    assert {item["name"] for item in urgent} == {"google_integration"}
+    assert set(urgent[0]["parameters"]["properties"]["capability_id"]["enum"]) == {
+        "gmail.prioritize",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.mark_read",
+        "Read that email",
+    )
+
+    reply = await value.openai_tools("Have I got any reply?", principal_id="aaron")
+    assert {item["name"] for item in reply} == {"google_integration"}
+    reply_google = reply[0]
+    assert set(reply_google["parameters"]["properties"]["capability_id"]["enum"]) == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+    }
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.reply",
+        "Have I got any reply?",
+    )
+
+    briefing = await value.openai_tools("Give me an inbox briefing", principal_id="aaron")
+    assert {item["name"] for item in briefing} == {"google_integration"}
+    assert set(briefing[0]["parameters"]["properties"]["capability_id"]["enum"]) == {
+        "gmail.briefing",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    standards = await value.openai_tools(
+        "Research current email security standards",
+        principal_id="aaron",
+    )
+    assert {item["name"] for item in standards} == {"web_search", "deep_research"}
+
+    briefing_engine = SimpleNamespace(
+        briefing=AsyncMock(
+            return_value={
+                "success": True,
+                "live_evidence_available": True,
+                "watermark_persisted": True,
+            }
+        )
+    )
+    value.set_email_policy_engine(briefing_engine)
+    durable_briefing = await value.openai_tools(
+        "Give me an inbox briefing",
+        principal_id="aaron",
+    )
+    assert {item["name"] for item in durable_briefing} == {"get_email_briefing"}
+    briefing_result = await value.execute_model_tool(
+        "get_email_briefing",
+        {"query": None, "limit": 50},
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Give me an inbox briefing",
+    )
+    assert briefing_result["watermark_persisted"] is True
+    briefing_engine.briefing.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        query="in:inbox",
+        limit=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_retention_request_exposes_only_durable_policy_creation(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    policy = {
+        "policy_id": "policy-1",
+        "principal_id": "aaron",
+        "conversation_id": "usr:aaron:mail",
+        "status": "active",
+        "retention_days": 30,
+    }
+    engine = SimpleNamespace(
+        create_retention_policy=AsyncMock(return_value=policy),
+        get=AsyncMock(return_value=policy),
+        list=AsyncMock(return_value=[]),
+    )
+    value.set_email_policy_engine(engine)
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+    current = "Delete emails after 30 days if not archived"
+
+    tools = await value.openai_tools(current, principal_id="aaron")
+    assert {item["name"] for item in tools} == {"manage_email_retention_policy"}
+
+    result = await value.execute_model_tool(
+        "manage_email_retention_policy",
+        {"operation": "create", "policy_id": None, "retention_days": 30},
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="retention-request",
+        user_text=current,
+    )
+    assert result["persisted"] is True
+    assert result["permanent_delete"] is False
+    engine.create_retention_policy.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        retention_days=30,
+        request_id="retention-request",
+    )
+
+    with pytest.raises(ValueError, match="current request"):
+        await value.execute_model_tool(
+            "manage_email_retention_policy",
+            {"operation": "create", "policy_id": None, "retention_days": 30},
+            conversation_id="mail",
+            principal_id="aaron",
+            request_id="history-cannot-authorize",
+            user_text="Okay",
+            history=[
+                {
+                    "role": "user",
+                    "content": current,
+                }
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_recent_reply_check_anchors_to_same_conversation_verified_send_receipt(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    claim = await value.receipts.begin(
+        request_id="send-request",
+        conversation_id="usr:aaron:mail",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="draft-1",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "aaron", "payload": {"draft_id": "draft-1"}},
+        idempotency_key="verified-send-for-reply-check",
+    )
+    await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference="sent-1",
+        result={
+            "status": "sent",
+            "message_id": "sent-1",
+            "thread_id": "thread-1",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            data={
+                "reply_received": False,
+                "reply_count": 0,
+                "reply_message_ids": [],
+                "latest_reply_message_id": None,
+                "evidence": {"subsequent_inbound_only": True},
+            },
+            error=None,
+            provider_reference="thread-1",
+        )
+    )
+    value.registry.execute = execute
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text=("Check whether amber.gill1992@outlook.com replied to the email I just sent"),
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is False
+    # The provider call is pinned to the IDs recorded by the verified send.
+    provider_request = execute.await_args.args[0]
+    assert provider_request.capability_id == "gmail.reply_status"
+    assert provider_request.payload == {
+        "thread_id": "thread-1",
+        "sent_message_id": "sent-1",
+    }
+
+    unmatched = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Did other.person@example.test reply?",
+    )
+    assert unmatched["success"] is False
+    assert unmatched["reply_received"] is None
+
+    value.create_external_monitor = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "success": True,
+            "job_id": "reply-monitor-1",
+            "status": "pending",
+            "baseline_captured": True,
+        }
+    )
+    monitor = await value._create_recent_gmail_reply_monitor(
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="monitor-request",
+        user_text=("Let me know when amber.gill1992@outlook.com replies to that email"),
+        polling_interval_seconds=300,
+    )
+    assert monitor["job_id"] == "reply-monitor-1"
+    value.create_external_monitor.assert_awaited_once_with(
+        conversation_id="mail",
+        principal_id="aaron",
+        provider="google",
+        capability_id="gmail.reply_status",
+        arguments={"thread_id": "thread-1", "sent_message_id": "sent-1"},
+        value_path="reply_count",
+        comparison={"operator": "increased"},
+        polling_interval_seconds=300,
+        label="Reply from amber.gill1992@outlook.com",
+        notify=True,
+        request_id="monitor-request",
+    )
+
+
+@pytest.mark.asyncio
+async def test_important_gmail_monitor_is_continuous_notifying_and_id_deduped(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    creator = AsyncMock()
+    value.set_monitor_creator(creator)
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+    web_search = value.registry.capability_definition("web.search")
+    assert web_search is not None
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[*gmail_capabilities, web_search]
+    )
+    current = "Notify me when important emails need my attention"
+    tools = await value.openai_tools(current, principal_id="aaron")
+    assert {item["name"] for item in tools} == {"create_important_gmail_monitor"}
+
+    value.create_external_monitor = AsyncMock(  # type: ignore[method-assign]
+        return_value={"success": True, "job_id": "important-monitor-1", "status": "pending"}
+    )
+
+    result = await value._create_important_gmail_monitor(
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="important-request",
+        user_text=current,
+        polling_interval_seconds=300,
+    )
+
+    assert result["job_id"] == "important-monitor-1"
+    value.create_external_monitor.assert_awaited_once_with(
+        conversation_id="mail",
+        principal_id="aaron",
+        provider="google",
+        capability_id="gmail.important_status",
+        arguments={
+            "query": "in:inbox {is:important is:starred is:unread}",
+            "limit": 50,
+        },
+        value_path="attention_message_ids",
+        comparison={"operator": "new_items"},
+        polling_interval_seconds=300,
+        label="Important Gmail",
+        continuous=True,
+        notify=True,
+        request_id="important-request",
+    )
+
+
+@pytest.mark.asyncio
+async def test_contextual_gmail_reply_follow_up_is_read_only(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+
+    history = [
+        {
+            "role": "user",
+            "content": (
+                "Send an email to amber.gill1992@outlook.com asking if she wants to go for dinner."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "Done — I've sent it, Aaron.",
+        },
+    ]
+
+    current = "Have I got any reply?"
+
+    # The same natural question is a live Gmail read, never a reply write.
+    assert value.is_external_request(current) is True
+
+    # With recent email context it becomes a live Gmail read request.
+    assert value.is_external_request(current, history) is True
+
+    gmail_capabilities = [
+        item
+        for item in value.google_connector.capabilities
+        if item.capability_id.startswith("gmail.")
+    ]
+
+    value.registry.executable_capabilities = AsyncMock(return_value=gmail_capabilities)
+
+    tools = await value.openai_tools(
+        current,
+        principal_id="aaron",
+        history=history,
+    )
+
+    google_tool = next(item for item in tools if item["name"] == "google_integration")
+
+    capabilities = set(google_tool["parameters"]["properties"]["capability_id"]["enum"])
+
+    assert capabilities == {
+        "gmail.search",
+        "gmail.read",
+        "gmail.thread",
+    }
+
+    # Previous conversation context must not grant write authority.
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.send",
+        current,
+    )
+    assert not ExternalAgentRuntime._write_authorized(
+        "gmail.archive",
+        current,
+    )
+
+    context = await value.model_context(
+        current,
+        principal_id="aaron",
+        history=history,
+    )
+
+    assert context is not None
+    assert "contextual Gmail follow-up" in context
+
+    value.set_monitor_creator(AsyncMock())
+    monitor_tools = await value.openai_tools(
+        "Let me know when she replies",
+        principal_id="aaron",
+        history=history,
+    )
+    assert {item["name"] for item in monitor_tools} == {"create_recent_gmail_reply_monitor"}
 
 
 @pytest.mark.asyncio
