@@ -27,6 +27,7 @@ from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
 from app.runtime_observability import runtime_metrics
 from app.realtime_turn_ledger import RealtimeTurnLedger, TurnRecord
+from app.response_presentation import present_error, present_user_response
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
 VERSION = JARVIS_RELEASE
@@ -4245,7 +4246,8 @@ class RealtimeVoiceProxy:
                 raw_result = {"success": True, "response": str(raw_result)}
             response = str(raw_result.get("response") or "").strip()
             if not response:
-                response = "I completed that, but Jarvis Core did not return a response."
+                response = "I couldn’t get a usable answer that time."
+            response = present_user_response(response, request_text=command)
 
             _LOGGER.info(
                 "JARVIS DIAG | BRAIN COMPLETE | generation=%s "
@@ -4314,7 +4316,7 @@ class RealtimeVoiceProxy:
             _LOGGER.exception("Jarvis brain turn failed")
             result = {
                 "success": False,
-                "response": f"Jarvis Core error: {exc}",
+                "response": present_error(exc),
                 "intent": None,
                 "conversation_id": metadata.get("conversation_id"),
                 "model": None,

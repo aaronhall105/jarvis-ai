@@ -34,6 +34,7 @@ from app.registry import RegistryEngine
 from app.runtime_observability import runtime_metrics
 from app.speech_corrections import SpeechCorrectionEngine
 from app.reply_policy import ReplyBudgetPolicy
+from app.response_presentation import present_user_response, render_gmail_reply_status
 from app.tool_engine import ToolEngine
 from app.tool_outcomes import request_tool_success
 from app.tone_engine import ToneEngine, ToneProfile
@@ -94,6 +95,12 @@ Use natural British English. Your relationship with Aaron combines a dependable 
 Response style:
 - Default to one or two natural sentences. Use longer explanations only when the
   current user asks for detail or the task genuinely needs it.
+- Tool, provider and database output is evidence, not user-facing wording. Explain
+  its meaning conversationally; never dump internal identifiers, status fields,
+  raw JSON, MIME content or API diagnostics unless the current user explicitly
+  asks for technical or raw output.
+- Use contractions naturally and speak as Jarvis, not as a backend system. State
+  uncertainty plainly in everyday language without weakening the underlying facts.
 - Do not use headings such as "Quick answer" or "Options" for ordinary replies.
 - Do not produce a list of alternative methods unless the user asks for alternatives.
 - Speak as Jarvis. For questions about using Jarvis, explain the simplest phrase the
@@ -830,27 +837,8 @@ def verified_gmail_reply_status_reply(
             continue
         result = call.get("result")
         if not isinstance(result, Mapping):
-            return "I couldn’t verify whether that email received a reply."
-        if result.get("success") is not True:
-            error = str(result.get("error") or "Gmail reply status could not be verified").strip()
-            return f"I couldn’t verify whether that email received a reply: {error}."
-        recipient = str(result.get("recipient") or "the recipient").strip()
-        if result.get("reply_received") is not True:
-            return f"No, I haven’t found a reply from {recipient} yet."
-        replies = [item for item in result.get("replies") or () if isinstance(item, Mapping)]
-        latest = replies[-1] if replies else {}
-        sender = str(latest.get("from") or recipient).strip()
-        evidence_text = " ".join(str(latest.get("snippet") or latest.get("body") or "").split())[
-            :500
-        ]
-        count = max(1, int(result.get("reply_count") or len(replies) or 1))
-        noun = "reply" if count == 1 else "replies"
-        if evidence_text:
-            return (
-                f"Yes — I found {count} {noun}. The latest reply from {sender} says: "
-                f"{evidence_text}"
-            )
-        return f"Yes — I found {count} {noun} from {sender}."
+            return "I couldn’t check that email properly just now."
+        return render_gmail_reply_status(result)
     return None
 
 
@@ -5209,12 +5197,12 @@ class AIEngine:
             await self.dialogue.record_result(
                 resolved_conversation_id,
                 intent=dialogue_pronoun.kind or "control_follow_up_ambiguous",
-                success=False,
+                success=True,
                 response=final_reply,
                 calls=[],
             )
             return {
-                "success": False,
+                "success": True,
                 "response": final_reply,
                 "model": self.model,
                 "intent": dialogue_pronoun.kind or "control_follow_up_ambiguous",
@@ -5254,7 +5242,7 @@ class AIEngine:
                 content=final_reply,
             )
             return {
-                "success": False,
+                "success": True,
                 "response": final_reply,
                 "model": self.model,
                 "intent": "control_follow_up_ambiguous",
@@ -5355,7 +5343,7 @@ class AIEngine:
                     content=final_reply,
                 )
                 return {
-                    "success": False,
+                    "success": True,
                     "response": final_reply,
                     "model": self.model,
                     "intent": "notification_message_missing",
@@ -6514,6 +6502,7 @@ class AIEngine:
         if unbacked_write_reply is not None:
             final_reply = unbacked_write_reply
 
+        final_reply = present_user_response(final_reply, request_text=raw_user_text)
         final_reply = _clean_reply(final_reply)
         if not final_reply:
             if tone_profile.label in {"angry", "frustrated"}:

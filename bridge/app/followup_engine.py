@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.connectors.audit import ActionReceiptStore, ReceiptStatus
 from app.connectors.credentials import redact_secrets, redact_text
 from app.followup_schedule import next_recurrence, resolve_recurrence, resolve_schedule
+from app.response_presentation import present_user_response
 
 
 MIN_EXTERNAL_INTERVAL_SECONDS = 10
@@ -2327,7 +2328,7 @@ class FollowUpEngine:
     ) -> dict[str, Any] | None:
         if completion_status not in {"completed", "failed", "expired"}:
             raise ValueError("Invalid follow-up completion status")
-        message = str(message).strip()
+        message = present_user_response(str(message).strip(), allow_technical=False)
         if not message:
             raise ValueError("Follow-up delivery message cannot be empty")
         result_json = json.dumps(dict(result), separators=(",", ":"), sort_keys=True)
@@ -2363,10 +2364,14 @@ class FollowUpEngine:
             ).rowcount
         if not claimed:
             return
+        delivery_message = present_user_response(
+            str(job.get("delivery_message") or ""),
+            allow_technical=False,
+        )
         try:
             await self.conversations.add_assistant_message(
                 str(job["conversation_id"]),
-                str(job.get("delivery_message") or ""),
+                delivery_message,
                 delivery_key=(
                     f"followup:{job['job_id']}:occurrence:{job.get('occurrence_index', 0)}"
                     if job.get("kind") == "recurring"
@@ -2431,7 +2436,7 @@ class FollowUpEngine:
                 try:
                     notification = await self.notifier(
                         str(job.get("principal_id") or ""),
-                        str(job.get("delivery_message") or ""),
+                        delivery_message,
                         "Jarvis reminder",
                     )
                     if bool(notification.get("success")) or bool(

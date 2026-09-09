@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.response_presentation import present_user_response
+
 
 VALID_ROLES = {
     "user",
@@ -339,6 +341,22 @@ class ConversationEngine:
 
             if conversation is None:
                 raise ValueError(f"Conversation does not exist: {conversation_id}")
+
+            if resolved_role == "assistant":
+                latest_user = connection.execute(
+                    """
+                    SELECT content FROM messages
+                    WHERE conversation_id = ? AND role = 'user'
+                    ORDER BY message_id DESC LIMIT 1
+                    """,
+                    (conversation_id,),
+                ).fetchone()
+                request_text = str(latest_user["content"]) if latest_user is not None else None
+                resolved_content = present_user_response(
+                    resolved_content,
+                    request_text=request_text,
+                    allow_technical=False if resolved_delivery_key is not None else None,
+                )
 
             if resolved_delivery_key is not None:
                 existing = connection.execute(

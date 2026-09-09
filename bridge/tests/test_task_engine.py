@@ -272,7 +272,7 @@ class TemporalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.process_once()
         self.assertEqual(len(self.tools.notifications), 1)
         self.assertEqual(self.tools.notifications[0]["recipient"], "aaron")
-        self.assertIn("Task 1 completed", self.tools.notifications[0]["message"])
+        self.assertIn("Your scheduled action has run", self.tools.notifications[0]["message"])
 
     async def test_failed_task_sends_failure_notification(self) -> None:
         self.tools.verified = False
@@ -283,7 +283,10 @@ class TemporalActionEngineTests(unittest.IsolatedAsyncioTestCase):
         self.clock.advance(seconds=10)
         await self.engine.process_once()
         self.assertEqual(len(self.tools.notifications), 1)
-        self.assertIn("Task 1 failed", self.tools.notifications[0]["message"])
+        self.assertIn(
+            "I couldn’t complete your scheduled action",
+            self.tools.notifications[0]["message"],
+        )
 
     async def test_clear_completed_history_keeps_pending(self) -> None:
         await self.engine.handle_command(

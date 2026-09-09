@@ -1619,20 +1619,31 @@ class GoogleConnector(Connector):
 
     @classmethod
     def _body_text(cls, payload: Mapping[str, Any]) -> str:
-        mime = str(payload.get("mimeType") or "")
-        raw_body = payload.get("body")
-        body: Mapping[str, Any] = raw_body if isinstance(raw_body, Mapping) else {}
-        data = str(body.get("data") or "")
-        if data and mime in {"text/plain", "text/html", ""}:
-            try:
-                return _decode_b64url(data).decode("utf-8", errors="replace")[:100_000]
-            except (ValueError, UnicodeError):
-                return ""
-        for part in payload.get("parts") or ():
-            if isinstance(part, Mapping):
-                text = cls._body_text(part)
-                if text:
-                    return text
+        candidates: dict[str, list[str]] = {"text/plain": [], "text/html": [], "": []}
+
+        def visit(part: Mapping[str, Any]) -> None:
+            # A text attachment is not the message body.
+            if str(part.get("filename") or "").strip():
+                return
+            mime = str(part.get("mimeType") or "").casefold()
+            raw_body = part.get("body")
+            body: Mapping[str, Any] = raw_body if isinstance(raw_body, Mapping) else {}
+            data = str(body.get("data") or "")
+            if data and mime in candidates:
+                try:
+                    decoded = _decode_b64url(data).decode("utf-8", errors="replace")
+                except (ValueError, UnicodeError):
+                    decoded = ""
+                if decoded:
+                    candidates[mime].append(decoded)
+            for child in part.get("parts") or ():
+                if isinstance(child, Mapping):
+                    visit(child)
+
+        visit(payload)
+        for preferred in ("text/plain", "text/html", ""):
+            if candidates[preferred]:
+                return candidates[preferred][0][:100_000]
         return ""
 
     async def _gmail_search(

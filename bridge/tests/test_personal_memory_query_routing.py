@@ -111,6 +111,10 @@ def test_reply_status_read_does_not_trigger_external_write_guard() -> None:
     assert unsupported_external_capability_reply("Have I got any reply?", []) is None
     assert unsupported_external_capability_reply("Did she reply?", []) is None
     assert unsupported_external_capability_reply("Has Amber replied yet?", []) is None
+    assert unsupported_external_capability_reply("Any reply?", []) is None
+    assert unsupported_external_capability_reply("Any reply from Amber?", []) is None
+    assert unsupported_external_capability_reply("Did I get a reply to that email?", []) is None
+    assert unsupported_external_capability_reply("What did she say?", []) is None
     # The write guard itself remains active for a genuine reply command.
     assert unsupported_external_capability_reply("Reply to that email saying thanks", [])
     assert unsupported_external_capability_reply("Do reply to that email saying thanks", [])
@@ -130,7 +134,7 @@ def test_reply_status_answer_is_derived_from_provider_evidence() -> None:
             }
         ]
     )
-    assert no_reply == "No, I haven’t found a reply from amber.gill1992@outlook.com yet."
+    assert no_reply == "No, I haven’t found a reply from Amber yet."
 
     reply = verified_gmail_reply_status_reply(
         [
@@ -152,6 +156,7 @@ def test_reply_status_answer_is_derived_from_provider_evidence() -> None:
         ]
     )
     assert reply is not None
+    assert reply.startswith("Yeah, Amber replied.")
     assert "Yes, that works for me." in reply
 
 

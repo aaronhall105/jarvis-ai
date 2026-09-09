@@ -654,9 +654,7 @@ class JarvisCoreConversationEntity(ConversationEntity):
                 user_input=user_input,
                 chat_log=chat_log,
                 response=response,
-                speech=(
-                    "Jarvis Core took too long to respond. Please try again."
-                ),
+                speech="I took too long to answer that. Please try again.",
             )
 
         except ClientResponseError as exc:
@@ -668,10 +666,7 @@ class JarvisCoreConversationEntity(ConversationEntity):
                 user_input=user_input,
                 chat_log=chat_log,
                 response=response,
-                speech=(
-                    "Jarvis Core returned an error. Please check the "
-                    "Jarvis server logs."
-                ),
+                speech="Something went wrong on my side, so I couldn’t finish that.",
             )
 
         except ValueError:
@@ -680,9 +675,7 @@ class JarvisCoreConversationEntity(ConversationEntity):
                 user_input=user_input,
                 chat_log=chat_log,
                 response=response,
-                speech=(
-                    "Jarvis's reply was interrupted. Please try again."
-                ),
+                speech="My reply was interrupted. Please try again.",
             )
 
         except (ClientError, TypeError):
@@ -691,10 +684,7 @@ class JarvisCoreConversationEntity(ConversationEntity):
                 user_input=user_input,
                 chat_log=chat_log,
                 response=response,
-                speech=(
-                    "I could not reach Jarvis Core. Please check the "
-                    "Jarvis server."
-                ),
+                speech="I can’t reach the assistant service right now. Please try again shortly.",
             )
 
     def _error_result(

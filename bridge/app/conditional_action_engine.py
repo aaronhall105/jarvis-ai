@@ -13,6 +13,7 @@ from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.task_engine import ActionPlan, TaskCommandResult
+from app.response_presentation import present_user_response
 
 logger = logging.getLogger("jarvis-core.conditions")
 
@@ -1247,7 +1248,7 @@ class ConditionalActionEngine:
             notification = await self.tools.send_mobile_notification(
                 recipient=recipient,
                 title="Jarvis conditional action",
-                message=message,
+                message=present_user_response(message, allow_technical=False),
             )
             return {
                 "success": notification.get("success", True),
@@ -1267,7 +1268,10 @@ class ConditionalActionEngine:
             await self.tools.send_mobile_notification(
                 recipient=recipient,
                 title="Jarvis conditional action failed",
-                message=f"Rule {rule['rule_id']} failed: {rule['action_summary']}. {error}",
+                message=present_user_response(
+                    f"I couldn’t run your conditional action: {rule['action_summary']}. {error}",
+                    allow_technical=False,
+                ),
             )
         except Exception:
             logger.exception("Could not send failure notification for rule %s", rule["rule_id"])

@@ -417,7 +417,7 @@ class RecurringScheduleEngineTests(unittest.IsolatedAsyncioTestCase):
         self.clock.advance(hours=1)
         await self.engine.process_once()
         self.assertEqual(len(self.tools.notifications), 1)
-        self.assertIn("Schedule 1 ran", self.tools.notifications[0]["message"])
+        self.assertIn("Your recurring action ran", self.tools.notifications[0]["message"])
 
         await self.engine.handle_command(
             "Every 2 hours turn the living room lights off",
@@ -428,7 +428,7 @@ class RecurringScheduleEngineTests(unittest.IsolatedAsyncioTestCase):
         await self.engine.process_once()
         self.assertGreaterEqual(len(self.tools.notifications), 2)
         self.assertTrue(
-            any("failed" in item["message"].casefold() for item in self.tools.notifications)
+            any("couldn’t run" in item["message"].casefold() for item in self.tools.notifications)
         )
 
     async def test_multi_step_recurring_schedule_executes_all_steps(self) -> None:
