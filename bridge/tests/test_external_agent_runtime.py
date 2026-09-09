@@ -188,6 +188,9 @@ def test_literal_recipient_authorization_requires_exact_email():
     assert ExternalAgentRuntime._literal_user_emails("Has amber.gill1992@outlook.com replied?") == {
         "amber.gill1992@outlook.com"
     }
+    assert ExternalAgentRuntime._literal_user_emails(
+        "!" * 20_000 + " Send it to amber.gill1992@outlook.com."
+    ) == {"amber.gill1992@outlook.com"}
 
 
 def test_ai_ask_wires_original_text_into_external_authorization():

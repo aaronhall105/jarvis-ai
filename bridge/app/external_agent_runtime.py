@@ -3091,16 +3091,28 @@ class ExternalAgentRuntime:
     def _literal_user_emails(user_text: str) -> frozenset[str]:
         """Return complete literal email addresses stated in the user's request."""
 
-        pattern = re.compile(
-            r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
-            r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
-            r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
-            r"(?![A-Za-z0-9-])"
+        text = str(user_text or "")
+        local_characters = frozenset(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.!#$%&'*+/=?^_`{|}~-"
+        )
+        domain_characters = frozenset(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
         )
         addresses: set[str] = set()
-        for match in pattern.finditer(str(user_text or "")):
+        for marker, character in enumerate(text):
+            if character != "@":
+                continue
+            start = marker
+            while start > 0 and text[start - 1] in local_characters:
+                start -= 1
+            end = marker + 1
+            while end < len(text) and text[end] in domain_characters:
+                end += 1
+            while end > marker + 1 and text[end - 1] in ".-":
+                end -= 1
+            candidate = text[start:end]
             try:
-                addresses.add(GoogleConnector._recipient(match.group(0)).casefold())
+                addresses.add(GoogleConnector._recipient(candidate).casefold())
             except ValueError:
                 continue
         return frozenset(addresses)
