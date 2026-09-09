@@ -86,6 +86,10 @@ def test_explicit_raw_technical_request_preserves_diagnostics() -> None:
         ("First line\nsecond line", "First line second line"),
         ("Yes\n\nSent from Outlook for Android\nFrom: Aaron", "Yes"),
         (
+            "Yes Sent from Outlook for Android<https://aka.ms/AAb9ysg>",
+            "Yes",
+        ),
+        (
             "Yes\n\nFrom: Aaron Hall\nSent: Thursday\nTo: Amber\nSubject: Dinner",
             "Yes",
         ),

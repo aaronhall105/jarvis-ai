@@ -41,6 +41,46 @@ class DialogueFocusFreshnessTests(unittest.IsolatedAsyncioTestCase):
         self.now += timedelta(seconds=301)
         self.assertIsNone(await self.dialogue.focused_person("conversation", max_age_seconds=300))
 
+    async def test_verified_gmail_reply_result_persists_exact_read_focus(self) -> None:
+        await self.dialogue.record_result(
+            "conversation",
+            intent="general",
+            success=True,
+            response="Yeah, Amber replied.",
+            calls=[
+                {
+                    "tool": "check_recent_gmail_reply",
+                    "result": {
+                        "success": True,
+                        "live_evidence_available": True,
+                        "reply_received": True,
+                        "recipient": "amber.gill1992@outlook.com",
+                        "recipient_name": "Amber Gill",
+                        "sent_message_id": "sent-1",
+                        "thread_id": "thread-1",
+                        "send_receipt_action_id": "action-1",
+                        "anchor_source": "principal_durable_receipt",
+                    },
+                }
+            ],
+        )
+
+        restarted = DialogueManager(f"{self.temp.name}/dialogue.db")
+        state = await restarted.get("conversation")
+
+        self.assertEqual(
+            {
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber Gill",
+                "sent_message_id": "sent-1",
+                "thread_id": "thread-1",
+                "send_receipt_action_id": "action-1",
+                "anchor_source": "principal_durable_receipt",
+                "observed_at": "2026-08-26T12:00:00+00:00",
+            },
+            state.focus["gmail_reply"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,18 @@ def clean_email_reply_body(value: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\u200b", "")
     lines = [line.strip() for line in text.splitlines()]
 
+    # Some clients flatten their mobile signature and link onto the final body
+    # line. Treat the well-known signature as a presentation cutoff even when
+    # MIME decoding did not preserve the preceding newline.
+    inline_signature = re.search(
+        r"(?<!\w)(?:sent from outlook for android|sent from my (?:iphone|ipad|android))"
+        r"(?:\s*<?https?://[^>\s]+>?)*",
+        "\n".join(lines),
+        re.I,
+    )
+    if inline_signature is not None:
+        lines = "\n".join(lines)[: inline_signature.start()].splitlines()
+
     cutoff = len(lines)
     for index, line in enumerate(lines):
         lowered = line.casefold()
