@@ -215,6 +215,50 @@ def test_home_state_renderer_does_not_call_unavailable_light_off() -> None:
     )
     assert "both" not in response.casefold()
 
+    adversarial = render_home_state_evidence(
+        [
+            {
+                "tool": "get_entity_state",
+                "result": {"success": True, "entity": {"name": "Lamp", "state": "off"}},
+            }
+        ],
+        request_text="Are" + (" " * 20_000) + "the lights on?",
+    )
+    assert adversarial == "No, Lamp is off."
+
+    long_punctuation = render_home_state_evidence(
+        [
+            {
+                "tool": "get_entity_state",
+                "result": {"success": True, "entity": {"name": "Lamp", "state": "off"}},
+            }
+        ],
+        request_text="Are the lights on" + ("?" * 20_000),
+    )
+    assert long_punctuation == "No, Lamp is off."
+
+    long_non_match = render_home_state_evidence(
+        [
+            {
+                "tool": "get_entity_state",
+                "result": {"success": True, "entity": {"name": "Lamp", "state": "off"}},
+            }
+        ],
+        request_text="Tell me " + ("something ordinary " * 5_000),
+    )
+    assert long_non_match == "Lamp is off."
+
+    large_valid_question = render_home_state_evidence(
+        [
+            {
+                "tool": "get_entity_state",
+                "result": {"success": True, "entity": {"name": "Lamp", "state": "off"}},
+            }
+        ],
+        request_text="Are " + ("the living room " * 5_000) + "lights on?",
+    )
+    assert large_valid_question == "No, Lamp is off."
+
     assert (
         render_home_state_evidence(
             [

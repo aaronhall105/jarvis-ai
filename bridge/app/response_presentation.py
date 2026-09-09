@@ -254,7 +254,10 @@ def render_home_state_evidence(
             else:
                 known.append((name, state))
 
-        asks_on = bool(re.match(r"^\s*(?:is|are)\b.{1,160}\bon\s*[?!.]*\s*$", request_text, re.I))
+        normalised_request = " ".join(str(request_text or "").casefold().split()).strip("?!. ")
+        asks_on = normalised_request.startswith(("is ", "are ")) and normalised_request.endswith(
+            " on"
+        )
         if asks_on and known:
             switched_on = [name for name, state in known if state == "on"]
             switched_off = [name for name, state in known if state == "off"]
