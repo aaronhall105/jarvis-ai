@@ -301,6 +301,121 @@ def test_home_state_renderer_never_presents_ambiguous_search_matches_as_facts() 
     )
     assert "Sofa" not in response
 
+
+def test_home_state_renderer_rejects_ambiguous_followup_reads_and_irrelevant_area_lists() -> None:
+    response = render_home_state_evidence(
+        [
+            {
+                "tool": "search_entity_states",
+                "arguments": {"query": "living room Detect"},
+                "result": {
+                    "success": True,
+                    "resolution": "ambiguous",
+                    "query": "living room Detect",
+                    "entities": [
+                        {
+                            "entity_id": "binary_sensor.sofa_tv_occupancy",
+                            "name": "Sofa TV occupancy",
+                            "state": "off",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool": "get_entity_state",
+                "result": {
+                    "success": True,
+                    "entity": {
+                        "entity_id": "binary_sensor.sofa_tv_occupancy",
+                        "name": "Sofa TV occupancy",
+                        "state": "off",
+                    },
+                },
+            },
+            {
+                "tool": "list_area_states",
+                "arguments": {"area_id": "living_room", "domain": "binary_sensor"},
+                "result": {
+                    "success": True,
+                    "entities": [
+                        {
+                            "entity_id": "binary_sensor.dining_table_person_occupancy",
+                            "name": "Dining Table Person occupancy",
+                            "state": "off",
+                        }
+                    ],
+                },
+            },
+            {
+                "tool": "list_area_states",
+                "arguments": {"area_id": "living_room", "domain": "light"},
+                "result": {
+                    "success": True,
+                    "entities": [
+                        {
+                            "entity_id": "light.living_room_floodlight",
+                            "name": "Living Room Floodlight",
+                            "state": "off",
+                        },
+                        {
+                            "entity_id": "light.home_assistant_voice_led_ring",
+                            "name": "Jarvis Voice Living Room LED Ring",
+                            "state": "unavailable",
+                            "available": False,
+                        },
+                    ],
+                },
+            },
+        ],
+        request_text="Is Living Room Detect on, and is the Living Room Floodlight on?",
+    )
+
+    assert response == (
+        "Living Room Floodlight is off, but I couldn’t confidently match "
+        "living room Detect to one device."
+    )
+    assert "Sofa" not in response
+    assert "Dining Table" not in response
+    assert "LED Ring" not in response
+
+
+def test_home_state_renderer_keeps_generic_area_lists_and_exact_named_entities() -> None:
+    area_result = {
+        "success": True,
+        "entities": [
+            {"entity_id": "light.lamp", "name": "Lamp", "state": "on"},
+            {"entity_id": "light.wall", "name": "Wall Light", "state": "off"},
+        ],
+    }
+
+    assert (
+        render_home_state_evidence(
+            [
+                {
+                    "tool": "list_area_states",
+                    "arguments": {"area_id": "living_room", "domain": "light"},
+                    "result": area_result,
+                }
+            ],
+            request_text="Are the living-room lights on?",
+        )
+        == "Lamp is on, while Wall Light is off."
+    )
+
+    assert (
+        render_home_state_evidence(
+            [
+                {
+                    "tool": "list_area_states",
+                    "arguments": {"area_id": "living_room", "domain": "light"},
+                    "result": area_result,
+                }
+            ],
+            request_text="Is the Wall Light on?",
+        )
+        == "No, Wall Light is off."
+    )
+
     adversarial = render_home_state_evidence(
         [
             {

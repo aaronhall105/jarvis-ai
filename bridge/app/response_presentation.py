@@ -226,9 +226,57 @@ def render_home_state_evidence(
 
     if technical_output_requested(request_text):
         return None
+    normalised_request = " ".join(
+        "".join(
+            character.casefold() if character.isalnum() else " "
+            for character in str(request_text or "")
+        ).split()
+    )
+    request_words = set(normalised_request.split())
     entities: list[Mapping[str, Any]] = []
     seen_entities: set[str] = set()
     unresolved_queries: list[str] = []
+    ambiguous_entity_ids: set[str] = set()
+
+    def normalise_reference(value: Any) -> str:
+        return " ".join(
+            "".join(
+                character.casefold() if character.isalnum() else " "
+                for character in str(value or "")
+            ).split()
+        )
+
+    def explicitly_referenced(entity: Any) -> bool:
+        if not isinstance(entity, Mapping):
+            return False
+        references = [
+            entity.get("name"),
+            entity.get("friendly_name"),
+            entity.get("entity_id"),
+        ]
+        attributes = entity.get("attributes")
+        if isinstance(attributes, Mapping):
+            references.append(attributes.get("friendly_name"))
+        return any(
+            reference
+            and len(normalised := normalise_reference(reference)) >= 3
+            and normalised in normalised_request
+            for reference in references
+        )
+
+    def generic_area_request(domain: Any) -> bool:
+        domain_terms = {
+            "light": {"light", "lights"},
+            "switch": {"switch", "switches"},
+            "sensor": {"sensor", "sensors"},
+            "binary_sensor": {"sensor", "sensors"},
+            "camera": {"camera", "cameras"},
+            "media_player": {"speaker", "speakers", "player", "players"},
+        }
+        value = str(domain or "").casefold()
+        if not value:
+            return bool(request_words & {"devices", "entities", "states"})
+        return bool(request_words & domain_terms.get(value, {value, f"{value}s"}))
 
     def add_entity(entity: Any) -> None:
         if not isinstance(entity, Mapping):
@@ -266,23 +314,56 @@ def render_home_state_evidence(
         if not isinstance(result, Mapping) or result.get("success") is not True:
             continue
         if call.get("tool") == "get_entity_state":
-            add_entity(result.get("entity"))
+            entity = result.get("entity")
+            entity_id = (
+                str(entity.get("entity_id") or "").casefold() if isinstance(entity, Mapping) else ""
+            )
+            if entity_id in ambiguous_entity_ids and not explicitly_referenced(entity):
+                continue
+            add_entity(entity)
             continue
         if call.get("tool") == "search_entity_states":
             resolution = str(result.get("resolution") or "").casefold()
+            raw_entities = [
+                entity for entity in result.get("entities") or () if isinstance(entity, Mapping)
+            ]
+            referenced_entities = [
+                entity for entity in raw_entities if explicitly_referenced(entity)
+            ]
+            if referenced_entities:
+                for entity in referenced_entities:
+                    add_entity(entity)
+                continue
             if resolution in {"ambiguous", "zero"}:
+                ambiguous_entity_ids.update(
+                    str(entity.get("entity_id") or "").casefold()
+                    for entity in raw_entities
+                    if entity.get("entity_id")
+                )
                 add_unresolved(result.get("query") or call.get("arguments", {}).get("query"))
                 continue
             selected = result.get("selected_entity")
             if isinstance(selected, Mapping):
                 add_entity(selected)
                 continue
-            raw_entities = list(result.get("entities") or ())
             if resolution == "ranked" and len(raw_entities) != 1:
                 add_unresolved(result.get("query") or call.get("arguments", {}).get("query"))
                 continue
         else:
-            raw_entities = list(result.get("entities") or ())
+            raw_entities = [
+                entity for entity in result.get("entities") or () if isinstance(entity, Mapping)
+            ]
+            referenced_entities = [
+                entity for entity in raw_entities if explicitly_referenced(entity)
+            ]
+            if referenced_entities:
+                raw_entities = referenced_entities
+            else:
+                arguments = call.get("arguments")
+                domain = arguments.get("domain") if isinstance(arguments, Mapping) else None
+                if not generic_area_request(domain):
+                    add_unresolved("one of the requested devices")
+                    continue
         for entity in raw_entities:
             add_entity(entity)
 
@@ -301,7 +382,6 @@ def render_home_state_evidence(
         else:
             known.append((name, state))
 
-    normalised_request = " ".join(str(request_text or "").casefold().split()).strip("?!. ")
     asks_on = normalised_request.startswith(("is ", "are ")) and normalised_request.endswith(" on")
     unresolved_note = (
         f"I couldn’t confidently match {unresolved_queries[0]} to one device"
