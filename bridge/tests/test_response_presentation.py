@@ -76,6 +76,17 @@ def test_internal_status_language_is_naturalised(raw: str, expected: str) -> Non
     assert expected in present_user_response(raw, request_text="Can you check?")
 
 
+def test_setup_only_provider_failure_is_naturalised() -> None:
+    raw = (
+        "Instagram is unavailable — No supported Instagram adapter and authorised "
+        "account are configured."
+    )
+
+    assert present_user_response(raw, request_text="Check my Instagram messages") == (
+        "I can’t check Instagram yet because it isn’t set up."
+    )
+
+
 def test_explicit_raw_technical_request_preserves_diagnostics() -> None:
     raw = '{"principal_id":"aaron","thread_id":"thread-1"}'
     assert present_user_response(raw, request_text="Show me the raw JSON diagnostics") == raw
@@ -214,6 +225,81 @@ def test_home_state_renderer_does_not_call_unavailable_light_off() -> None:
         "because it’s unavailable."
     )
     assert "both" not in response.casefold()
+
+    mixed = render_home_state_evidence(
+        [
+            {
+                "tool": "search_entity_states",
+                "result": {
+                    "success": True,
+                    "resolution": "exact",
+                    "selected_entity": {
+                        "entity_id": "switch.living_room_detect",
+                        "name": "Living Room Detect",
+                        "state": "on",
+                    },
+                },
+            },
+            {
+                "tool": "search_entity_states",
+                "result": {
+                    "success": True,
+                    "resolution": "ranked",
+                    "entities": [
+                        {
+                            "entity_id": "light.living_room_floodlight",
+                            "name": "Living Room Floodlight",
+                            "state": "off",
+                        }
+                    ],
+                },
+            },
+        ],
+        request_text="Is Living Room Detect on, and is the Living Room Floodlight on?",
+    )
+    assert mixed == ("Living Room Detect is on, while Living Room Floodlight is off.")
+
+
+def test_home_state_renderer_never_presents_ambiguous_search_matches_as_facts() -> None:
+    response = render_home_state_evidence(
+        [
+            {
+                "tool": "search_entity_states",
+                "arguments": {"query": "living room Detect"},
+                "result": {
+                    "success": True,
+                    "resolution": "ambiguous",
+                    "query": "living room Detect",
+                    "entities": [
+                        {"name": "Sofa TV occupancy", "state": "off"},
+                        {"name": "Sofa Remote occupancy", "state": "off"},
+                    ],
+                },
+            },
+            {
+                "tool": "search_entity_states",
+                "arguments": {"query": "floodlight"},
+                "result": {
+                    "success": True,
+                    "resolution": "ranked",
+                    "entities": [
+                        {
+                            "entity_id": "light.living_room_floodlight",
+                            "name": "Living Room Floodlight",
+                            "state": "off",
+                        }
+                    ],
+                },
+            },
+        ],
+        request_text="Is Living Room Detect on, and is the Living Room Floodlight on?",
+    )
+
+    assert response == (
+        "Living Room Floodlight is off, but I couldn’t confidently match "
+        "living room Detect to one device."
+    )
+    assert "Sofa" not in response
 
     adversarial = render_home_state_evidence(
         [
