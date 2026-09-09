@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.response_presentation import present_user_response
+
 logger = logging.getLogger("jarvis-core.proactive")
 
 
@@ -1119,12 +1121,16 @@ class ProactiveOrchestrator:
             return
         channels: list[dict[str, Any]] = []
         errors: list[str] = []
+        user_message = present_user_response(
+            str(alert["summary"]),
+            allow_technical=False,
+        )
 
         if decision.announce:
             try:
                 result = await self.tools.announce_message(
                     target=self.announcement_target,
-                    message=str(alert["summary"]),
+                    message=user_message,
                 )
                 channels.append({"channel": "announcement", "result": result})
             except Exception as exc:
@@ -1140,7 +1146,7 @@ class ProactiveOrchestrator:
                 }.get(str(alert["severity"]), "Jarvis")
                 result = await self.tools.send_mobile_notification(
                     recipient=decision.recipient,
-                    message=str(alert["summary"]),
+                    message=user_message,
                     title=title,
                 )
                 channels.append({"channel": "mobile", "result": result})
@@ -1428,9 +1434,13 @@ class ProactiveOrchestrator:
             level = int(alert["escalation_level"]) + 1
             recipient = "both" if level >= 2 or str(alert["severity"]) == "critical" else "aaron"
             try:
+                escalation_message = present_user_response(
+                    f"Still unresolved: {alert['summary']}",
+                    allow_technical=False,
+                )
                 result = await self.tools.send_mobile_notification(
                     recipient=recipient,
-                    message=f"Still unresolved: {alert['summary']}",
+                    message=escalation_message,
                     title="Jarvis — Alert still active",
                 )
                 success = bool(result.get("success"))
@@ -1744,7 +1754,10 @@ class ProactiveOrchestrator:
                 recipient = "both"
             result = await self.tools.send_mobile_notification(
                 recipient=recipient,
-                message=str(alert["summary"]),
+                message=present_user_response(
+                    str(alert["summary"]),
+                    allow_technical=False,
+                ),
                 title="Jarvis — Forwarded alert",
             )
             await asyncio.to_thread(

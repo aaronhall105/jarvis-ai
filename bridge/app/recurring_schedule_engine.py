@@ -14,6 +14,7 @@ from typing import Any, Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.task_engine import ActionPlan, TaskCommandResult
+from app.response_presentation import present_user_response
 
 logger = logging.getLogger("jarvis-core.schedules")
 
@@ -1354,14 +1355,15 @@ class RecurringScheduleEngine:
             scheduled_for.astimezone(self._timezone).strftime("%A %-d %B at %-I:%M %p").lower()
         )
         if status == "completed":
-            message = f"Schedule {schedule_id} ran: {summary} ({local_time})."
+            message = f"Your recurring action ran {local_time}: {summary}."
         else:
-            message = f"Schedule {schedule_id} failed: {summary} ({local_time})."
+            message = f"I couldn’t run your recurring action {local_time}: {summary}."
         result_message = str(
             result.get("response_message") or result.get("message") or error or ""
         ).strip()
         if result_message:
             message += f" {result_message}"
+        message = present_user_response(message, allow_technical=False)
         try:
             notification = await self.tools.send_mobile_notification(
                 recipient=recipient,

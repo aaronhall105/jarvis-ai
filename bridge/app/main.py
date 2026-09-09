@@ -59,6 +59,7 @@ from app.memory_models import (
 from app.registry import RegistryEngine
 from app.realtime_voice import RealtimeVoiceProxy
 from app.realtime_turn_ledger import RealtimeTurnLedger
+from app.response_presentation import present_user_response
 from app.tool_engine import ToolEngine
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext, scope_conversation_id
@@ -2056,7 +2057,7 @@ async def assistant_text(
         entity_count = len(entities) if isinstance(entities, list) else 0
         if result.get("success"):
             response = (
-                f"I have {action_text} {entity_count} light"
+                f"Yep, I’ve {action_text} {entity_count} light"
                 f"{'' if entity_count == 1 else 's'} in the {parsed.area_name}."
             )
         else:
@@ -2065,7 +2066,7 @@ async def assistant_text(
             )
         return {
             "success": bool(result.get("success")),
-            "response": response,
+            "response": present_user_response(response, request_text=request.text),
             "parsed": parsed.as_dict(),
             "result": result,
         }
@@ -2123,7 +2124,11 @@ async def _execute_ai_request(
             endpoint=request.voice_endpoint_kind,
         )
     if personal_result is not None:
-        response = str(personal_result["response"])
+        response = present_user_response(
+            str(personal_result["response"]),
+            request_text=request.text,
+        )
+        personal_result["response"] = response
         await conversations.add_user_message(
             conversation_id=storage_conversation_id,
             content=request.text,
@@ -2153,7 +2158,10 @@ async def _execute_ai_request(
 
     proactive_reply = await proactive_engine.handle_reply(request.text, actor.user_key)
     if proactive_reply is not None:
-        response = str(proactive_reply["response"])
+        response = present_user_response(
+            str(proactive_reply["response"]),
+            request_text=request.text,
+        )
         await conversations.add_user_message(
             conversation_id=storage_conversation_id, content=request.text
         )
@@ -2222,7 +2230,10 @@ async def _execute_ai_request(
             }
 
     if room_result is not None and bool(room_result.get("handled")):
-        response = str(room_result.get("response") or "").strip()
+        response = present_user_response(
+            str(room_result.get("response") or "").strip(),
+            request_text=request.text,
+        )
         await conversations.add_user_message(
             conversation_id=storage_conversation_id,
             content=request.text,
@@ -2261,17 +2272,21 @@ async def _execute_ai_request(
         )
 
         if improvement_command.handled:
+            presented_improvement = present_user_response(
+                improvement_command.response,
+                request_text=request.text,
+            )
             await conversations.add_user_message(
                 conversation_id=storage_conversation_id,
                 content=request.text,
             )
             await conversations.add_assistant_message(
                 conversation_id=storage_conversation_id,
-                content=improvement_command.response,
+                content=presented_improvement,
             )
             result = {
                 "success": improvement_command.success,
-                "response": improvement_command.response,
+                "response": presented_improvement,
                 "model": "self-improvement",
                 "intent": improvement_command.intent,
                 "deterministic": True,
@@ -2324,6 +2339,10 @@ async def _execute_ai_request(
 
     # Home Assistant should keep its own opaque conversation ID. Jarvis uses a
     # user-scoped ID internally so Aaron and Amber can never share history.
+    result["response"] = present_user_response(
+        str(result.get("response") or ""),
+        request_text=request.text,
+    )
     result["conversation_id"] = external_conversation_id
     result["message_count"] = await conversations.message_count(storage_conversation_id)
     result["user"] = {

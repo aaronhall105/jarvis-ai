@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from app.response_presentation import present_user_response
+
 logger = logging.getLogger("jarvis-core.tasks")
 
 
@@ -864,11 +866,12 @@ class TemporalActionEngine:
             result.get("response_message") or result.get("message") or error or ""
         ).strip()
         if status == "completed":
-            message = f"Task {task_id} completed: {summary}."
+            message = f"Your scheduled action has run: {summary}."
         else:
-            message = f"Task {task_id} failed: {summary}."
+            message = f"I couldn’t complete your scheduled action: {summary}."
         if result_message:
             message += f" {result_message}"
+        message = present_user_response(message, allow_technical=False)
         try:
             notification = await self.tools.send_mobile_notification(
                 recipient=recipient,

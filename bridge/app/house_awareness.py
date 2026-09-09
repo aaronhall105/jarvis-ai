@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.home_assistant import HomeAssistantClient
 from app.registry import RegistryEngine
+from app.response_presentation import present_user_response
 from app.tool_engine import ToolEngine
 from app.user_context import UserContext
 
@@ -393,7 +394,10 @@ class HouseAwarenessEngine:
         try:
             result = await self.tools.announce_message(
                 target=self.proactive_target,
-                message=event.summary,
+                message=present_user_response(
+                    event.summary,
+                    allow_technical=False,
+                ),
             )
         except Exception:
             logger.exception(

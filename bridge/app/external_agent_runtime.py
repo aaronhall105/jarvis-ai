@@ -931,6 +931,9 @@ class ExternalAgentRuntime:
                 r"did [a-z0-9@._+' -]{1,60}|has [a-z0-9@._+' -]{1,60})\b"
                 r".{0,60}\b(?:reply|replies|replied|response|responded|answered)\b|"
                 r"\b(?:received|got) (?:any |a )?(?:reply|response)\b|"
+                r"\b(?:any|a) (?:reply|replies|response)\b|"
+                r"\bdid i get (?:a|any|the)?\s*(?:reply|response)\b|"
+                r"\bwhat did (?:she|he|they|[a-z][a-z'’-]{1,60}) say\b|"
                 r"\bheard back\b",
                 value,
             )
@@ -1539,9 +1542,10 @@ class ExternalAgentRuntime:
                     "name": "check_recent_gmail_reply",
                     "description": (
                         "Check live Gmail for an inbound reply using exact verified gmail.send "
-                        "receipt evidence owned by this principal. If no matching receipt exists "
-                        "and the current user supplied one literal recipient, recover the latest "
-                        "exact matching Sent message with a bounded Gmail read. This is read-only."
+                        "evidence owned by this principal. A recipient may be grounded by current "
+                        "conversation history or a unique Google Contacts read. If no receipt "
+                        "matches an exact grounded recipient, use a bounded Sent-mail read. Return "
+                        "ambiguity as a clarification and never guess. This is read-only."
                     ),
                     "parameters": {
                         "type": "object",
@@ -2162,6 +2166,7 @@ class ExternalAgentRuntime:
                 conversation_id=conversation_id,
                 principal_id=principal_id,
                 user_text=user_text,
+                history=history,
             )
         if name == "create_recent_gmail_reply_monitor":
             return await self._create_recent_gmail_reply_monitor(
@@ -2260,6 +2265,123 @@ class ExternalAgentRuntime:
             return owned_matches[0][0], owned_matches[0][1], "principal_durable_receipt"
         return None
 
+    @staticmethod
+    def _reply_person_reference(text: str) -> str | None:
+        """Extract an explicitly named reply referent without resolving identity."""
+
+        value = " ".join(str(text or "").split())
+        patterns = (
+            r"\b(?:has|did)\s+([a-z][a-z'’-]{1,60})\s+(?:replied|reply|responded|respond)",
+            r"\b(?:reply|response)\s+from\s+([a-z][a-z'’-]{1,60})\b",
+            r"\bwhat\s+did\s+([a-z][a-z'’-]{1,60})\s+say\b",
+            r"\bemail\s+(?:i|you|we)\s+(?:just\s+)?sent\s+to\s+"
+            r"([a-z][a-z'’-]{1,60})\b",
+        )
+        excluded = {"any", "he", "her", "him", "i", "me", "she", "that", "they", "we", "you"}
+        for pattern in patterns:
+            match = re.search(pattern, value, re.I)
+            if match and match.group(1).casefold() not in excluded:
+                return match.group(1).strip().title()
+        return None
+
+    @classmethod
+    def _history_reply_referent(
+        cls,
+        history: Sequence[Mapping[str, str]],
+    ) -> tuple[frozenset[str], str | None]:
+        """Resolve read-only recipient hints from recent dialogue evidence."""
+
+        for item in reversed(history):
+            content = str(item.get("content") or "")
+            emails = cls._literal_user_emails(content)
+            if emails:
+                return emails, cls._reply_person_reference(content)
+        for item in reversed(history):
+            name = cls._reply_person_reference(str(item.get("content") or ""))
+            if name:
+                return frozenset(), name
+        return frozenset(), None
+
+    async def _resolve_reply_contact(
+        self,
+        *,
+        name: str,
+        conversation_id: str,
+        principal_id: str,
+    ) -> tuple[frozenset[str], str | None, dict[str, Any] | None]:
+        """Resolve one named person through provider-backed Contacts evidence."""
+
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="contacts.resolve",
+                payload={"query": name},
+                request_id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="resolve_reply_status_recipient",
+                target=name,
+            ),
+            refresh_health=True,
+        )
+        if not execution.success:
+            return (
+                frozenset(),
+                None,
+                {
+                    "success": False,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "error": execution.error or "Google Contacts is unavailable",
+                },
+            )
+        if execution.data.get("ambiguous") is True:
+            return (
+                frozenset(),
+                None,
+                {
+                    "success": True,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "clarification_required": True,
+                    "clarification": (
+                        f"I found more than one {name} in your contacts — which one do you mean?"
+                    ),
+                },
+            )
+        contact = execution.data.get("contact")
+        if not execution.data.get("resolved") or not isinstance(contact, Mapping):
+            return (
+                frozenset(),
+                None,
+                {
+                    "success": True,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "clarification_required": True,
+                    "clarification": f"Which {name} do you mean?",
+                },
+            )
+        recipients: set[str] = set()
+        for address in contact.get("email_addresses") or ():
+            try:
+                recipients.add(GoogleConnector._recipient(str(address)).casefold())
+            except ValueError:
+                continue
+        if not recipients:
+            return (
+                frozenset(),
+                None,
+                {
+                    "success": True,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "clarification_required": True,
+                    "clarification": f"I don’t have a verified email address for {name}. Which email do you mean?",
+                },
+            )
+        display_name = str(contact.get("display_name") or name).strip() or name
+        return frozenset(recipients), display_name, None
+
     async def _create_recent_gmail_reply_monitor(
         self,
         *,
@@ -2334,18 +2456,139 @@ class ExternalAgentRuntime:
         conversation_id: str,
         principal_id: str,
         user_text: str,
+        history: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any]:
         """Resolve an exact sent anchor, then inspect its Gmail thread live."""
 
-        anchor = await self._verified_gmail_send_anchor(
-            conversation_id=conversation_id,
-            principal_id=principal_id,
-            user_text=user_text,
-        )
         scoped_conversation = self.planner_executor.scope_conversation(
             conversation_id,
             principal_id,
         )
+        same_conversation = await self.receipts.list_recent(
+            limit=100,
+            conversation_id=scoped_conversation,
+        )
+        recent = await self.receipts.list_recent(limit=500)
+        owner_prefix = f"usr:{principal_id}:"
+        current_recipients = self._literal_user_emails(user_text)
+        history_recipients, history_name = self._history_reply_referent(history)
+        current_name = self._reply_person_reference(user_text)
+        recipient_name: str | None = current_name or history_name
+        recipient_hints = current_recipients or history_recipients
+
+        if not current_recipients and current_name:
+            normalised_name = re.sub(r"[^a-z0-9]+", "", current_name.casefold())
+            receipt_addresses: set[str] = set()
+            for receipt in (*same_conversation, *recent):
+                if (
+                    receipt.status is not ReceiptStatus.VERIFIED
+                    or receipt.capability_id != "gmail.send"
+                    or not str(receipt.conversation_id or "").startswith(owner_prefix)
+                    or str(receipt.result.get("status") or "") != "sent"
+                ):
+                    continue
+                try:
+                    address = GoogleConnector._recipient(
+                        str(receipt.result.get("recipient") or "")
+                    ).casefold()
+                except ValueError:
+                    continue
+                local_tokens = {
+                    re.sub(r"[^a-z0-9]+", "", token)
+                    for token in re.split(r"[._+\-]+", address.split("@", 1)[0])
+                }
+                if normalised_name and normalised_name in local_tokens:
+                    receipt_addresses.add(address)
+            if len(receipt_addresses) == 1:
+                recipient_hints = frozenset(receipt_addresses)
+            else:
+                recipient_hints, recipient_name, resolution = await self._resolve_reply_contact(
+                    name=current_name,
+                    conversation_id=scoped_conversation,
+                    principal_id=principal_id,
+                )
+                if resolution is not None:
+                    return resolution
+        elif not recipient_hints and history_name:
+            recipient_hints, recipient_name, resolution = await self._resolve_reply_contact(
+                name=history_name,
+                conversation_id=scoped_conversation,
+                principal_id=principal_id,
+            )
+            if resolution is not None:
+                return resolution
+
+        def eligible(receipt: ActionReceipt) -> tuple[ActionReceipt, str] | None:
+            result = receipt.result
+            if (
+                receipt.status is not ReceiptStatus.VERIFIED
+                or receipt.capability_id != "gmail.send"
+                or str(result.get("status") or "") != "sent"
+                or not result.get("message_id")
+                or not result.get("thread_id")
+            ):
+                return None
+            try:
+                candidate = GoogleConnector._recipient(
+                    str(result.get("recipient") or "")
+                ).casefold()
+            except ValueError:
+                return None
+            if recipient_hints and candidate not in recipient_hints:
+                return None
+            return receipt, candidate
+
+        same_matches = [
+            match for receipt in same_conversation if (match := eligible(receipt)) is not None
+        ]
+        other_matches = [
+            match
+            for receipt in recent
+            if receipt.conversation_id != scoped_conversation
+            and str(receipt.conversation_id or "").startswith(owner_prefix)
+            and (match := eligible(receipt)) is not None
+        ]
+
+        anchor: tuple[ActionReceipt, str, str] | None = None
+        if same_matches and (current_recipients or len(same_matches) == 1):
+            anchor = same_matches[0][0], same_matches[0][1], "same_conversation_receipt"
+        elif len(same_matches) > 1:
+            whom = recipient_name or "that recipient"
+            return {
+                "success": True,
+                "live_evidence_available": False,
+                "reply_received": None,
+                "clarification_required": True,
+                "clarification": (
+                    f"I found more than one recent email to {whom}. Which one do you mean?"
+                ),
+            }
+        elif current_recipients and other_matches:
+            # Preserve the exact-address contract: an address in the immutable
+            # current request means the latest exact principal-owned send.
+            anchor = other_matches[0][0], other_matches[0][1], "principal_durable_receipt"
+        elif len(other_matches) == 1:
+            anchor = other_matches[0][0], other_matches[0][1], "principal_durable_receipt"
+        elif len(other_matches) > 1:
+            if not recipient_hints and not recipient_name:
+                return {
+                    "success": True,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "clarification_required": True,
+                    "clarification": "Which email do you mean?",
+                }
+            whom = recipient_name or "that recipient"
+            return {
+                "success": True,
+                "live_evidence_available": False,
+                "reply_received": None,
+                "clarification_required": True,
+                "clarification": (
+                    f"I found more than one recent email to {whom}. Which one do you mean?"
+                ),
+            }
+
         receipt_action_id: str | None = None
         if anchor is not None:
             anchor_receipt, recipient, anchor_source = anchor
@@ -2354,18 +2597,15 @@ class ExternalAgentRuntime:
             thread_id = str(result["thread_id"])
             receipt_action_id = str(anchor_receipt.action_id)
         else:
-            literal_recipients = self._literal_user_emails(user_text)
-            if len(literal_recipients) != 1:
+            if len(recipient_hints) != 1:
                 return {
-                    "success": False,
+                    "success": True,
                     "live_evidence_available": False,
                     "reply_received": None,
-                    "error": (
-                        "No principal-owned verified Gmail send receipt matched the request; "
-                        "state one exact recipient to recover the sent message safely"
-                    ),
+                    "clarification_required": True,
+                    "clarification": "Which email do you mean?",
                 }
-            recipient = next(iter(literal_recipients))
+            recipient = next(iter(recipient_hints))
             search = await self.registry.execute(
                 CapabilityRequest(
                     capability_id="gmail.search",
@@ -2408,23 +2648,29 @@ class ExternalAgentRuntime:
             )
             if not candidates:
                 return {
-                    "success": False,
+                    "success": True,
                     "live_evidence_available": True,
                     "reply_received": None,
-                    "error": f"No exact Sent message to {recipient} was found",
+                    "clarification_required": True,
+                    "clarification": (
+                        f"I couldn’t find a sent email to {recipient_name or recipient} to check."
+                    ),
                 }
-            if candidates[0][0] is None or (
-                len(candidates) > 1 and candidates[1][0] == candidates[0][0]
+            ambiguous_named_recovery = not current_recipients and len(candidates) > 1
+            if (
+                ambiguous_named_recovery
+                or candidates[0][0] is None
+                or (len(candidates) > 1 and candidates[1][0] == candidates[0][0])
             ):
                 return {
-                    "success": False,
+                    "success": True,
                     "live_evidence_available": True,
                     "reply_received": None,
-                    "error": (
-                        f"Multiple sent messages to {recipient} are equally recent; "
-                        "the reply target is ambiguous"
+                    "clarification_required": True,
+                    "clarification": (
+                        f"I found more than one recent email to {recipient_name or recipient}. "
+                        "Which one do you mean?"
                     ),
-                    "candidate_message_ids": [item[1] for item in candidates[:10]],
                 }
             _, sent_message_id, thread_id = candidates[0]
             anchor_source = "bounded_exact_recipient_sent_search"
@@ -2457,6 +2703,7 @@ class ExternalAgentRuntime:
             "live_evidence_available": True,
             "reply_received": evidence.get("reply_received") is True,
             "recipient": recipient,
+            "recipient_name": recipient_name,
             "sent_message_id": sent_message_id,
             "thread_id": thread_id,
             "anchor_source": anchor_source,

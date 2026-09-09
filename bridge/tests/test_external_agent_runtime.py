@@ -676,6 +676,14 @@ async def test_explicit_gmail_reads_and_priorities_expose_only_needed_reads(runt
         "Have I got any reply?",
         "Did she reply?",
         "Has Amber replied yet?",
+        "Did Amber reply?",
+        "Any reply?",
+        "Any reply from Amber?",
+        "Have I had a reply?",
+        "Did I get a reply to that email?",
+        "What did she say?",
+        "Has Amber replied to the email I sent her?",
+        "Has she replied to the email you sent for me?",
         (
             "Check my Gmail inbox and tell me if I have received a reply to the email "
             "you just sent to amber.gill1992@outlook.com."
@@ -683,6 +691,17 @@ async def test_explicit_gmail_reads_and_priorities_expose_only_needed_reads(runt
     ):
         reply = await value.openai_tools(reply_text, principal_id="aaron")
         assert {item["name"] for item in reply} == {"check_recent_gmail_reply"}
+        assert not any(
+            ExternalAgentRuntime._write_authorized(capability, reply_text)
+            for capability in (
+                "gmail.draft",
+                "gmail.reply",
+                "gmail.send",
+                "gmail.archive",
+                "gmail.trash",
+                "gmail.mark_read",
+            )
+        )
     assert not ExternalAgentRuntime._write_authorized(
         "gmail.reply",
         "Have I got any reply?",
@@ -861,8 +880,9 @@ async def test_recent_reply_check_anchors_to_same_conversation_verified_send_rec
         principal_id="aaron",
         user_text="Did other.person@example.test reply?",
     )
-    assert unmatched["success"] is False
+    assert unmatched["success"] is True
     assert unmatched["reply_received"] is None
+    assert unmatched["clarification_required"] is True
 
     value.create_external_monitor = AsyncMock(  # type: ignore[method-assign]
         return_value={
@@ -1091,9 +1111,10 @@ async def test_reply_check_fails_closed_for_equally_recent_sent_candidates(runti
         ),
     )
 
-    assert result["success"] is False
+    assert result["success"] is True
     assert result["reply_received"] is None
-    assert "ambiguous" in result["error"]
+    assert result["clarification_required"] is True
+    assert "more than one" in result["clarification"]
     assert execute.await_count == 1
 
 
@@ -1146,6 +1167,331 @@ async def test_reply_check_returns_real_provider_error(runtime):
     assert result["error"] == "Google token refresh failed"
 
 
+async def _record_verified_send(
+    value: ExternalAgentRuntime,
+    *,
+    conversation_id: str,
+    recipient: str,
+    suffix: str,
+):
+    claim = await value.receipts.begin(
+        request_id=f"send-{suffix}",
+        conversation_id=conversation_id,
+        capability_id="gmail.send",
+        provider_id="google",
+        target=f"draft-{suffix}",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "aaron", "payload": {"draft_id": suffix}},
+        idempotency_key=f"context-send-{suffix}",
+    )
+    return await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference=f"sent-{suffix}",
+        result={
+            "status": "sent",
+            "message_id": f"sent-{suffix}",
+            "thread_id": f"thread-{suffix}",
+            "recipient": recipient,
+        },
+        verification={"sent_label_present": True},
+    )
+
+
+def _unique_amber_contact():
+    return SimpleNamespace(
+        success=True,
+        data={
+            "resolved": True,
+            "ambiguous": False,
+            "contact": {
+                "display_name": "Amber Gill",
+                "email_addresses": ["amber.gill1992@outlook.com"],
+            },
+        },
+        error=None,
+        provider_reference="people/amber",
+    )
+
+
+def _reply_status(*, received: bool = True):
+    return SimpleNamespace(
+        success=True,
+        data={
+            "reply_received": received,
+            "reply_count": 1 if received else 0,
+            "replies": (
+                [
+                    {
+                        "message_id": "reply-1",
+                        "from": "Amber Gill <amber.gill1992@outlook.com>",
+                        "body": "Yes",
+                    }
+                ]
+                if received
+                else []
+            ),
+        },
+        error=None,
+        provider_reference="thread-amber",
+    )
+
+
+@pytest.mark.asyncio
+async def test_named_reply_referent_uses_contacts_and_same_conversation_send(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    await _record_verified_send(
+        value,
+        conversation_id="usr:aaron:mail",
+        recipient="amber.gill1992@outlook.com",
+        suffix="amber",
+    )
+    value.registry.execute = AsyncMock(return_value=_reply_status())
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Has Amber replied?",
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is True
+    assert result["recipient_name"] == "Amber"
+    assert result["anchor_source"] == "same_conversation_receipt"
+    calls = [item.args[0] for item in value.registry.execute.await_args_list]
+    assert [item.capability_id for item in calls] == ["gmail.reply_status"]
+    assert calls[0].payload == {
+        "thread_id": "thread-amber",
+        "sent_message_id": "sent-amber",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    (
+        "Has she replied yet?",
+        "Any reply?",
+        "Have I had a reply?",
+        "Did I get a reply to that email?",
+        "What did she say?",
+        "Has she replied to the email?",
+        "Has she replied to the email you sent for me?",
+    ),
+)
+async def test_pronoun_reply_referents_use_separate_read_only_history(runtime, question):
+    value, _, _, _ = runtime
+    await value.initialize()
+    await _record_verified_send(
+        value,
+        conversation_id="usr:aaron:original-chat",
+        recipient="amber.gill1992@outlook.com",
+        suffix=question.replace(" ", "-")[:32],
+    )
+    # Reopening the store models a Core restart; the current conversation is new.
+    value.receipts = ActionReceiptStore(value.receipts.path)
+    value.registry.execute = AsyncMock(return_value=_reply_status())
+    history = [
+        {
+            "role": "user",
+            "content": "Has Amber replied to amber.gill1992@outlook.com?",
+        },
+        {"role": "assistant", "content": "I’ll check the live Gmail thread."},
+    ]
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="new-android-chat",
+        principal_id="aaron",
+        user_text=question,
+        history=history,
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is True
+    request = value.registry.execute.await_args.args[0]
+    assert request.capability_id == "gmail.reply_status"
+    assert request.payload["sent_message_id"].startswith("sent-")
+
+
+@pytest.mark.asyncio
+async def test_named_reply_referent_uses_durable_receipt_after_restart_and_new_chat(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    receipt = await _record_verified_send(
+        value,
+        conversation_id="usr:aaron:old-mobile-chat",
+        recipient="amber.gill1992@outlook.com",
+        suffix="restart",
+    )
+    value.receipts = ActionReceiptStore(value.receipts.path)
+    value.registry.execute = AsyncMock(return_value=_reply_status(received=False))
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="brand-new-mobile-chat",
+        principal_id="aaron",
+        user_text="Did Amber reply?",
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is False
+    assert result["send_receipt_action_id"] == receipt.action_id
+    assert result["anchor_source"] == "principal_durable_receipt"
+
+
+@pytest.mark.asyncio
+async def test_unique_contact_supports_bounded_read_only_sent_recovery(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    sent_search = SimpleNamespace(
+        success=True,
+        data={
+            "messages": [
+                {
+                    "message_id": "sent-contact",
+                    "thread_id": "thread-contact",
+                    "internal_date_ms": 2_000,
+                    "label_ids": ["SENT"],
+                    "to": "Amber Gill <amber.gill1992@outlook.com>",
+                }
+            ]
+        },
+        error=None,
+        provider_reference="sent-contact",
+    )
+    value.registry.execute = AsyncMock(
+        side_effect=[_unique_amber_contact(), sent_search, _reply_status()]
+    )
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="new-chat",
+        principal_id="aaron",
+        user_text="Has Amber replied?",
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is True
+    assert result["anchor_source"] == "bounded_exact_recipient_sent_search"
+    calls = [item.args[0] for item in value.registry.execute.await_args_list]
+    assert [item.capability_id for item in calls] == [
+        "contacts.resolve",
+        "gmail.search",
+        "gmail.reply_status",
+    ]
+    assert calls[1].payload == {
+        "query": "in:sent to:amber.gill1992@outlook.com",
+        "limit": 10,
+    }
+
+
+@pytest.mark.asyncio
+async def test_contact_and_sent_message_ambiguity_are_normal_clarifications(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    value.registry.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            data={"resolved": False, "ambiguous": True, "matches": [{}, {}]},
+            error=None,
+            provider_reference=None,
+        )
+    )
+
+    contacts = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Has Amber replied?",
+    )
+    ungrounded = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Has she replied yet?",
+    )
+
+    assert contacts["success"] is True
+    assert contacts["clarification_required"] is True
+    assert "more than one Amber" in contacts["clarification"]
+    assert ungrounded == {
+        "success": True,
+        "live_evidence_available": False,
+        "reply_received": None,
+        "clarification_required": True,
+        "clarification": "Which email do you mean?",
+    }
+
+
+@pytest.mark.asyncio
+async def test_multiple_cross_conversation_sends_to_named_recipient_are_not_guessed(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    for index in (1, 2):
+        await _record_verified_send(
+            value,
+            conversation_id=f"usr:aaron:old-{index}",
+            recipient="amber.gill1992@outlook.com",
+            suffix=f"ambiguous-{index}",
+        )
+    value.registry.execute = AsyncMock(return_value=_unique_amber_contact())
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="new-chat",
+        principal_id="aaron",
+        user_text="Any reply from Amber?",
+    )
+
+    assert result["success"] is True
+    assert result["clarification_required"] is True
+    assert "more than one recent email to Amber" in result["clarification"]
+    assert value.registry.execute.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reply_referent_never_uses_another_principals_send_receipt(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    claim = await value.receipts.begin(
+        request_id="amber-send",
+        conversation_id="usr:amber:private",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="private-draft",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "amber"},
+        idempotency_key="amber-private-context-send",
+    )
+    await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        result={
+            "status": "sent",
+            "message_id": "private-sent",
+            "thread_id": "private-thread",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    empty_search = SimpleNamespace(
+        success=True,
+        data={"messages": []},
+        error=None,
+        provider_reference=None,
+    )
+    value.registry.execute = AsyncMock(side_effect=[_unique_amber_contact(), empty_search])
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text="Has Amber replied?",
+    )
+
+    assert result["success"] is True
+    assert result["clarification_required"] is True
+    assert all(
+        request.args[0].capability_id != "gmail.reply_status"
+        for request in value.registry.execute.await_args_list
+    )
+
+
 @pytest.mark.asyncio
 async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
     engine = AIEngine.__new__(AIEngine)
@@ -1157,6 +1503,10 @@ async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
         "Check my Gmail inbox and tell me if I have received a reply to the email "
         "you just sent to amber.gill1992@outlook.com."
     )
+    history = [
+        {"role": "user", "content": "I sent Amber an email earlier."},
+        {"role": "assistant", "content": "That email was sent."},
+    ]
 
     completed = await engine._execute_function(
         name="check_recent_gmail_reply",
@@ -1167,6 +1517,7 @@ async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
         actor=SimpleNamespace(user_key="aaron"),
         request_id="reply-status-request",
         authorization_text=exact,
+        history=history,
     )
 
     assert completed["result"]["reply_received"] is False
@@ -1177,7 +1528,7 @@ async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
         principal_id="aaron",
         request_id="reply-status-request",
         user_text=exact,
-        history=(),
+        history=history,
     )
 
 
