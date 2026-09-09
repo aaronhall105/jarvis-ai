@@ -11,6 +11,8 @@ from app.response_presentation import (
     clean_email_reply_body,
     present_user_response,
     render_gmail_reply_status,
+    render_home_state_evidence,
+    render_presence_evidence,
 )
 
 
@@ -179,6 +181,76 @@ def test_gmail_no_reply_unavailable_ambiguity_and_attachment_are_natural() -> No
     assert ambiguous == "Which email do you mean?"
     assert attachment == (
         "Yeah, Amber replied with an attachment, but there wasn’t any message text."
+    )
+
+
+def test_home_state_renderer_does_not_call_unavailable_light_off() -> None:
+    response = render_home_state_evidence(
+        [
+            {
+                "tool": "search_entity_states",
+                "result": {
+                    "success": True,
+                    "entities": [
+                        {
+                            "name": "Living Room Floodlight",
+                            "state": "off",
+                            "available": True,
+                        },
+                        {
+                            "name": "Living Room LED Ring",
+                            "state": "unavailable",
+                            "available": False,
+                        },
+                    ],
+                },
+            }
+        ],
+        request_text="Are the living-room lights on?",
+    )
+
+    assert response == (
+        "Living Room Floodlight is off, but I can’t confirm Living Room LED Ring "
+        "because it’s unavailable."
+    )
+    assert "both" not in response.casefold()
+
+    assert (
+        render_home_state_evidence(
+            [
+                {
+                    "tool": "get_entity_state",
+                    "result": {"success": True, "entity": {"name": "Lamp", "state": "off"}},
+                }
+            ],
+            request_text="Show me the raw JSON state for the lamp",
+        )
+        is None
+    )
+
+
+def test_presence_renderer_is_natural_but_keeps_conflicting_evidence() -> None:
+    at_home = render_presence_evidence(
+        {
+            "person": {"name": "Amber", "state": "home"},
+            "source": {"name": "Amber Phone", "state": "home"},
+            "conflicts": [],
+        },
+        person_name="Amber",
+    )
+    conflicted = render_presence_evidence(
+        {
+            "person": {"name": "Aaron", "state": "home"},
+            "conflicts": [{"name": "Aaron Phone", "state": "not_home"}],
+        },
+        person_name="Aaron",
+        first_person=True,
+    )
+
+    assert at_home == "Amber’s at home."
+    assert conflicted == (
+        "Home Assistant says you are at home, but Aaron Phone says away, "
+        "so I can’t confirm that properly."
     )
 
 
