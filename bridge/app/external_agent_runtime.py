@@ -18,6 +18,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from app.agent_planner import (
     SQLitePlanStore,
 )
 from app.connectors import (
+    ActionReceipt,
     ActionReceiptStore,
     CapabilityAccess,
     CapabilityMetadata,
@@ -1484,9 +1486,14 @@ class ExternalAgentRuntime:
         else:
             google_executable = []
 
+        reply_status_intent = reply_read_intent or self._contextual_gmail_follow_up(
+            text,
+            history,
+        )
         google_tool = google_model_tool(google_executable)
         if (
             google_tool is not None
+            and not reply_status_intent
             and not monitor_management_intent
             and not retention_intent
             and not reply_monitor_intent
@@ -1520,7 +1527,7 @@ class ExternalAgentRuntime:
                 }
             )
         if (
-            self._contextual_gmail_follow_up(text, history)
+            reply_status_intent
             and "gmail.reply_status" in executable
             and not monitor_management_intent
             and not retention_intent
@@ -1531,9 +1538,10 @@ class ExternalAgentRuntime:
                     "type": "function",
                     "name": "check_recent_gmail_reply",
                     "description": (
-                        "Check live Gmail for an inbound reply using the latest verified "
-                        "gmail.send receipt in this same conversation. Prefer this over "
-                        "sender or subject guessing. This is read-only."
+                        "Check live Gmail for an inbound reply using exact verified gmail.send "
+                        "receipt evidence owned by this principal. If no matching receipt exists "
+                        "and the current user supplied one literal recipient, recover the latest "
+                        "exact matching Sent message with a bounded Gmail read. This is read-only."
                     ),
                     "parameters": {
                         "type": "object",
@@ -2199,17 +2207,26 @@ class ExternalAgentRuntime:
         conversation_id: str,
         principal_id: str,
         user_text: str,
-    ) -> tuple[Any, str] | None:
+    ) -> tuple[ActionReceipt, str, str] | None:
         scoped_conversation = self.planner_executor.scope_conversation(
             conversation_id,
             principal_id,
         )
-        receipts = await self.receipts.list_recent(
+        literal_recipients = self._literal_user_emails(user_text)
+        same_conversation = await self.receipts.list_recent(
             limit=100,
             conversation_id=scoped_conversation,
         )
-        literal_recipients = self._literal_user_emails(user_text)
-        for receipt in receipts:
+        recent = await self.receipts.list_recent(limit=500)
+        owner_prefix = f"usr:{principal_id}:"
+        other_owned = [
+            receipt
+            for receipt in recent
+            if receipt.conversation_id != scoped_conversation
+            and str(receipt.conversation_id or "").startswith(owner_prefix)
+        ]
+
+        def eligible(receipt: ActionReceipt) -> tuple[ActionReceipt, str] | None:
             result = receipt.result
             if (
                 receipt.status is not ReceiptStatus.VERIFIED
@@ -2218,15 +2235,29 @@ class ExternalAgentRuntime:
                 or not result.get("message_id")
                 or not result.get("thread_id")
             ):
-                continue
+                return None
             try:
                 recipient = GoogleConnector._recipient(
                     str(result.get("recipient") or "")
                 ).casefold()
             except ValueError:
-                continue
-            if not literal_recipients or recipient in literal_recipients:
-                return receipt, recipient
+                return None
+            if literal_recipients and recipient not in literal_recipients:
+                return None
+            return receipt, recipient
+
+        for receipt in same_conversation:
+            match = eligible(receipt)
+            if match is not None:
+                return match[0], match[1], "same_conversation_receipt"
+
+        owned_matches = [match for receipt in other_owned if (match := eligible(receipt))]
+        if literal_recipients and owned_matches:
+            return owned_matches[0][0], owned_matches[0][1], "principal_durable_receipt"
+        # Without an explicit recipient, a cross-conversation receipt is safe
+        # only when it is the principal's sole possible sent referent.
+        if len(owned_matches) == 1:
+            return owned_matches[0][0], owned_matches[0][1], "principal_durable_receipt"
         return None
 
     async def _create_recent_gmail_reply_monitor(
@@ -2249,7 +2280,7 @@ class ExternalAgentRuntime:
             raise ValueError(
                 "No verified sent Gmail message in this conversation matched the monitor request"
             )
-        receipt, recipient = anchor
+        receipt, recipient, _ = anchor
         sent = receipt.result
         return await self.create_external_monitor(
             conversation_id=conversation_id,
@@ -2304,40 +2335,112 @@ class ExternalAgentRuntime:
         principal_id: str,
         user_text: str,
     ) -> dict[str, Any]:
-        """Resolve a sent anchor from verified receipts, then inspect Gmail live."""
+        """Resolve an exact sent anchor, then inspect its Gmail thread live."""
 
         anchor = await self._verified_gmail_send_anchor(
             conversation_id=conversation_id,
             principal_id=principal_id,
             user_text=user_text,
         )
-        if anchor is None:
-            return {
-                "success": False,
-                "live_evidence_available": False,
-                "reply_received": None,
-                "error": (
-                    "No verified sent Gmail message in this conversation matched the request"
-                ),
-            }
-        anchor_receipt, recipient = anchor
-        result = anchor_receipt.result
         scoped_conversation = self.planner_executor.scope_conversation(
             conversation_id,
             principal_id,
         )
+        receipt_action_id: str | None = None
+        if anchor is not None:
+            anchor_receipt, recipient, anchor_source = anchor
+            result = anchor_receipt.result
+            sent_message_id = str(result["message_id"])
+            thread_id = str(result["thread_id"])
+            receipt_action_id = str(anchor_receipt.action_id)
+        else:
+            literal_recipients = self._literal_user_emails(user_text)
+            if len(literal_recipients) != 1:
+                return {
+                    "success": False,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "error": (
+                        "No principal-owned verified Gmail send receipt matched the request; "
+                        "state one exact recipient to recover the sent message safely"
+                    ),
+                }
+            recipient = next(iter(literal_recipients))
+            search = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id="gmail.search",
+                    payload={"query": f"in:sent to:{recipient}", "limit": 10},
+                    request_id=str(uuid.uuid4()),
+                    conversation_id=scoped_conversation,
+                    principal_id=principal_id,
+                    operation="recover_exact_sent_message_for_reply_status",
+                    target=recipient,
+                ),
+                refresh_health=True,
+            )
+            if not search.success:
+                return {
+                    "success": False,
+                    "live_evidence_available": False,
+                    "reply_received": None,
+                    "error": search.error or "Gmail Sent-mail recovery failed",
+                }
+            candidates: list[tuple[int | None, str, str]] = []
+            for item in search.data.get("messages") or ():
+                if not isinstance(item, Mapping):
+                    continue
+                labels = {str(label) for label in item.get("label_ids") or ()}
+                message_id = str(item.get("message_id") or "").strip()
+                candidate_thread = str(item.get("thread_id") or "").strip()
+                addresses: set[str] = set()
+                for _, address in getaddresses([str(item.get("to") or "")]):
+                    try:
+                        addresses.add(GoogleConnector._recipient(address).casefold())
+                    except ValueError:
+                        continue
+                raw_timestamp = item.get("internal_date_ms")
+                timestamp = int(raw_timestamp) if isinstance(raw_timestamp, int) else None
+                if "SENT" in labels and message_id and candidate_thread and recipient in addresses:
+                    candidates.append((timestamp, message_id, candidate_thread))
+            candidates.sort(
+                key=lambda item: item[0] if item[0] is not None else -1,
+                reverse=True,
+            )
+            if not candidates:
+                return {
+                    "success": False,
+                    "live_evidence_available": True,
+                    "reply_received": None,
+                    "error": f"No exact Sent message to {recipient} was found",
+                }
+            if candidates[0][0] is None or (
+                len(candidates) > 1 and candidates[1][0] == candidates[0][0]
+            ):
+                return {
+                    "success": False,
+                    "live_evidence_available": True,
+                    "reply_received": None,
+                    "error": (
+                        f"Multiple sent messages to {recipient} are equally recent; "
+                        "the reply target is ambiguous"
+                    ),
+                    "candidate_message_ids": [item[1] for item in candidates[:10]],
+                }
+            _, sent_message_id, thread_id = candidates[0]
+            anchor_source = "bounded_exact_recipient_sent_search"
+
         execution = await self.registry.execute(
             CapabilityRequest(
                 capability_id="gmail.reply_status",
                 payload={
-                    "thread_id": str(result["thread_id"]),
-                    "sent_message_id": str(result["message_id"]),
+                    "thread_id": thread_id,
+                    "sent_message_id": sent_message_id,
                 },
                 request_id=str(uuid.uuid4()),
                 conversation_id=scoped_conversation,
                 principal_id=principal_id,
                 operation="check_reply_after_verified_send",
-                target=str(result["thread_id"]),
+                target=thread_id,
             ),
             refresh_health=True,
         )
@@ -2354,8 +2457,10 @@ class ExternalAgentRuntime:
             "live_evidence_available": True,
             "reply_received": evidence.get("reply_received") is True,
             "recipient": recipient,
-            "sent_message_id": result["message_id"],
-            "thread_id": result["thread_id"],
+            "sent_message_id": sent_message_id,
+            "thread_id": thread_id,
+            "anchor_source": anchor_source,
+            "send_receipt_action_id": receipt_action_id,
             "reply_count": int(evidence.get("reply_count") or 0),
             "replies": list(evidence.get("replies") or ()),
             "provider_reference": execution.provider_reference,
@@ -2743,7 +2848,7 @@ class ExternalAgentRuntime:
             r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])"
             r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
             r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
-            r"(?![A-Za-z0-9.-])"
+            r"(?![A-Za-z0-9-])"
         )
         addresses: set[str] = set()
         for match in pattern.finditer(str(user_text or "")):

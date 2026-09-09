@@ -3,6 +3,7 @@ from app.ai_engine import (
     RequestRouter,
     unbacked_future_promise_reply,
     unsupported_external_capability_reply,
+    verified_gmail_reply_status_reply,
     verified_monitor_creation_reply,
     verified_plan_creation_reply,
     unbacked_external_write_claim_reply,
@@ -91,6 +92,67 @@ def test_unavailable_external_capability_cannot_be_claimed() -> None:
         )
         is None
     )
+
+
+def test_reply_status_read_does_not_trigger_external_write_guard() -> None:
+    exact = (
+        "Check my Gmail inbox and tell me if I have received a reply to the email "
+        "you just sent to amber.gill1992@outlook.com."
+    )
+    verified_read = {
+        "tool": "check_recent_gmail_reply",
+        "result": {
+            "success": True,
+            "reply_received": False,
+            "recipient": "amber.gill1992@outlook.com",
+        },
+    }
+    assert unsupported_external_capability_reply(exact, [verified_read]) is None
+    assert unsupported_external_capability_reply("Have I got any reply?", []) is None
+    assert unsupported_external_capability_reply("Did she reply?", []) is None
+    assert unsupported_external_capability_reply("Has Amber replied yet?", []) is None
+    # The write guard itself remains active for a genuine reply command.
+    assert unsupported_external_capability_reply("Reply to that email saying thanks", [])
+    assert unsupported_external_capability_reply("Do reply to that email saying thanks", [])
+
+
+def test_reply_status_answer_is_derived_from_provider_evidence() -> None:
+    no_reply = verified_gmail_reply_status_reply(
+        [
+            {
+                "tool": "check_recent_gmail_reply",
+                "result": {
+                    "success": True,
+                    "reply_received": False,
+                    "recipient": "amber.gill1992@outlook.com",
+                    "replies": [],
+                },
+            }
+        ]
+    )
+    assert no_reply == "No, I haven’t found a reply from amber.gill1992@outlook.com yet."
+
+    reply = verified_gmail_reply_status_reply(
+        [
+            {
+                "tool": "check_recent_gmail_reply",
+                "result": {
+                    "success": True,
+                    "reply_received": True,
+                    "recipient": "amber.gill1992@outlook.com",
+                    "reply_count": 1,
+                    "replies": [
+                        {
+                            "from": "Amber <amber.gill1992@outlook.com>",
+                            "snippet": "Yes, that works for me.",
+                        }
+                    ],
+                },
+            }
+        ]
+    )
+    assert reply is not None
+    assert "Yes, that works for me." in reply
 
 
 def test_book_research_is_not_misclassified_as_a_booking_action() -> None:
