@@ -603,6 +603,16 @@ _UNSUPPORTED_EXTERNAL_ACTION_PATTERN = re.compile(
     re.I,
 )
 
+_EXTERNAL_REPLY_STATUS_READ_PATTERN = re.compile(
+    r"\b(?:have|has)\b.{0,100}"
+    r"\b(?:got|received|reply|replies|replied|response|responded|answered|heard back)\b|"
+    r"\bdid\b.{0,100}\b(?:reply|replied|respond|responded|answer|answered)\b|"
+    r"\bdo\s+(?:i|we)\s+have\b.{0,80}\b(?:reply|response)\b|"
+    r"\b(?:check|find out|see|tell me)\b.{0,180}"
+    r"\b(?:received|got|reply|replies|replied|response|responded|heard back)\b",
+    re.I,
+)
+
 _UNBACKED_FUTURE_PROMISE_PATTERN = re.compile(
     r"\b(?:i(?:'ll| will)\s+(?:get back to you|check(?: again| later)?|let you know|"
     r"monitor|update you|keep an eye(?: on (?:it|this|that))?|"
@@ -679,6 +689,12 @@ def unsupported_external_capability_reply(
 ) -> str | None:
     """Block execution claims for integrations that have no registered tool."""
     if not _UNSUPPORTED_EXTERNAL_ACTION_PATTERN.search(text):
+        return None
+    # "Did she reply?" and "have I received a reply to the email I sent?"
+    # describe an external READ. In particular, the words "reply to the
+    # email" must not turn a reply-status question into a request to write a
+    # reply. Provider availability is handled separately from live state.
+    if _EXTERNAL_REPLY_STATUS_READ_PATTERN.search(text):
         return None
     if _verified_external_write_evidence(completed_calls):
         return None
@@ -802,6 +818,40 @@ def unbacked_external_write_claim_reply(
         "I don’t have verified execution evidence for that external write, so I "
         "can’t claim it was completed."
     )
+
+
+def verified_gmail_reply_status_reply(
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Render only provider-backed reply status from the dedicated read tool."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "check_recent_gmail_reply":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping):
+            return "I couldn’t verify whether that email received a reply."
+        if result.get("success") is not True:
+            error = str(result.get("error") or "Gmail reply status could not be verified").strip()
+            return f"I couldn’t verify whether that email received a reply: {error}."
+        recipient = str(result.get("recipient") or "the recipient").strip()
+        if result.get("reply_received") is not True:
+            return f"No, I haven’t found a reply from {recipient} yet."
+        replies = [item for item in result.get("replies") or () if isinstance(item, Mapping)]
+        latest = replies[-1] if replies else {}
+        sender = str(latest.get("from") or recipient).strip()
+        evidence_text = " ".join(str(latest.get("snippet") or latest.get("body") or "").split())[
+            :500
+        ]
+        count = max(1, int(result.get("reply_count") or len(replies) or 1))
+        noun = "reply" if count == 1 else "replies"
+        if evidence_text:
+            return (
+                f"Yes — I found {count} {noun}. The latest reply from {sender} says: "
+                f"{evidence_text}"
+            )
+        return f"Yes — I found {count} {noun} from {sender}."
+    return None
 
 
 class RequestIntent(str, Enum):
@@ -2347,6 +2397,7 @@ class AIEngine:
                 "list_external_monitors",
                 "cancel_external_monitor",
                 "google_integration",
+                "check_recent_gmail_reply",
             }:
                 if name == "create_personal_plan":
                     raw_steps = arguments.get("steps")
@@ -5118,7 +5169,15 @@ class AIEngine:
         )
         if provider_low_confidence_control:
             runtime_metrics.increment("voice_low_confidence_controls_blocked")
-        user_text = understanding.interpreted_text
+        # Second-stage interpretation is semantic context, not authority. It
+        # has occasionally inserted spaces into a literal address. Keep the
+        # complete current request intact for any turn containing an address so
+        # recipient matching and provider routing see the exact supplied value.
+        user_text = (
+            raw_user_text
+            if re.search(r"\b[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@", raw_user_text)
+            else understanding.interpreted_text
+        )
         if dialogue_resolution.rewritten_text and dialogue_resolution.clear_goal:
             await self.dialogue.clear_goal(
                 resolved_conversation_id,
@@ -6392,11 +6451,15 @@ class AIEngine:
         # This installation has no support, email, contact, or booking tool, so
         # prevent a fluent model answer from implying that one is available.
         unavailable_reply = unsupported_external_capability_reply(
-            user_text,
+            raw_user_text,
             completed_calls,
         )
         if unavailable_reply is not None:
             final_reply = unavailable_reply
+
+        reply_status_reply = verified_gmail_reply_status_reply(completed_calls)
+        if reply_status_reply is not None:
+            final_reply = reply_status_reply
 
         if external_runtime is not None:
             try:

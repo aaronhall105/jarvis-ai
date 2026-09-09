@@ -13,6 +13,7 @@ from app.agent_planner import PlanStatus, StepStatus
 from app.ai_engine import AIEngine
 from app.external_agent_runtime import ConnectorPlannerExecutor, ExternalAgentRuntime
 from app.connectors import (
+    ActionReceiptStore,
     CapabilityAccess,
     CapabilityMetadata,
     CapabilityRequest,
@@ -184,12 +185,16 @@ def test_literal_recipient_authorization_requires_exact_email():
         user_text=original,
         steps_by_id={},
     )
+    assert ExternalAgentRuntime._literal_user_emails("Has amber.gill1992@outlook.com replied?") == {
+        "amber.gill1992@outlook.com"
+    }
 
 
 def test_ai_ask_wires_original_text_into_external_authorization():
     source = inspect.getsource(AIEngine.ask)
 
-    assert "user_text = understanding.interpreted_text" in source
+    assert "else understanding.interpreted_text" in source
+    assert "recipient matching and provider routing" in source
     assert "authorization_text=raw_user_text" in source
     assert "history=history" in source
 
@@ -667,14 +672,17 @@ async def test_explicit_gmail_reads_and_priorities_expose_only_needed_reads(runt
         "Read that email",
     )
 
-    reply = await value.openai_tools("Have I got any reply?", principal_id="aaron")
-    assert {item["name"] for item in reply} == {"google_integration"}
-    reply_google = reply[0]
-    assert set(reply_google["parameters"]["properties"]["capability_id"]["enum"]) == {
-        "gmail.search",
-        "gmail.read",
-        "gmail.thread",
-    }
+    for reply_text in (
+        "Have I got any reply?",
+        "Did she reply?",
+        "Has Amber replied yet?",
+        (
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
+    ):
+        reply = await value.openai_tools(reply_text, principal_id="aaron")
+        assert {item["name"] for item in reply} == {"check_recent_gmail_reply"}
     assert not ExternalAgentRuntime._write_authorized(
         "gmail.reply",
         "Have I got any reply?",
@@ -832,7 +840,10 @@ async def test_recent_reply_check_anchors_to_same_conversation_verified_send_rec
     result = await value._check_recent_gmail_reply(
         conversation_id="mail",
         principal_id="aaron",
-        user_text=("Check whether amber.gill1992@outlook.com replied to the email I just sent"),
+        user_text=(
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
     )
 
     assert result["success"] is True
@@ -881,6 +892,292 @@ async def test_recent_reply_check_anchors_to_same_conversation_verified_send_rec
         label="Reply from amber.gill1992@outlook.com",
         notify=True,
         request_id="monitor-request",
+    )
+
+
+@pytest.mark.asyncio
+async def test_reply_check_finds_inbound_reply_from_durable_receipt_in_new_conversation(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    claim = await value.receipts.begin(
+        request_id="send-request",
+        conversation_id="usr:aaron:original-chat",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="draft-1",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "aaron", "payload": {"draft_id": "draft-1"}},
+        idempotency_key="durable-send-new-conversation",
+    )
+    completed = await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference="sent-1",
+        result={
+            "status": "sent",
+            "message_id": "sent-1",
+            "thread_id": "thread-1",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    # A new store object models Core restarting before the later check.
+    value.receipts = ActionReceiptStore(value.receipts.path)
+    execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            data={
+                "reply_received": True,
+                "reply_count": 1,
+                "reply_message_ids": ["reply-1"],
+                "latest_reply_message_id": "reply-1",
+                "replies": [
+                    {
+                        "message_id": "reply-1",
+                        "from": "Amber <amber.gill1992@outlook.com>",
+                        "snippet": "Yes, that works for me.",
+                    }
+                ],
+                "evidence": {"subsequent_inbound_only": True},
+            },
+            error=None,
+            provider_reference="thread-1",
+        )
+    )
+    value.registry.execute = execute
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="new-chat",
+        principal_id="aaron",
+        user_text=(
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is True
+    assert result["anchor_source"] == "principal_durable_receipt"
+    assert result["send_receipt_action_id"] == completed.action_id
+    request = execute.await_args.args[0]
+    assert request.payload == {"thread_id": "thread-1", "sent_message_id": "sent-1"}
+    assert request.conversation_id == "usr:aaron:new-chat"
+
+
+@pytest.mark.asyncio
+async def test_reply_check_recovers_exact_latest_sent_message_without_receipt(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    other_owner = await value.receipts.begin(
+        request_id="amber-send-request",
+        conversation_id="usr:amber:private-chat",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="amber-draft",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "amber", "payload": {"draft_id": "amber-draft"}},
+        idempotency_key="other-principal-send-anchor",
+    )
+    await value.receipts.complete(
+        other_owner.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference="other-owner-sent",
+        result={
+            "status": "sent",
+            "message_id": "other-owner-sent",
+            "thread_id": "other-owner-thread",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    execute = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                success=True,
+                data={
+                    "messages": [
+                        {
+                            "message_id": "sent-new",
+                            "thread_id": "thread-new",
+                            "internal_date_ms": 2_000,
+                            "label_ids": ["SENT"],
+                            "to": "Amber <amber.gill1992@outlook.com>",
+                        },
+                        {
+                            "message_id": "sent-old",
+                            "thread_id": "thread-old",
+                            "internal_date_ms": 1_000,
+                            "label_ids": ["SENT"],
+                            "to": "amber.gill1992@outlook.com",
+                        },
+                    ]
+                },
+                error=None,
+                provider_reference="sent-new",
+            ),
+            SimpleNamespace(
+                success=True,
+                data={
+                    "reply_received": False,
+                    "reply_count": 0,
+                    "replies": [],
+                    "evidence": {"subsequent_inbound_only": True},
+                },
+                error=None,
+                provider_reference="thread-new",
+            ),
+        ]
+    )
+    value.registry.execute = execute
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text=(
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
+    )
+
+    assert result["success"] is True
+    assert result["reply_received"] is False
+    assert result["anchor_source"] == "bounded_exact_recipient_sent_search"
+    assert result["send_receipt_action_id"] is None
+    search_request = execute.await_args_list[0].args[0]
+    assert search_request.capability_id == "gmail.search"
+    assert search_request.payload == {
+        "query": "in:sent to:amber.gill1992@outlook.com",
+        "limit": 10,
+    }
+    status_request = execute.await_args_list[1].args[0]
+    assert status_request.capability_id == "gmail.reply_status"
+    assert status_request.payload == {
+        "thread_id": "thread-new",
+        "sent_message_id": "sent-new",
+    }
+
+
+@pytest.mark.asyncio
+async def test_reply_check_fails_closed_for_equally_recent_sent_candidates(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=True,
+            data={
+                "messages": [
+                    {
+                        "message_id": message_id,
+                        "thread_id": f"thread-{message_id}",
+                        "internal_date_ms": 2_000,
+                        "label_ids": ["SENT"],
+                        "to": "amber.gill1992@outlook.com",
+                    }
+                    for message_id in ("sent-a", "sent-b")
+                ]
+            },
+            error=None,
+            provider_reference="sent-a",
+        )
+    )
+    value.registry.execute = execute
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text=(
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
+    )
+
+    assert result["success"] is False
+    assert result["reply_received"] is None
+    assert "ambiguous" in result["error"]
+    assert execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_check_returns_real_provider_error(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    claim = await value.receipts.begin(
+        request_id="send-request",
+        conversation_id="usr:aaron:mail",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="draft-1",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "aaron", "payload": {"draft_id": "draft-1"}},
+        idempotency_key="provider-unavailable-send-anchor",
+    )
+    await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference="sent-1",
+        result={
+            "status": "sent",
+            "message_id": "sent-1",
+            "thread_id": "thread-1",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    value.registry.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            success=False,
+            data={},
+            error="Google token refresh failed",
+            provider_reference=None,
+        )
+    )
+
+    result = await value._check_recent_gmail_reply(
+        conversation_id="mail",
+        principal_id="aaron",
+        user_text=(
+            "Check my Gmail inbox and tell me if I have received a reply to the email "
+            "you just sent to amber.gill1992@outlook.com."
+        ),
+    )
+
+    assert result["success"] is False
+    assert result["reply_received"] is None
+    assert result["error"] == "Google token refresh failed"
+
+
+@pytest.mark.asyncio
+async def test_ai_dispatches_reply_status_as_external_read_with_original_text():
+    engine = AIEngine.__new__(AIEngine)
+    runtime = SimpleNamespace(
+        execute_model_tool=AsyncMock(return_value={"success": True, "reply_received": False})
+    )
+    engine.external_runtime = runtime
+    exact = (
+        "Check my Gmail inbox and tell me if I have received a reply to the email "
+        "you just sent to amber.gill1992@outlook.com."
+    )
+
+    completed = await engine._execute_function(
+        name="check_recent_gmail_reply",
+        arguments_json="{}",
+        user_text="semantically changed text",
+        authorised_tools={"check_recent_gmail_reply"},
+        conversation_id="usr:aaron:mail",
+        actor=SimpleNamespace(user_key="aaron"),
+        request_id="reply-status-request",
+        authorization_text=exact,
+    )
+
+    assert completed["result"]["reply_received"] is False
+    runtime.execute_model_tool.assert_awaited_once_with(
+        "check_recent_gmail_reply",
+        {},
+        conversation_id="usr:aaron:mail",
+        principal_id="aaron",
+        request_id="reply-status-request",
+        user_text=exact,
+        history=(),
     )
 
 
@@ -976,15 +1273,7 @@ async def test_contextual_gmail_reply_follow_up_is_read_only(runtime):
         history=history,
     )
 
-    google_tool = next(item for item in tools if item["name"] == "google_integration")
-
-    capabilities = set(google_tool["parameters"]["properties"]["capability_id"]["enum"])
-
-    assert capabilities == {
-        "gmail.search",
-        "gmail.read",
-        "gmail.thread",
-    }
+    assert {item["name"] for item in tools} == {"check_recent_gmail_reply"}
 
     # Previous conversation context must not grant write authority.
     assert not ExternalAgentRuntime._write_authorized(
