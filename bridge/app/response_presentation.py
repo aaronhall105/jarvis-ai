@@ -226,7 +226,36 @@ def render_home_state_evidence(
 
     if technical_output_requested(request_text):
         return None
-    for call in reversed(calls):
+    entities: list[Mapping[str, Any]] = []
+    seen_entities: set[str] = set()
+    unresolved_queries: list[str] = []
+
+    def add_entity(entity: Any) -> None:
+        if not isinstance(entity, Mapping):
+            return
+        identity = str(entity.get("entity_id") or entity.get("name") or id(entity)).casefold()
+        if identity in seen_entities:
+            return
+        seen_entities.add(identity)
+        entities.append(entity)
+
+    def add_unresolved(query: Any) -> None:
+        value = " ".join(str(query or "").split()).strip()
+        if not value:
+            return
+        lowered = value.casefold()
+        if any(lowered == current.casefold() for current in unresolved_queries):
+            return
+        # Model retries often shorten the same unresolved phrase. Keep the most
+        # descriptive form so a clarification remains useful to the user.
+        if any(lowered in current.casefold() for current in unresolved_queries):
+            return
+        unresolved_queries[:] = [
+            current for current in unresolved_queries if current.casefold() not in lowered
+        ]
+        unresolved_queries.append(value)
+
+    for call in calls:
         if call.get("tool") not in {
             "search_entity_states",
             "list_area_states",
@@ -237,49 +266,104 @@ def render_home_state_evidence(
         if not isinstance(result, Mapping) or result.get("success") is not True:
             continue
         if call.get("tool") == "get_entity_state":
-            raw_entities = [result.get("entity")]
+            add_entity(result.get("entity"))
+            continue
+        if call.get("tool") == "search_entity_states":
+            resolution = str(result.get("resolution") or "").casefold()
+            if resolution in {"ambiguous", "zero"}:
+                add_unresolved(result.get("query") or call.get("arguments", {}).get("query"))
+                continue
+            selected = result.get("selected_entity")
+            if isinstance(selected, Mapping):
+                add_entity(selected)
+                continue
+            raw_entities = list(result.get("entities") or ())
+            if resolution == "ranked" and len(raw_entities) != 1:
+                add_unresolved(result.get("query") or call.get("arguments", {}).get("query"))
+                continue
         else:
             raw_entities = list(result.get("entities") or ())
-        entities = [item for item in raw_entities if isinstance(item, Mapping)]
-        if not entities:
-            return "I couldn’t find a matching current state."
+        for entity in raw_entities:
+            add_entity(entity)
 
-        known: list[tuple[str, str]] = []
-        unavailable: list[str] = []
-        for entity in entities[:5]:
-            name = _entity_name(entity)
-            state = _readable_state(entity.get("display_value") or entity.get("state"))
-            if state in {"", "unknown", "unavailable"} or entity.get("available") is False:
-                unavailable.append(name)
-            else:
-                known.append((name, state))
+    if not entities:
+        if unresolved_queries:
+            return f"I couldn’t confidently match {unresolved_queries[0]} to one device."
+        return None
 
-        normalised_request = " ".join(str(request_text or "").casefold().split()).strip("?!. ")
-        asks_on = normalised_request.startswith(("is ", "are ")) and normalised_request.endswith(
-            " on"
-        )
-        if asks_on and known:
-            switched_on = [name for name, state in known if state == "on"]
-            switched_off = [name for name, state in known if state == "off"]
-            if switched_on:
-                names = ", ".join(switched_on)
-                return f"Yes — {names} {'is' if len(switched_on) == 1 else 'are'} on."
-            if switched_off and unavailable:
-                off_names = ", ".join(switched_off)
+    known: list[tuple[str, str]] = []
+    unavailable: list[str] = []
+    for entity in entities[:5]:
+        name = _entity_name(entity)
+        state = _readable_state(entity.get("display_value") or entity.get("state"))
+        if state in {"", "unknown", "unavailable"} or entity.get("available") is False:
+            unavailable.append(name)
+        else:
+            known.append((name, state))
+
+    normalised_request = " ".join(str(request_text or "").casefold().split()).strip("?!. ")
+    asks_on = normalised_request.startswith(("is ", "are ")) and normalised_request.endswith(" on")
+    unresolved_note = (
+        f"I couldn’t confidently match {unresolved_queries[0]} to one device"
+        if unresolved_queries
+        else ""
+    )
+    if asks_on and known:
+        switched_on = [name for name, state in known if state == "on"]
+        switched_off = [name for name, state in known if state == "off"]
+        if switched_on and switched_off:
+            on_names = ", ".join(switched_on)
+            off_names = ", ".join(switched_off)
+            answer = (
+                f"{on_names} {'is' if len(switched_on) == 1 else 'are'} on, while "
+                f"{off_names} {'is' if len(switched_off) == 1 else 'are'} off"
+            )
+            if unavailable:
                 unknown_names = ", ".join(unavailable)
-                return (
-                    f"{off_names} {'is' if len(switched_off) == 1 else 'are'} off, "
-                    f"but I can’t confirm {unknown_names} because "
-                    f"{'it’s' if len(unavailable) == 1 else 'they’re'} unavailable."
+                answer += (
+                    f", but I can’t confirm {unknown_names} because "
+                    f"{'it’s' if len(unavailable) == 1 else 'they’re'} unavailable"
                 )
-            if switched_off and len(switched_off) == len(known):
-                names = ", ".join(switched_off)
-                return f"No, {names} {'is' if len(switched_off) == 1 else 'are'} off."
+            if unresolved_note:
+                answer += f", and {unresolved_note}"
+            return answer + "."
+        if switched_on:
+            names = ", ".join(switched_on)
+            answer = f"Yes — {names} {'is' if len(switched_on) == 1 else 'are'} on"
+            if unavailable:
+                unknown_names = ", ".join(unavailable)
+                answer += (
+                    f", but I can’t confirm {unknown_names} because "
+                    f"{'it’s' if len(unavailable) == 1 else 'they’re'} unavailable"
+                )
+            if unresolved_note:
+                answer += f", but {unresolved_note}"
+            return answer + "."
+        if switched_off and unavailable:
+            off_names = ", ".join(switched_off)
+            unknown_names = ", ".join(unavailable)
+            answer = (
+                f"{off_names} {'is' if len(switched_off) == 1 else 'are'} off, "
+                f"but I can’t confirm {unknown_names} because "
+                f"{'it’s' if len(unavailable) == 1 else 'they’re'} unavailable"
+            )
+            if unresolved_note:
+                answer += f", and {unresolved_note}"
+            return answer + "."
+        if switched_off and len(switched_off) == len(known):
+            names = ", ".join(switched_off)
+            if unresolved_note:
+                return (
+                    f"{names} {'is' if len(switched_off) == 1 else 'are'} off, "
+                    f"but {unresolved_note}."
+                )
+            return f"No, {names} {'is' if len(switched_off) == 1 else 'are'} off."
 
-        parts = [f"{name} is {state}" for name, state in known]
-        parts.extend(f"I can’t confirm {name} because it’s unavailable" for name in unavailable)
-        return ". ".join(parts) + "."
-    return None
+    parts = [f"{name} is {state}" for name, state in known]
+    parts.extend(f"I can’t confirm {name} because it’s unavailable" for name in unavailable)
+    if unresolved_queries:
+        parts.append(f"I couldn’t confidently match {unresolved_queries[0]} to one device")
+    return ". ".join(parts) + "."
 
 
 def render_presence_evidence(
@@ -350,6 +434,16 @@ def present_user_response(
         if "no provider" in lowered or "not connected" in lowered:
             return "I can’t check Gmail because Google isn’t connected."
         return "I can’t check Gmail properly right now because Google is unavailable."
+    unavailable_separator = " is unavailable — "
+    if unavailable_separator in lowered:
+        label = text[: lowered.index(unavailable_separator)].strip()
+        reason = lowered.split(unavailable_separator, 1)[1]
+        if label and len(label) <= 80:
+            if any(word in reason for word in ("oauth", "token", "reconnect")):
+                return f"I can’t check {label} right now because it needs reconnecting."
+            if any(word in reason for word in ("configured", "adapter", "setup", "set up")):
+                return f"I can’t check {label} yet because it isn’t set up."
+            return f"I can’t check {label} properly right now."
     if lowered.startswith("jarvis core error:"):
         return "Something went wrong on my side, so I couldn’t finish that."
     if _INTERNAL_TERM.search(text):
