@@ -474,6 +474,45 @@ def test_home_state_renderer_keeps_generic_area_lists_and_exact_named_entities()
     )
 
 
+def test_home_state_renderer_keeps_generic_multi_result_domain_search() -> None:
+    response = render_home_state_evidence(
+        [
+            {
+                "tool": "search_entity_states",
+                "arguments": {
+                    "query": "living room light",
+                    "domain": "light",
+                    "area_id": "living_room",
+                },
+                "result": {
+                    "success": True,
+                    "resolution": "ambiguous",
+                    "query": "living room light",
+                    "entities": [
+                        {
+                            "entity_id": "light.living_room_floodlight",
+                            "name": "Living Room Floodlight",
+                            "state": "off",
+                        },
+                        {
+                            "entity_id": "light.home_assistant_voice_led_ring",
+                            "name": "Jarvis Voice Living Room LED Ring",
+                            "state": "unavailable",
+                            "available": False,
+                        },
+                    ],
+                },
+            }
+        ],
+        request_text="What are the current states of the living-room lights?",
+    )
+
+    assert response == (
+        "Living Room Floodlight is off. "
+        "I can’t confirm Jarvis Voice Living Room LED Ring because it’s unavailable."
+    )
+
+
 def test_presence_renderer_is_natural_but_keeps_conflicting_evidence() -> None:
     at_home = render_presence_evidence(
         {
