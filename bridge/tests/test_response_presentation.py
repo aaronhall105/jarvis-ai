@@ -10,6 +10,7 @@ from app.google_integration import GoogleConnector
 from app.response_presentation import (
     clean_email_reply_body,
     present_user_response,
+    render_gmail_message_action,
     render_gmail_reply_status,
     render_home_state_evidence,
     render_presence_evidence,
@@ -57,6 +58,57 @@ def test_global_presentation_keeps_natural_evidence_based_responses(
 
     assert presented == response
     assert not any(term in presented.casefold() for term in INTERNAL_TERMS)
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            {
+                "success": True,
+                "status": "verified",
+                "operation": "send",
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber Gill",
+                "provider_reference": "hidden",
+            },
+            "Done — I sent that email to Amber.",
+        ),
+        (
+            {
+                "success": True,
+                "status": "verified",
+                "operation": "draft",
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber",
+            },
+            "Done — I’ve drafted that email to Amber.",
+        ),
+        (
+            {
+                "operation": "send",
+                "clarification_required": True,
+                "clarification": "Which Amber do you mean?",
+            },
+            "Which Amber do you mean?",
+        ),
+        (
+            {"operation": "send", "success": False, "error": "OAuth token expired"},
+            "I couldn’t send that because Google needs reconnecting.",
+        ),
+    ],
+)
+def test_gmail_message_actions_are_natural_and_hide_evidence(
+    result: dict[str, object], expected: str
+) -> None:
+    rendered = render_gmail_message_action(result)
+    assert rendered == expected
+    assert not any(term in rendered.casefold() for term in INTERNAL_TERMS)
+
+
+def test_gmail_send_unavailable_response_keeps_action_specific_wording() -> None:
+    response = "I can’t send that right now because Gmail needs reconnecting."
+    assert present_user_response(response, request_text="Send Amber an email") == response
 
 
 @pytest.mark.parametrize(

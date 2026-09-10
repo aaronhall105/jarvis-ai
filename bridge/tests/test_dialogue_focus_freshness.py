@@ -81,6 +81,41 @@ class DialogueFocusFreshnessTests(unittest.IsolatedAsyncioTestCase):
             state.focus["gmail_reply"],
         )
 
+    async def test_verified_named_gmail_action_persists_exact_recipient_focus(self) -> None:
+        await self.dialogue.record_result(
+            "conversation",
+            intent="general",
+            success=True,
+            response="Done — I sent that email to Amber.",
+            calls=[
+                {
+                    "tool": "prepare_gmail_message",
+                    "result": {
+                        "success": True,
+                        "status": "verified",
+                        "operation": "send",
+                        "recipient": "amber.gill1992@outlook.com",
+                        "recipient_name": "Amber",
+                        "recipient_source": "google_contacts",
+                    },
+                }
+            ],
+        )
+
+        restarted = DialogueManager(f"{self.temp.name}/dialogue.db")
+        state = await restarted.get("conversation")
+
+        self.assertEqual(
+            {
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber",
+                "source": "google_contacts",
+                "operation": "send",
+                "observed_at": "2026-08-26T12:00:00+00:00",
+            },
+            state.focus["gmail_recipient"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -877,6 +877,162 @@ class ExternalAgentRuntime:
         return mailbox_language or not generic_web_subject
 
     @staticmethod
+    def _gmail_message_operation(text: str) -> str | None:
+        """Return an explicit CURRENT-turn new-message operation, if any."""
+
+        value = " ".join(
+            "".join(
+                character.casefold() if character.isalnum() else " "
+                for character in str(text or "")[:5_000]
+            ).split()
+        )
+        words = value.split()[:32]
+        if not words:
+            return None
+        if words[0] == "please":
+            words = words[1:]
+        if len(words) >= 3 and words[0] in {"can", "could", "would", "will"}:
+            if words[1] != "you":
+                return None
+            words = words[2:]
+            if words and words[0] == "please":
+                words = words[1:]
+        elif len(words) >= 5 and words[:4] in (
+            ["i", "want", "you", "to"],
+            ["i", "need", "you", "to"],
+        ):
+            words = words[4:]
+        if not words or words[0] in {"show", "tell", "what", "whether", "if"}:
+            return None
+        if words[0] in {"send", "email"}:
+            return "send"
+        if words[0] in {"draft", "compose", "write"} and "email" in words:
+            return "draft"
+        return None
+
+    @classmethod
+    def _new_gmail_message_operation(cls, text: str) -> str | None:
+        """Recognise a new outgoing email without treating quoted intent as authority."""
+
+        operation = cls._gmail_message_operation(text)
+        if operation is None or not cls._current_gmail_context(text):
+            return None
+        value = " ".join(str(text or "").casefold().split())
+        if re.search(r"\b(?:reply|forward)\b", value):
+            return None
+        return operation
+
+    @staticmethod
+    def _gmail_recipient_reference(text: str) -> str | None:
+        """Extract only the named/pronoun target phrase from a new-email command."""
+
+        rendered = " ".join(
+            "".join(
+                character if character.isalnum() or character in "'’-" else " "
+                for character in str(text or "")[:2_000]
+            ).split()
+        )
+        words = rendered.split()
+        lowered = [word.casefold() for word in words]
+        if not words:
+            return None
+
+        content_markers = {
+            "about",
+            "ask",
+            "asking",
+            "say",
+            "saying",
+            "tell",
+            "telling",
+            "with",
+        }
+        boundary = next(
+            (index for index, word in enumerate(lowered) if word in content_markers),
+            len(words),
+        )
+        words = words[:boundary]
+        lowered = lowered[:boundary]
+        if not words:
+            return None
+
+        start: int | None = None
+        end: int | None = None
+        if "email" in lowered:
+            email_index = lowered.index("email")
+            for marker in ("to", "for"):
+                try:
+                    marker_index = lowered.index(marker, email_index + 1)
+                except ValueError:
+                    continue
+                start = marker_index + 1
+                break
+            if start is None and lowered[0] == "email":
+                start = 1
+            if start is None and email_index > 1 and lowered[0] == "send":
+                if "message" in lowered[1:email_index]:
+                    end = lowered.index("message", 1, email_index)
+                    while end > 1 and lowered[end - 1] in {"a", "an", "the", "another"}:
+                        end -= 1
+                else:
+                    end = email_index
+                    while end > 1 and lowered[end - 1] in {"a", "an", "the", "another"}:
+                        end -= 1
+                start = 1
+        if start is None and "message" in lowered and lowered[0] == "send":
+            message_index = lowered.index("message")
+            if message_index > 1:
+                start, end = 1, message_index
+        if start is None:
+            return None
+
+        stop_words = {
+            "again",
+            "and",
+            "about",
+            "make",
+            "say",
+            "saying",
+            "subject",
+            "tell",
+            "telling",
+            "that",
+            "with",
+        }
+        selected: list[str] = []
+        for word in words[start:end]:
+            if word.casefold() in stop_words:
+                break
+            selected.append(word)
+            if len(selected) >= 6:
+                break
+        reference = " ".join(selected).strip(" -'’")
+        return reference or None
+
+    @classmethod
+    def _current_gmail_recipient_emails(cls, text: str) -> frozenset[str]:
+        """Extract literal addresses only from the command's recipient clause."""
+
+        value = str(text or "")[:5_000]
+        lowered = value.casefold()
+        cut = len(value)
+        for marker in (
+            " saying ",
+            " say ",
+            " asking ",
+            " ask ",
+            " telling ",
+            " tell ",
+            " about ",
+            " with the body ",
+            " with body ",
+        ):
+            position = lowered.find(marker)
+            if position >= 0:
+                cut = min(cut, position)
+        return cls._literal_user_emails(value[:cut])
+
+    @staticmethod
     def _gmail_briefing_intent(text: str) -> bool:
         value = " ".join(str(text or "").casefold().split())
         return bool(re.search(r"\b(?:inbox|email|gmail) briefing\b", value))
@@ -1305,6 +1461,13 @@ class ExternalAgentRuntime:
             status = statuses.get(provider_id)
             if status is None or not status.get("available"):
                 reason = str((status or {}).get("health_reason") or "No provider is configured")
+                if provider_id == "gmail" and self._new_gmail_message_operation(text) == "send":
+                    if any(
+                        marker in reason.casefold()
+                        for marker in ("oauth", "token", "authentication", "reconnect")
+                    ):
+                        return "I can’t send that right now because Gmail needs reconnecting."
+                    return "I can’t send that right now because Gmail is unavailable."
                 return f"{label} is unavailable — {reason}."
         return None
 
@@ -1365,6 +1528,7 @@ class ExternalAgentRuntime:
         current_gmail_request = self._current_gmail_service_request(text)
         gmail_management = self._gmail_management_write_capabilities(text)
         gmail_writes = self._gmail_write_capabilities(text)
+        gmail_message_operation = self._new_gmail_message_operation(text)
         gmail_context = self._current_gmail_context(text) or self._recent_gmail_context(history)
         domain_text = lowered
         for literal_email in self._literal_user_emails(text):
@@ -1414,7 +1578,11 @@ class ExternalAgentRuntime:
             or important_monitor_intent
         )
 
-        if (
+        if gmail_message_operation is not None:
+            # New-message writes use one deterministic target-resolution and
+            # execution boundary. The model supplies content, never an address.
+            google_executable = []
+        elif (
             contextual_read
             or reply_read_intent
             or priority_read_intent
@@ -1504,6 +1672,34 @@ class ExternalAgentRuntime:
             and not (briefing_intent and self._email_policies is not None)
         ):
             definitions.append(google_tool)
+        required_message_capabilities = {"gmail.draft"}
+        if gmail_message_operation == "send":
+            required_message_capabilities.add("gmail.send")
+        if gmail_message_operation is not None and required_message_capabilities <= executable:
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "prepare_gmail_message",
+                    "description": (
+                        "Create the new Gmail message requested in the CURRENT user turn. "
+                        "Jarvis resolves the exact recipient independently from trusted "
+                        "Contacts, dialogue or verified send evidence; never put an email "
+                        "address in these arguments. The server decides from the immutable "
+                        "current request whether to draft only or send, and returns a "
+                        "clarification without writing when the recipient is ambiguous."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string", "minLength": 1, "maxLength": 1000},
+                            "body": {"type": "string", "minLength": 1, "maxLength": 100000},
+                        },
+                        "required": ["subject", "body"],
+                        "additionalProperties": False,
+                    },
+                    "strict": True,
+                }
+            )
         if briefing_intent and self._email_policies is not None:
             definitions.append(
                 {
@@ -1875,6 +2071,7 @@ class ExternalAgentRuntime:
             )
         if (
             not retention_intent
+            and gmail_message_operation is None
             and (
                 not narrow_gmail_intent
                 or (
@@ -2006,6 +2203,16 @@ class ExternalAgentRuntime:
                 request_id=request_id,
                 user_text=user_text,
                 history=history,
+            )
+        if name == "prepare_gmail_message":
+            return await self._prepare_gmail_message(
+                arguments,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+                history=history,
+                dialogue_focus=dialogue_focus,
             )
         if name == "web_search":
             return await self.search(
@@ -2187,6 +2394,395 @@ class ExternalAgentRuntime:
                 polling_interval_seconds=int(arguments.get("polling_interval_seconds") or 900),
             )
         raise ValueError(f"Unsupported external agent tool: {name}")
+
+    @staticmethod
+    def _receipt_name_matches_address(name: str, address: str) -> bool:
+        """Match a stated person to exact local-part tokens, never an address suffix."""
+
+        name_terms = re.findall(r"[a-z]+", str(name or "").casefold())
+        local = str(address or "").partition("@")[0]
+        local_terms = re.findall(r"[a-z]+", local.casefold())
+        return bool(name_terms and all(term in local_terms for term in name_terms))
+
+    async def _resolve_gmail_message_recipient(
+        self,
+        *,
+        conversation_id: str,
+        principal_id: str,
+        user_text: str,
+        history: Sequence[Mapping[str, str]],
+        dialogue_focus: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve one exact write target from trusted read evidence."""
+
+        literal_recipients = self._current_gmail_recipient_emails(user_text)
+        if len(literal_recipients) > 1:
+            return {
+                "resolved": False,
+                "clarification_required": True,
+                "clarification": "Which email address should I use?",
+            }
+        current_reference = self._gmail_recipient_reference(user_text)
+        display_name = str(current_reference or "").strip()
+        if len(literal_recipients) == 1:
+            return {
+                "resolved": True,
+                "recipient": next(iter(literal_recipients)),
+                "recipient_name": None,
+                "source": "current_literal_address",
+            }
+
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            principal_id,
+        )
+        owner_prefix = f"usr:{principal_id}:"
+        same_conversation = await self.receipts.list_recent(
+            limit=100,
+            conversation_id=scoped_conversation,
+        )
+        recent = await self.receipts.list_recent(limit=500)
+
+        def verified_receipt_addresses(receipts: Sequence[ActionReceipt]) -> frozenset[str]:
+            addresses: set[str] = set()
+            for receipt in receipts:
+                if (
+                    receipt.status is not ReceiptStatus.VERIFIED
+                    or receipt.capability_id != "gmail.send"
+                    or not str(receipt.conversation_id or "").startswith(owner_prefix)
+                    or str(receipt.result.get("status") or "") != "sent"
+                ):
+                    continue
+                try:
+                    addresses.add(
+                        GoogleConnector._recipient(
+                            str(receipt.result.get("recipient") or "")
+                        ).casefold()
+                    )
+                except ValueError:
+                    continue
+            return frozenset(addresses)
+
+        owned_addresses = verified_receipt_addresses(recent)
+        same_addresses = verified_receipt_addresses(same_conversation)
+
+        pronouns = {"her", "him", "them", "it"}
+        reference = display_name
+        if reference.casefold() in pronouns:
+            reference = ""
+
+        if not reference:
+            for focus_key in ("gmail_recipient", "gmail_reply"):
+                raw_focus = (dialogue_focus or {}).get(focus_key)
+                if not isinstance(raw_focus, Mapping):
+                    continue
+                try:
+                    focused = GoogleConnector._recipient(
+                        str(raw_focus.get("recipient") or "")
+                    ).casefold()
+                except ValueError:
+                    continue
+                trusted_focus = (
+                    focus_key == "gmail_recipient"
+                    and str(raw_focus.get("source") or "")
+                    in {
+                        "current_literal_address",
+                        "google_contacts",
+                        "principal_verified_send",
+                        "grounded_dialogue_address",
+                        "same_conversation_verified_send",
+                        "conversation_focus",
+                    }
+                    and str(raw_focus.get("operation") or "") in {"draft", "send"}
+                ) or (
+                    focus_key == "gmail_reply"
+                    and bool(raw_focus.get("sent_message_id"))
+                    and bool(raw_focus.get("thread_id"))
+                )
+                if focused in owned_addresses or trusted_focus:
+                    return {
+                        "resolved": True,
+                        "recipient": focused,
+                        "recipient_name": str(raw_focus.get("recipient_name") or "").strip()
+                        or None,
+                        "source": "conversation_focus",
+                    }
+
+            for item in reversed(history[-12:]):
+                content = str(item.get("content") or "")
+                history_emails = self._literal_user_emails(content) & owned_addresses
+                if len(history_emails) == 1:
+                    return {
+                        "resolved": True,
+                        "recipient": next(iter(history_emails)),
+                        "recipient_name": None,
+                        "source": "grounded_dialogue_address",
+                    }
+                history_reference = self._gmail_recipient_reference(content)
+                if not history_reference:
+                    history_reference = self._reply_person_reference(content)
+                if history_reference and history_reference.casefold() not in pronouns:
+                    reference = history_reference
+                    break
+
+            if not reference and len(same_addresses) == 1:
+                return {
+                    "resolved": True,
+                    "recipient": next(iter(same_addresses)),
+                    "recipient_name": None,
+                    "source": "same_conversation_verified_send",
+                }
+
+        if not reference:
+            return {
+                "resolved": False,
+                "clarification_required": True,
+                "clarification": "Who do you mean?",
+            }
+
+        contact_error: str | None = None
+        contact_resolved_without_address = False
+        contact_execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="contacts.resolve",
+                payload={"query": reference},
+                request_id=str(uuid.uuid4()),
+                conversation_id=scoped_conversation,
+                principal_id=principal_id,
+                operation="resolve_gmail_message_recipient",
+                target=reference,
+            ),
+            refresh_health=True,
+        )
+        if contact_execution.success:
+            contact_data = contact_execution.data
+            if contact_data.get("ambiguous") is True:
+                return {
+                    "resolved": False,
+                    "clarification_required": True,
+                    "clarification": f"Which {reference} do you mean?",
+                }
+            contact = contact_data.get("contact")
+            if contact_data.get("resolved") is True and isinstance(contact, Mapping):
+                contact_addresses: set[str] = set()
+                for item in contact.get("email_addresses") or ():
+                    try:
+                        contact_addresses.add(GoogleConnector._recipient(str(item)).casefold())
+                    except ValueError:
+                        continue
+                if len(contact_addresses) == 1:
+                    return {
+                        "resolved": True,
+                        "recipient": next(iter(contact_addresses)),
+                        "recipient_name": reference,
+                        "source": "google_contacts",
+                    }
+                if len(contact_addresses) > 1:
+                    return {
+                        "resolved": False,
+                        "clarification_required": True,
+                        "clarification": (
+                            f"I’ve got more than one email address for {reference}. "
+                            "Which one should I use?"
+                        ),
+                    }
+                contact_resolved_without_address = True
+        else:
+            contact_error = str(contact_execution.error or "Google Contacts is unavailable")
+
+        receipt_matches = {
+            address
+            for address in owned_addresses
+            if self._receipt_name_matches_address(reference, address)
+        }
+        if len(receipt_matches) == 1:
+            return {
+                "resolved": True,
+                "recipient": next(iter(receipt_matches)),
+                "recipient_name": reference,
+                "source": "principal_verified_send",
+            }
+        if len(receipt_matches) > 1:
+            return {
+                "resolved": False,
+                "clarification_required": True,
+                "clarification": f"Which {reference} do you mean?",
+            }
+        if contact_error:
+            return {
+                "resolved": False,
+                "error": contact_error,
+                "user_error": f"I couldn’t look up {reference}’s email address just now.",
+            }
+        if contact_resolved_without_address:
+            return {
+                "resolved": False,
+                "clarification_required": True,
+                "clarification": (
+                    f"I know who you mean, but I don’t have an email address for {reference} yet."
+                ),
+            }
+        return {
+            "resolved": False,
+            "clarification_required": True,
+            "clarification": f"Which email address should I use for {reference}?",
+        }
+
+    async def _prepare_gmail_message(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+        history: Sequence[Mapping[str, str]],
+        dialogue_focus: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Resolve a target, create a verified draft and send only when authorised now."""
+
+        operation = self._new_gmail_message_operation(user_text)
+        if operation not in {"draft", "send"}:
+            raise ValueError("The current request did not authorize a new Gmail message")
+        if not self._write_authorized("gmail.draft", user_text) or (
+            operation == "send" and not self._write_authorized("gmail.send", user_text)
+        ):
+            raise ValueError("The current request did not authorize this Gmail write")
+
+        subject = str(arguments.get("subject") or "").strip()
+        body = str(arguments.get("body") or "").strip()
+        if not subject or not body:
+            raise ValueError("A subject and body are required")
+        if len(subject) > 1_000 or len(body) > 100_000:
+            raise ValueError("The email content is too long")
+
+        resolution = await self._resolve_gmail_message_recipient(
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            user_text=user_text,
+            history=history,
+            dialogue_focus=dialogue_focus,
+        )
+        if resolution.get("resolved") is not True:
+            return {
+                "handled": True,
+                "success": resolution.get("clarification_required") is True,
+                "write_executed": False,
+                "operation": operation,
+                **resolution,
+            }
+
+        recipient = str(resolution["recipient"])
+        scoped_conversation = self.planner_executor.scope_conversation(
+            conversation_id,
+            principal_id,
+        )
+        base_request_id = str(request_id or uuid.uuid4())
+
+        def child_id(stage: str) -> str:
+            return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{base_request_id}:gmail:{stage}"))
+
+        draft_request_id = child_id("draft")
+        draft_execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="gmail.draft",
+                payload={"to": recipient, "subject": subject, "body": body},
+                request_id=draft_request_id,
+                conversation_id=scoped_conversation,
+                principal_id=principal_id,
+                operation="compose_new_email",
+                target=recipient,
+                confirmed=True,
+                idempotency_key=draft_request_id,
+            ),
+            refresh_health=True,
+        )
+        draft_receipt = (
+            draft_execution.receipt.as_dict() if draft_execution.receipt is not None else None
+        )
+        draft_verified = (
+            draft_execution.status is ExecutionStatus.VERIFIED
+            and isinstance(draft_receipt, Mapping)
+            and draft_receipt.get("status") == ReceiptStatus.VERIFIED.value
+        )
+        base_result = {
+            "handled": True,
+            "operation": operation,
+            "recipient": recipient,
+            "recipient_name": resolution.get("recipient_name"),
+            "recipient_source": resolution.get("source"),
+            "subject": subject,
+        }
+        if not draft_verified:
+            return {
+                **base_result,
+                "success": False,
+                "status": draft_execution.status.value,
+                "error": draft_execution.error or "Gmail did not verify the draft",
+                "receipt": draft_receipt,
+            }
+        draft_id = str(draft_execution.data.get("draft_id") or "").strip()
+        if not draft_id:
+            return {
+                **base_result,
+                "success": False,
+                "status": "accepted_unverified",
+                "error": "Gmail did not return a verified draft identifier",
+                "receipt": draft_receipt,
+            }
+        if operation == "draft":
+            return {
+                **base_result,
+                "success": True,
+                "status": "verified",
+                "drafted": True,
+                "receipt": draft_receipt,
+            }
+
+        send_request_id = child_id("send")
+        send_execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="gmail.send",
+                payload={"draft_id": draft_id},
+                request_id=send_request_id,
+                conversation_id=scoped_conversation,
+                principal_id=principal_id,
+                operation="send_new_email",
+                target=draft_id,
+                confirmed=True,
+                idempotency_key=send_request_id,
+            ),
+            refresh_health=True,
+        )
+        send_receipt = (
+            send_execution.receipt.as_dict() if send_execution.receipt is not None else None
+        )
+        send_verified = (
+            send_execution.status is ExecutionStatus.VERIFIED
+            and isinstance(send_receipt, Mapping)
+            and send_receipt.get("status") == ReceiptStatus.VERIFIED.value
+        )
+        if not send_verified:
+            return {
+                **base_result,
+                "success": False,
+                "status": send_execution.status.value,
+                "drafted": True,
+                "sent": False,
+                "error": send_execution.error or "Gmail did not verify the send",
+                "draft_receipt": draft_receipt,
+                "receipt": send_receipt,
+            }
+        return {
+            **base_result,
+            "success": True,
+            "status": "verified",
+            "drafted": True,
+            "sent": True,
+            "draft_receipt": draft_receipt,
+            "receipt": send_receipt,
+            "provider_reference": send_execution.provider_reference,
+        }
 
     async def _get_email_briefing(
         self,
@@ -2925,6 +3521,15 @@ class ExternalAgentRuntime:
                 )
             )
 
+        if capability_id == "gmail.send":
+            return ExternalAgentRuntime._gmail_message_operation(authority_text) == "send"
+
+        if capability_id == "gmail.draft":
+            return ExternalAgentRuntime._gmail_message_operation(authority_text) in {
+                "draft",
+                "send",
+            }
+
         if capability_id == "gmail.mark_read":
             return bool(
                 re.search(
@@ -3074,12 +3679,6 @@ class ExternalAgentRuntime:
                     )
                 )
             )
-
-        if capability_id in {"gmail.draft", "gmail.send"} and re.match(
-            r"^(?:please\s+)?email\b",
-            authority_text,
-        ):
-            return True
 
         # ----------------------------------------------------
         # Existing explicit command verbs.
