@@ -36,6 +36,7 @@ from app.speech_corrections import SpeechCorrectionEngine
 from app.reply_policy import ReplyBudgetPolicy
 from app.response_presentation import (
     present_user_response,
+    render_gmail_message_action,
     render_gmail_reply_status,
     render_home_state_evidence,
     render_presence_evidence,
@@ -64,6 +65,7 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "send_mobile_notification",
     "announce_message",
     "propose_admin_change",
+    "prepare_gmail_message",
 }
 
 
@@ -663,6 +665,7 @@ def _verified_external_write_evidence(
         "shopping_purchase",
         "dating_profile_update",
         "google_integration",
+        "prepare_gmail_message",
     }
     for call in completed_calls:
         result = call.get("result")
@@ -708,6 +711,13 @@ def unsupported_external_capability_reply(
     # email" must not turn a reply-status question into a request to write a
     # reply. Provider availability is handled separately from live state.
     if _EXTERNAL_REPLY_STATUS_READ_PATTERN.search(text):
+        return None
+    if any(
+        call.get("tool") == "prepare_gmail_message"
+        and isinstance(call.get("result"), Mapping)
+        and call["result"].get("handled") is True
+        for call in completed_calls
+    ):
         return None
     if _verified_external_write_evidence(completed_calls):
         return None
@@ -845,6 +855,21 @@ def verified_gmail_reply_status_reply(
         if not isinstance(result, Mapping):
             return "I couldn’t check that email properly just now."
         return render_gmail_reply_status(result)
+    return None
+
+
+def gmail_message_action_reply(
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Render the deterministic resolved-recipient Gmail action boundary."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "prepare_gmail_message":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping):
+            return "I couldn’t handle that email properly just now."
+        return render_gmail_message_action(result)
     return None
 
 
@@ -2392,6 +2417,7 @@ class AIEngine:
                 "cancel_external_monitor",
                 "google_integration",
                 "check_recent_gmail_reply",
+                "prepare_gmail_message",
             }:
                 if name == "create_personal_plan":
                     raw_steps = arguments.get("steps")
@@ -2420,7 +2446,7 @@ class AIEngine:
                     authorization_text if authorization_text is not None else user_text
                 )
                 dialogue_focus: Mapping[str, Any] | None = None
-                if name == "check_recent_gmail_reply":
+                if name in {"check_recent_gmail_reply", "prepare_gmail_message"}:
                     dialogue_state = await self.dialogue.get(conversation_id)
                     dialogue_focus = dict(dialogue_state.focus)
                 result = await external_runtime.execute_model_tool(
@@ -6442,6 +6468,10 @@ class AIEngine:
         )
         if unavailable_reply is not None:
             final_reply = unavailable_reply
+
+        message_action_reply = gmail_message_action_reply(completed_calls)
+        if message_action_reply is not None:
+            final_reply = message_action_reply
 
         reply_status_reply = verified_gmail_reply_status_reply(completed_calls)
         if reply_status_reply is not None:

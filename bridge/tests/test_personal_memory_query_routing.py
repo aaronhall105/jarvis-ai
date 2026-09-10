@@ -1,4 +1,5 @@
 from app.ai_engine import (
+    gmail_message_action_reply,
     RequestIntent,
     RequestRouter,
     unbacked_future_promise_reply,
@@ -8,6 +9,7 @@ from app.ai_engine import (
     verified_plan_creation_reply,
     unbacked_external_write_claim_reply,
 )
+from app.tool_outcomes import request_tool_success
 
 
 def classify(text: str):
@@ -92,6 +94,57 @@ def test_unavailable_external_capability_cannot_be_claimed() -> None:
         )
         is None
     )
+
+
+def test_resolved_gmail_message_clarification_bypasses_generic_provider_fallback() -> None:
+    calls = [
+        {
+            "tool": "prepare_gmail_message",
+            "result": {
+                "handled": True,
+                "success": True,
+                "write_executed": False,
+                "operation": "send",
+                "resolved": False,
+                "clarification_required": True,
+                "clarification": "Which Amber do you mean?",
+            },
+        }
+    ]
+
+    assert unsupported_external_capability_reply("Send Amber an email.", calls) is None
+    assert gmail_message_action_reply(calls) == "Which Amber do you mean?"
+    assert (
+        request_tool_success(
+            calls,
+            partial_read_only_allowed=False,
+            read_only_tools=(),
+            final_reply="Which Amber do you mean?",
+        )
+        is True
+    )
+
+
+def test_verified_gmail_send_has_natural_receipt_backed_response() -> None:
+    calls = [
+        {
+            "tool": "prepare_gmail_message",
+            "result": {
+                "handled": True,
+                "operation": "send",
+                "success": True,
+                "status": "verified",
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber",
+                "receipt": {"status": "verified", "action_id": "secret-action"},
+            },
+        }
+    ]
+
+    reply = gmail_message_action_reply(calls)
+    assert reply == "Done — I sent that email to Amber."
+    assert "action" not in reply.casefold()
+    assert unsupported_external_capability_reply("Send Amber an email.", calls) is None
 
 
 def test_reply_status_read_does_not_trigger_external_write_guard() -> None:

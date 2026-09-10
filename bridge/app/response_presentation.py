@@ -205,6 +205,34 @@ def render_gmail_reply_status(result: Mapping[str, Any]) -> str:
     return f"Yeah, {name} replied, but there wasn’t any message text."
 
 
+def render_gmail_message_action(result: Mapping[str, Any]) -> str:
+    """Render a resolved Gmail draft/send result without exposing write evidence internals."""
+
+    if result.get("clarification_required") is True:
+        return str(result.get("clarification") or "Who do you mean?").strip()
+    operation = str(result.get("operation") or "send").casefold()
+    if result.get("success") is not True:
+        user_error = str(result.get("user_error") or "").strip()
+        if user_error:
+            return user_error
+        reason = str(result.get("error") or "").casefold()
+        if any(word in reason for word in ("oauth", "token", "reconnect", "authentication")):
+            return "I couldn’t send that because Google needs reconnecting."
+        if "unavailable" in reason or "unhealthy" in reason:
+            return "I couldn’t send that because Gmail is unavailable right now."
+        if operation == "draft":
+            return "I couldn’t verify that draft, so I won’t claim it was saved."
+        return "I couldn’t verify that send, so I won’t claim the email was sent."
+
+    recipient = str(result.get("recipient") or "").strip()
+    preferred_name = str(result.get("recipient_name") or "").strip() or None
+    name = _person_name("", recipient, preferred_name)
+    target = name if name != "They" else "them"
+    if operation == "draft":
+        return f"Done — I’ve drafted that email to {target}."
+    return f"Done — I sent that email to {target}."
+
+
 def _readable_state(value: Any) -> str:
     state = str(value or "unknown").strip().casefold().replace("_", " ")
     return "away" if state == "not home" else state
@@ -512,6 +540,8 @@ def present_user_response(
     text = "\n".join(normalised_lines)
 
     lowered = text.casefold()
+    if lowered.startswith(("i can't send", "i can’t send", "i couldn't send", "i couldn’t send")):
+        return text
     if "no principal-owned verified gmail send receipt matched" in lowered:
         return "Which email do you mean?"
     if any(word in lowered for word in ("oauth", "token refresh", "needs reconnecting")):
@@ -551,6 +581,7 @@ __all__ = [
     "present_error",
     "present_user_response",
     "render_gmail_reply_status",
+    "render_gmail_message_action",
     "render_home_state_evidence",
     "render_presence_evidence",
     "technical_output_requested",

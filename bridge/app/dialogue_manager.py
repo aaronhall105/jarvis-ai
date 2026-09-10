@@ -367,6 +367,7 @@ class DialogueManager:
         presence_source: dict[str, Any] | None = None
         area: dict[str, Any] | None = None
         gmail_reply: dict[str, Any] | None = None
+        gmail_recipient: dict[str, Any] | None = None
         action: str | None = None
 
         for call in calls:
@@ -488,6 +489,20 @@ class DialogueManager:
                     "observed_at": self._iso(self._utc_now()),
                 }
 
+            elif (
+                tool == "prepare_gmail_message"
+                and result.get("success") is True
+                and result.get("status") == "verified"
+                and result.get("recipient")
+            ):
+                gmail_recipient = {
+                    "recipient": result.get("recipient"),
+                    "recipient_name": result.get("recipient_name"),
+                    "source": result.get("recipient_source"),
+                    "operation": result.get("operation"),
+                    "observed_at": self._iso(self._utc_now()),
+                }
+
         if devices:
             deduplicated: list[dict[str, Any]] = []
             seen: set[str] = set()
@@ -530,6 +545,13 @@ class DialogueManager:
             state.focus = {
                 **state.focus,
                 "gmail_reply": gmail_reply,
+                "intent": intent,
+                "updated_at": self._iso(self._utc_now()),
+            }
+        if gmail_recipient:
+            state.focus = {
+                **state.focus,
+                "gmail_recipient": gmail_recipient,
                 "intent": intent,
                 "updated_at": self._iso(self._utc_now()),
             }
