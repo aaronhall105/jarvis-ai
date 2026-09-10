@@ -947,6 +947,27 @@ class ExternalAgentRuntime:
         return any(index + 1 < len(words) for index, word in enumerate(words) if word in markers)
 
     @staticmethod
+    def _gmail_message_body_slot(text: str) -> str | None:
+        """Extract literal short message content for a deferred recipient slot."""
+
+        value = str(text or "")[:5_000].strip().strip('“”"')
+        lowered = value.casefold()
+        candidates: list[tuple[int, str]] = []
+        for marker in (" saying ", " say ", " telling ", " tell ", " asking ", " ask "):
+            position = lowered.find(marker)
+            if position >= 0:
+                candidates.append((position, marker))
+        if not candidates:
+            return None
+        position, marker = min(candidates)
+        body = value[position + len(marker) :].strip().strip('“”"')
+        if marker.strip() in {"tell", "telling"}:
+            first, separator, remainder = body.partition(" ")
+            if separator and first.casefold() in {"her", "him", "them"}:
+                body = remainder.strip()
+        return body or None
+
+    @staticmethod
     def _gmail_recipient_reference(text: str) -> str | None:
         """Extract only the named/pronoun target phrase from a new-email command."""
 
