@@ -26,7 +26,7 @@ from app.admin_engine import AdminEngine, AdminEngineError
 from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
 from app.conversation_engine import ConversationEngine
-from app.dialogue_manager import DialogueManager
+from app.dialogue_manager import DialogueManager, DialogueResolution
 from app.house_context import HouseContextEngine
 from app.house_awareness import HouseAwarenessEngine
 from app.memory_engine import MemoryEngine
@@ -531,6 +531,16 @@ _NOTIFICATION_MESSAGE_PROMPT_PATTERN = re.compile(
 _NOTIFICATION_CANCEL_COMMANDS = frozenset(
     {"cancel", "never mind", "nevermind", "don't send it", "dont send it", "stop"}
 )
+
+_DIALOGUE_AFFIRMATIVE_COMMANDS = frozenset(
+    {"yes", "yeah", "yep", "correct", "that one", "go ahead", "do it"}
+)
+
+_DIALOGUE_NEGATIVE_COMMANDS = frozenset(
+    {"no", "nope", "not that one", "different one", "someone else"}
+)
+
+_GMAIL_PENDING_TTL_SECONDS = 600
 
 _FRUSTRATION_COMMANDS = frozenset(
     {
@@ -4958,6 +4968,257 @@ class AIEngine:
 
         return " ".join(messages), calls
 
+    async def _finish_pending_gmail_turn(
+        self,
+        *,
+        conversation_id: str,
+        raw_user_text: str,
+        response: str,
+        intent: str,
+        success: bool,
+        calls: Sequence[dict[str, Any]] = (),
+        slots: Mapping[str, Any] | None = None,
+        missing_slots: Sequence[str] = (),
+        clear_outcome: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist and return one model-free Gmail continuation turn."""
+
+        await self.conversations.add_user_message(
+            conversation_id=conversation_id,
+            content=raw_user_text,
+        )
+        if clear_outcome is not None:
+            await self.dialogue.clear_goal(conversation_id, outcome=clear_outcome)
+        elif slots is not None:
+            await self.dialogue.begin_goal(
+                conversation_id,
+                "gmail_message",
+                slots=dict(slots),
+                missing_slots=missing_slots,
+                prompt=response,
+                status="awaiting_slot",
+                ttl_seconds=_GMAIL_PENDING_TTL_SECONDS,
+            )
+        final_reply = _clean_reply(response)
+        await self.conversations.add_assistant_message(
+            conversation_id=conversation_id,
+            content=final_reply,
+        )
+        await self.dialogue.record_result(
+            conversation_id,
+            intent=intent,
+            success=success,
+            response=final_reply,
+            calls=calls,
+        )
+        return {
+            "success": success,
+            "response": final_reply,
+            "model": self.model,
+            "intent": intent,
+            "deterministic": True,
+            "tool_called": bool(calls),
+            "tool_rounds": 1 if calls else 0,
+            "calls": list(calls),
+            "memory_used": False,
+            "conversation_id": conversation_id,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+        }
+
+    async def _continue_pending_gmail_message(
+        self,
+        *,
+        resolution: DialogueResolution,
+        conversation_id: str,
+        actor: UserContext,
+        raw_user_text: str,
+    ) -> dict[str, Any]:
+        """Consume one answer using only a scoped, durable Gmail goal."""
+
+        action = resolution.action or {}
+        slots = dict(action.get("slots") or {})
+        missing = [str(item) for item in action.get("missing_slots") or ()]
+        answer = str(action.get("answer") or raw_user_text).strip()
+        command = str(action.get("command") or normalized_command(answer))
+        runtime = self.external_runtime
+        if runtime is None:
+            return await self._finish_pending_gmail_turn(
+                conversation_id=conversation_id,
+                raw_user_text=raw_user_text,
+                response="I can’t continue that email because Gmail is unavailable.",
+                intent="gmail_message_pending_unavailable",
+                success=False,
+                clear_outcome="failed",
+            )
+        owner = str(slots.get("principal_id") or "")
+        owning_conversation = str(slots.get("conversation_id") or "")
+        operation = str(slots.get("operation") or "")
+        authorization_text = str(slots.get("original_authorization_text") or "")
+
+        valid_pending = bool(
+            owner == actor.user_key
+            and owning_conversation == conversation_id
+            and operation in {"draft", "send"}
+            and authorization_text
+            and runtime._gmail_message_operation(authorization_text) == operation
+            and runtime._write_authorized("gmail.draft", authorization_text)
+            and (operation != "send" or runtime._write_authorized("gmail.send", authorization_text))
+        )
+        if not valid_pending:
+            return await self._finish_pending_gmail_turn(
+                conversation_id=conversation_id,
+                raw_user_text=raw_user_text,
+                response="That email request is no longer active.",
+                intent="gmail_message_pending_invalid",
+                success=True,
+                clear_outcome="invalid",
+            )
+
+        filled_recipient = False
+        if "recipient" in missing:
+            if command in _DIALOGUE_NEGATIVE_COMMANDS:
+                slots.pop("candidate_recipient", None)
+                slots.pop("candidate_recipient_name", None)
+                return await self._finish_pending_gmail_turn(
+                    conversation_id=conversation_id,
+                    raw_user_text=raw_user_text,
+                    response="Who do you mean?",
+                    intent="gmail_message_awaiting_recipient",
+                    success=True,
+                    slots=slots,
+                    missing_slots=missing,
+                )
+            if command in _DIALOGUE_AFFIRMATIVE_COMMANDS:
+                candidate = str(slots.get("candidate_recipient") or "").strip()
+                if not candidate:
+                    return await self._finish_pending_gmail_turn(
+                        conversation_id=conversation_id,
+                        raw_user_text=raw_user_text,
+                        response="Who do you mean?",
+                        intent="gmail_message_awaiting_recipient",
+                        success=True,
+                        slots=slots,
+                        missing_slots=missing,
+                    )
+                target_resolution: Mapping[str, Any] = {
+                    "resolved": True,
+                    "recipient": candidate,
+                    "recipient_name": slots.get("candidate_recipient_name"),
+                    "source": "pending_trusted_candidate",
+                }
+            else:
+                target_resolution = await runtime._resolve_gmail_message_recipient(
+                    conversation_id=conversation_id,
+                    principal_id=actor.user_key,
+                    user_text=f"Send an email to {answer}",
+                    history=(),
+                    dialogue_focus=None,
+                )
+            if target_resolution.get("resolved") is not True:
+                prompt = render_gmail_message_action(
+                    {
+                        "operation": operation,
+                        "success": target_resolution.get("clarification_required") is True,
+                        "write_executed": False,
+                        **target_resolution,
+                    }
+                )
+                for key in ("candidate_recipient", "candidate_recipient_name"):
+                    if target_resolution.get(key):
+                        slots[key] = target_resolution[key]
+                return await self._finish_pending_gmail_turn(
+                    conversation_id=conversation_id,
+                    raw_user_text=raw_user_text,
+                    response=prompt,
+                    intent="gmail_message_awaiting_recipient",
+                    success=True,
+                    slots=slots,
+                    missing_slots=missing,
+                )
+            slots["recipient"] = str(target_resolution["recipient"])
+            slots["recipient_name"] = target_resolution.get("recipient_name")
+            slots["recipient_source"] = target_resolution.get("source")
+            slots.pop("candidate_recipient", None)
+            slots.pop("candidate_recipient_name", None)
+            missing = [item for item in missing if item != "recipient"]
+            filled_recipient = True
+
+        if "body" in missing:
+            if filled_recipient:
+                return await self._finish_pending_gmail_turn(
+                    conversation_id=conversation_id,
+                    raw_user_text=raw_user_text,
+                    response="What would you like it to say?",
+                    intent="gmail_message_awaiting_body",
+                    success=True,
+                    slots=slots,
+                    missing_slots=missing,
+                )
+            slots["body"] = answer
+            slots["subject"] = str(slots.get("subject") or "A quick note")
+            missing = [item for item in missing if item != "body"]
+
+        if "signoff" in missing:
+            suggested = str(slots.get("suggested_signoff") or "Love, Aaron").strip()
+            if command in _DIALOGUE_AFFIRMATIVE_COMMANDS:
+                slots["body"] = str(slots.get("body") or "").rstrip() + f"\n\n{suggested}"
+            elif command not in _DIALOGUE_NEGATIVE_COMMANDS:
+                return await self._finish_pending_gmail_turn(
+                    conversation_id=conversation_id,
+                    raw_user_text=raw_user_text,
+                    response=f"Would you like me to add ‘{suggested}’?",
+                    intent="gmail_message_awaiting_signoff",
+                    success=True,
+                    slots=slots,
+                    missing_slots=missing,
+                )
+            missing = [item for item in missing if item != "signoff"]
+
+        if missing:
+            return await self._finish_pending_gmail_turn(
+                conversation_id=conversation_id,
+                raw_user_text=raw_user_text,
+                response="What else should I include?",
+                intent="gmail_message_awaiting_slot",
+                success=True,
+                slots=slots,
+                missing_slots=missing,
+            )
+
+        try:
+            result = await runtime.execute_resolved_gmail_message(
+                operation=operation,
+                authorization_text=authorization_text,
+                recipient=str(slots.get("recipient") or ""),
+                recipient_name=str(slots.get("recipient_name") or "").strip() or None,
+                recipient_source=str(slots.get("recipient_source") or "pending_exact_target"),
+                subject=str(slots.get("subject") or "A quick note"),
+                body=str(slots.get("body") or ""),
+                conversation_id=conversation_id,
+                principal_id=actor.user_key,
+                request_id=str(slots.get("pending_request_id") or ""),
+            )
+        except Exception:
+            logger.exception("Pending Gmail message execution failed")
+            result = {
+                "handled": True,
+                "operation": operation,
+                "success": False,
+                "error": "Gmail message execution failed",
+            }
+        final_reply = render_gmail_message_action(result)
+        call = {"tool": "prepare_gmail_message", "arguments": {}, "result": result}
+        verified = bool(result.get("success") is True and result.get("status") == "verified")
+        return await self._finish_pending_gmail_turn(
+            conversation_id=conversation_id,
+            raw_user_text=raw_user_text,
+            response=final_reply,
+            intent="gmail_message_follow_up",
+            success=verified,
+            calls=[call],
+            clear_outcome="completed" if verified else "failed",
+        )
+
     async def ask(
         self,
         text: str,
@@ -5082,6 +5343,14 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
+        if dialogue_resolution.handled and dialogue_resolution.kind == "gmail_message":
+            return await self._continue_pending_gmail_message(
+                resolution=dialogue_resolution,
+                conversation_id=resolved_conversation_id,
+                actor=actor,
+                raw_user_text=raw_user_text,
+            )
+
         if dialogue_resolution.handled and dialogue_resolution.kind == "send_notification":
             await self.conversations.add_user_message(
                 conversation_id=resolved_conversation_id,
@@ -5156,6 +5425,70 @@ class AIEngine:
                 "conversation_id": resolved_conversation_id,
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
+
+        # A new Gmail request with no message content is a real unfinished
+        # action, not an invitation for the model to improvise a conversation.
+        # Resolve every known target slot now and persist only what is missing.
+        external_runtime = self.external_runtime
+        gmail_operation = (
+            external_runtime._new_gmail_message_operation(raw_user_text, history)
+            if external_runtime is not None
+            else None
+        )
+        if (
+            external_runtime is not None
+            and gmail_operation in {"draft", "send"}
+            and not external_runtime._gmail_message_content_requested(raw_user_text)
+        ):
+            dialogue_state = await self.dialogue.get(resolved_conversation_id)
+            target_resolution = await external_runtime._resolve_gmail_message_recipient(
+                conversation_id=resolved_conversation_id,
+                principal_id=actor.user_key,
+                user_text=raw_user_text,
+                history=history,
+                dialogue_focus=dict(dialogue_state.focus),
+            )
+            pending_slots: dict[str, Any] = {
+                "principal_id": actor.user_key,
+                "conversation_id": resolved_conversation_id,
+                "operation": gmail_operation,
+                "original_authorization_text": raw_user_text,
+                "pending_request_id": resolved_request_id,
+                "subject": "",
+                "body": "",
+            }
+            missing_slots = ["body"]
+            if target_resolution.get("resolved") is True:
+                pending_slots.update(
+                    {
+                        "recipient": target_resolution.get("recipient"),
+                        "recipient_name": target_resolution.get("recipient_name"),
+                        "recipient_source": target_resolution.get("source"),
+                    }
+                )
+                prompt = "What would you like it to say?"
+            else:
+                missing_slots.insert(0, "recipient")
+                prompt = render_gmail_message_action(
+                    {
+                        "operation": gmail_operation,
+                        "success": target_resolution.get("clarification_required") is True,
+                        "write_executed": False,
+                        **target_resolution,
+                    }
+                )
+                for key in ("candidate_recipient", "candidate_recipient_name"):
+                    if target_resolution.get(key):
+                        pending_slots[key] = target_resolution[key]
+            return await self._finish_pending_gmail_turn(
+                conversation_id=resolved_conversation_id,
+                raw_user_text=raw_user_text,
+                response=prompt,
+                intent="gmail_message_awaiting_slot",
+                success=True,
+                slots=pending_slots,
+                missing_slots=missing_slots,
+            )
 
         interpretation_input = dialogue_resolution.rewritten_text or raw_user_text
         understanding = await self.understanding.interpret(
@@ -6472,6 +6805,43 @@ class AIEngine:
         message_action_reply = gmail_message_action_reply(completed_calls)
         if message_action_reply is not None:
             final_reply = message_action_reply
+            pending_result = next(
+                (
+                    call.get("result")
+                    for call in reversed(completed_calls)
+                    if call.get("tool") == "prepare_gmail_message"
+                    and isinstance(call.get("result"), Mapping)
+                ),
+                None,
+            )
+            if (
+                isinstance(pending_result, Mapping)
+                and pending_result.get("clarification_required") is True
+                and pending_result.get("write_executed") is False
+                and str(pending_result.get("subject") or "").strip()
+                and str(pending_result.get("body") or "").strip()
+            ):
+                pending_slots = {
+                    "principal_id": actor.user_key,
+                    "conversation_id": resolved_conversation_id,
+                    "operation": str(pending_result.get("operation") or ""),
+                    "original_authorization_text": raw_user_text,
+                    "pending_request_id": resolved_request_id,
+                    "subject": str(pending_result["subject"]),
+                    "body": str(pending_result["body"]),
+                }
+                for key in ("candidate_recipient", "candidate_recipient_name"):
+                    if pending_result.get(key):
+                        pending_slots[key] = pending_result[key]
+                await self.dialogue.begin_goal(
+                    resolved_conversation_id,
+                    "gmail_message",
+                    slots=pending_slots,
+                    missing_slots=["recipient"],
+                    prompt=message_action_reply,
+                    status="awaiting_slot",
+                    ttl_seconds=_GMAIL_PENDING_TTL_SECONDS,
+                )
 
         reply_status_reply = verified_gmail_reply_status_reply(completed_calls)
         if reply_status_reply is not None:

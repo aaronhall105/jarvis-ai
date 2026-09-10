@@ -2893,6 +2893,78 @@ async def test_grounded_pronoun_uses_verified_dialogue_focus(runtime) -> None:
 
 
 @pytest.mark.asyncio
+async def test_exact_live_contextual_repeat_uses_focus_and_preserves_body(runtime) -> None:
+    value, _, _, _ = runtime
+    await value.initialize()
+    draft = _verified_write_execution(
+        capability_id="gmail.draft",
+        data={"draft_id": "repeat-draft"},
+        reference="repeat-draft",
+    )
+    sent = _verified_write_execution(
+        capability_id="gmail.send",
+        data={"message_id": "repeat-send"},
+        reference="repeat-send",
+    )
+    execute = AsyncMock(side_effect=[draft, sent])
+    value.registry.execute = execute
+    text = "“Send her another one saying I'll call later. ”"
+
+    result = await value._prepare_gmail_message(
+        {"subject": "Later", "body": "I'll call later."},
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="contextual-repeat",
+        user_text=text,
+        history=(),
+        dialogue_focus={
+            "gmail_recipient": {
+                "recipient": "amber.gill1992@outlook.com",
+                "recipient_name": "Amber",
+                "source": "principal_verified_send",
+                "operation": "send",
+            }
+        },
+    )
+
+    assert result["success"] is True
+    assert result["recipient"] == "amber.gill1992@outlook.com"
+    assert [call.args[0].capability_id for call in execute.await_args_list] == [
+        "gmail.draft",
+        "gmail.send",
+    ]
+    assert execute.await_args_list[0].args[0].payload == {
+        "to": "amber.gill1992@outlook.com",
+        "subject": "Later",
+        "body": "I'll call later.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_contextual_repeat_exposes_only_safe_message_boundary(runtime) -> None:
+    value, _, _, _ = runtime
+    await value.initialize()
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[
+            SimpleNamespace(capability_id="gmail.draft"),
+            SimpleNamespace(capability_id="gmail.send"),
+        ]
+    )
+
+    tools = await value.openai_tools(
+        "“Send her another one saying I'll call later. ”",
+        principal_id="aaron",
+        history=[
+            {"role": "user", "content": "Send Amber an email saying hello."},
+            {"role": "assistant", "content": "Done — I sent that email to Amber."},
+        ],
+    )
+
+    assert [tool["name"] for tool in tools] == ["prepare_gmail_message"]
+    assert set(tools[0]["parameters"]["properties"]) == {"subject", "body"}
+
+
+@pytest.mark.asyncio
 async def test_ungrounded_pronoun_clarifies_without_provider_or_write(runtime) -> None:
     value, _, _, _ = runtime
     await value.initialize()
@@ -2912,6 +2984,8 @@ async def test_ungrounded_pronoun_clarifies_without_provider_or_write(runtime) -
     assert result["clarification"] == "Who do you mean?"
     assert result["success"] is True
     assert result["write_executed"] is False
+    assert result["subject"] == "Tonight"
+    assert result["body"] == "I'll sort it tonight."
     execute.assert_not_awaited()
 
 
@@ -3192,6 +3266,20 @@ def test_recipient_parsing_is_bounded_and_handles_natural_punctuation() -> None:
     )
     assert result is not None
     assert len(result) <= 2_000
+
+
+@pytest.mark.parametrize(
+    ("text", "has_content"),
+    [
+        ("Send Amber an email.", False),
+        ("Draft an email to Amber.", False),
+        ("Send her another one saying I'll call later.", True),
+        ("Send Amber an email saying have a good day.", True),
+        ("Send an email to Amber and make it sweet.", True),
+    ],
+)
+def test_new_message_content_slot_detection(text: str, has_content: bool) -> None:
+    assert ExternalAgentRuntime._gmail_message_content_requested(text) is has_content
 
 
 @pytest.mark.asyncio
