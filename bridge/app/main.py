@@ -154,6 +154,9 @@ external_agent = ExternalAgentRuntime(
 email_policies = EmailAssistantPolicyEngine(
     data_directory / "jarvis_email_policies.db",
     external_agent.registry,
+    conversations=conversations,
+    notifier=tools.send_mobile_notification,
+    focus_recorder=dialogue.record_email_notification_focus,
 )
 external_agent.set_email_policy_engine(email_policies)
 followups = FollowUpEngine(
@@ -488,6 +491,20 @@ class EmailRetentionChangeRequest(BaseModel):
     retention_days: int = Field(ge=1, le=3650)
 
 
+class EmailAssistantSettingsRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=300)
+    important_email_alerts: bool | None = None
+    reply_alerts: bool | None = None
+    inbox_cleanup: bool | None = None
+    cleanup_dry_run: bool | None = None
+    importance_threshold: str | None = Field(default=None, max_length=20)
+    cleanup_mode: str | None = Field(default=None, max_length=20)
+    cleanup_age_days: int | None = Field(default=None, ge=1, le=3650)
+    protected_senders: list[str] | None = Field(default=None, max_length=100)
+    poll_interval_seconds: int | None = Field(default=None, ge=60, le=3600)
+    cleanup_interval_seconds: int | None = Field(default=None, ge=3600, le=2_592_000)
+
+
 async def _try_handle_personal_task(
     text: str,
     *,
@@ -518,6 +535,362 @@ async def _try_handle_personal_task(
     if command.details is not None:
         result.update(command.details)
     return result
+
+
+async def _try_handle_email_assistant(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    request_id: str | None,
+) -> dict[str, object] | None:
+    """Handle explicit Email Assistant status/configuration commands deterministically."""
+
+    command = " ".join(str(text or "").casefold().replace("’", "'").split())
+    status = await email_policies.assistant_status(principal_id=actor.user_key)
+    dialogue_state = await dialogue.get(conversation_id)
+    if (
+        dialogue_state.active_goal == "email_cleanup_confirmation"
+        and dialogue_state.status == "awaiting_confirmation"
+    ):
+        if command in {
+            "cancel",
+            "cancel it",
+            "never mind",
+            "nevermind",
+            "don't do it",
+            "dont do it",
+            "no",
+            "no thanks",
+        }:
+            await dialogue.clear_goal(conversation_id, outcome="cancelled")
+            return {
+                "success": True,
+                "response": "Okay, I won't enable that cleanup.",
+                "intent": "email_cleanup_cancelled",
+            }
+        if command in {"yes", "yeah", "yep", "go ahead", "do it", "confirm"}:
+            slots = dict(dialogue_state.slots)
+            authorization_text = str(slots.get("original_authorization_text") or "")
+            if not _email_cleanup_policy_request(authorization_text):
+                await dialogue.clear_goal(conversation_id, outcome="invalid")
+                return {
+                    "success": False,
+                    "response": "I couldn't safely recover the cleanup request, so I haven't changed anything.",
+                    "intent": "email_cleanup_confirmation_expired",
+                }
+            configured = await email_policies.configure_assistant(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                inbox_cleanup=True,
+                cleanup_dry_run=False,
+                cleanup_mode=str(slots.get("cleanup_mode") or "trash"),
+                cleanup_age_days=int(slots.get("cleanup_age_days") or 30),
+            )
+            await dialogue.clear_goal(conversation_id, outcome="confirmed")
+            action = "archive" if configured["cleanup_mode"] == "archive" else "move to Trash"
+            return {
+                "success": True,
+                "response": (
+                    f"Okay — I’ll {action} only read, low-value promotional or newsletter mail "
+                    f"once it’s {configured['cleanup_age_days']} days old. I’ll keep anything uncertain."
+                ),
+                "intent": "email_cleanup_settings",
+            }
+        return {
+            "success": True,
+            "response": "Would you like me to enable that safe cleanup policy?",
+            "intent": "email_cleanup_awaiting_confirmation",
+        }
+    if dialogue_state.active_goal:
+        # AIEngine owns all other durable pending-task continuations and runs
+        # them before generic intent/tool routing. Do not intercept their slot
+        # answers with Email Assistant status/configuration commands.
+        return None
+    status_phrases = (
+        "is my email assistant running",
+        "email assistant status",
+        "what email alerts are enabled",
+        "is inbox cleanup on",
+        "when did you last check gmail",
+    )
+    if any(phrase in command for phrase in status_phrases):
+        if ("raw" in command or "technical" in command) and status is not None:
+            response = json.dumps(status, ensure_ascii=False, sort_keys=True)
+        elif status is None:
+            response = "Your email assistant isn't enabled yet."
+        elif status.get("provider_error"):
+            response = (
+                "Your email assistant is paused by a Gmail problem. Google may need reconnecting."
+            )
+        else:
+            enabled: list[str] = []
+            if status["important_email_alerts"]:
+                enabled.append("important-email alerts")
+            if status["reply_alerts"]:
+                enabled.append("reply alerts")
+            if status["inbox_cleanup"]:
+                enabled.append(
+                    "inbox cleanup in preview mode"
+                    if status["cleanup_dry_run"]
+                    else "inbox cleanup"
+                )
+            response = (
+                "Your email assistant is running with " + ", ".join(enabled) + "."
+                if enabled
+                else "Your email assistant is paused."
+            )
+            if "last check" in command and status.get("last_gmail_check"):
+                response = f"I last checked Gmail at {status['last_gmail_check']}."
+        return {"success": True, "response": response, "intent": "email_assistant_status"}
+
+    if "what are you watching" in command or "which emails are you waiting" in command:
+        watches = await email_policies.list_reply_watches(principal_id=actor.user_key)
+        active = [item for item in watches if item["status"] == "active"]
+        names = [
+            str(item.get("display_name") or item.get("recipient") or "that email")
+            for item in active
+        ]
+        response = (
+            "I'm waiting for replies from " + ", ".join(dict.fromkeys(names)) + "."
+            if names
+            else "I'm not waiting for any email replies at the moment."
+        )
+        return {"success": True, "response": response, "intent": "email_assistant_watches"}
+
+    if "stop watching that email" in command:
+        state = await dialogue.get(conversation_id)
+        focused = state.focus.get("gmail_reply") if isinstance(state.focus, dict) else None
+        thread_id = str(focused.get("thread_id") or "") if isinstance(focused, dict) else ""
+        stopped = bool(
+            thread_id
+            and await email_policies.set_reply_watch_status(
+                principal_id=actor.user_key,
+                thread_id=thread_id,
+                status="cancelled",
+            )
+        )
+        return {
+            "success": True,
+            "response": (
+                "Okay, I’ve stopped watching that email."
+                if stopped
+                else "I don't have a specific email in focus to stop watching."
+            ),
+            "intent": "email_assistant_stop_watch",
+        }
+
+    if "don't clean up that email" in command or "do not clean up that email" in command:
+        state = await dialogue.get(conversation_id)
+        focused = state.focus.get("gmail_reply") if isinstance(state.focus, dict) else None
+        message_id = (
+            str(focused.get("latest_reply_message_id") or "") if isinstance(focused, dict) else ""
+        )
+        thread_id = str(focused.get("thread_id") or "") if isinstance(focused, dict) else ""
+        protected = await email_policies.protect_message(
+            principal_id=actor.user_key,
+            message_id=message_id,
+            thread_id=thread_id or None,
+        )
+        return {
+            "success": True,
+            "response": (
+                "Okay, I won't include that email in automatic cleanup."
+                if protected
+                else "Which email would you like me to protect from cleanup?"
+            ),
+            "intent": "email_cleanup_protect",
+        }
+
+    if "what would you delete" in command or "show me what would be deleted" in command:
+        preview = await email_policies.preview_cleanup(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+        )
+        count = int(preview.get("dry_run_candidates") or 0)
+        quantified = f"at least {count}" if preview.get("coverage_partial") else str(count)
+        response = (
+            f"I found {quantified} old low-value email{'s' if count != 1 else ''} I'd move to Trash. "
+            "I wouldn't touch unread, personal, starred or important mail."
+            if count
+            else "I couldn't find any old low-value email I'd safely clean up right now."
+        )
+        return {"success": True, "response": response, "intent": "email_cleanup_preview"}
+
+    if "what did you clean up" in command:
+        history = await email_policies.cleanup_history(
+            principal_id=actor.user_key,
+            since=datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0),
+        )
+        totals = history["totals"]
+        response = (
+            f"Today I moved {totals['trashed']} email{'s' if totals['trashed'] != 1 else ''} "
+            f"to Trash and archived {totals['archived']}."
+            if totals["trashed"] or totals["archived"]
+            else "I haven't changed any emails today."
+        )
+        return {"success": True, "response": response, "intent": "email_cleanup_history"}
+
+    if (
+        "never delete emails from" in command
+        or "don't clean up emails from" in command
+        or "do not clean up emails from" in command
+    ):
+        addresses = sorted(external_agent._literal_user_emails(text))
+        if len(addresses) != 1:
+            return {
+                "success": True,
+                "response": "Which exact email address or domain should I protect?",
+                "intent": "email_cleanup_protect_sender",
+            }
+        existing = list((status or {}).get("protected_senders") or ())
+        protected_values = list(dict.fromkeys([*existing, addresses[0]]))
+        await email_policies.configure_assistant(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            protected_senders=protected_values,
+        )
+        return {
+            "success": True,
+            "response": "Okay, I won't include emails from that address in automatic cleanup.",
+            "intent": "email_cleanup_protect_sender",
+        }
+
+    if command in {"undo the last email cleanup", "undo last email cleanup"}:
+        undo = await email_policies.undo_last_cleanup(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            request_id=request_id or str(uuid.uuid4()),
+        )
+        response = (
+            "Done — I restored the last email I moved to Trash."
+            if undo["restored"]
+            else "There isn't a recent cleanup email I can safely restore."
+        )
+        return {
+            "success": bool(undo["success"]),
+            "response": response,
+            "intent": "email_cleanup_undo",
+        }
+
+    cleanup_age = re.search(r"\b(\d{1,4})\s+days?\b", command)
+    if _email_cleanup_policy_request(text):
+        mode = "archive" if "archive" in command else "trash"
+        age_days = (
+            int(cleanup_age.group(1))
+            if cleanup_age is not None
+            else int((status or {}).get("cleanup_age_days") or 30)
+        )
+        try:
+            preview = await email_policies.preview_cleanup(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                cleanup_mode=mode,
+                cleanup_age_days=age_days,
+            )
+            await dialogue.begin_goal(
+                conversation_id,
+                "email_cleanup_confirmation",
+                status="awaiting_confirmation",
+                slots={
+                    "original_authorization_text": str(text),
+                    "cleanup_mode": mode,
+                    "cleanup_age_days": age_days,
+                },
+                prompt="Would you like me to enable that safe cleanup policy?",
+                ttl_seconds=600,
+            )
+        except ValueError as exc:
+            return {
+                "success": False,
+                "response": str(exc),
+                "intent": "email_cleanup_settings",
+            }
+        count = int(preview.get("dry_run_candidates") or 0)
+        quantified = f"at least {count}" if preview.get("coverage_partial") else str(count)
+        action = "archive" if mode == "archive" else "move to Trash"
+        return {
+            "success": True,
+            "response": (
+                f"I found {quantified} old low-value email{'s' if count != 1 else ''} that fit. "
+                f"Would you like me to {action} only matching read promotional or newsletter mail "
+                f"once it’s {age_days} days old? I’ll keep anything uncertain."
+            ),
+            "intent": "email_cleanup_awaiting_confirmation",
+        }
+
+    setting: dict[str, bool] = {}
+    if "pause email alerts" in command:
+        setting = {"important_email_alerts": False, "reply_alerts": False}
+    elif "resume email alerts" in command:
+        setting = {"important_email_alerts": True, "reply_alerts": True}
+    elif "pause inbox cleanup" in command:
+        setting = {"inbox_cleanup": False}
+    elif "resume inbox cleanup" in command:
+        setting = {"inbox_cleanup": True}
+    elif "keep my inbox clean" in command:
+        setting = {"inbox_cleanup": True, "cleanup_dry_run": True}
+    if setting:
+        configured = await email_policies.configure_assistant(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            important_email_alerts=setting.get("important_email_alerts"),
+            reply_alerts=setting.get("reply_alerts"),
+            inbox_cleanup=setting.get("inbox_cleanup"),
+            cleanup_dry_run=setting.get("cleanup_dry_run"),
+        )
+        if "email alerts" in command:
+            response = (
+                "Email alerts are paused." if "pause" in command else "Email alerts are back on."
+            )
+        elif configured["inbox_cleanup"] and configured["cleanup_dry_run"]:
+            response = "Inbox cleanup is on in preview mode, so I won't change any mail yet."
+        else:
+            response = (
+                "Inbox cleanup is paused." if "pause" in command else "Inbox cleanup is back on."
+            )
+        return {"success": True, "response": response, "intent": "email_assistant_settings"}
+    return None
+
+
+def _email_cleanup_policy_request(text: str) -> bool:
+    """Recognise explicit broad cleanup requests, never message-level actions."""
+
+    command = " ".join(str(text or "").casefold().replace("’", "'").split())
+    if not command or any(
+        phrase in command
+        for phrase in (
+            "what would you delete",
+            "show me what would be deleted",
+            "delete this email",
+            "delete that email",
+            "move this email to trash",
+            "move that email to trash",
+        )
+    ):
+        return False
+    broad_target = any(
+        phrase in command
+        for phrase in (
+            "clean my inbox",
+            "clean up my inbox",
+            "clean up promotional emails",
+            "clean up promotion emails",
+            "get rid of newsletters",
+            "old newsletters",
+            "old promotional emails",
+            "old promotion emails",
+        )
+    ) or bool(
+        re.search(
+            r"\b(?:email|emails|gmail|inbox)\b.{0,80}"
+            r"\b(?:older than|after)\b.{0,20}\b\d{1,4}\s+days?\b",
+            command,
+        )
+    )
+    return broad_target and any(
+        verb in command for verb in ("clean", "delete", "trash", "archive", "get rid")
+    )
 
 
 async def _try_handle_explicit_memory(
@@ -1152,6 +1525,91 @@ async def create_email_retention_policy(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/email-assistant/status")
+async def email_assistant_status(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    status = await email_policies.assistant_status(principal_id=principal_id)
+    if status is None:
+        return {
+            "principal_id": principal_id,
+            "status": "paused",
+            "important_email_alerts": False,
+            "reply_alerts": False,
+            "inbox_cleanup": False,
+            "cleanup_dry_run": True,
+            "importance_threshold": "important",
+            "cleanup_mode": "trash",
+            "cleanup_age_days": 30,
+            "protected_senders": [],
+            "last_gmail_check": None,
+            "last_cleanup": None,
+            "evaluated_count": 0,
+            "important_detected_count": 0,
+            "notified_count": 0,
+        }
+    return status
+
+
+@app.post("/api/email-assistant/settings")
+async def configure_email_assistant(
+    request: EmailAssistantSettingsRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    _, scoped_conversation = scope_conversation_id(request.conversation_id, principal_id)
+    try:
+        return await email_policies.configure_assistant(
+            principal_id=principal_id,
+            conversation_id=scoped_conversation,
+            important_email_alerts=request.important_email_alerts,
+            reply_alerts=request.reply_alerts,
+            inbox_cleanup=request.inbox_cleanup,
+            cleanup_dry_run=request.cleanup_dry_run,
+            importance_threshold=request.importance_threshold,
+            cleanup_mode=request.cleanup_mode,
+            cleanup_age_days=request.cleanup_age_days,
+            protected_senders=request.protected_senders,
+            poll_interval_seconds=request.poll_interval_seconds,
+            cleanup_interval_seconds=request.cleanup_interval_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/email-assistant/cleanup/preview")
+async def preview_email_cleanup(
+    request: EmailAssistantSettingsRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    _, scoped_conversation = scope_conversation_id(request.conversation_id, principal_id)
+    return await email_policies.preview_cleanup(
+        principal_id=principal_id,
+        conversation_id=scoped_conversation,
+        cleanup_mode=request.cleanup_mode,
+        cleanup_age_days=request.cleanup_age_days,
+    )
+
+
+@app.get("/api/email-assistant/cleanup/history")
+async def email_cleanup_history(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await email_policies.cleanup_history(principal_id=principal_id)
+
+
+@app.get("/api/email-assistant/reply-watches")
+async def email_reply_watches(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    watches = await email_policies.list_reply_watches(principal_id=principal_id)
+    return {"count": len(watches), "watches": watches}
 
 
 @app.get("/api/email-assistant/retention")
@@ -2107,11 +2565,18 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
-    memory_result = await _try_handle_explicit_memory(
+    memory_result = await _try_handle_email_assistant(
         request.text,
         actor=actor,
         conversation_id=storage_conversation_id,
+        request_id=request.request_id,
     )
+    if memory_result is None:
+        memory_result = await _try_handle_explicit_memory(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+        )
     requested_timezone = str((trusted_context or {}).get("timezone") or "").strip()
     personal_result = memory_result
     if personal_result is None:
@@ -2142,7 +2607,11 @@ async def _execute_ai_request(
                 "model": (
                     "memory-engine"
                     if str(personal_result.get("intent") or "").startswith("explicit_memory")
-                    else "followup-engine"
+                    else (
+                        "email-assistant"
+                        if str(personal_result.get("intent") or "").startswith("email_")
+                        else "followup-engine"
+                    )
                 ),
                 "deterministic": True,
                 "tool_called": False,

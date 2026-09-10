@@ -43,6 +43,11 @@ MOBILE_ACCOUNT_ROUTES = {
     ("post", "/api/email-assistant/retention/{policy_id}/resume"),
     ("post", "/api/email-assistant/retention/{policy_id}/change"),
     ("post", "/api/email-assistant/retention/{policy_id}/disable"),
+    ("get", "/api/email-assistant/status"),
+    ("post", "/api/email-assistant/settings"),
+    ("post", "/api/email-assistant/cleanup/preview"),
+    ("get", "/api/email-assistant/cleanup/history"),
+    ("get", "/api/email-assistant/reply-watches"),
 }
 
 

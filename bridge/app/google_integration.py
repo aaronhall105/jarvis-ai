@@ -74,6 +74,7 @@ GOOGLE_MODEL_TOOL = "google_integration"
 
 _GOOGLE_ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "gmail.search": "query (Gmail search syntax), optional limit",
+    "gmail.changes": "optional history_id and limit; returns only newly added Gmail messages",
     "gmail.read": "message_id",
     "gmail.thread": "thread_id, or query and optional limit",
     "gmail.reply_status": "exact thread_id and sent_message_id; checks only later inbound replies",
@@ -561,6 +562,11 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
             (SCOPE_GMAIL_READ,),
             repeatable=True,
             value_paths=("latest_message_id", "message_ids", "count"),
+        ),
+        read(
+            "gmail.changes",
+            "Read incremental Gmail message changes",
+            (SCOPE_GMAIL_READ,),
         ),
         read("gmail.read", "Read Gmail message", (SCOPE_GMAIL_READ,)),
         read(
@@ -1148,6 +1154,7 @@ class GoogleConnector(Connector):
             return ConnectorResult.failed("An authenticated account owner is required")
         handlers = {
             "gmail.search": self._gmail_search,
+            "gmail.changes": self._gmail_changes,
             "gmail.read": self._gmail_read,
             "gmail.thread": self._gmail_thread,
             "gmail.reply_status": self._gmail_reply_status,
@@ -1554,10 +1561,14 @@ class GoogleConnector(Connector):
             "snippet": str(message.get("snippet") or "")[:2_000],
             "from": headers.get("from"),
             "to": headers.get("to"),
+            "cc": headers.get("cc"),
             "subject": headers.get("subject"),
             "date": headers.get("date"),
             "message_id_header": headers.get("message-id"),
             "reply_to": headers.get("reply-to"),
+            "list_unsubscribe": headers.get("list-unsubscribe"),
+            "precedence": headers.get("precedence"),
+            "delivered_to": headers.get("delivered-to"),
             "attachments": GoogleConnector._attachment_metadata(payload),
         }
 
@@ -1680,6 +1691,140 @@ class GoogleConnector(Connector):
             "latest_message_id": ids[0] if ids else None,
             "result_size_estimate": int(result.get("resultSizeEstimate") or len(ids)),
         }, ids[0] if ids else None
+
+    async def _gmail_changes(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        """Return a bounded Gmail history delta, or establish a fresh cursor.
+
+        A missing or expired cursor never causes old mail to be replayed.  In
+        both cases the caller receives the current provider history ID and an
+        empty change set so it can resume incrementally on the next pass.
+        """
+
+        limit = self._limit(payload, default=100)
+        supplied = str(payload.get("history_id") or "").strip()
+        if supplied and (not supplied.isdigit() or len(supplied) > 40):
+            raise ValueError("history_id must be a Gmail numeric history identifier")
+
+        if not supplied:
+            profile = await self._request(principal, "GET", f"{GMAIL_API}/profile")
+            current = str(profile.get("historyId") or "").strip()
+            if not current.isdigit():
+                raise GoogleProviderError("Gmail did not return a valid history cursor")
+            return {
+                "history_id": current,
+                "previous_history_id": None,
+                "messages": [],
+                "message_ids": [],
+                "count": 0,
+                "bootstrap": True,
+                "cursor_expired": False,
+                "account_email": str(profile.get("emailAddress") or "").strip() or None,
+            }, current
+
+        ids: list[str] = []
+        seen: set[str] = set()
+        page_token: str | None = None
+        current = supplied
+        for page_number in range(10):
+            params: dict[str, Any] = {
+                "startHistoryId": supplied,
+                "historyTypes": "messageAdded",
+                "maxResults": limit,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            response = await self._raw_request(
+                principal,
+                "GET",
+                f"{GMAIL_API}/history",
+                params=params,
+            )
+            if response.status_code == 404 and page_number == 0:
+                profile = await self._request(principal, "GET", f"{GMAIL_API}/profile")
+                replacement = str(profile.get("historyId") or "").strip()
+                if not replacement.isdigit():
+                    raise GoogleProviderError("Gmail did not return a valid replacement cursor")
+                return {
+                    "history_id": replacement,
+                    "previous_history_id": supplied,
+                    "messages": [],
+                    "message_ids": [],
+                    "count": 0,
+                    "bootstrap": False,
+                    "cursor_expired": True,
+                    "account_email": str(profile.get("emailAddress") or "").strip() or None,
+                }, replacement
+            if response.status_code != 200:
+                raise GoogleProviderError(
+                    f"Google API request failed with HTTP {response.status_code}",
+                    status_code=response.status_code,
+                )
+            try:
+                result = response.json()
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise GoogleProviderError("Google API returned malformed JSON") from exc
+            if not isinstance(result, Mapping):
+                raise GoogleProviderError("Google API returned a malformed response")
+            candidate_cursor = str(result.get("historyId") or current).strip()
+            if not candidate_cursor.isdigit():
+                raise GoogleProviderError("Gmail history returned an invalid cursor")
+            current = candidate_cursor
+            for history in result.get("history") or ():
+                if not isinstance(history, Mapping):
+                    continue
+                for added in history.get("messagesAdded") or ():
+                    if not isinstance(added, Mapping):
+                        continue
+                    message = added.get("message")
+                    message_id = (
+                        str(message.get("id") or "").strip() if isinstance(message, Mapping) else ""
+                    )
+                    if message_id and message_id not in seen:
+                        seen.add(message_id)
+                        ids.append(message_id)
+                        if len(ids) > 1_000:
+                            raise GoogleProviderError(
+                                "Gmail returned too many changes for one safe incremental pass"
+                            )
+            page_token = str(result.get("nextPageToken") or "").strip() or None
+            if not page_token:
+                break
+        else:
+            raise GoogleProviderError("Gmail history pagination exceeded the safe bounded limit")
+        details: list[dict[str, Any]] = []
+        for offset in range(0, len(ids), 25):
+            details.extend(
+                await asyncio.gather(
+                    *(
+                        self._request(
+                            principal,
+                            "GET",
+                            f"{GMAIL_API}/messages/{self._segment(message_id)}",
+                            params={"format": "full"},
+                        )
+                        for message_id in ids[offset : offset + 25]
+                    )
+                )
+            )
+        messages: list[dict[str, Any]] = []
+        for item in details:
+            summary = self._message_summary(item)
+            raw_payload = item.get("payload")
+            summary["body"] = (
+                self._body_text(raw_payload) if isinstance(raw_payload, Mapping) else ""
+            )
+            messages.append(summary)
+        return {
+            "history_id": current,
+            "previous_history_id": supplied,
+            "messages": messages,
+            "message_ids": ids,
+            "count": len(messages),
+            "bootstrap": False,
+            "cursor_expired": False,
+        }, current
 
     async def _gmail_read(
         self, principal: str, payload: dict[str, Any]
