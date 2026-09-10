@@ -3282,6 +3282,19 @@ def test_new_message_content_slot_detection(text: str, has_content: bool) -> Non
     assert ExternalAgentRuntime._gmail_message_content_requested(text) is has_content
 
 
+@pytest.mark.parametrize(
+    ("text", "body"),
+    [
+        ("Send her another one saying I'll call later.", "I'll call later."),
+        ("Email Amber and tell her I'll be home at six.", "I'll be home at six."),
+        ("Send Amber an email saying have a good day.", "have a good day."),
+        ("Send Amber an email.", None),
+    ],
+)
+def test_pending_body_slot_preserves_literal_user_content(text: str, body: str | None) -> None:
+    assert ExternalAgentRuntime._gmail_message_body_slot(text) == body
+
+
 @pytest.mark.asyncio
 async def test_multiple_verified_addresses_for_same_name_are_ambiguous(runtime) -> None:
     value, _, _, _ = runtime

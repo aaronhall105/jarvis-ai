@@ -391,5 +391,7 @@ async def test_failed_completion_clears_authority_instead_of_retrying_on_later_t
 def test_pending_gmail_precedes_understanding_and_presence_routing() -> None:
     source = inspect.getsource(AIEngine.ask)
     pending = source.index('dialogue_resolution.kind == "gmail_message"')
+    preflight = source.index("Preflight new Gmail targets")
     understanding = source.index("self.understanding.interpret")
     assert pending < understanding
+    assert preflight < understanding

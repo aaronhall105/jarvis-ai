@@ -5426,20 +5426,16 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
-        # A new Gmail request with no message content is a real unfinished
-        # action, not an invitation for the model to improvise a conversation.
-        # Resolve every known target slot now and persist only what is missing.
+        # Preflight new Gmail targets before the model can improvise a
+        # clarification. Persist every unresolved target and every missing body
+        # as a real action derived from this exact authorised turn.
         external_runtime = self.external_runtime
         gmail_operation = (
             external_runtime._new_gmail_message_operation(raw_user_text, history)
             if external_runtime is not None
             else None
         )
-        if (
-            external_runtime is not None
-            and gmail_operation in {"draft", "send"}
-            and not external_runtime._gmail_message_content_requested(raw_user_text)
-        ):
+        if external_runtime is not None and gmail_operation in {"draft", "send"}:
             dialogue_state = await self.dialogue.get(resolved_conversation_id)
             target_resolution = await external_runtime._resolve_gmail_message_recipient(
                 conversation_id=resolved_conversation_id,
@@ -5448,16 +5444,17 @@ class AIEngine:
                 history=history,
                 dialogue_focus=dict(dialogue_state.focus),
             )
+            body_slot = external_runtime._gmail_message_body_slot(raw_user_text)
             pending_slots: dict[str, Any] = {
                 "principal_id": actor.user_key,
                 "conversation_id": resolved_conversation_id,
                 "operation": gmail_operation,
                 "original_authorization_text": raw_user_text,
                 "pending_request_id": resolved_request_id,
-                "subject": "",
-                "body": "",
+                "subject": "A quick note" if body_slot else "",
+                "body": body_slot or "",
             }
-            missing_slots = ["body"]
+            missing_slots = [] if body_slot else ["body"]
             if target_resolution.get("resolved") is True:
                 pending_slots.update(
                     {
@@ -5480,15 +5477,16 @@ class AIEngine:
                 for key in ("candidate_recipient", "candidate_recipient_name"):
                     if target_resolution.get(key):
                         pending_slots[key] = target_resolution[key]
-            return await self._finish_pending_gmail_turn(
-                conversation_id=resolved_conversation_id,
-                raw_user_text=raw_user_text,
-                response=prompt,
-                intent="gmail_message_awaiting_slot",
-                success=True,
-                slots=pending_slots,
-                missing_slots=missing_slots,
-            )
+            if target_resolution.get("resolved") is not True or not body_slot:
+                return await self._finish_pending_gmail_turn(
+                    conversation_id=resolved_conversation_id,
+                    raw_user_text=raw_user_text,
+                    response=prompt,
+                    intent="gmail_message_awaiting_slot",
+                    success=True,
+                    slots=pending_slots,
+                    missing_slots=missing_slots,
+                )
 
         interpretation_input = dialogue_resolution.rewritten_text or raw_user_text
         understanding = await self.understanding.interpret(
