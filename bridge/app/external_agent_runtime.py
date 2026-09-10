@@ -911,16 +911,40 @@ class ExternalAgentRuntime:
         return None
 
     @classmethod
-    def _new_gmail_message_operation(cls, text: str) -> str | None:
+    def _new_gmail_message_operation(
+        cls,
+        text: str,
+        history: Sequence[Mapping[str, str]] = (),
+    ) -> str | None:
         """Recognise a new outgoing email without treating quoted intent as authority."""
 
         operation = cls._gmail_message_operation(text)
-        if operation is None or not cls._current_gmail_context(text):
+        natural_repeat = bool(
+            operation is not None
+            and re.search(
+                r"\b(?:send|email)\s+(?:her|him|them)\b.*\b(?:another|again)\b",
+                " ".join(str(text or "")[:5_000].casefold().split()),
+            )
+        )
+        if operation is None or not (cls._current_gmail_context(text) or natural_repeat):
             return None
         value = " ".join(str(text or "").casefold().split())
         if re.search(r"\b(?:reply|forward)\b", value):
             return None
         return operation
+
+    @staticmethod
+    def _gmail_message_content_requested(text: str) -> bool:
+        """Return whether the current command already supplies message content."""
+
+        words = " ".join(
+            "".join(
+                character.casefold() if character.isalnum() or character in "'’" else " "
+                for character in str(text or "")[:5_000]
+            ).split()
+        ).split()
+        markers = {"about", "ask", "asking", "make", "say", "saying", "tell", "telling"}
+        return any(index + 1 < len(words) for index, word in enumerate(words) if word in markers)
 
     @staticmethod
     def _gmail_recipient_reference(text: str) -> str | None:
@@ -983,6 +1007,10 @@ class ExternalAgentRuntime:
             message_index = lowered.index("message")
             if message_index > 1:
                 start, end = 1, message_index
+        if start is None and lowered[0] == "send" and "another" in lowered:
+            another_index = lowered.index("another")
+            if another_index > 1:
+                start, end = 1, another_index
         if start is None:
             return None
 
@@ -1253,6 +1281,7 @@ class ExternalAgentRuntime:
             or cls._current_gmail_context(text)
             or cls._gmail_reply_read_intent(text)
             or cls._gmail_priority_intent(text)
+            or cls._new_gmail_message_operation(text, history) is not None
             or any(
                 phrase in lowered
                 for phrase in (
@@ -1461,7 +1490,10 @@ class ExternalAgentRuntime:
             status = statuses.get(provider_id)
             if status is None or not status.get("available"):
                 reason = str((status or {}).get("health_reason") or "No provider is configured")
-                if provider_id == "gmail" and self._new_gmail_message_operation(text) == "send":
+                if (
+                    provider_id == "gmail"
+                    and self._new_gmail_message_operation(text, history) == "send"
+                ):
                     if any(
                         marker in reason.casefold()
                         for marker in ("oauth", "token", "authentication", "reconnect")
@@ -1528,7 +1560,7 @@ class ExternalAgentRuntime:
         current_gmail_request = self._current_gmail_service_request(text)
         gmail_management = self._gmail_management_write_capabilities(text)
         gmail_writes = self._gmail_write_capabilities(text)
-        gmail_message_operation = self._new_gmail_message_operation(text)
+        gmail_message_operation = self._new_gmail_message_operation(text, history)
         gmail_context = self._current_gmail_context(text) or self._recent_gmail_context(history)
         domain_text = lowered
         for literal_email in self._literal_user_emails(text):
@@ -2641,7 +2673,7 @@ class ExternalAgentRuntime:
     ) -> dict[str, Any]:
         """Resolve a target, create a verified draft and send only when authorised now."""
 
-        operation = self._new_gmail_message_operation(user_text)
+        operation = self._new_gmail_message_operation(user_text, history)
         if operation not in {"draft", "send"}:
             raise ValueError("The current request did not authorize a new Gmail message")
         if not self._write_authorized("gmail.draft", user_text) or (
@@ -2669,10 +2701,55 @@ class ExternalAgentRuntime:
                 "success": resolution.get("clarification_required") is True,
                 "write_executed": False,
                 "operation": operation,
+                "subject": subject,
+                "body": body,
                 **resolution,
             }
 
-        recipient = str(resolution["recipient"])
+        return await self.execute_resolved_gmail_message(
+            operation=operation,
+            authorization_text=user_text,
+            recipient=str(resolution["recipient"]),
+            recipient_name=str(resolution.get("recipient_name") or "").strip() or None,
+            recipient_source=str(resolution.get("source") or "pending_exact_target"),
+            subject=subject,
+            body=body,
+            conversation_id=conversation_id,
+            principal_id=principal_id,
+            request_id=request_id,
+        )
+
+    async def execute_resolved_gmail_message(
+        self,
+        *,
+        operation: str,
+        authorization_text: str,
+        recipient: str,
+        recipient_name: str | None,
+        recipient_source: str,
+        subject: str,
+        body: str,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+    ) -> dict[str, Any]:
+        """Execute a server-resolved target under preserved current-turn authority."""
+
+        authorised_operation = self._gmail_message_operation(authorization_text)
+        if operation not in {"draft", "send"} or authorised_operation != operation:
+            raise ValueError("The original request did not authorize this Gmail message")
+        if not self._write_authorized("gmail.draft", authorization_text) or (
+            operation == "send" and not self._write_authorized("gmail.send", authorization_text)
+        ):
+            raise ValueError("The original request did not authorize this Gmail write")
+        canonical_recipient = GoogleConnector._recipient(recipient).casefold()
+        subject = str(subject or "").strip()
+        body = str(body or "").strip()
+        if not subject or not body:
+            raise ValueError("A subject and body are required")
+        if len(subject) > 1_000 or len(body) > 100_000:
+            raise ValueError("The email content is too long")
+
         scoped_conversation = self.planner_executor.scope_conversation(
             conversation_id,
             principal_id,
@@ -2686,12 +2763,12 @@ class ExternalAgentRuntime:
         draft_execution = await self.registry.execute(
             CapabilityRequest(
                 capability_id="gmail.draft",
-                payload={"to": recipient, "subject": subject, "body": body},
+                payload={"to": canonical_recipient, "subject": subject, "body": body},
                 request_id=draft_request_id,
                 conversation_id=scoped_conversation,
                 principal_id=principal_id,
                 operation="compose_new_email",
-                target=recipient,
+                target=canonical_recipient,
                 confirmed=True,
                 idempotency_key=draft_request_id,
             ),
@@ -2708,9 +2785,9 @@ class ExternalAgentRuntime:
         base_result = {
             "handled": True,
             "operation": operation,
-            "recipient": recipient,
-            "recipient_name": resolution.get("recipient_name"),
-            "recipient_source": resolution.get("source"),
+            "recipient": canonical_recipient,
+            "recipient_name": recipient_name,
+            "recipient_source": recipient_source,
             "subject": subject,
         }
         if not draft_verified:

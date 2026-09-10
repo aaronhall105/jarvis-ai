@@ -598,6 +598,21 @@ class DialogueManager:
                     clear_goal=True,
                 )
 
+        if state.active_goal == "gmail_message" and state.status == "awaiting_slot":
+            # Gmail owns the provider-specific slot validation and execution.
+            # Returning the durable state here ensures every answer is consumed
+            # before understanding, presence, memory or model routing.
+            return DialogueResolution(
+                handled=True,
+                kind="gmail_message",
+                action={
+                    "answer": value,
+                    "command": command,
+                    "slots": dict(state.slots),
+                    "missing_slots": list(state.missing_slots),
+                },
+            )
+
         if state.active_goal == "device_control" and state.status == "awaiting_slot":
             action = str(state.slots.get("action") or "").lower()
             target = value
