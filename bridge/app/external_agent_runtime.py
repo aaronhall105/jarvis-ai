@@ -1808,7 +1808,7 @@ class ExternalAgentRuntime:
         if (
             reply_monitor_intent
             and "gmail.reply_status" in executable
-            and self._monitor_creator is not None
+            and (self._monitor_creator is not None or self._email_policies is not None)
         ):
             definitions.append(
                 {
@@ -1837,7 +1837,7 @@ class ExternalAgentRuntime:
         if (
             important_monitor_intent
             and "gmail.important_status" in executable
-            and self._monitor_creator is not None
+            and (self._monitor_creator is not None or self._email_policies is not None)
         ):
             definitions.append(
                 {
@@ -3100,6 +3100,19 @@ class ExternalAgentRuntime:
             )
         receipt, recipient, _ = anchor
         sent = receipt.result
+        if self._email_policies is not None:
+            return await self._email_policies.watch_reply(
+                principal_id=principal_id,
+                conversation_id=self.planner_executor.scope_conversation(
+                    conversation_id,
+                    principal_id,
+                ),
+                thread_id=str(sent["thread_id"]),
+                sent_message_id=str(sent["message_id"]),
+                recipient=recipient,
+                source="explicit_verified_send_monitor",
+                poll_interval_seconds=polling_interval_seconds,
+            )
         return await self.create_external_monitor(
             conversation_id=conversation_id,
             principal_id=principal_id,
@@ -3128,6 +3141,22 @@ class ExternalAgentRuntime:
     ) -> dict[str, Any]:
         if not self._important_email_monitor_intent(user_text):
             raise ValueError("The current request did not authorize important-email monitoring")
+        if self._email_policies is not None:
+            configured = await self._email_policies.configure_assistant(
+                principal_id=principal_id,
+                conversation_id=self.planner_executor.scope_conversation(
+                    conversation_id,
+                    principal_id,
+                ),
+                important_email_alerts=True,
+                poll_interval_seconds=polling_interval_seconds,
+            )
+            return {
+                "success": True,
+                "status": configured["status"],
+                "important_email_alerts": configured["important_email_alerts"],
+                "durable": True,
+            }
         return await self.create_external_monitor(
             conversation_id=conversation_id,
             principal_id=principal_id,

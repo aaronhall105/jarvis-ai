@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 import static org.robolectric.Shadows.shadowOf;
 
 import android.content.Intent;
@@ -13,6 +14,7 @@ import android.net.Uri;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
+import android.widget.Switch;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -114,6 +116,39 @@ public final class IntegrationsSettingsUiTest {
         ));
         assertEquals(11, countText(root, "Authentication required"));
         assertFalse(allText(root).contains("Core offline"));
+    }
+
+    @Test public void integrationsShowNaturalSafeEmailAssistantSettings() {
+        IntegrationsActivity activity = Robolectric.buildActivity(IntegrationsActivity.class)
+            .create()
+            .get();
+        activity.renderEmailAssistant(new EmailAssistantSettings(
+            true,
+            true,
+            true,
+            true,
+            "important",
+            "trash",
+            30,
+            List.of("@bank.example"),
+            "active",
+            "2026-09-10T12:00:00Z",
+            "",
+            "2026-09-11T12:00:00Z",
+            false
+        ));
+
+        View root = activity.findViewById(android.R.id.content);
+        assertNotNull(findText(root, "Email Assistant"));
+        assertNotNull(findText(root, "Active · cleanup preview only"));
+        assertNotNull(findText(root, "Important email alerts"));
+        assertNotNull(findText(root, "Reply alerts"));
+        assertNotNull(findText(root, "Inbox cleanup"));
+        assertNotNull(findText(root, "Importance: Important"));
+        assertNotNull(findText(root, "Cleanup: Trash"));
+        assertNotNull(findText(root, "Cleanup age: 30 days"));
+        assertTrue(((Switch) findText(root, "Important email alerts")).isChecked());
+        assertTrue(allText(root).contains("Cleanup never permanently deletes Gmail."));
     }
 
     private static IntegrationProvider provider(String id, String name, String state) {

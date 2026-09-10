@@ -116,6 +116,29 @@ class DialogueFocusFreshnessTests(unittest.IsolatedAsyncioTestCase):
             state.focus["gmail_recipient"],
         )
 
+    async def test_proactive_reply_focus_preserves_exact_thread_across_restart(self) -> None:
+        await self.dialogue.record_email_notification_focus(
+            "conversation",
+            {
+                "message_id": "reply-1",
+                "thread_id": "thread-1",
+                "sent_message_id": "sent-1",
+                "recipient": "amber@example.test",
+                "recipient_name": "Amber",
+                "event_kind": "reply",
+                "observed_at": "2026-08-26T12:00:00+00:00",
+            },
+        )
+
+        restarted = DialogueManager(f"{self.temp.name}/dialogue.db")
+        focused = (await restarted.get("conversation")).focus["gmail_reply"]
+
+        self.assertEqual("thread-1", focused["thread_id"])
+        self.assertEqual("sent-1", focused["sent_message_id"])
+        self.assertEqual("reply-1", focused["latest_reply_message_id"])
+        self.assertEqual("amber@example.test", focused["recipient"])
+        self.assertEqual("proactive_email_assistant", focused["anchor_source"])
+
 
 if __name__ == "__main__":
     unittest.main()

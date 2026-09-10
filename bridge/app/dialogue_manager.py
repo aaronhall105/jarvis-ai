@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from app.command_text import normalized_command
 
@@ -334,6 +334,37 @@ class DialogueManager:
         focus["updated_at"] = self._iso(self._utc_now())
         state.focus = focus
         return await self.save(state, "focus_updated", focus)
+
+    async def record_email_notification_focus(
+        self, conversation_id: str, evidence: Mapping[str, Any]
+    ) -> DialogueState:
+        """Ground conversational follow-ups in a verified proactive Gmail event."""
+
+        message_id = str(evidence.get("message_id") or "").strip()
+        thread_id = str(evidence.get("thread_id") or "").strip()
+        if not message_id or not thread_id:
+            raise ValueError("Verified Gmail message and thread identifiers are required")
+        state = await self.get(conversation_id)
+        state.focus = {
+            **state.focus,
+            "gmail_reply": {
+                "recipient": evidence.get("recipient"),
+                "recipient_name": evidence.get("recipient_name"),
+                "sent_message_id": evidence.get("sent_message_id"),
+                "thread_id": thread_id,
+                "latest_reply_message_id": message_id,
+                "event_kind": str(evidence.get("event_kind") or "important"),
+                "observed_at": str(evidence.get("observed_at") or self._iso(self._utc_now())),
+                "anchor_source": "proactive_email_assistant",
+            },
+            "intent": "proactive_email_notification",
+            "updated_at": self._iso(self._utc_now()),
+        }
+        return await self.save(
+            state,
+            "proactive_email_focused",
+            {"message_id": message_id, "thread_id": thread_id},
+        )
 
     async def record_result(
         self,

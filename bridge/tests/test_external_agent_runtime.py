@@ -963,6 +963,76 @@ async def test_recent_reply_check_anchors_to_same_conversation_verified_send_rec
 
 
 @pytest.mark.asyncio
+async def test_explicit_gmail_monitors_use_unified_email_assistant_when_available(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    claim = await value.receipts.begin(
+        request_id="send-request",
+        conversation_id="usr:aaron:mail",
+        capability_id="gmail.send",
+        provider_id="google",
+        target="draft-1",
+        requested_operation="gmail.send",
+        request_payload={"principal_id": "aaron", "payload": {"draft_id": "draft-1"}},
+        idempotency_key="unified-email-monitor-send",
+    )
+    await value.receipts.complete(
+        claim.receipt.action_id,
+        status=ReceiptStatus.VERIFIED,
+        provider_reference="sent-1",
+        result={
+            "status": "sent",
+            "message_id": "sent-1",
+            "thread_id": "thread-1",
+            "recipient": "amber.gill1992@outlook.com",
+        },
+        verification={"sent_label_present": True},
+    )
+    engine = SimpleNamespace(
+        watch_reply=AsyncMock(return_value={"success": True, "status": "active", "durable": True}),
+        configure_assistant=AsyncMock(
+            return_value={"status": "active", "important_email_alerts": True}
+        ),
+    )
+    value.set_email_policy_engine(engine)
+    value.create_external_monitor = AsyncMock()  # type: ignore[method-assign]
+
+    reply = await value._create_recent_gmail_reply_monitor(
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="watch-1",
+        user_text="Tell me when she replies",
+        polling_interval_seconds=300,
+    )
+    important = await value._create_important_gmail_monitor(
+        conversation_id="mail",
+        principal_id="aaron",
+        request_id="important-1",
+        user_text="Alert me about important Gmail emails",
+        polling_interval_seconds=300,
+    )
+
+    assert reply["durable"] is True
+    assert important["important_email_alerts"] is True
+    engine.watch_reply.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        thread_id="thread-1",
+        sent_message_id="sent-1",
+        recipient="amber.gill1992@outlook.com",
+        source="explicit_verified_send_monitor",
+        poll_interval_seconds=300,
+    )
+    engine.configure_assistant.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        important_email_alerts=True,
+        poll_interval_seconds=300,
+    )
+    value.create_external_monitor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reply_check_finds_inbound_reply_from_durable_receipt_in_new_conversation(runtime):
     value, _, _, _ = runtime
     await value.initialize()

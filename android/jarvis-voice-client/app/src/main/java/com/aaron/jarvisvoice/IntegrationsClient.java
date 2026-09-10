@@ -55,6 +55,11 @@ public final class IntegrationsClient implements AutoCloseable {
         void onError(String message);
     }
 
+    public interface EmailAssistantCallback {
+        void onSuccess(EmailAssistantSettings settings);
+        void onError(Failure failure);
+    }
+
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     static final long PROVIDER_READ_TIMEOUT_SECONDS = 45L;
     static final long PROVIDER_CALL_TIMEOUT_SECONDS = 50L;
@@ -135,6 +140,39 @@ public final class IntegrationsClient implements AutoCloseable {
                 main.post(callback::onSuccess);
             } catch (Exception exception) {
                 main.post(() -> callback.onError(message(exception)));
+            }
+        });
+    }
+
+    public void emailAssistant(EmailAssistantCallback callback) {
+        executor.execute(() -> {
+            try {
+                EmailAssistantSettings settings = EmailAssistantSettings.fromJson(
+                    request("GET", "/api/email-assistant/status", null)
+                );
+                main.post(() -> callback.onSuccess(settings));
+            } catch (Exception exception) {
+                main.post(() -> callback.onError(failure(exception)));
+            }
+        });
+    }
+
+    public void updateEmailAssistant(
+        EmailAssistantSettings settings,
+        EmailAssistantCallback callback
+    ) {
+        executor.execute(() -> {
+            try {
+                EmailAssistantSettings updated = EmailAssistantSettings.fromJson(
+                    request(
+                        "POST",
+                        "/api/email-assistant/settings",
+                        settings.toJson(store.conversationId())
+                    )
+                );
+                main.post(() -> callback.onSuccess(updated));
+            } catch (Exception exception) {
+                main.post(() -> callback.onError(failure(exception)));
             }
         });
     }

@@ -16,6 +16,7 @@ import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -33,6 +34,16 @@ public final class IntegrationsActivity extends Activity {
     private IntegrationsClient client;
     private LinearLayout providerList;
     private TextView coreState;
+    private TextView emailAssistantState;
+    private TextView emailAssistantDetails;
+    private Switch importantEmailAlerts;
+    private Switch replyAlerts;
+    private Switch inboxCleanup;
+    private Button importanceThreshold;
+    private Button cleanupMode;
+    private Button cleanupAge;
+    private EmailAssistantSettings currentEmailSettings;
+    private boolean renderingEmailSettings;
     private boolean oauthBrowserOpened;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -119,6 +130,8 @@ public final class IntegrationsActivity extends Activity {
         explanation.setLineSpacing(0f, 1.12f);
         page.addView(explanation, matchWrap(0, dp(18)));
 
+        page.addView(buildEmailAssistantCard(), matchWrap(0, dp(18)));
+
         providerList = new LinearLayout(this);
         providerList.setOrientation(LinearLayout.VERTICAL);
         page.addView(providerList, matchWrap());
@@ -182,6 +195,161 @@ public final class IntegrationsActivity extends Activity {
                 showProviderFailure(failure);
             }
         });
+        loadEmailAssistant();
+    }
+
+    private View buildEmailAssistantCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(15), dp(16), dp(15));
+        card.setBackground(rounded(SOFT, 18, 1, LINE));
+        TextView title = text("Email Assistant", 18, BLACK);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        card.addView(title, matchWrap(0, dp(4)));
+        emailAssistantState = text("Checking settings…", 12, MID);
+        card.addView(emailAssistantState, matchWrap(0, dp(8)));
+
+        importantEmailAlerts = settingSwitch("Important email alerts");
+        replyAlerts = settingSwitch("Reply alerts");
+        inboxCleanup = settingSwitch("Inbox cleanup");
+        card.addView(importantEmailAlerts, matchWrap());
+        card.addView(replyAlerts, matchWrap());
+        card.addView(inboxCleanup, matchWrap(0, dp(8)));
+
+        importanceThreshold = secondaryButton("Importance: Important");
+        importanceThreshold.setOnClickListener(view -> cycleImportance());
+        card.addView(importanceThreshold, matchWrap(0, dp(6)));
+        cleanupMode = secondaryButton("Cleanup: Trash");
+        cleanupMode.setOnClickListener(view -> cycleCleanupMode());
+        card.addView(cleanupMode, matchWrap(0, dp(6)));
+        cleanupAge = secondaryButton("Cleanup age: 30 days");
+        cleanupAge.setOnClickListener(view -> cycleCleanupAge());
+        card.addView(cleanupAge, matchWrap(0, dp(8)));
+
+        emailAssistantDetails = text(
+            "Cleanup starts in preview mode and never permanently deletes Gmail.",
+            12,
+            MID
+        );
+        emailAssistantDetails.setLineSpacing(0f, 1.1f);
+        card.addView(emailAssistantDetails, matchWrap());
+
+        importantEmailAlerts.setOnCheckedChangeListener((button, checked) -> saveEmailToggles());
+        replyAlerts.setOnCheckedChangeListener((button, checked) -> saveEmailToggles());
+        inboxCleanup.setOnCheckedChangeListener((button, checked) -> saveEmailToggles());
+        return card;
+    }
+
+    private Switch settingSwitch(String label) {
+        Switch value = new Switch(this);
+        value.setText(label);
+        value.setTextSize(14);
+        value.setTextColor(BLACK);
+        value.setMinHeight(dp(46));
+        return value;
+    }
+
+    private void loadEmailAssistant() {
+        client.emailAssistant(new IntegrationsClient.EmailAssistantCallback() {
+            @Override public void onSuccess(EmailAssistantSettings settings) {
+                renderEmailAssistant(settings);
+            }
+
+            @Override public void onError(IntegrationsClient.Failure failure) {
+                emailAssistantState.setText("Settings unavailable — " + failure.message);
+            }
+        });
+    }
+
+    void renderEmailAssistant(EmailAssistantSettings settings) {
+        currentEmailSettings = settings;
+        renderingEmailSettings = true;
+        importantEmailAlerts.setChecked(settings.importantAlerts);
+        replyAlerts.setChecked(settings.replyAlerts);
+        inboxCleanup.setChecked(settings.inboxCleanup);
+        renderingEmailSettings = false;
+        String state = settings.providerNeedsAttention
+            ? "Needs reconnecting"
+            : (settings.status.isBlank() ? "Paused" : titleCase(settings.status));
+        if (settings.inboxCleanup && settings.cleanupDryRun) state += " · cleanup preview only";
+        emailAssistantState.setText(state);
+        importanceThreshold.setText("Importance: " + titleCase(settings.importanceThreshold));
+        cleanupMode.setText("Cleanup: " + titleCase(settings.cleanupMode));
+        cleanupAge.setText("Cleanup age: " + settings.cleanupAgeDays + " days");
+        String lastCheck = settings.lastGmailCheck.isBlank() ? "Not checked yet" : settings.lastGmailCheck;
+        String lastCleanup = settings.lastCleanup.isBlank() ? "Not run yet" : settings.lastCleanup;
+        String nextCleanup = settings.nextCleanup.isBlank() ? "Not scheduled" : settings.nextCleanup;
+        emailAssistantDetails.setText(
+            "Last Gmail check: " + lastCheck
+                + "\nLast cleanup: " + lastCleanup
+                + "\nNext cleanup: " + nextCleanup
+                + "\nProtected senders: " + settings.protectedSenders.size()
+                + "\nCleanup never permanently deletes Gmail."
+        );
+    }
+
+    private void saveEmailToggles() {
+        if (renderingEmailSettings || currentEmailSettings == null) return;
+        saveEmailSettings(currentEmailSettings.withToggles(
+            importantEmailAlerts.isChecked(),
+            replyAlerts.isChecked(),
+            inboxCleanup.isChecked()
+        ));
+    }
+
+    private void cycleImportance() {
+        if (currentEmailSettings == null) return;
+        String next = switch (currentEmailSettings.importanceThreshold) {
+            case "critical" -> "important";
+            case "important" -> "normal";
+            default -> "critical";
+        };
+        saveEmailSettings(currentEmailSettings.withOptions(
+            next,
+            currentEmailSettings.cleanupMode,
+            currentEmailSettings.cleanupAgeDays
+        ));
+    }
+
+    private void cycleCleanupMode() {
+        if (currentEmailSettings == null) return;
+        String next = "trash".equals(currentEmailSettings.cleanupMode) ? "archive" : "trash";
+        saveEmailSettings(currentEmailSettings.withOptions(
+            currentEmailSettings.importanceThreshold,
+            next,
+            currentEmailSettings.cleanupAgeDays
+        ));
+    }
+
+    private void cycleCleanupAge() {
+        if (currentEmailSettings == null) return;
+        int next = currentEmailSettings.cleanupAgeDays == 30
+            ? 60
+            : (currentEmailSettings.cleanupAgeDays == 60 ? 90 : 30);
+        saveEmailSettings(currentEmailSettings.withOptions(
+            currentEmailSettings.importanceThreshold,
+            currentEmailSettings.cleanupMode,
+            next
+        ));
+    }
+
+    private void saveEmailSettings(EmailAssistantSettings requested) {
+        emailAssistantState.setText("Saving…");
+        client.updateEmailAssistant(requested, new IntegrationsClient.EmailAssistantCallback() {
+            @Override public void onSuccess(EmailAssistantSettings settings) {
+                renderEmailAssistant(settings);
+            }
+
+            @Override public void onError(IntegrationsClient.Failure failure) {
+                emailAssistantState.setText("Couldn't save settings — " + failure.message);
+                renderEmailAssistant(currentEmailSettings);
+            }
+        });
+    }
+
+    private static String titleCase(String value) {
+        if (value == null || value.isBlank()) return "Paused";
+        return value.substring(0, 1).toUpperCase(Locale.ROOT) + value.substring(1);
     }
 
     void renderProviders(List<IntegrationProvider> providers) {

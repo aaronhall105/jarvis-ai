@@ -63,6 +63,8 @@ class GoogleFixture:
         self.gmail_probe_timeout = False
         self.gmail_search_status = 200
         self.gmail_search_malformed = False
+        self.gmail_history_pages: dict[str, dict[str, object]] = {}
+        self.gmail_history_expired = False
         self.gmail_send_timeout = False
         self.calendar_probe_status = 200
         self.contacts_probe_status = 200
@@ -154,6 +156,27 @@ class GoogleFixture:
             if isinstance(sent, dict) and sent.get("raw"):
                 self.forward_message = self._message_from_raw(sent)
             return httpx.Response(200, json={"id": "forward-1", "threadId": "thread-2"})
+        if path == "/gmail/v1/users/me/profile":
+            return httpx.Response(
+                200,
+                json={"emailAddress": "aaron@example.test", "historyId": "500"},
+            )
+        if path == "/gmail/v1/users/me/history":
+            if self.gmail_history_expired:
+                return httpx.Response(404, json={"error": "history expired"})
+            token = request.url.params.get("pageToken") or "first"
+            return httpx.Response(
+                200,
+                json=self.gmail_history_pages.get(
+                    token,
+                    {
+                        "historyId": "501",
+                        "history": [
+                            {"id": "501", "messagesAdded": [{"message": {"id": "message-2"}}]}
+                        ],
+                    },
+                ),
+            )
         if path == "/gmail/v1/users/me/messages" and request.method == "GET":
             if self.gmail_probe_timeout and request.url.params.get("maxResults") == "1":
                 raise httpx.ConnectTimeout("gmail probe timed out", request=request)
@@ -610,6 +633,7 @@ async def test_partial_scopes_are_principal_isolated_and_capability_grounded(
         "gmail.prioritize",
         "gmail.important_status",
         "gmail.briefing",
+        "gmail.changes",
     }
     assert other.available is False
     assert other.executable_capabilities == ()
@@ -823,6 +847,52 @@ async def test_gmail_search_returns_provider_message_summaries(tmp_path: Path) -
         )
     )
     assert inbox.data["query"] == "in:inbox"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_changes_bootstraps_paginates_and_recovers_expired_cursor(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_history_pages = {
+        "first": {
+            "historyId": "502",
+            "history": [{"id": "501", "messagesAdded": [{"message": {"id": "message-2"}}]}],
+            "nextPageToken": "next",
+        },
+        "next": {
+            "historyId": "503",
+            "history": [{"id": "503", "messagesAdded": [{"message": {"id": "message-2"}}]}],
+        },
+    }
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    bootstrap, bootstrap_reference = await connector._gmail_changes("aaron", {})
+    assert bootstrap_reference == "500"
+    assert bootstrap == {
+        "history_id": "500",
+        "previous_history_id": None,
+        "messages": [],
+        "message_ids": [],
+        "count": 0,
+        "bootstrap": True,
+        "cursor_expired": False,
+        "account_email": "aaron@example.test",
+    }
+
+    changes, reference = await connector._gmail_changes("aaron", {"history_id": "500", "limit": 25})
+    assert reference == "503"
+    assert changes["history_id"] == "503"
+    assert changes["message_ids"] == ["message-2"]
+    assert changes["messages"][0]["body"] == "The garage can see you Friday."
+    assert fixture.calls["GET /gmail/v1/users/me/history"] == 2
+
+    fixture.gmail_history_expired = True
+    expired, expired_reference = await connector._gmail_changes("aaron", {"history_id": "100"})
+    assert expired_reference == "500"
+    assert expired["cursor_expired"] is True
+    assert expired["messages"] == []
     await client.aclose()
 
 
