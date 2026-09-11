@@ -149,6 +149,7 @@ Conversation, understanding and identity:
 - Warmth, dry wit, gentle sarcasm and playful banter are welcome in low-stakes conversation, but use them occasionally rather than forcing a joke into every reply.
 - Automatically drop humour and sarcasm for safety, health, medical, legal, financial, relationship-crisis, grief, distress, anger or genuine device-failure situations.
 - Give useful advice and one relevant suggestion when it genuinely improves the answer. Do not append generic offers merely to keep talking.
+- Never offer an executable follow-up unless a structured pending action was created for that exact offer. If no pending action exists, answer the current request and stop.
 - Respectfully disagree when Aaron's assumption or plan appears mistaken. Explain why plainly instead of agreeing for the sake of being agreeable.
 - Remain truthful. Do not claim consciousness, feelings or knowledge that Home Assistant does not have.
 - Adapt to the apparent tone of the current message. If the user is frustrated or
@@ -659,6 +660,14 @@ _UNBACKED_EXTERNAL_WRITE_CLAIM_PATTERN = re.compile(
     re.I,
 )
 
+_UNBACKED_EXECUTABLE_OFFER_PATTERN = re.compile(
+    r"\b(?:want me to|would you like me to|shall i)\b[^.!?\n]{0,160}"
+    r"\b(?:send|notify|email|message|forward|reply|delete|trash|archive|restore|"
+    r"move|turn|switch|run|book|order|purchase|post|publish|create|change|update|"
+    r"add|remove|save)\b",
+    re.I,
+)
+
 
 def _verified_external_write_evidence(
     completed_calls: Sequence[dict[str, Any]],
@@ -851,6 +860,21 @@ def unbacked_external_write_claim_reply(
         "I don’t have verified execution evidence for that external write, so I "
         "can’t claim it was completed."
     )
+
+
+def remove_unbacked_executable_offer(reply: str, *, structured_follow_up: bool) -> str:
+    """Remove an executable offer that has no durable continuation state."""
+
+    value = str(reply or "").strip()
+    if structured_follow_up or not value:
+        return value
+    match = _UNBACKED_EXECUTABLE_OFFER_PATTERN.search(value)
+    if match is None:
+        return value
+    prefix = value[: match.start()].rstrip(" \t\r\n—–-,:;")
+    if prefix:
+        return prefix
+    return "Tell me directly what you'd like me to do."
 
 
 def verified_gmail_reply_status_reply(
@@ -6781,6 +6805,7 @@ class AIEngine:
         staged_admin_change = any(
             call.get("tool") == "propose_admin_change" for call in completed_calls
         )
+        structured_follow_up = staged_admin_change
         if decision.intent == RequestIntent.ADMIN_CHANGE and not staged_admin_change:
             final_reply = (
                 "I couldn’t safely stage that Home Assistant change, so nothing was saved."
@@ -6840,6 +6865,7 @@ class AIEngine:
                     status="awaiting_slot",
                     ttl_seconds=_GMAIL_PENDING_TTL_SECONDS,
                 )
+                structured_follow_up = True
 
         reply_status_reply = verified_gmail_reply_status_reply(completed_calls)
         if reply_status_reply is not None:
@@ -6905,6 +6931,11 @@ class AIEngine:
         )
         if unbacked_write_reply is not None:
             final_reply = unbacked_write_reply
+
+        final_reply = remove_unbacked_executable_offer(
+            final_reply,
+            structured_follow_up=structured_follow_up,
+        )
 
         final_reply = present_user_response(final_reply, request_text=raw_user_text)
         final_reply = _clean_reply(final_reply)

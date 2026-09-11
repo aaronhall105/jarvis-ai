@@ -970,6 +970,231 @@ class EmailAssistantPolicyEngine:
             )
         return {"totals": totals, "entries": entries}
 
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return None
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _history_item(row: Mapping[str, Any]) -> dict[str, Any]:
+        """Return one safe cleanup-history record, including legacy fallbacks."""
+
+        try:
+            evidence = json.loads(str(row.get("evidence_json") or "{}"))
+        except json.JSONDecodeError:
+            evidence = {}
+        if not isinstance(evidence, dict):
+            evidence = {}
+        metadata = evidence.get("message_metadata")
+        metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+        classification = evidence.get("classification")
+        classification = dict(classification) if isinstance(classification, Mapping) else {}
+        verification = evidence.get("verification")
+        verification = dict(verification) if isinstance(verification, Mapping) else {}
+        operation = str(evidence.get("cleanup_mode") or row.get("cleanup_mode") or "trash")
+        action_at = (
+            EmailAssistantPolicyEngine._parse_timestamp(evidence.get("cleanup_at"))
+            or EmailAssistantPolicyEngine._parse_timestamp(verification.get("verified_at"))
+            or EmailAssistantPolicyEngine._parse_timestamp(row.get("updated_at"))
+        )
+        sender_address = str(
+            metadata.get("sender_address") or classification.get("sender") or ""
+        ).strip()
+        sender_name = str(metadata.get("sender_display_name") or "").strip()
+        subject = str(metadata.get("subject") or "").strip()
+        thread_id = str(metadata.get("thread_id") or "").strip()
+        previous_labels = metadata.get("previous_labels")
+        if not isinstance(previous_labels, list):
+            previous_labels = evidence.get("provider_labels")
+        return {
+            "message_id": str(row.get("message_id") or ""),
+            "thread_id": thread_id or None,
+            "sender_display_name": sender_name or None,
+            "sender_address": sender_address or None,
+            "subject": subject or None,
+            "previous_labels": [str(item) for item in previous_labels or ()],
+            "operation": operation,
+            "classification": str(classification.get("category") or "").strip() or None,
+            "eligibility_reason": str(evidence.get("eligibility") or "").strip() or None,
+            "policy_id": str(row.get("policy_id") or ""),
+            "policy_version": str(evidence.get("policy_version") or "legacy").strip(),
+            "action_id": str(
+                evidence.get("action_receipt_id")
+                or evidence.get("cleanup_action_id")
+                or row.get("action_id")
+                or ""
+            ).strip()
+            or None,
+            "provider_reference": str(
+                evidence.get("cleanup_provider_reference") or row.get("provider_reference") or ""
+            ).strip()
+            or None,
+            "verification": verification,
+            "verified": bool(
+                str(row.get("status") or "") in {"verified", "verified_after_unknown", "restored"}
+                and (verification or evidence.get("reconciliation"))
+            ),
+            "restored": str(row.get("status") or "") == "restored"
+            or bool(evidence.get("undone_at")),
+            "action_at": EmailAssistantPolicyEngine._iso(action_at) if action_at else None,
+            "cleanup_run_at": str(evidence.get("cleanup_run_at") or "").strip() or None,
+            "metadata_complete": bool(sender_address and subject and thread_id),
+        }
+
+    async def cleanup_history_items(
+        self,
+        *,
+        principal_id: str,
+        since: datetime | None = None,
+        operation: str | None = None,
+        offset: int = 0,
+        limit: int = 10,
+        latest_run: bool = False,
+    ) -> dict[str, Any]:
+        """Page through verified, principal-owned cleanup mutations."""
+
+        principal = str(principal_id or "").strip()
+        selected_operation = str(operation or "").casefold().strip() or None
+        if selected_operation not in {None, "trash", "archive"}:
+            raise ValueError("Cleanup history operation must be trash or archive")
+        start = max(0, int(offset))
+        page_size = max(1, min(int(limit), 25))
+        with self._db() as connection:
+            rows = connection.execute(
+                "SELECT i.*,p.principal_id,p.cleanup_mode,p.classification_version "
+                "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
+                "WHERE p.principal_id=? AND p.kind='safe_cleanup' "
+                "AND i.status IN ('verified','verified_after_unknown','restored') "
+                "ORDER BY i.updated_at DESC LIMIT 1000",
+                (principal,),
+            ).fetchall()
+        items: list[dict[str, Any]] = []
+        for raw in rows:
+            item = self._history_item(dict(raw))
+            action_at = self._parse_timestamp(item.get("action_at"))
+            if since is not None and (
+                action_at is None or action_at < since.astimezone(timezone.utc)
+            ):
+                continue
+            if selected_operation and item["operation"] != selected_operation:
+                continue
+            items.append(item)
+        items.sort(
+            key=lambda item: (
+                self._parse_timestamp(item.get("action_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ),
+            reverse=True,
+        )
+        if latest_run and items:
+            run_times = [self._parse_timestamp(item.get("cleanup_run_at")) for item in items]
+            newest_run = max((item for item in run_times if item is not None), default=None)
+            if newest_run is not None:
+                items = [
+                    item
+                    for item in items
+                    if self._parse_timestamp(item.get("cleanup_run_at")) == newest_run
+                ]
+            else:
+                newest_action = self._parse_timestamp(items[0].get("action_at"))
+                if newest_action is not None:
+                    oldest = newest_action - timedelta(minutes=15)
+                    items = [
+                        item
+                        for item in items
+                        if (self._parse_timestamp(item.get("action_at")) or oldest) >= oldest
+                    ]
+        page = items[start : start + page_size]
+        totals = {
+            "trashed": sum(1 for item in items if item["operation"] == "trash"),
+            "archived": sum(1 for item in items if item["operation"] == "archive"),
+        }
+        return {
+            "total": len(items),
+            "totals": totals,
+            "items": page,
+            "offset": start,
+            "limit": page_size,
+            "has_more": start + len(page) < len(items),
+            "next_offset": start + len(page),
+            "operation": selected_operation,
+            "latest_run": bool(latest_run),
+        }
+
+    async def verify_cleanup_items_state(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        message_ids: Sequence[str],
+        expected_operation: str,
+    ) -> dict[str, Any]:
+        """Verify current Gmail state for exact principal-owned cleanup records."""
+
+        principal = str(principal_id or "").strip()
+        requested = [str(item).strip() for item in message_ids if str(item).strip()][:25]
+        if not requested:
+            return {"checked": 0, "matching": 0, "unavailable": 0, "states": []}
+        placeholders = ",".join("?" for _ in requested)
+        with self._db() as connection:
+            owned = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT DISTINCT i.message_id FROM email_policy_items i "
+                    "JOIN email_policies p ON p.policy_id=i.policy_id "
+                    f"WHERE p.principal_id=? AND p.kind='safe_cleanup' AND i.message_id IN ({placeholders}) "
+                    "AND i.status IN ('verified','verified_after_unknown','restored')",
+                    (principal, *requested),
+                ).fetchall()
+            }
+        policy = {"principal_id": principal, "conversation_id": conversation_id}
+        states: list[dict[str, Any]] = []
+        for message_id in requested:
+            if message_id not in owned:
+                continue
+            current = await self._read_message(policy=policy, message_id=message_id)
+            if current is None:
+                states.append({"message_id": message_id, "available": False, "matches": False})
+                continue
+            labels = {str(item) for item in current.get("label_ids") or ()}
+            matches = (
+                "TRASH" in labels
+                if expected_operation == "trash"
+                else "INBOX" not in labels and "TRASH" not in labels
+            )
+            states.append({"message_id": message_id, "available": True, "matches": matches})
+        return {
+            "checked": len(states),
+            "matching": sum(1 for item in states if item["matches"]),
+            "unavailable": sum(1 for item in states if not item["available"]),
+            "states": states,
+        }
+
+    async def send_cleanup_history_notification(
+        self, *, principal_id: str, text: str
+    ) -> dict[str, Any]:
+        """Send an explicitly requested cleanup list to the owner's configured phone."""
+
+        if self.notifier is None:
+            return {"success": False, "command_accepted": False, "error": "unavailable"}
+        message = str(text or "").strip()
+        if not message:
+            return {"success": False, "command_accepted": False, "error": "empty"}
+        result = await self.notifier(
+            str(principal_id),
+            message[:1000],
+            "Jarvis Email Cleanup",
+        )
+        return dict(result)
+
     async def protect_message(
         self, *, principal_id: str, message_id: str, thread_id: str | None = None
     ) -> bool:
@@ -1106,6 +1331,116 @@ class EmailAssistantPolicyEngine:
                 "error": redact_text(action.error or "Restore could not be verified"),
             }
         return {"success": True, "restored": 0}
+
+    async def restore_cleanup_item(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        message_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Restore one exact, principal-owned, verified Trash cleanup item."""
+
+        principal = str(principal_id or "").strip()
+        selected = str(message_id or "").strip()
+        if not principal or not selected:
+            return {"success": False, "restored": 0, "reason": "missing_target"}
+        with self._db() as connection:
+            raws = connection.execute(
+                "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id "
+                "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
+                "WHERE p.principal_id=? AND p.kind='safe_cleanup' AND i.message_id=? "
+                "AND i.status IN "
+                "('verified','verified_after_unknown','restored') "
+                "ORDER BY i.updated_at DESC LIMIT 50",
+                (principal, selected),
+            ).fetchall()
+        raw = next(
+            (
+                candidate
+                for candidate in raws
+                if self._history_item(dict(candidate))["operation"] == "trash"
+            ),
+            None,
+        )
+        if raw is None:
+            return {"success": False, "restored": 0, "reason": "not_verified_cleanup"}
+        row = dict(raw)
+        try:
+            evidence = json.loads(str(row.get("evidence_json") or "{}"))
+        except json.JSONDecodeError:
+            evidence = {}
+        if not isinstance(evidence, dict):
+            evidence = {}
+        if evidence.get("undone_at") or str(row.get("status")) == "restored":
+            return {"success": True, "restored": 0, "reason": "already_restored"}
+        policy = {"principal_id": principal, "conversation_id": conversation_id}
+        current = await self._read_message(policy=policy, message_id=selected)
+        if current is None:
+            return {"success": False, "restored": 0, "reason": "state_unavailable"}
+        labels = {str(item) for item in current.get("label_ids") or ()}
+        if "TRASH" not in labels:
+            return {"success": True, "restored": 0, "reason": "not_in_trash"}
+        key = f"email-cleanup-undo:{row['eligibility_key']}"
+        action = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="gmail.restore",
+                payload={"message_id": selected},
+                request_id=request_id,
+                conversation_id=conversation_id,
+                principal_id=principal,
+                operation="restore_selected_email_cleanup",
+                target=selected,
+                confirmed=True,
+                idempotency_key=key,
+            ),
+            refresh_health=True,
+        )
+        evidence["undo_status"] = action.status.value
+        evidence["undo_verification"] = dict(action.verification)
+        if action.status is not ExecutionStatus.VERIFIED:
+            return {
+                "success": False,
+                "restored": 0,
+                "reason": "restore_not_verified",
+                "error": redact_text(action.error or "Restore could not be verified"),
+            }
+        evidence["undone_at"] = self._iso(self._now())
+        evidence.setdefault("cleanup_action_id", row.get("action_id"))
+        evidence.setdefault("cleanup_provider_reference", row.get("provider_reference"))
+        evidence["restore_action_id"] = action.receipt.action_id if action.receipt else None
+        evidence["restore_provider_reference"] = action.provider_reference
+        self._record_item(
+            policy_id=str(row["policy_id"]),
+            message_id=selected,
+            eligibility_key=str(row["eligibility_key"]),
+            status="restored",
+            attempts=int(row["attempts"]),
+            action_id=(action.receipt.action_id if action.receipt else row.get("action_id")),
+            provider_reference=action.provider_reference,
+            evidence=evidence,
+        )
+        with self._db() as connection:
+            self._audit(
+                connection,
+                {"policy_id": str(row["policy_id"]), "principal_id": principal},
+                "undo",
+                "verified",
+                {
+                    "message_id": selected,
+                    "provider_reference": action.provider_reference,
+                    "permanent_delete": False,
+                },
+            )
+        return {
+            "success": True,
+            "restored": 1,
+            "reason": "verified",
+            "item": self._history_item(
+                {**row, "status": "restored", "evidence_json": json.dumps(evidence)}
+            ),
+        }
 
     async def _sync_safe_cleanup_policy(self, principal_id: str) -> None:
         profile = await self.assistant_status(principal_id=principal_id)
@@ -2154,6 +2489,22 @@ class EmailAssistantPolicyEngine:
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
+    @classmethod
+    def _cleanup_message_metadata(cls, message: Mapping[str, Any]) -> dict[str, Any]:
+        """Keep the small, safe envelope needed to explain a later cleanup."""
+
+        raw_sender = " ".join(str(message.get("from") or "").split())[:500]
+        display_name, parsed_address = parseaddr(raw_sender)
+        sender_address = cls._address(parsed_address or raw_sender)
+        subject = " ".join(str(message.get("subject") or "").split())[:500]
+        return {
+            "thread_id": str(message.get("thread_id") or "").strip()[:300] or None,
+            "sender_display_name": " ".join(display_name.split())[:200] or None,
+            "sender_address": sender_address or None,
+            "subject": subject or None,
+            "previous_labels": sorted(str(item) for item in message.get("label_ids") or ()),
+        }
+
     def _record_item(
         self,
         *,
@@ -2499,6 +2850,12 @@ class EmailAssistantPolicyEngine:
                     "dry_run": dry_run,
                     "classification": dict(classification),
                     "permanent_delete": False,
+                    "message_metadata": self._cleanup_message_metadata(message),
+                    "policy_id": policy_id,
+                    "policy_version": str(
+                        policy.get("classification_version") or "legacy-inbox-age-v1"
+                    ),
+                    "cleanup_run_at": self._iso(current),
                 }
                 if dry_run:
                     counts["dry_run_candidates"] += 1
@@ -2545,6 +2902,8 @@ class EmailAssistantPolicyEngine:
                 receipt = action.receipt
                 evidence["action_status"] = action.status.value
                 evidence["verification"] = dict(action.verification)
+                evidence["cleanup_at"] = self._iso(self._now())
+                evidence["action_receipt_id"] = receipt.action_id if receipt is not None else None
                 if action.status is ExecutionStatus.VERIFIED:
                     item_status = "verified"
                     counts["archived" if policy["cleanup_mode"] == "archive" else "trashed"] += 1

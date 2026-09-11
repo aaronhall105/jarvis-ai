@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ class ProactiveRegistry:
         self.known_contacts: set[str] = set()
         self.contacts_available = True
         self.writes: list[tuple[str, str]] = []
+        self.reads: list[str] = []
 
     @staticmethod
     def result(data: dict[str, Any], *, reference: str | None = None):
@@ -60,7 +62,9 @@ class ProactiveRegistry:
                 }
             )
         if capability == "gmail.read":
-            message = self.messages.get(str(request.payload["message_id"]))
+            message_id = str(request.payload["message_id"])
+            self.reads.append(message_id)
+            message = self.messages.get(message_id)
             if message is None:
                 return SimpleNamespace(success=False, data={}, error="message disappeared")
             return self.result(dict(message), reference=str(message["message_id"]))
@@ -891,3 +895,216 @@ def test_known_direct_contact_is_important_but_bulk_mail_stays_non_interrupting(
     assert direct["addressed_directly"] is True
     assert direct["level"] == "important"
     assert newsletter["level"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_cleanup_history_persists_safe_envelope_and_pages_after_restart(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    registry.messages = {
+        f"promotion-{index}": mail(
+            f"promotion-{index}",
+            thread_id=f"thread-{index}",
+            labels={"INBOX", "CATEGORY_PROMOTIONS"},
+            sender=f"Store {index} <offers{index}@example.test>",
+            subject=f"Weekly offers {index}",
+            body="Newsletter unsubscribe",
+            age_days=45,
+        )
+        for index in range(12)
+    }
+    path = tmp_path / "email.db"
+    engine = EmailAssistantPolicyEngine(path, registry)  # type: ignore[arg-type]
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        inbox_cleanup=True,
+        cleanup_dry_run=False,
+    )
+    policy = next(
+        item for item in await engine.list(principal_id="aaron") if item["kind"] == "safe_cleanup"
+    )
+    result = await engine.run_policy(
+        policy["policy_id"], now=datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
+    )
+    assert result["trashed"] == 12
+
+    reads_after_cleanup = len(registry.reads)
+    first = await engine.cleanup_history_items(principal_id="aaron", limit=10)
+    assert first["total"] == 12
+    assert first["totals"] == {"trashed": 12, "archived": 0}
+    assert len(first["items"]) == 10
+    assert first["has_more"] is True
+    assert first["next_offset"] == 10
+    assert len(registry.reads) == reads_after_cleanup
+    item = first["items"][0]
+    assert item["thread_id"]
+    assert item["sender_display_name"].startswith("Store ")
+    assert item["sender_address"].endswith("@example.test")
+    assert item["subject"].startswith("Weekly offers ")
+    assert item["previous_labels"] == ["CATEGORY_PROMOTIONS", "INBOX"]
+    assert item["operation"] == "trash"
+    assert item["classification"] == "newsletter/low priority"
+    assert item["eligibility_reason"] == "read_low_value_old_mail"
+    assert item["action_id"]
+    assert item["verification"]
+    assert item["metadata_complete"] is True
+
+    restarted = EmailAssistantPolicyEngine(path, registry)  # type: ignore[arg-type]
+    rest = await restarted.cleanup_history_items(
+        principal_id="aaron", operation="trash", offset=10, limit=10
+    )
+    assert len(rest["items"]) == 2
+    assert rest["has_more"] is False
+    isolated = await restarted.cleanup_history_items(principal_id="amber")
+    assert isolated["total"] == 0
+    assert isolated["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_cleanup_history_legacy_fallback_and_live_state_are_truthful(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    registry.messages = {
+        "legacy": mail(
+            "legacy",
+            labels={"TRASH", "CATEGORY_PROMOTIONS"},
+            sender="Old Sender <old@example.test>",
+            subject="Old subject",
+            age_days=45,
+        )
+    }
+    engine = EmailAssistantPolicyEngine(tmp_path / "email.db", registry)  # type: ignore[arg-type]
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        inbox_cleanup=True,
+        cleanup_dry_run=False,
+    )
+    policy = next(
+        item for item in await engine.list(principal_id="aaron") if item["kind"] == "safe_cleanup"
+    )
+    engine._record_item(
+        policy_id=policy["policy_id"],
+        message_id="legacy",
+        eligibility_key="legacy-key",
+        status="verified",
+        attempts=1,
+        action_id="legacy-action",
+        provider_reference="legacy",
+        evidence={
+            "cleanup_mode": "trash",
+            "eligibility": "read_low_value_old_mail",
+            "classification": {
+                "category": "newsletter/low priority",
+                "sender": "old@example.test",
+            },
+            "verification": {"verified_at": "2026-09-10T12:00:00+00:00"},
+        },
+    )
+
+    history = await engine.cleanup_history_items(principal_id="aaron")
+    assert history["items"][0]["sender_address"] == "old@example.test"
+    assert history["items"][0]["subject"] is None
+    assert history["items"][0]["metadata_complete"] is False
+    assert registry.reads == []
+
+    state = await engine.verify_cleanup_items_state(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        message_ids=["legacy"],
+        expected_operation="trash",
+    )
+    assert state["checked"] == 1
+    assert state["matching"] == 1
+    assert registry.reads == ["legacy"]
+
+
+@pytest.mark.asyncio
+async def test_restore_cleanup_item_is_exact_principal_scoped_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    registry.messages = {
+        "promotion": mail(
+            "promotion",
+            labels={"TRASH", "CATEGORY_PROMOTIONS"},
+            age_days=45,
+        )
+    }
+    engine = EmailAssistantPolicyEngine(tmp_path / "email.db", registry)  # type: ignore[arg-type]
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        inbox_cleanup=True,
+        cleanup_dry_run=False,
+    )
+    policy = next(
+        item for item in await engine.list(principal_id="aaron") if item["kind"] == "safe_cleanup"
+    )
+    engine._record_item(
+        policy_id=policy["policy_id"],
+        message_id="promotion",
+        eligibility_key="restore-key",
+        status="verified",
+        attempts=1,
+        action_id="trash-action",
+        provider_reference="promotion",
+        evidence={
+            "cleanup_mode": "trash",
+            "verification": {"verified_at": "2026-09-10T12:00:00+00:00"},
+            "message_metadata": {
+                "thread_id": "thread-promotion",
+                "sender_display_name": "Work",
+                "sender_address": "work@example.test",
+                "subject": "Please confirm Friday",
+                "previous_labels": ["INBOX"],
+            },
+        },
+    )
+    # The historical operation remains authoritative even if the current policy changes.
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        cleanup_mode="archive",
+    )
+
+    isolated = await engine.restore_cleanup_item(
+        principal_id="amber",
+        conversation_id="usr:amber:mail",
+        message_id="promotion",
+        request_id="wrong-principal",
+    )
+    assert isolated["restored"] == 0
+    assert registry.writes == []
+
+    restored = await engine.restore_cleanup_item(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        message_id="promotion",
+        request_id="restore-once",
+    )
+    replay = await engine.restore_cleanup_item(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        message_id="promotion",
+        request_id="restore-retry",
+    )
+    assert restored["restored"] == 1
+    assert replay["reason"] == "already_restored"
+    assert registry.writes == [("gmail.restore", "promotion")]
+    history = await engine.cleanup_history_items(principal_id="aaron")
+    assert history["items"][0]["action_id"] == "trash-action"
+    with engine._db() as connection:
+        evidence = json.loads(
+            str(
+                connection.execute(
+                    "SELECT evidence_json FROM email_policy_items WHERE message_id=?",
+                    ("promotion",),
+                ).fetchone()[0]
+            )
+        )
+    assert evidence["cleanup_action_id"] == "trash-action"
+    assert evidence["restore_action_id"] == "action-gmail.restore-promotion"
