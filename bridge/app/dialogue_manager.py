@@ -366,6 +366,60 @@ class DialogueManager:
             {"message_id": message_id, "thread_id": thread_id},
         )
 
+    async def record_email_cleanup_history_focus(
+        self, conversation_id: str, evidence: Mapping[str, Any]
+    ) -> DialogueState:
+        """Persist the exact cleanup-history page used by conversational follow-ups."""
+
+        message_ids = [
+            str(item).strip() for item in evidence.get("message_ids") or () if str(item).strip()
+        ][:25]
+        items = [
+            {
+                key: item.get(key)
+                for key in (
+                    "message_id",
+                    "sender_display_name",
+                    "sender_address",
+                    "subject",
+                    "operation",
+                    "classification",
+                    "eligibility_reason",
+                )
+            }
+            for item in evidence.get("items") or ()
+            if isinstance(item, Mapping)
+            and str(item.get("message_id") or "").strip() in message_ids
+        ][:25]
+        state = await self.get(conversation_id)
+        state.focus = {
+            **state.focus,
+            "email_cleanup_history": {
+                "message_ids": message_ids,
+                "items": items,
+                "operation": (
+                    str(evidence.get("operation")) if evidence.get("operation") else None
+                ),
+                "since": str(evidence.get("since") or "") or None,
+                "offset": max(0, int(evidence.get("offset") or 0)),
+                "next_offset": max(0, int(evidence.get("next_offset") or 0)),
+                "has_more": bool(evidence.get("has_more")),
+                "latest_run": bool(evidence.get("latest_run")),
+                "observed_at": str(evidence.get("observed_at") or self._iso(self._utc_now())),
+            },
+            "intent": "email_cleanup_history",
+            "updated_at": self._iso(self._utc_now()),
+        }
+        return await self.save(
+            state,
+            "email_cleanup_history_focused",
+            {
+                "operation": str(evidence.get("operation") or "all"),
+                "item_count": len(message_ids),
+                "has_more": bool(evidence.get("has_more")),
+            },
+        )
+
     async def record_result(
         self,
         conversation_id: str,

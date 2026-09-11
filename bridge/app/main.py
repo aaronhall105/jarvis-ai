@@ -537,6 +537,131 @@ async def _try_handle_personal_task(
     return result
 
 
+_EMAIL_HISTORY_AFFIRMATIVES = frozenset(
+    {"yes", "yeah", "yep", "correct", "go ahead", "do it", "confirm"}
+)
+_EMAIL_HISTORY_CANCELLATIONS = frozenset(
+    {"no", "no thanks", "cancel", "cancel it", "never mind", "nevermind"}
+)
+
+
+def _email_cleanup_history_detail_request(command: str) -> bool:
+    return any(
+        phrase in command
+        for phrase in (
+            "what emails did you move",
+            "which emails did you delete",
+            "what did you put in trash",
+            "which ones did you archive",
+            "show me the emails you cleaned up",
+            "show me today's cleanup",
+            "show me todays cleanup",
+            "show me the last cleanup",
+            "why did you delete those",
+        )
+    )
+
+
+def _email_cleanup_history_operation(command: str) -> str | None:
+    if "archive" in command:
+        return "archive"
+    if "delete" in command or "trash" in command:
+        return "trash"
+    return None
+
+
+def _cleanup_history_item_label(item: Mapping[str, Any]) -> str:
+    sender = str(item.get("sender_display_name") or item.get("sender_address") or "").strip()
+    subject = str(item.get("subject") or "").strip()
+    if sender and subject:
+        return f"{sender} — ‘{subject}’"
+    if sender:
+        return f"{sender} — the subject wasn't saved in this older cleanup record"
+    if subject:
+        return f"‘{subject}’ — the sender wasn't saved in this older cleanup record"
+    return "An older cleanup record whose sender and subject weren't saved"
+
+
+def _cleanup_history_list_text(page: Mapping[str, Any], *, why: bool = False) -> str:
+    items = [dict(item) for item in page.get("items") or () if isinstance(item, Mapping)]
+    if not items:
+        operation = str(page.get("operation") or "")
+        if operation == "archive":
+            return "I haven't archived any emails in that cleanup history."
+        if operation == "trash":
+            return "I haven't moved any emails to Trash in that cleanup history."
+        return "I haven't changed any emails in that cleanup history."
+    operations = {str(item.get("operation") or "") for item in items}
+    operation = str(page.get("operation") or "")
+    if not operation and len(operations) == 1:
+        operation = next(iter(operations))
+    if len(items) == 1 and not why:
+        label = _cleanup_history_item_label(items[0])
+        if operation == "archive":
+            return f"I archived {label}."
+        if operation == "trash":
+            return f"I moved {label} to Trash."
+        return f"I cleaned up {label}."
+    lines: list[str] = []
+    for index, item in enumerate(items, start=int(page.get("offset") or 0) + 1):
+        label = _cleanup_history_item_label(item)
+        if why:
+            category = str(item.get("classification") or "low-value mail")
+            reason = str(item.get("eligibility_reason") or "matched the safe cleanup rule")
+            label = f"{label}: {category}; {reason.replace('_', ' ')}"
+        lines.append(f"{index}. {label}")
+    if operation == "archive":
+        intro = "I archived these emails:"
+    elif operation == "trash":
+        intro = "I moved these emails to Trash:"
+    else:
+        intro = "These are the emails I cleaned up:"
+    response = intro + "\n" + "\n".join(lines)
+    if page.get("has_more"):
+        remaining = max(0, int(page.get("total") or 0) - int(page.get("next_offset") or 0))
+        response += (
+            f"\nThere {'is' if remaining == 1 else 'are'} {remaining} more. Say “Show me the rest.”"
+        )
+    return response
+
+
+def _cleanup_focus_is_recent(focus: Mapping[str, Any]) -> bool:
+    observed = str(focus.get("observed_at") or "").strip()
+    if not observed:
+        return False
+    try:
+        parsed = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)
+    return timedelta(0) <= age <= timedelta(hours=24)
+
+
+def _explicit_cleanup_notification_request(command: str) -> bool:
+    return any(
+        phrase in command
+        for phrase in (
+            "send that list to my phone",
+            "send the list to my phone",
+            "send this list to my phone",
+            "send those to my phone",
+            "send it as a notification",
+        )
+    )
+
+
+def _explicit_cleanup_restore_request(command: str) -> bool:
+    return command.startswith("restore ") or command in {
+        "put that one back",
+        "undo the last cleanup",
+        "undo the last email cleanup",
+        "undo last email cleanup",
+        "restore the last email you deleted",
+    }
+
+
 async def _try_handle_email_assistant(
     text: str,
     *,
@@ -546,7 +671,7 @@ async def _try_handle_email_assistant(
 ) -> dict[str, object] | None:
     """Handle explicit Email Assistant status/configuration commands deterministically."""
 
-    command = " ".join(str(text or "").casefold().replace("’", "'").split())
+    command = " ".join(str(text or "").casefold().replace("’", "'").split()).strip(" .?!")
     status = await email_policies.assistant_status(principal_id=actor.user_key)
     dialogue_state = await dialogue.get(conversation_id)
     if (
@@ -602,11 +727,100 @@ async def _try_handle_email_assistant(
             "response": "Would you like me to enable that safe cleanup policy?",
             "intent": "email_cleanup_awaiting_confirmation",
         }
+    if (
+        dialogue_state.active_goal == "email_cleanup_restore_selection"
+        and dialogue_state.status == "awaiting_slot"
+    ):
+        if command in _EMAIL_HISTORY_CANCELLATIONS:
+            await dialogue.clear_goal(conversation_id, outcome="cancelled")
+            return {
+                "success": True,
+                "response": "Okay, I won't restore anything.",
+                "intent": "email_cleanup_restore_cancelled",
+            }
+        slots = dict(dialogue_state.slots)
+        if (
+            str(slots.get("principal_id") or "") != actor.user_key
+            or str(slots.get("conversation_id") or "") != conversation_id
+        ):
+            await dialogue.clear_goal(conversation_id, outcome="invalid")
+            return {
+                "success": False,
+                "response": "I can't safely recover which cleanup email you meant, so I haven't restored anything.",
+                "intent": "email_cleanup_restore_expired",
+            }
+        original = " ".join(str(slots.get("original_authorization_text") or "").casefold().split())
+        candidates = [
+            dict(item)
+            for item in slots.get("candidates") or ()
+            if isinstance(item, Mapping) and str(item.get("message_id") or "").strip()
+        ][:10]
+        if not _explicit_cleanup_restore_request(original) or not candidates:
+            await dialogue.clear_goal(conversation_id, outcome="invalid")
+            return {
+                "success": False,
+                "response": "I can't safely recover which cleanup email you meant, so I haven't restored anything.",
+                "intent": "email_cleanup_restore_expired",
+            }
+        selected: dict[str, Any] | None = None
+        number = re.fullmatch(r"(?:number\s+)?(\d{1,2})(?:st|nd|rd|th)?", command)
+        if number is not None:
+            index = int(number.group(1)) - 1
+            if 0 <= index < len(candidates):
+                selected = candidates[index]
+        if selected is None and command not in _EMAIL_HISTORY_AFFIRMATIVES:
+            matches = [
+                item
+                for item in candidates
+                if command
+                and command
+                in " ".join(
+                    str(item.get(key) or "")
+                    for key in ("sender_display_name", "sender_address", "subject")
+                ).casefold()
+            ]
+            if len(matches) == 1:
+                selected = matches[0]
+        if selected is None:
+            return {
+                "success": True,
+                "response": "Which one should I restore? You can give me its number, sender or subject.",
+                "intent": "email_cleanup_restore_awaiting_selection",
+            }
+        restored = await email_policies.restore_cleanup_item(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            message_id=str(selected["message_id"]),
+            request_id=request_id or str(uuid.uuid4()),
+        )
+        await dialogue.clear_goal(
+            conversation_id,
+            outcome="confirmed" if restored.get("restored") else "not_completed",
+        )
+        return {
+            "success": bool(restored.get("success")),
+            "response": (
+                f"Done — I restored {_cleanup_history_item_label(selected)}."
+                if restored.get("restored")
+                else "I couldn't verify that email was restored, so I haven't claimed it was."
+            ),
+            "intent": "email_cleanup_restore",
+        }
     if dialogue_state.active_goal:
         # AIEngine owns all other durable pending-task continuations and runs
         # them before generic intent/tool routing. Do not intercept their slot
         # answers with Email Assistant status/configuration commands.
         return None
+    cleanup_focus = (
+        dialogue_state.focus.get("email_cleanup_history")
+        if isinstance(dialogue_state.focus, dict)
+        else None
+    )
+    cleanup_focus = (
+        dict(cleanup_focus)
+        if isinstance(cleanup_focus, Mapping) and _cleanup_focus_is_recent(cleanup_focus)
+        else None
+    )
     status_phrases = (
         "is my email assistant running",
         "email assistant status",
@@ -702,6 +916,86 @@ async def _try_handle_email_assistant(
             "intent": "email_cleanup_protect",
         }
 
+    if command in {
+        "are they in trash now",
+        "are those in trash now",
+        "are those emails in trash now",
+        "are the emails in trash now",
+    }:
+        message_ids = list((cleanup_focus or {}).get("message_ids") or ())
+        if not message_ids:
+            return {
+                "success": True,
+                "response": "Which cleanup emails would you like me to check?",
+                "intent": "email_cleanup_state_needs_context",
+            }
+        verified = await email_policies.verify_cleanup_items_state(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            message_ids=message_ids,
+            expected_operation="trash",
+        )
+        checked = int(verified.get("checked") or 0)
+        matching = int(verified.get("matching") or 0)
+        unavailable = int(verified.get("unavailable") or 0)
+        if not checked or unavailable == checked:
+            response = "I can't verify whether those emails are still in Trash right now."
+        elif matching == checked and not unavailable:
+            response = (
+                "Yes — that email is currently in Trash."
+                if checked == 1
+                else f"Yes — all {checked} are currently in Trash."
+            )
+        elif not matching and not unavailable:
+            response = (
+                "No — that email isn't currently in Trash."
+                if checked == 1
+                else "No — none of those emails is currently in Trash."
+            )
+        else:
+            response = (
+                f"I confirmed {matching} of the {checked} checked emails are currently in Trash, "
+                "but I couldn't verify all of them."
+            )
+        return {
+            "success": True,
+            "response": response,
+            "intent": "email_cleanup_state_verified",
+        }
+
+    if _explicit_cleanup_notification_request(command):
+        focused_items = [
+            dict(item)
+            for item in (cleanup_focus or {}).get("items") or ()
+            if isinstance(item, Mapping)
+        ]
+        if not focused_items:
+            return {
+                "success": True,
+                "response": "Which cleanup list would you like me to send?",
+                "intent": "email_cleanup_notification_needs_context",
+            }
+        page = {
+            "items": focused_items,
+            "offset": int((cleanup_focus or {}).get("offset") or 0),
+            "operation": (cleanup_focus or {}).get("operation"),
+            "has_more": False,
+        }
+        notification = await email_policies.send_cleanup_history_notification(
+            principal_id=actor.user_key,
+            text=_cleanup_history_list_text(page),
+        )
+        accepted = bool(notification.get("success") or notification.get("command_accepted"))
+        return {
+            "success": accepted,
+            "response": (
+                "Done — I sent that cleanup list to your phone."
+                if accepted
+                else "I couldn't send that list to your phone right now."
+            ),
+            "intent": "email_cleanup_notification",
+        }
+
     if "what would you delete" in command or "show me what would be deleted" in command:
         preview = await email_policies.preview_cleanup(
             principal_id=actor.user_key,
@@ -718,18 +1012,101 @@ async def _try_handle_email_assistant(
         return {"success": True, "response": response, "intent": "email_cleanup_preview"}
 
     if "what did you clean up" in command:
-        history = await email_policies.cleanup_history(
+        today_since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        history = await email_policies.cleanup_history_items(
             principal_id=actor.user_key,
-            since=datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0),
+            since=today_since,
+            limit=10,
         )
         totals = history["totals"]
-        response = (
-            f"Today I moved {totals['trashed']} email{'s' if totals['trashed'] != 1 else ''} "
-            f"to Trash and archived {totals['archived']}."
-            if totals["trashed"] or totals["archived"]
-            else "I haven't changed any emails today."
+        trashed = int(totals["trashed"])
+        archived = int(totals["archived"])
+        if trashed and archived:
+            response = (
+                f"Today I moved {trashed} email{'s' if trashed != 1 else ''} to Trash "
+                f"and archived {archived}."
+            )
+        elif trashed:
+            response = f"Today I moved {trashed} email{'s' if trashed != 1 else ''} to Trash."
+        elif archived:
+            response = f"Today I archived {archived} email{'s' if archived != 1 else ''}."
+        else:
+            response = "I haven't changed any emails today."
+        await dialogue.record_email_cleanup_history_focus(
+            conversation_id,
+            {
+                **history,
+                "message_ids": [item["message_id"] for item in history["items"]],
+                "since": today_since.isoformat(),
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
         )
         return {"success": True, "response": response, "intent": "email_cleanup_history"}
+
+    if command == "show me the rest" or _email_cleanup_history_detail_request(command):
+        continuing = command == "show me the rest"
+        if continuing and not cleanup_focus:
+            return {
+                "success": True,
+                "response": "Which cleanup list would you like me to continue?",
+                "intent": "email_cleanup_history_needs_context",
+            }
+        why = "why did you delete those" in command
+        if continuing or why:
+            since_text = str((cleanup_focus or {}).get("since") or "")
+            try:
+                since = datetime.fromisoformat(since_text.replace("Z", "+00:00"))
+            except ValueError:
+                since = None
+            operation = str((cleanup_focus or {}).get("operation") or "") or None
+            if operation == "all":  # Compatibility with focus written by an earlier build.
+                operation = None
+            offset = int((cleanup_focus or {}).get("next_offset" if continuing else "offset") or 0)
+        else:
+            since = (
+                None
+                if "last cleanup" in command
+                else datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            )
+            operation = _email_cleanup_history_operation(command)
+            offset = 0
+        page = await email_policies.cleanup_history_items(
+            principal_id=actor.user_key,
+            since=since,
+            operation=operation,
+            offset=offset,
+            limit=10,
+            latest_run=(
+                bool((cleanup_focus or {}).get("latest_run"))
+                if continuing or why
+                else "last cleanup" in command
+            ),
+        )
+        response = _cleanup_history_list_text(page, why=why)
+        await dialogue.record_email_cleanup_history_focus(
+            conversation_id,
+            {
+                **page,
+                "message_ids": [item["message_id"] for item in page["items"]],
+                "since": since.isoformat() if since is not None else None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return {
+            "success": True,
+            "response": response,
+            "intent": "email_cleanup_history_details",
+        }
+
+    if command in _EMAIL_HISTORY_AFFIRMATIVES | _EMAIL_HISTORY_CANCELLATIONS and cleanup_focus:
+        return {
+            "success": True,
+            "response": (
+                "There isn't a cleanup action waiting for confirmation. "
+                "What would you like me to do?"
+            ),
+            "intent": "email_cleanup_no_pending_action",
+        }
 
     if (
         "never delete emails from" in command
@@ -756,21 +1133,112 @@ async def _try_handle_email_assistant(
             "intent": "email_cleanup_protect_sender",
         }
 
-    if command in {"undo the last email cleanup", "undo last email cleanup"}:
-        undo = await email_policies.undo_last_cleanup(
+    if _explicit_cleanup_restore_request(command):
+        history = await email_policies.cleanup_history_items(
+            principal_id=actor.user_key,
+            operation="trash",
+            limit=25,
+        )
+        await dialogue.record_email_cleanup_history_focus(
+            conversation_id,
+            {
+                **history,
+                "message_ids": [item["message_id"] for item in history["items"]],
+                "since": None,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        candidates = [
+            dict(item)
+            for item in history.get("items") or ()
+            if isinstance(item, Mapping) and not item.get("restored")
+        ]
+        if "last" in command or command.startswith("undo"):
+            candidates = candidates[:1]
+        elif command in {"put that one back", "restore that email"}:
+            focused_ids = set((cleanup_focus or {}).get("message_ids") or ())
+            candidates = [item for item in candidates if item.get("message_id") in focused_ids]
+        else:
+            ignored = {
+                "restore",
+                "the",
+                "email",
+                "message",
+                "you",
+                "deleted",
+                "trashed",
+                "put",
+                "that",
+                "one",
+                "back",
+            }
+            terms = [
+                cleaned
+                for token in re.findall(r"[\w@.-]+", command)
+                if (cleaned := token.strip(".,!?;:"))
+                and len(cleaned) >= 3
+                and cleaned not in ignored
+            ]
+            if terms:
+                candidates = [
+                    item
+                    for item in candidates
+                    if all(
+                        term
+                        in " ".join(
+                            str(item.get(key) or "")
+                            for key in ("sender_display_name", "sender_address", "subject")
+                        ).casefold()
+                        for term in terms
+                    )
+                ]
+        if not candidates:
+            return {
+                "success": True,
+                "response": "I couldn't match that to a verified email from your cleanup history.",
+                "intent": "email_cleanup_restore_not_found",
+            }
+        if len(candidates) > 1:
+            choices = candidates[:10]
+            await dialogue.begin_goal(
+                conversation_id,
+                "email_cleanup_restore_selection",
+                slots={
+                    "principal_id": actor.user_key,
+                    "conversation_id": conversation_id,
+                    "original_authorization_text": str(text),
+                    "candidates": choices,
+                },
+                missing_slots=("selection",),
+                prompt="Which email should I restore?",
+                ttl_seconds=600,
+            )
+            rendered = "\n".join(
+                f"{index}. {_cleanup_history_item_label(item)}"
+                for index, item in enumerate(choices, start=1)
+            )
+            return {
+                "success": True,
+                "response": "Which one should I restore?\n" + rendered,
+                "intent": "email_cleanup_restore_awaiting_selection",
+            }
+        selected = candidates[0]
+        restored = await email_policies.restore_cleanup_item(
             principal_id=actor.user_key,
             conversation_id=conversation_id,
+            message_id=str(selected["message_id"]),
             request_id=request_id or str(uuid.uuid4()),
         )
-        response = (
-            "Done — I restored the last email I moved to Trash."
-            if undo["restored"]
-            else "There isn't a recent cleanup email I can safely restore."
-        )
+        if restored.get("restored"):
+            response = f"Done — I restored {_cleanup_history_item_label(selected)}."
+        elif restored.get("reason") in {"already_restored", "not_in_trash"}:
+            response = "That email isn't currently in Trash, so I haven't changed it."
+        else:
+            response = "I couldn't verify that email was restored, so I haven't claimed it was."
         return {
-            "success": bool(undo["success"]),
+            "success": bool(restored.get("success")),
             "response": response,
-            "intent": "email_cleanup_undo",
+            "intent": "email_cleanup_restore",
         }
 
     cleanup_age = re.search(r"\b(\d{1,4})\s+days?\b", command)

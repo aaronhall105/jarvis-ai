@@ -2,6 +2,7 @@ from app.ai_engine import (
     gmail_message_action_reply,
     RequestIntent,
     RequestRouter,
+    remove_unbacked_executable_offer,
     unbacked_future_promise_reply,
     unsupported_external_capability_reply,
     verified_gmail_reply_status_reply,
@@ -238,6 +239,24 @@ def test_unbacked_future_commitment_is_blocked() -> None:
             [{"tool": "task", "result": {"success": True, "job_id": "job-1"}}],
         )
         is None
+    )
+
+
+def test_executable_offer_requires_structured_follow_up_state() -> None:
+    reply = (
+        "I moved 10 messages to Trash today. Want me to send the subjects and senders "
+        "to your phone?"
+    )
+    assert remove_unbacked_executable_offer(reply, structured_follow_up=False) == (
+        "I moved 10 messages to Trash today."
+    )
+    assert remove_unbacked_executable_offer(reply, structured_follow_up=True) == reply
+    assert (
+        remove_unbacked_executable_offer(
+            "Would you like me to explain the cleanup rule?",
+            structured_follow_up=False,
+        )
+        == "Would you like me to explain the cleanup rule?"
     )
 
 
