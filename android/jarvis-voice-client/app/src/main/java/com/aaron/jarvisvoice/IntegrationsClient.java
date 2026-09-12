@@ -144,6 +144,44 @@ public final class IntegrationsClient implements AutoCloseable {
         });
     }
 
+    public void startMicrosoft(OAuthCallback callback) {
+        executor.execute(() -> {
+            try {
+                JSONObject response = request(
+                    "POST",
+                    "/api/integrations/mobile/microsoft/start",
+                    new JSONObject().put("connect", true)
+                );
+                String url = response.optString("authorization_url", "").trim();
+                if (!isMicrosoftAuthorizationUrl(url)) {
+                    throw new IOException("Core returned an invalid Microsoft authorization URL");
+                }
+                main.post(() -> callback.onSuccess(url));
+            } catch (Exception exception) {
+                main.post(() -> callback.onError(message(exception)));
+            }
+        });
+    }
+
+    public void disconnectMicrosoft(String accountId, ResultCallback callback) {
+        if (accountId == null || accountId.isBlank()) {
+            callback.onError("No connected Outlook account was returned by Core");
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                request(
+                    "DELETE",
+                    "/api/integrations/mobile/microsoft/accounts/" + accountId,
+                    null
+                );
+                main.post(callback::onSuccess);
+            } catch (Exception exception) {
+                main.post(() -> callback.onError(message(exception)));
+            }
+        });
+    }
+
     public void emailAssistant(EmailAssistantCallback callback) {
         executor.execute(() -> {
             try {
@@ -255,6 +293,23 @@ public final class IntegrationsClient implements AutoCloseable {
             && url.queryParameter("client_id") != null
             && url.queryParameter("state") != null
             && url.queryParameter("code_challenge") != null;
+    }
+
+    static boolean isMicrosoftAuthorizationUrl(String value) {
+        HttpUrl url = HttpUrl.parse(value);
+        return url != null
+            && url.isHttps()
+            && "login.microsoftonline.com".equals(url.host())
+            && url.username().isEmpty()
+            && url.password().isEmpty()
+            && url.encodedPath().matches(
+                "^/(?:common|organizations|consumers|[0-9a-fA-F-]{36})/oauth2/v2\\.0/authorize$"
+            )
+            && "code".equals(url.queryParameter("response_type"))
+            && url.queryParameter("client_id") != null
+            && url.queryParameter("state") != null
+            && url.queryParameter("code_challenge") != null
+            && "S256".equals(url.queryParameter("code_challenge_method"));
     }
 
     static Failure failureForHttpCode(int code) {

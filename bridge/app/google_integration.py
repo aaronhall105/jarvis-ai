@@ -1663,13 +1663,38 @@ class GoogleConnector(Connector):
         query = str(payload.get("query") or "in:inbox").strip()
         if len(query) > 1_000:
             raise ValueError("query is too long")
-        result = await self._request(
-            principal,
-            "GET",
-            f"{GMAIL_API}/messages",
-            params={"q": query, "maxResults": self._limit(payload)},
-        )
-        messages = [item for item in result.get("messages") or () if isinstance(item, Mapping)]
+        all_pages = payload.get("all_pages") is True
+        maximum = max(1, min(int(payload.get("max_messages") or 5_000), 10_000))
+        requested = self._limit(payload)
+        messages: list[Mapping[str, Any]] = []
+        page_token: str | None = None
+        result_size_estimate = 0
+        pages = 0
+        while pages < 100 and len(messages) < maximum:
+            pages += 1
+            params: dict[str, Any] = {
+                "q": query,
+                "maxResults": min(requested if not all_pages else 100, maximum - len(messages)),
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            result = await self._request(
+                principal,
+                "GET",
+                f"{GMAIL_API}/messages",
+                params=params,
+            )
+            messages.extend(
+                item for item in result.get("messages") or () if isinstance(item, Mapping)
+            )
+            result_size_estimate = max(
+                result_size_estimate,
+                int(result.get("resultSizeEstimate") or len(messages)),
+            )
+            page_token = str(result.get("nextPageToken") or "").strip() or None
+            if not all_pages or not page_token:
+                break
+        truncated = bool(page_token) or result_size_estimate > len(messages)
         ids = [str(item.get("id")) for item in messages if item.get("id")]
         details = await asyncio.gather(
             *(
@@ -1689,7 +1714,9 @@ class GoogleConnector(Connector):
             "message_ids": ids,
             "messages": summaries,
             "latest_message_id": ids[0] if ids else None,
-            "result_size_estimate": int(result.get("resultSizeEstimate") or len(ids)),
+            "result_size_estimate": result_size_estimate or len(ids),
+            "pages": pages,
+            "truncated": truncated,
         }, ids[0] if ids else None
 
     async def _gmail_changes(

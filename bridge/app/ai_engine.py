@@ -664,7 +664,21 @@ _UNBACKED_EXECUTABLE_OFFER_PATTERN = re.compile(
     r"\b(?:want me to|would you like me to|shall i)\b[^.!?\n]{0,160}"
     r"\b(?:send|notify|email|message|forward|reply|delete|trash|archive|restore|"
     r"move|turn|switch|run|book|order|purchase|post|publish|create|change|update|"
-    r"add|remove|save)\b",
+    r"add|remove|save|check|list|show|open|close|start|stop|restart|sync|refresh|"
+    r"force|enable|disable|clean|apply|confirm)\b",
+    re.I,
+)
+
+_UNBACKED_BINARY_OFFER_PATTERN = re.compile(
+    r"(?:^|(?<=[.!]))\s*(?:proceed|shall i continue|do you want me to continue)\?\s*$",
+    re.I,
+)
+
+_UNSUPPORTED_MAIL_APP_SYNC_PATTERN = re.compile(
+    r"\b(?:force|trigger|start)\b[^.!?\n]{0,80}\b(?:mailbox|outlook|mail|email)\b"
+    r"[^.!?\n]{0,40}\bsync\b|"
+    r"\b(?:force|trigger|start)\s+(?:a\s+)?(?:mailbox\s+)?sync\b|"
+    r"\bforce\b[^.!?\n]{0,80}\boutlook\b[^.!?\n]{0,40}\bsync\b",
     re.I,
 )
 
@@ -866,15 +880,48 @@ def remove_unbacked_executable_offer(reply: str, *, structured_follow_up: bool) 
     """Remove an executable offer that has no durable continuation state."""
 
     value = str(reply or "").strip()
-    if structured_follow_up or not value:
+    if not value:
         return value
-    match = _UNBACKED_EXECUTABLE_OFFER_PATTERN.search(value)
+    if _UNSUPPORTED_MAIL_APP_SYNC_PATTERN.search(value):
+        return (
+            "I can work with mail through a connected provider, but I can't control or "
+            "force-sync the Gmail or Outlook app."
+        )
+    if structured_follow_up:
+        return value
+    matches = [
+        match
+        for pattern in (_UNBACKED_EXECUTABLE_OFFER_PATTERN, _UNBACKED_BINARY_OFFER_PATTERN)
+        if (match := pattern.search(value)) is not None
+    ]
+    match = min(matches, key=lambda item: item.start()) if matches else None
     if match is None:
         return value
     prefix = value[: match.start()].rstrip(" \t\r\n—–-,:;")
     if prefix:
         return prefix
     return "Tell me directly what you'd like me to do."
+
+
+def complete_or_reject_dangling_response(reply: str) -> str:
+    """Fail closed when generation ends in an orphaned question fragment."""
+
+    value = str(reply or "").strip()
+    if not value:
+        return value
+    if re.search(
+        r"(?:^|[.!?]\s+)(?:do you|shall i|want me to|would you like me to)\s*[?.…]*$",
+        value,
+        re.IGNORECASE,
+    ):
+        prefix = re.sub(
+            r"(?:^|[.!?]\s+)(?:do you|shall i|want me to|would you like me to)\s*[?.…]*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        ).strip()
+        return prefix or "I didn't finish that thought. What would you like me to do?"
+    return value
 
 
 def verified_gmail_reply_status_reply(
@@ -2188,6 +2235,7 @@ class AIEngine:
         actor: UserContext,
         user_text: str = "",
         history: Sequence[Mapping[str, str]] = (),
+        dialogue_focus: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = []
 
@@ -2221,6 +2269,7 @@ class AIEngine:
                     user_text,
                     principal_id=actor.user_key,
                     history=history,
+                    dialogue_focus=dialogue_focus,
                 )
             )
 
@@ -5367,6 +5416,42 @@ class AIEngine:
                 "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
             }
 
+        if (
+            dialogue_resolution.handled
+            and dialogue_resolution.kind == "unsupported_pending_confirmation"
+        ):
+            await self.conversations.add_user_message(
+                conversation_id=resolved_conversation_id,
+                content=raw_user_text,
+            )
+            final_reply = dialogue_resolution.reply or (
+                "I can’t safely continue that unfinished request. Please tell me what to do."
+            )
+            await self.conversations.add_assistant_message(
+                conversation_id=resolved_conversation_id,
+                content=final_reply,
+            )
+            await self.dialogue.record_result(
+                resolved_conversation_id,
+                intent="dialogue_confirmation_not_actionable",
+                success=False,
+                response=final_reply,
+                calls=[],
+            )
+            return {
+                "success": False,
+                "response": final_reply,
+                "model": self.model,
+                "intent": "dialogue_confirmation_not_actionable",
+                "deterministic": True,
+                "tool_called": False,
+                "tool_rounds": 0,
+                "calls": [],
+                "memory_used": False,
+                "conversation_id": resolved_conversation_id,
+                "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+            }
+
         if dialogue_resolution.handled and dialogue_resolution.kind == "gmail_message":
             return await self._continue_pending_gmail_message(
                 resolution=dialogue_resolution,
@@ -6600,11 +6685,13 @@ class AIEngine:
             }
         )
 
+        tool_dialogue_state = await self.dialogue.get(resolved_conversation_id)
         tool_definitions = await self._openai_tools(
             decision,
             actor,
             user_text,
             history,
+            dialogue_focus=dict(tool_dialogue_state.focus),
         )
 
         if code_awareness_requested and self.code_awareness is not None:
@@ -6936,6 +7023,7 @@ class AIEngine:
             final_reply,
             structured_follow_up=structured_follow_up,
         )
+        final_reply = complete_or_reject_dangling_response(final_reply)
 
         final_reply = present_user_response(final_reply, request_text=raw_user_text)
         final_reply = _clean_reply(final_reply)

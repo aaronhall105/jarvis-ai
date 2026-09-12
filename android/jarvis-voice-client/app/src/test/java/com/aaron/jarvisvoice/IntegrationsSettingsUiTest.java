@@ -145,10 +145,10 @@ public final class IntegrationsSettingsUiTest {
         assertNotNull(findText(root, "Reply alerts"));
         assertNotNull(findText(root, "Inbox cleanup"));
         assertNotNull(findText(root, "Importance: Important"));
-        assertNotNull(findText(root, "Cleanup: Trash"));
+        assertNotNull(findText(root, "Cleanup: Bin / Deleted Items"));
         assertNotNull(findText(root, "Cleanup age: 30 days"));
         assertTrue(((Switch) findText(root, "Important email alerts")).isChecked());
-        assertTrue(allText(root).contains("Cleanup never permanently deletes Gmail."));
+        assertTrue(allText(root).contains("Cleanup never permanently deletes Gmail or Outlook mail."));
     }
 
     private static IntegrationProvider provider(String id, String name, String state) {

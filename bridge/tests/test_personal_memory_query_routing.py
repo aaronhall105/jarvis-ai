@@ -1,4 +1,5 @@
 from app.ai_engine import (
+    complete_or_reject_dangling_response,
     gmail_message_action_reply,
     RequestIntent,
     RequestRouter,
@@ -251,12 +252,38 @@ def test_executable_offer_requires_structured_follow_up_state() -> None:
         "I moved 10 messages to Trash today."
     )
     assert remove_unbacked_executable_offer(reply, structured_follow_up=True) == reply
+    assert remove_unbacked_executable_offer(
+        "That was Gmail. Want me to force Outlook to sync?",
+        structured_follow_up=False,
+    ) == (
+        "I can work with mail through a connected provider, but I can't control or "
+        "force-sync the Gmail or Outlook app."
+    )
+    assert "can't control" in remove_unbacked_executable_offer(
+        "I can force a mailbox sync. Want me to do it?", structured_follow_up=True
+    )
+    assert (
+        remove_unbacked_executable_offer(
+            "The preview is ready. Proceed?", structured_follow_up=False
+        )
+        == "The preview is ready."
+    )
     assert (
         remove_unbacked_executable_offer(
             "Would you like me to explain the cleanup rule?",
             structured_follow_up=False,
         )
         == "Would you like me to explain the cleanup rule?"
+    )
+
+
+def test_dangling_assistant_question_is_never_exposed_as_a_continuation() -> None:
+    assert complete_or_reject_dangling_response("I can move those. Do you") == ("I can move those")
+    assert complete_or_reject_dangling_response("Shall I") == (
+        "I didn't finish that thought. What would you like me to do?"
+    )
+    assert complete_or_reject_dangling_response("That action is ready.") == (
+        "That action is ready."
     )
 
 

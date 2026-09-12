@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     jarvis_google_oauth_client_secret: str = ""
     jarvis_google_oauth_redirect_uri: str = ""
     jarvis_google_android_return_uri: str = "jarvis://integrations/google"
+    jarvis_microsoft_client_id: str = ""
+    jarvis_microsoft_client_secret: str = ""
+    jarvis_microsoft_redirect_uri: str = ""
+    jarvis_microsoft_authority: str = "common"
+    jarvis_microsoft_android_return_uri: str = "jarvis://integrations/microsoft"
     home_assistant_url: str = "http://homeassistant.local:8123"
     home_assistant_token: str = ""
 

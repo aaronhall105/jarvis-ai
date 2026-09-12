@@ -63,6 +63,7 @@ class GoogleFixture:
         self.gmail_probe_timeout = False
         self.gmail_search_status = 200
         self.gmail_search_malformed = False
+        self.gmail_search_pages: dict[str, dict] = {}
         self.gmail_history_pages: dict[str, dict[str, object]] = {}
         self.gmail_history_expired = False
         self.gmail_send_timeout = False
@@ -189,9 +190,13 @@ class GoogleFixture:
                 )
             if request.url.params.get("maxResults") != "1" and self.gmail_search_malformed:
                 return httpx.Response(200, text="not-json")
+            token = request.url.params.get("pageToken") or "first"
             return httpx.Response(
                 200,
-                json={"messages": [{"id": "message-2"}], "resultSizeEstimate": 1},
+                json=self.gmail_search_pages.get(
+                    token,
+                    {"messages": [{"id": "message-2"}], "resultSizeEstimate": 1},
+                ),
             )
         if path == "/gmail/v1/users/me/labels" and request.method == "GET":
             return httpx.Response(
@@ -267,6 +272,23 @@ class GoogleFixture:
                                 "body": {"attachmentId": "attachment-1", "size": 321},
                             }
                         ],
+                    },
+                },
+            )
+        if "/gmail/v1/users/me/messages/page-message-" in path:
+            message_id = path.rsplit("/", 1)[-1]
+            return httpx.Response(
+                200,
+                json={
+                    "id": message_id,
+                    "threadId": f"thread-{message_id}",
+                    "labelIds": ["INBOX", "UNREAD"],
+                    "snippet": "Paged message",
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": "Paged <paged@example.test>"},
+                            {"name": "Subject", "value": message_id},
+                        ]
                     },
                 },
             )
@@ -847,6 +869,36 @@ async def test_gmail_search_returns_provider_message_summaries(tmp_path: Path) -
         )
     )
     assert inbox.data["query"] == "in:inbox"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_search_snapshots_every_provider_page(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    first_ids = [f"page-message-{index}" for index in range(100)]
+    second_ids = [f"page-message-{index}" for index in range(100, 137)]
+    fixture.gmail_search_pages = {
+        "first": {
+            "messages": [{"id": item} for item in first_ids],
+            "resultSizeEstimate": 137,
+            "nextPageToken": "second",
+        },
+        "second": {
+            "messages": [{"id": item} for item in second_ids],
+            "resultSizeEstimate": 137,
+        },
+    }
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    result, _ = await connector._gmail_search(
+        "aaron",
+        {"query": "in:inbox is:unread", "all_pages": True, "max_messages": 1000},
+    )
+
+    assert result["count"] == 137
+    assert result["message_ids"] == first_ids + second_ids
+    assert result["pages"] == 2
+    assert result["truncated"] is False
     await client.aclose()
 
 

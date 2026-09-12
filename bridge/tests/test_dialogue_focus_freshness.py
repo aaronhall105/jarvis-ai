@@ -139,6 +139,31 @@ class DialogueFocusFreshnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("amber@example.test", focused["recipient"])
         self.assertEqual("proactive_email_assistant", focused["anchor_source"])
 
+    async def test_outlook_notification_focus_preserves_provider_account_across_restart(
+        self,
+    ) -> None:
+        await self.dialogue.record_email_notification_focus(
+            "conversation",
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-account-1",
+                "message_id": "outlook-message-1",
+                "thread_id": "outlook-conversation-1",
+                "event_kind": "important",
+                "observed_at": "2026-08-26T12:00:00+00:00",
+            },
+        )
+
+        restarted = DialogueManager(f"{self.temp.name}/dialogue.db")
+        state = await restarted.get("conversation")
+        focused = state.focus["outlook_message"]
+
+        self.assertEqual("microsoft_outlook", focused["provider"])
+        self.assertEqual("outlook-account-1", focused["account_id"])
+        self.assertEqual("outlook-message-1", focused["message_id"])
+        self.assertEqual("outlook-conversation-1", focused["thread_id"])
+        self.assertNotIn("gmail_reply", state.focus)
+
 
 if __name__ == "__main__":
     unittest.main()

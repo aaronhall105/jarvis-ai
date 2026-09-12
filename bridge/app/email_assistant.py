@@ -68,6 +68,7 @@ class EmailAssistantPolicyEngine:
         conversations: ConversationWriter | None = None,
         notifier: NotificationSender | None = None,
         focus_recorder: Callable[[str, Mapping[str, Any]], Awaitable[Any]] | None = None,
+        account_resolver: Callable[[str], Awaitable[Sequence[Mapping[str, Any]]]] | None = None,
     ) -> None:
         self.path = Path(database_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +77,7 @@ class EmailAssistantPolicyEngine:
         self.conversations = conversations
         self.notifier = notifier
         self.focus_recorder = focus_recorder
+        self.account_resolver = account_resolver
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._run_lock = asyncio.Lock()
@@ -239,6 +241,68 @@ class EmailAssistantPolicyEngine:
                   created_at TEXT NOT NULL,
                   PRIMARY KEY(principal_id, message_id)
                 );
+                CREATE TABLE IF NOT EXISTS email_provider_checkpoints (
+                  principal_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  account_email TEXT,
+                  cursor TEXT,
+                  last_check_at TEXT,
+                  next_check_at TEXT NOT NULL,
+                  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                  outage_fingerprint TEXT,
+                  last_error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(principal_id,provider,account_id)
+                );
+                CREATE TABLE IF NOT EXISTS email_bulk_actions (
+                  bulk_action_id TEXT PRIMARY KEY,
+                  principal_id TEXT NOT NULL,
+                  conversation_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  operation TEXT NOT NULL,
+                  filter_kind TEXT NOT NULL,
+                  filter_json TEXT NOT NULL,
+                  original_authorization_text TEXT NOT NULL,
+                  idempotency_key TEXT NOT NULL UNIQUE,
+                  status TEXT NOT NULL,
+                  intended_count INTEGER NOT NULL,
+                  attempted_count INTEGER NOT NULL DEFAULT 0,
+                  succeeded_count INTEGER NOT NULL DEFAULT 0,
+                  failed_count INTEGER NOT NULL DEFAULT 0,
+                  skipped_count INTEGER NOT NULL DEFAULT 0,
+                  batch_size INTEGER NOT NULL DEFAULT 25,
+                  halt_reason TEXT,
+                  created_at TEXT NOT NULL,
+                  expires_at TEXT NOT NULL,
+                  confirmed_at TEXT,
+                  completed_at TEXT,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_email_bulk_actions_owner
+                  ON email_bulk_actions(principal_id,conversation_id,created_at DESC);
+                CREATE TABLE IF NOT EXISTS email_bulk_action_items (
+                  bulk_action_id TEXT NOT NULL,
+                  provider_message_id TEXT NOT NULL,
+                  provider_thread_id TEXT,
+                  sender TEXT,
+                  subject TEXT,
+                  ordinal INTEGER NOT NULL,
+                  status TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  action_receipt_id TEXT,
+                  provider_reference TEXT,
+                  verification_json TEXT NOT NULL DEFAULT '{}',
+                  error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(bulk_action_id,provider_message_id),
+                  FOREIGN KEY(bulk_action_id) REFERENCES email_bulk_actions(bulk_action_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_email_bulk_items_open
+                  ON email_bulk_action_items(bulk_action_id,status,ordinal);
                 """
             )
             policy_columns = {
@@ -251,6 +315,8 @@ class EmailAssistantPolicyEngine:
                 "protected_senders_json": "TEXT NOT NULL DEFAULT '[]'",
                 "classification_version": "TEXT NOT NULL DEFAULT 'legacy-inbox-age-v1'",
                 "last_result_json": "TEXT NOT NULL DEFAULT '{}'",
+                "provider": "TEXT NOT NULL DEFAULT 'google_gmail'",
+                "account_id": "TEXT",
             }.items():
                 if column not in policy_columns:
                     connection.execute(
@@ -272,6 +338,43 @@ class EmailAssistantPolicyEngine:
                         f"ALTER TABLE email_assistant_profiles ADD COLUMN {column} "
                         "INTEGER NOT NULL DEFAULT 0"
                     )
+            for table, additions in {
+                "email_assistant_events": {
+                    "provider": "TEXT NOT NULL DEFAULT 'google_gmail'",
+                    "account_id": "TEXT",
+                    "provider_message_id": "TEXT",
+                    "provider_thread_id": "TEXT",
+                },
+                "email_reply_watches": {
+                    "provider": "TEXT NOT NULL DEFAULT 'google_gmail'",
+                    "account_id": "TEXT",
+                    "provider_message_id": "TEXT",
+                    "provider_thread_id": "TEXT",
+                },
+            }.items():
+                columns = {
+                    str(row["name"])
+                    for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+                }
+                for column, definition in additions.items():
+                    if column not in columns:
+                        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            connection.execute(
+                "UPDATE email_assistant_events SET provider_message_id=message_id,"
+                "provider_thread_id=thread_id WHERE provider_message_id IS NULL"
+            )
+            connection.execute(
+                "UPDATE email_reply_watches SET provider_message_id=anchor_message_id,"
+                "provider_thread_id=thread_id WHERE provider_message_id IS NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_email_events_provider_identity ON "
+                "email_assistant_events(principal_id,provider,account_id,provider_message_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_email_watches_provider_identity ON "
+                "email_reply_watches(principal_id,provider,account_id,provider_thread_id)"
+            )
             # A process may stop between item persistence and provider execution.
             # Reconciliation always reads Gmail state before deciding what follows.
             connection.execute(
@@ -291,6 +394,24 @@ class EmailAssistantPolicyEngine:
             connection.execute(
                 "UPDATE email_assistant_events SET status='pending',updated_at=? "
                 "WHERE status='delivering' AND notification_state!='attempting'",
+                (self._iso(self._now()),),
+            )
+            connection.execute(
+                "UPDATE email_policies SET provider='google_gmail' "
+                "WHERE provider IS NULL OR provider=''"
+            )
+            # An interrupted bulk write is never blindly replayed. Its exact
+            # frozen item is reconciled against provider state before retry.
+            connection.execute(
+                "UPDATE email_bulk_action_items SET status='outcome_unknown',"
+                "error='Core restarted while this bulk item was executing',updated_at=? "
+                "WHERE status='executing'",
+                (self._iso(self._now()),),
+            )
+            connection.execute(
+                "UPDATE email_bulk_actions SET status='interrupted',"
+                "halt_reason='Core restarted during bulk execution',updated_at=? "
+                "WHERE status='running'",
                 (self._iso(self._now()),),
             )
 
@@ -335,6 +456,10 @@ class EmailAssistantPolicyEngine:
                 if "last_result_json" in values
                 else {}
             ),
+            "provider": str(row["provider"] or "google_gmail")
+            if "provider" in values
+            else "google_gmail",
+            "account_id": row["account_id"] if "account_id" in values else None,
         }
 
     def _audit(
@@ -853,18 +978,965 @@ class EmailAssistantPolicyEngine:
         result = self._profile_row(row)
         result["active_reply_watches"] = int(watch_count[0]) if watch_count else 0
         result["pending_notifications"] = int(pending_count[0]) if pending_count else 0
+        accounts = (
+            [dict(item) for item in await self.account_resolver(principal)]
+            if self.account_resolver is not None
+            else []
+        )
+        result["accounts"] = accounts
+        if len(accounts) == 1:
+            result["provider"] = accounts[0].get("provider")
+            result["account_id"] = accounts[0].get("account_id")
+            result["account_email"] = accounts[0].get("account_email")
         return result
+
+    @staticmethod
+    def _bulk_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["filter"] = json.loads(str(value.pop("filter_json") or "{}"))
+        for key in (
+            "intended_count",
+            "attempted_count",
+            "succeeded_count",
+            "failed_count",
+            "skipped_count",
+            "batch_size",
+        ):
+            value[key] = int(value.get(key) or 0)
+        return value
+
+    async def _require_email_account(
+        self, *, principal_id: str, provider: str, account_id: str
+    ) -> dict[str, Any]:
+        accounts = (
+            [dict(item) for item in await self.account_resolver(principal_id)]
+            if self.account_resolver is not None
+            else []
+        )
+        matches = [
+            item
+            for item in accounts
+            if item.get("provider") == provider and item.get("account_id") == account_id
+        ]
+        if len(matches) != 1:
+            raise ValueError("The selected email account is not uniquely connected")
+        return matches[0]
+
+    @staticmethod
+    def _bulk_search_payload(provider: str, filter_kind: str) -> dict[str, Any]:
+        if provider == "google_gmail":
+            queries = {
+                "all_inbox": "in:inbox",
+                "unread_inbox": "in:inbox is:unread",
+                "bin": "in:trash",
+                "all_mail": "-in:spam -in:trash",
+            }
+            if filter_kind not in queries:
+                raise ValueError("That Gmail bulk filter is not supported")
+            return {
+                "query": queries[filter_kind],
+                "limit": 100,
+                "all_pages": True,
+                "max_messages": 10_000,
+            }
+        if provider == "microsoft_outlook":
+            folders = {
+                "all_inbox": "inbox",
+                "unread_inbox": "inbox",
+                "bin": "deleteditems",
+                "all_mail": "inbox",
+            }
+            if filter_kind not in folders:
+                raise ValueError("That Outlook bulk filter is not supported")
+            payload: dict[str, Any] = {
+                "folder": folders[filter_kind],
+                "limit": 100,
+                "all_pages": True,
+                "max_messages": 10_000,
+            }
+            if filter_kind == "unread_inbox":
+                payload["unread"] = True
+            return payload
+        raise ValueError("A supported email provider is required")
+
+    async def mailbox_count(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        filter_kind: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Return a provider-backed current count, never cleanup-history totals."""
+
+        await self._require_email_account(
+            principal_id=principal_id, provider=provider, account_id=account_id
+        )
+        capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
+        result = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability,
+                payload=self._bulk_search_payload(provider, filter_kind),
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"mail-count:{request_id}")),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_mailbox_count",
+            ),
+            refresh_health=True,
+        )
+        if not result.success:
+            return {"success": False, "error": result.error, "count": 0, "exact": False}
+        ids = [str(item) for item in result.data.get("message_ids") or () if str(item).strip()]
+        if not ids:
+            ids = [
+                str(item.get("message_id"))
+                for item in result.data.get("messages") or ()
+                if isinstance(item, Mapping) and item.get("message_id")
+            ]
+        return {
+            "success": True,
+            "count": len(dict.fromkeys(ids)),
+            "exact": not bool(result.data.get("truncated")),
+            "provider": provider,
+            "account_id": account_id,
+            "filter_kind": filter_kind,
+        }
+
+    async def snapshot_bulk_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        operation: str,
+        filter_kind: str,
+        original_authorization_text: str,
+        request_id: str,
+        ttl_seconds: int = 600,
+        batch_size: int = 25,
+    ) -> dict[str, Any]:
+        """Freeze an exact provider/account candidate set before confirmation.
+
+        The later Yes authorises only these persisted IDs. Newly arriving mail
+        cannot enter the action, and moving a page cannot shift subsequent
+        provider results because provider searching is complete before writes.
+        """
+
+        if operation not in {"trash", "archive"}:
+            raise ValueError("Bulk email operation must be trash or archive")
+        if not original_authorization_text.strip():
+            raise ValueError("Original bulk email authority is required")
+        await self._require_email_account(
+            principal_id=principal_id, provider=provider, account_id=account_id
+        )
+        scoped_request_id = f"{request_id}:{provider}:{account_id}:{operation}:{filter_kind}"
+        action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"email-bulk:{scoped_request_id}"))
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?",
+                (action_id,),
+            ).fetchone()
+        if existing is not None:
+            return self._bulk_row(existing)
+
+        capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
+        search_payload = self._bulk_search_payload(provider, filter_kind)
+        search = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability,
+                payload=search_payload,
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:snapshot")),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_bulk_snapshot",
+            ),
+            refresh_health=True,
+        )
+        if not search.success:
+            return {
+                "success": False,
+                "status": "provider_failed",
+                "error": search.error,
+                "intended_count": 0,
+            }
+        if search.data.get("truncated"):
+            return {
+                "success": False,
+                "status": "candidate_limit_exceeded",
+                "error": "The exact candidate set is too large to confirm safely",
+                "intended_count": len(search.data.get("message_ids") or ()),
+            }
+        raw_messages = [
+            dict(item) for item in search.data.get("messages") or () if isinstance(item, Mapping)
+        ]
+        metadata = {
+            str(item.get("message_id")): item for item in raw_messages if item.get("message_id")
+        }
+        ids = [str(item) for item in search.data.get("message_ids") or () if str(item).strip()]
+        if not ids:
+            ids = list(metadata)
+        ids = list(dict.fromkeys(ids))
+        now = self._now()
+        expires = now + timedelta(seconds=max(60, min(int(ttl_seconds), 3600)))
+        filter_evidence = {
+            "kind": filter_kind,
+            "provider_query": search_payload.get("query"),
+            "provider_folder": search_payload.get("folder"),
+            "unread": search_payload.get("unread") is True,
+            "frozen": True,
+            "permanent_delete": False,
+        }
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO email_bulk_actions "
+                "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
+                "filter_kind,filter_json,original_authorization_text,idempotency_key,status,"
+                "intended_count,batch_size,created_at,expires_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    action_id,
+                    principal_id,
+                    conversation_id,
+                    provider,
+                    account_id,
+                    operation,
+                    filter_kind,
+                    json.dumps(filter_evidence, sort_keys=True, separators=(",", ":")),
+                    original_authorization_text,
+                    scoped_request_id,
+                    "awaiting_confirmation",
+                    len(ids),
+                    max(1, min(int(batch_size), 100)),
+                    self._iso(now),
+                    self._iso(expires),
+                    self._iso(now),
+                ),
+            )
+            for ordinal, message_id in enumerate(ids):
+                message = metadata.get(message_id, {})
+                sender = str(message.get("sender_name") or message.get("from") or "")[:500]
+                connection.execute(
+                    "INSERT INTO email_bulk_action_items "
+                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
+                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        message_id,
+                        str(message.get("thread_id") or "") or None,
+                        sender or None,
+                        str(message.get("subject") or "")[:998] or None,
+                        ordinal,
+                        "pending",
+                        self._iso(now),
+                        self._iso(now),
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bulk email action was not persisted")
+        return {"success": True, **self._bulk_row(row)}
+
+    async def snapshot_safe_cleanup_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        operation: str,
+        cleanup_age_days: int,
+        original_authorization_text: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Dry-run the conservative policy, then freeze only its eligible IDs."""
+
+        await self._require_email_account(
+            principal_id=principal_id, provider=provider, account_id=account_id
+        )
+        started = self._now()
+        preview = await self.preview_cleanup(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            cleanup_mode=operation,
+            cleanup_age_days=cleanup_age_days,
+            provider=provider,
+            account_id=account_id,
+        )
+        if preview.get("status") not in {"completed", "partial"}:
+            return {"success": False, **preview}
+        if preview.get("coverage_partial"):
+            return {
+                "success": False,
+                "status": "candidate_limit_exceeded",
+                "error": "The safe cleanup preview could not freeze the complete candidate set",
+            }
+        with self._db() as connection:
+            rows = connection.execute(
+                "SELECT i.message_id,i.evidence_json FROM email_policy_items i "
+                "JOIN email_policies p ON p.policy_id=i.policy_id "
+                "WHERE p.principal_id=? AND p.provider=? AND COALESCE(p.account_id,'')=? "
+                "AND i.status='dry_run_candidate' AND i.updated_at>=? ORDER BY i.updated_at,i.message_id",
+                (
+                    principal_id,
+                    provider,
+                    account_id if provider == "microsoft_outlook" else "",
+                    self._iso(started),
+                ),
+            ).fetchall()
+        action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"email-bulk:{request_id}"))
+        now = self._now()
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+            if existing is not None:
+                return {"success": True, **self._bulk_row(existing)}
+            connection.execute(
+                "INSERT INTO email_bulk_actions "
+                "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
+                "filter_kind,filter_json,original_authorization_text,idempotency_key,status,"
+                "intended_count,batch_size,created_at,expires_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    action_id,
+                    principal_id,
+                    conversation_id,
+                    provider,
+                    account_id,
+                    operation,
+                    "safe_low_value",
+                    json.dumps(
+                        {
+                            "kind": "safe_low_value",
+                            "age_days": cleanup_age_days,
+                            "policy_version": "safe-low-value-v1",
+                            "frozen": True,
+                            "permanent_delete": False,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    original_authorization_text,
+                    request_id,
+                    "awaiting_confirmation",
+                    len(rows),
+                    25,
+                    self._iso(now),
+                    self._iso(now + timedelta(minutes=10)),
+                    self._iso(now),
+                ),
+            )
+            for ordinal, row in enumerate(rows):
+                evidence = json.loads(str(row["evidence_json"] or "{}"))
+                metadata = evidence.get("message_metadata")
+                metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+                connection.execute(
+                    "INSERT INTO email_bulk_action_items "
+                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
+                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        str(row["message_id"]),
+                        metadata.get("thread_id"),
+                        metadata.get("sender_display_name") or metadata.get("sender_address"),
+                        metadata.get("subject"),
+                        ordinal,
+                        "pending",
+                        self._iso(now),
+                        self._iso(now),
+                    ),
+                )
+            persisted = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if persisted is None:
+            raise RuntimeError("Safe cleanup bulk action was not persisted")
+        return {"success": True, **self._bulk_row(persisted)}
+
+    async def bulk_action(
+        self, *, principal_id: str, conversation_id: str, bulk_action_id: str
+    ) -> dict[str, Any] | None:
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=? "
+                "AND principal_id=? AND conversation_id=?",
+                (bulk_action_id, principal_id, conversation_id),
+            ).fetchone()
+        return self._bulk_row(row) if row is not None else None
+
+    async def cancel_bulk_action(
+        self, *, principal_id: str, conversation_id: str, bulk_action_id: str
+    ) -> bool:
+        with self._db() as connection:
+            changed = connection.execute(
+                "UPDATE email_bulk_actions SET status='cancelled',halt_reason='Cancelled by user',"
+                "updated_at=? WHERE bulk_action_id=? AND principal_id=? AND conversation_id=? "
+                "AND status IN ('awaiting_confirmation','interrupted','partial')",
+                (self._iso(self._now()), bulk_action_id, principal_id, conversation_id),
+            ).rowcount
+        return bool(changed)
+
+    async def _bulk_item_already_applied(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        message_id: str,
+        operation: str,
+        request_id: str,
+    ) -> bool | None:
+        read_capability = "gmail.read" if provider == "google_gmail" else "outlook.read"
+        observed = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=read_capability,
+                payload={"message_id": message_id},
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:reconcile")),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_bulk_reconcile",
+            ),
+            refresh_health=False,
+        )
+        if not observed.success:
+            return None
+        message = observed.data.get("message")
+        if not isinstance(message, Mapping):
+            message = observed.data
+        labels = {str(item).upper() for item in message.get("label_ids") or ()}
+        if provider == "google_gmail":
+            return "TRASH" in labels if operation == "trash" else "INBOX" not in labels
+        folders = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="outlook.folders",
+                payload={},
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:folders")),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_bulk_reconcile_folders",
+            ),
+            refresh_health=False,
+        )
+        if not folders.success:
+            return None
+        target_name = "deleted items" if operation == "trash" else "archive"
+        target_ids = {
+            str(item.get("id") or "")
+            for item in folders.data.get("folders") or ()
+            if isinstance(item, Mapping)
+            and str(item.get("displayName") or "").casefold() == target_name
+        }
+        return str(message.get("parent_folder_id") or "") in target_ids
+
+    async def execute_bulk_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        bulk_action_id: str,
+        max_items: int | None = None,
+    ) -> dict[str, Any]:
+        """Execute/resume an exact frozen action with per-item verified receipts."""
+
+        action = await self.bulk_action(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            bulk_action_id=bulk_action_id,
+        )
+        if action is None:
+            return {"success": False, "status": "not_found", "halt_reason": "Action not found"}
+        if action["status"] in {"cancelled", "expired"}:
+            return {"success": False, **action}
+        if action["status"] == "completed":
+            return {"success": True, **action}
+        expires = datetime.fromisoformat(str(action["expires_at"]))
+        if action["status"] == "awaiting_confirmation" and expires <= self._now():
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='expired',halt_reason='Confirmation expired',"
+                    "updated_at=? WHERE bulk_action_id=?",
+                    (self._iso(self._now()), bulk_action_id),
+                )
+            return {
+                "success": False,
+                **(
+                    await self.bulk_action(
+                        principal_id=principal_id,
+                        conversation_id=conversation_id,
+                        bulk_action_id=bulk_action_id,
+                    )
+                    or {}
+                ),
+            }
+        await self._require_email_account(
+            principal_id=principal_id,
+            provider=str(action["provider"]),
+            account_id=str(action["account_id"]),
+        )
+        now = self._iso(self._now())
+        with self._db() as connection:
+            connection.execute(
+                "UPDATE email_bulk_actions SET status='running',confirmed_at=COALESCE(confirmed_at,?),"
+                "halt_reason=NULL,updated_at=? WHERE bulk_action_id=?",
+                (now, now, bulk_action_id),
+            )
+            items = connection.execute(
+                "SELECT * FROM email_bulk_action_items WHERE bulk_action_id=? "
+                "AND status!='verified' ORDER BY ordinal",
+                (bulk_action_id,),
+            ).fetchall()
+        limit = len(items) if max_items is None else max(0, int(max_items))
+        processed = 0
+        for item in items:
+            if processed >= limit:
+                break
+            processed += 1
+            item_id = str(item["provider_message_id"])
+            item_request = f"email-bulk-item:{bulk_action_id}:{item_id}"
+            if str(item["status"]) == "outcome_unknown":
+                applied = await self._bulk_item_already_applied(
+                    principal_id=principal_id,
+                    conversation_id=conversation_id,
+                    provider=str(action["provider"]),
+                    message_id=item_id,
+                    operation=str(action["operation"]),
+                    request_id=item_request,
+                )
+                if applied is True:
+                    with self._db() as connection:
+                        connection.execute(
+                            "UPDATE email_bulk_action_items SET status='verified',"
+                            "verification_json=?,error=NULL,updated_at=? WHERE bulk_action_id=? "
+                            "AND provider_message_id=?",
+                            (
+                                json.dumps({"reconciled": True}, separators=(",", ":")),
+                                self._iso(self._now()),
+                                bulk_action_id,
+                                item_id,
+                            ),
+                        )
+                    continue
+                if applied is None:
+                    # Provider state is unknown. Never replay a potentially
+                    # successful move merely because readback is unavailable.
+                    continue
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_action_items SET status='executing',attempts=attempts+1,"
+                    "updated_at=? WHERE bulk_action_id=? AND provider_message_id=?",
+                    (self._iso(self._now()), bulk_action_id, item_id),
+                )
+            capability = (
+                f"gmail.{action['operation']}"
+                if action["provider"] == "google_gmail"
+                else f"outlook.{action['operation']}"
+            )
+            result = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id=capability,
+                    payload={"message_id": item_id},
+                    request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, item_request)),
+                    conversation_id=conversation_id,
+                    principal_id=principal_id,
+                    operation=f"explicit_bulk_email_{action['operation']}",
+                    target=item_id,
+                    confirmed=True,
+                    idempotency_key=item_request,
+                ),
+                refresh_health=True,
+            )
+            verified = result.status is ExecutionStatus.VERIFIED
+            persisted_status = (
+                "verified"
+                if verified
+                else (
+                    "outcome_unknown"
+                    if result.status
+                    in {ExecutionStatus.OUTCOME_UNKNOWN, ExecutionStatus.ACCEPTED_UNVERIFIED}
+                    else result.status.value
+                )
+            )
+            receipt_id = result.receipt.action_id if result.receipt else None
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_action_items SET status=?,action_receipt_id=?,"
+                    "provider_reference=?,verification_json=?,error=?,updated_at=? "
+                    "WHERE bulk_action_id=? AND provider_message_id=?",
+                    (
+                        persisted_status,
+                        receipt_id,
+                        result.provider_reference,
+                        json.dumps(
+                            dict(result.verification), sort_keys=True, separators=(",", ":")
+                        ),
+                        result.error,
+                        self._iso(self._now()),
+                        bulk_action_id,
+                        item_id,
+                    ),
+                )
+        with self._db() as connection:
+            counts = connection.execute(
+                "SELECT COUNT(*) AS total,"
+                "SUM(CASE WHEN status='verified' THEN 1 ELSE 0 END) AS succeeded,"
+                "SUM(CASE WHEN attempts>0 THEN 1 ELSE 0 END) AS attempted,"
+                "SUM(CASE WHEN status!='verified' AND attempts>0 THEN 1 ELSE 0 END) AS failed "
+                "FROM email_bulk_action_items WHERE bulk_action_id=?",
+                (bulk_action_id,),
+            ).fetchone()
+            total = int(counts["total"] or 0)
+            succeeded = int(counts["succeeded"] or 0)
+            attempted = int(counts["attempted"] or 0)
+            failed = int(counts["failed"] or 0)
+            remaining = total - succeeded
+            if succeeded == total:
+                status_value, halt = "completed", None
+            elif processed < len(items):
+                status_value, halt = "interrupted", "Bounded execution paused before the next batch"
+            else:
+                status_value = "partial"
+                halt = f"{failed} provider operation{'s' if failed != 1 else ''} failed"
+            completed_at = self._iso(self._now()) if status_value == "completed" else None
+            connection.execute(
+                "UPDATE email_bulk_actions SET status=?,attempted_count=?,succeeded_count=?,"
+                "failed_count=?,skipped_count=0,halt_reason=?,completed_at=?,updated_at=? "
+                "WHERE bulk_action_id=?",
+                (
+                    status_value,
+                    attempted,
+                    succeeded,
+                    failed,
+                    halt,
+                    completed_at,
+                    self._iso(self._now()),
+                    bulk_action_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (bulk_action_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bulk email action disappeared")
+        final = self._bulk_row(row)
+        final["remaining_count"] = remaining
+        return {"success": status_value == "completed", **final}
+
+    async def latest_bulk_action(
+        self, *, principal_id: str, conversation_id: str
+    ) -> dict[str, Any] | None:
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE principal_id=? AND conversation_id=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (principal_id, conversation_id),
+            ).fetchone()
+        return self._bulk_row(row) if row is not None else None
+
+    async def run_cleanup_now(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        cleanup_mode: str,
+        cleanup_age_days: int,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Run one exact confirmed cleanup rule through its durable policy boundary."""
+
+        if provider not in {"google_gmail", "microsoft_outlook"}:
+            raise ValueError("A supported email provider is required")
+        accounts = (
+            [dict(item) for item in await self.account_resolver(principal_id)]
+            if self.account_resolver is not None
+            else []
+        )
+        matches = [
+            item
+            for item in accounts
+            if item.get("provider") == provider and item.get("account_id") == account_id
+        ]
+        if len(matches) != 1:
+            return {"success": False, "reason": "account_not_uniquely_connected"}
+        if provider != "google_gmail":
+            return await self._run_outlook_cleanup_once(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                account_id=account_id,
+                cleanup_mode=cleanup_mode,
+                cleanup_age_days=cleanup_age_days,
+                request_id=request_id,
+            )
+        configured = await self.configure_assistant(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            inbox_cleanup=True,
+            cleanup_dry_run=False,
+            cleanup_mode=cleanup_mode,
+            cleanup_age_days=cleanup_age_days,
+        )
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT policy_id FROM email_policies WHERE principal_id=? "
+                "AND kind='safe_cleanup' AND status='active' ORDER BY updated_at DESC LIMIT 1",
+                (principal_id,),
+            ).fetchone()
+        if row is None:
+            return {"success": False, "reason": "cleanup_policy_missing"}
+        result = await self.run_policy(str(row["policy_id"]), now=self._now())
+        return {**result, "success": result.get("status") == "completed", "profile": configured}
+
+    async def _ensure_outlook_cleanup_policy(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        account_id: str,
+        cleanup_mode: str,
+        cleanup_age_days: int,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        mode = str(cleanup_mode).casefold()
+        days = int(cleanup_age_days)
+        if mode not in {"trash", "archive"} or days < 1 or days > 3650:
+            raise ValueError("Outlook cleanup settings are invalid")
+        now = self._iso(self._now())
+        policy_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"jarvis:email-cleanup:microsoft_outlook:{principal_id}:{account_id}",
+            )
+        )
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO email_policies "
+                "(policy_id,principal_id,conversation_id,kind,status,retention_days,"
+                "interval_seconds,idempotency_key,created_at,updated_at,next_run_at,"
+                "cleanup_mode,dry_run,protected_senders_json,classification_version,"
+                "provider,account_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(policy_id) DO UPDATE SET conversation_id=excluded.conversation_id,"
+                "retention_days=excluded.retention_days,cleanup_mode=excluded.cleanup_mode,"
+                "status=excluded.status,dry_run=excluded.dry_run,"
+                "updated_at=excluded.updated_at,provider=excluded.provider,"
+                "account_id=excluded.account_id",
+                (
+                    policy_id,
+                    principal_id,
+                    conversation_id,
+                    "safe_cleanup_outlook",
+                    "paused" if dry_run else "active",
+                    days,
+                    86400,
+                    f"safe-cleanup:microsoft_outlook:{principal_id}:{account_id}",
+                    now,
+                    now,
+                    now,
+                    mode,
+                    int(dry_run),
+                    "[]",
+                    "safe-low-value-v1",
+                    "microsoft_outlook",
+                    account_id,
+                ),
+            )
+        persisted = await self.get(policy_id, principal_id=principal_id)
+        if persisted is None:
+            raise RuntimeError("Outlook cleanup policy was not persisted")
+        return persisted
+
+    async def _outlook_cleanup_pass(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        account_id: str,
+        cleanup_mode: str,
+        cleanup_age_days: int,
+        request_id: str,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        policy = await self._ensure_outlook_cleanup_policy(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            account_id=account_id,
+            cleanup_mode=cleanup_mode,
+            cleanup_age_days=cleanup_age_days,
+            dry_run=dry_run,
+        )
+        search = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="outlook.search",
+                payload={
+                    "query": "newsletter OR promotion OR unsubscribe",
+                    "folder": "inbox",
+                    "limit": 100,
+                    "all_pages": True,
+                    "max_messages": 10_000,
+                },
+                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:search")),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_cleanup_candidates",
+            ),
+            refresh_health=True,
+        )
+        if not search.success:
+            return {
+                "success": False,
+                "status": "provider_failed",
+                "error": search.error,
+                "trashed": 0,
+                "archived": 0,
+                "dry_run_candidates": 0,
+            }
+        accounts = (
+            [dict(item) for item in await self.account_resolver(principal_id)]
+            if self.account_resolver is not None
+            else []
+        )
+        account = next(
+            (
+                item
+                for item in accounts
+                if item.get("provider") == "microsoft_outlook"
+                and item.get("account_id") == account_id
+            ),
+            {},
+        )
+        owner_email = str(account.get("account_email") or "")
+        cutoff = self._now() - timedelta(days=int(cleanup_age_days))
+        counts = {"trashed": 0, "archived": 0, "dry_run_candidates": 0, "skipped": 0}
+        for raw in search.data.get("messages") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            message = dict(raw)
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            known = await self._known_contact(policy, message)
+            eligible, reason, classification = self._safe_cleanup_eligible(
+                message,
+                cutoff,
+                protected_senders=policy.get("protected_senders") or (),
+                watched_threads=set(),
+                known_contact=known,
+                owner_email=owner_email,
+            )
+            if not eligible:
+                counts["skipped"] += 1
+                continue
+            key = self._eligibility_key(policy, message_id, cutoff)
+            evidence = {
+                "eligibility": reason,
+                "provider": "microsoft_outlook",
+                "account_id": account_id,
+                "provider_labels": list(message.get("label_ids") or ()),
+                "internal_date_ms": message.get("internal_date_ms"),
+                "cleanup_mode": cleanup_mode,
+                "dry_run": dry_run,
+                "classification": classification,
+                "permanent_delete": False,
+                "message_metadata": {
+                    **self._cleanup_message_metadata(message),
+                    "previous_folder_id": message.get("parent_folder_id"),
+                },
+                "policy_id": policy["policy_id"],
+                "policy_version": "safe-low-value-v1",
+                "cleanup_run_at": self._iso(self._now()),
+            }
+            if dry_run:
+                counts["dry_run_candidates"] += 1
+                self._record_item(
+                    policy_id=policy["policy_id"],
+                    message_id=message_id,
+                    eligibility_key=key,
+                    status="dry_run_candidate",
+                    attempts=0,
+                    evidence=evidence,
+                )
+                continue
+            capability = "outlook.archive" if cleanup_mode == "archive" else "outlook.trash"
+            action_key = f"email-cleanup:microsoft:{account_id}:{key}"
+            action = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id=capability,
+                    payload={"message_id": message_id},
+                    request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, action_key)),
+                    conversation_id=conversation_id,
+                    principal_id=principal_id,
+                    operation=f"safe_cleanup_{cleanup_mode}",
+                    target=message_id,
+                    confirmed=True,
+                    standing_permission=True,
+                    idempotency_key=action_key,
+                ),
+                refresh_health=True,
+            )
+            evidence.update(
+                {
+                    "verification": dict(action.verification),
+                    "cleanup_at": self._iso(self._now()),
+                    "action_receipt_id": action.receipt.action_id if action.receipt else None,
+                    "cleanup_provider_reference": action.provider_reference,
+                }
+            )
+            verified = action.status is ExecutionStatus.VERIFIED
+            if verified:
+                counts["archived" if cleanup_mode == "archive" else "trashed"] += 1
+            self._record_item(
+                policy_id=policy["policy_id"],
+                message_id=message_id,
+                eligibility_key=key,
+                status="verified" if verified else action.status.value,
+                attempts=1,
+                action_id=action.receipt.action_id if action.receipt else None,
+                provider_reference=action.provider_reference,
+                evidence=evidence,
+                error=action.error,
+            )
+        with self._db() as connection:
+            self._audit(
+                connection,
+                policy,
+                "preview" if dry_run else "run",
+                "completed",
+                {**counts, "provider": "microsoft_outlook", "permanent_delete": False},
+            )
+            connection.execute(
+                "UPDATE email_policies SET last_run_at=?,next_run_at=?,last_error=NULL,"
+                "last_result_json=?,updated_at=? WHERE policy_id=?",
+                (
+                    self._iso(self._now()),
+                    self._iso(self._now() + timedelta(seconds=int(policy["interval_seconds"]))),
+                    json.dumps(counts, sort_keys=True, separators=(",", ":")),
+                    self._iso(self._now()),
+                    policy["policy_id"],
+                ),
+            )
+        return {"success": True, "status": "completed", "ran": True, **counts}
+
+    async def _run_outlook_cleanup_once(self, **kwargs: Any) -> dict[str, Any]:
+        return await self._outlook_cleanup_pass(dry_run=False, **kwargs)
 
     async def list_reply_watches(self, *, principal_id: str) -> Sequence[dict[str, Any]]:
         with self._db() as connection:
             rows = connection.execute(
-                "SELECT thread_id,recipient,display_name,source,status,created_at,updated_at "
+                "SELECT thread_id,provider_thread_id,provider,account_id,recipient,display_name,"
+                "source,status,created_at,updated_at "
                 "FROM email_reply_watches WHERE principal_id=? ORDER BY updated_at DESC",
                 (str(principal_id),),
             ).fetchall()
         return [
             {
-                "thread_id": str(row["thread_id"]),
+                "thread_id": str(row["provider_thread_id"] or row["thread_id"]),
+                "provider": str(row["provider"] or "google_gmail"),
+                "account_id": row["account_id"],
                 "recipient": row["recipient"],
                 "display_name": row["display_name"],
                 "source": str(row["source"]),
@@ -948,7 +2020,7 @@ class EmailAssistantPolicyEngine:
             rows = connection.execute(
                 "SELECT a.operation,a.state,a.evidence_json,a.created_at "
                 "FROM email_policy_audit a JOIN email_policies p ON p.policy_id=a.policy_id "
-                "WHERE a.principal_id=? AND p.kind='safe_cleanup'"
+                "WHERE a.principal_id=? AND p.kind LIKE 'safe_cleanup%'"
                 + since_clause
                 + " ORDER BY a.audit_id DESC LIMIT 100",
                 values,
@@ -1015,6 +2087,20 @@ class EmailAssistantPolicyEngine:
         if not isinstance(previous_labels, list):
             previous_labels = evidence.get("provider_labels")
         return {
+            "provider": (
+                str(row.get("provider") or "").strip()
+                or (
+                    "google_gmail"
+                    if str(verification.get("provider") or "").casefold() == "google"
+                    else (
+                        "microsoft_outlook"
+                        if str(verification.get("provider") or "").casefold() == "microsoft"
+                        else "google_gmail"
+                    )
+                )
+            ),
+            "account_id": str(evidence.get("account_id") or row.get("account_id") or "").strip()
+            or None,
             "message_id": str(row.get("message_id") or ""),
             "thread_id": thread_id or None,
             "sender_display_name": sender_name or None,
@@ -1058,6 +2144,7 @@ class EmailAssistantPolicyEngine:
         offset: int = 0,
         limit: int = 10,
         latest_run: bool = False,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         """Page through verified, principal-owned cleanup mutations."""
 
@@ -1065,13 +2152,17 @@ class EmailAssistantPolicyEngine:
         selected_operation = str(operation or "").casefold().strip() or None
         if selected_operation not in {None, "trash", "archive"}:
             raise ValueError("Cleanup history operation must be trash or archive")
+        selected_provider = str(provider or "").strip() or None
+        if selected_provider not in {None, "google_gmail", "microsoft_outlook"}:
+            raise ValueError("Cleanup history provider is not supported")
         start = max(0, int(offset))
         page_size = max(1, min(int(limit), 25))
         with self._db() as connection:
             rows = connection.execute(
-                "SELECT i.*,p.principal_id,p.cleanup_mode,p.classification_version "
+                "SELECT i.*,p.principal_id,p.cleanup_mode,p.classification_version,"
+                "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind='safe_cleanup' "
+                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
                 "AND i.status IN ('verified','verified_after_unknown','restored') "
                 "ORDER BY i.updated_at DESC LIMIT 1000",
                 (principal,),
@@ -1085,6 +2176,8 @@ class EmailAssistantPolicyEngine:
             ):
                 continue
             if selected_operation and item["operation"] != selected_operation:
+                continue
+            if selected_provider and item["provider"] != selected_provider:
                 continue
             items.append(item)
         items.sort(
@@ -1127,6 +2220,7 @@ class EmailAssistantPolicyEngine:
             "next_offset": start + len(page),
             "operation": selected_operation,
             "latest_run": bool(latest_run),
+            "provider": selected_provider,
         }
 
     async def verify_cleanup_items_state(
@@ -1137,7 +2231,7 @@ class EmailAssistantPolicyEngine:
         message_ids: Sequence[str],
         expected_operation: str,
     ) -> dict[str, Any]:
-        """Verify current Gmail state for exact principal-owned cleanup records."""
+        """Verify current provider state for exact principal-owned cleanup records."""
 
         principal = str(principal_id or "").strip()
         requested = [str(item).strip() for item in message_ids if str(item).strip()][:25]
@@ -1146,11 +2240,13 @@ class EmailAssistantPolicyEngine:
         placeholders = ",".join("?" for _ in requested)
         with self._db() as connection:
             owned = {
-                str(row[0])
+                str(row["message_id"]): dict(row)
                 for row in connection.execute(
-                    "SELECT DISTINCT i.message_id FROM email_policy_items i "
+                    "SELECT i.message_id,i.provider_reference,i.evidence_json,p.provider,p.account_id "
+                    "FROM email_policy_items i "
                     "JOIN email_policies p ON p.policy_id=i.policy_id "
-                    f"WHERE p.principal_id=? AND p.kind='safe_cleanup' AND i.message_id IN ({placeholders}) "
+                    f"WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
+                    f"AND i.message_id IN ({placeholders}) "
                     "AND i.status IN ('verified','verified_after_unknown','restored')",
                     (principal, *requested),
                 ).fetchall()
@@ -1158,11 +2254,27 @@ class EmailAssistantPolicyEngine:
         policy = {"principal_id": principal, "conversation_id": conversation_id}
         states: list[dict[str, Any]] = []
         for message_id in requested:
-            if message_id not in owned:
+            owned_item = owned.get(message_id)
+            if owned_item is None:
                 continue
-            current = await self._read_message(policy=policy, message_id=message_id)
+            provider = str(owned_item.get("provider") or "google_gmail")
+            read_id = message_id
+            if provider == "microsoft_outlook":
+                read_id = str(owned_item.get("provider_reference") or message_id)
+            current = await self._read_provider_message(
+                policy=policy,
+                provider=provider,
+                message_id=read_id,
+            )
             if current is None:
-                states.append({"message_id": message_id, "available": False, "matches": False})
+                states.append(
+                    {
+                        "message_id": message_id,
+                        "provider": provider,
+                        "available": False,
+                        "matches": False,
+                    }
+                )
                 continue
             labels = {str(item) for item in current.get("label_ids") or ()}
             matches = (
@@ -1170,7 +2282,14 @@ class EmailAssistantPolicyEngine:
                 if expected_operation == "trash"
                 else "INBOX" not in labels and "TRASH" not in labels
             )
-            states.append({"message_id": message_id, "available": True, "matches": matches})
+            states.append(
+                {
+                    "message_id": message_id,
+                    "provider": provider,
+                    "available": True,
+                    "matches": matches,
+                }
+            )
         return {
             "checked": len(states),
             "matching": sum(1 for item in states if item["matches"]),
@@ -1225,6 +2344,8 @@ class EmailAssistantPolicyEngine:
         now: datetime | None = None,
         cleanup_mode: str | None = None,
         cleanup_age_days: int | None = None,
+        provider: str | None = None,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         profile = await self.assistant_status(principal_id=principal_id)
         if profile is None:
@@ -1232,6 +2353,34 @@ class EmailAssistantPolicyEngine:
                 principal_id=principal_id,
                 conversation_id=conversation_id,
             )
+        selected_provider = str(provider or "google_gmail")
+        if selected_provider == "microsoft_outlook":
+            selected_account = str(account_id or "").strip()
+            if not selected_account:
+                accounts = [
+                    dict(item)
+                    for item in (
+                        await self.account_resolver(principal_id) if self.account_resolver else ()
+                    )
+                    if item.get("provider") == "microsoft_outlook"
+                ]
+                if len(accounts) != 1:
+                    raise ValueError("Which Outlook account should I inspect?")
+                selected_account = str(accounts[0].get("account_id") or "")
+            profile = await self.assistant_status(principal_id=principal_id)
+            return await self._outlook_cleanup_pass(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                account_id=selected_account,
+                cleanup_mode=str(cleanup_mode or (profile or {}).get("cleanup_mode") or "trash"),
+                cleanup_age_days=int(
+                    cleanup_age_days or (profile or {}).get("cleanup_age_days") or 30
+                ),
+                request_id=str(uuid.uuid4()),
+                dry_run=True,
+            )
+        if selected_provider != "google_gmail":
+            raise ValueError("Which connected email account should I inspect?")
         await self._sync_safe_cleanup_policy(principal_id)
         with self._db() as connection:
             row = connection.execute(
@@ -1258,9 +2407,11 @@ class EmailAssistantPolicyEngine:
         principal = str(principal_id or "").strip()
         with self._db() as connection:
             rows = connection.execute(
-                "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id "
+                "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id,"
+                "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind='safe_cleanup' AND p.cleanup_mode='trash' "
+                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
+                "AND p.cleanup_mode='trash' "
                 "AND i.status IN ('verified','verified_after_unknown') "
                 "ORDER BY i.updated_at DESC LIMIT 20",
                 (principal,),
@@ -1274,17 +2425,39 @@ class EmailAssistantPolicyEngine:
                 "principal_id": principal,
                 "conversation_id": conversation_id,
             }
-            current = await self._read_message(policy=policy, message_id=str(row["message_id"]))
+            provider = str(row.get("provider") or "google_gmail")
+            current_id = (
+                str(row.get("provider_reference") or row["message_id"])
+                if provider == "microsoft_outlook"
+                else str(row["message_id"])
+            )
+            current = await self._read_provider_message(
+                policy=policy,
+                provider=provider,
+                message_id=current_id,
+            )
             if current is None:
                 continue
             labels = {str(item) for item in current.get("label_ids") or ()}
             if "TRASH" not in labels:
                 continue
-            key = f"email-cleanup-undo:{row['eligibility_key']}"
+            key = f"email-cleanup-undo:{provider}:{row['eligibility_key']}"
+            capability = "outlook.restore" if provider == "microsoft_outlook" else "gmail.restore"
+            payload = {"message_id": current_id}
+            if provider == "microsoft_outlook":
+                metadata = evidence.get("message_metadata")
+                destination_id = (
+                    str(metadata.get("previous_folder_id") or "")
+                    if isinstance(metadata, Mapping)
+                    else ""
+                )
+                if not destination_id:
+                    continue
+                payload["destination_id"] = destination_id
             action = await self.registry.execute(
                 CapabilityRequest(
-                    capability_id="gmail.restore",
-                    payload={"message_id": str(row["message_id"])},
+                    capability_id=capability,
+                    payload=payload,
                     request_id=request_id,
                     conversation_id=conversation_id,
                     principal_id=principal,
@@ -1348,9 +2521,10 @@ class EmailAssistantPolicyEngine:
             return {"success": False, "restored": 0, "reason": "missing_target"}
         with self._db() as connection:
             raws = connection.execute(
-                "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id "
+                "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id,"
+                "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind='safe_cleanup' AND i.message_id=? "
+                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' AND i.message_id=? "
                 "AND i.status IN "
                 "('verified','verified_after_unknown','restored') "
                 "ORDER BY i.updated_at DESC LIMIT 50",
@@ -1376,22 +2550,48 @@ class EmailAssistantPolicyEngine:
         if evidence.get("undone_at") or str(row.get("status")) == "restored":
             return {"success": True, "restored": 0, "reason": "already_restored"}
         policy = {"principal_id": principal, "conversation_id": conversation_id}
-        current = await self._read_message(policy=policy, message_id=selected)
+        provider = str(row.get("provider") or "google_gmail")
+        current_id = (
+            str(row.get("provider_reference") or selected)
+            if provider == "microsoft_outlook"
+            else selected
+        )
+        current = await self._read_provider_message(
+            policy=policy,
+            provider=provider,
+            message_id=current_id,
+        )
         if current is None:
             return {"success": False, "restored": 0, "reason": "state_unavailable"}
         labels = {str(item) for item in current.get("label_ids") or ()}
         if "TRASH" not in labels:
             return {"success": True, "restored": 0, "reason": "not_in_trash"}
-        key = f"email-cleanup-undo:{row['eligibility_key']}"
+        key = f"email-cleanup-undo:{provider}:{row['eligibility_key']}"
+        capability = "outlook.restore" if provider == "microsoft_outlook" else "gmail.restore"
+        payload = {"message_id": current_id}
+        if provider == "microsoft_outlook":
+            metadata = evidence.get("message_metadata")
+            destination_id = (
+                str(metadata.get("previous_folder_id") or "")
+                if isinstance(metadata, Mapping)
+                else ""
+            )
+            if not destination_id:
+                return {
+                    "success": False,
+                    "restored": 0,
+                    "reason": "original_folder_unavailable",
+                }
+            payload["destination_id"] = destination_id
         action = await self.registry.execute(
             CapabilityRequest(
-                capability_id="gmail.restore",
-                payload={"message_id": selected},
+                capability_id=capability,
+                payload=payload,
                 request_id=request_id,
                 conversation_id=conversation_id,
                 principal_id=principal,
                 operation="restore_selected_email_cleanup",
-                target=selected,
+                target=current_id,
                 confirmed=True,
                 idempotency_key=key,
             ),
@@ -1538,7 +2738,23 @@ class EmailAssistantPolicyEngine:
         for row in rows:
             policy_id = str(row["policy_id"])
             try:
-                results.append(await self.run_policy(policy_id, now=current))
+                policy = self._row(row)
+                if policy["provider"] == "microsoft_outlook":
+                    if not policy["account_id"]:
+                        raise RuntimeError("Outlook cleanup policy has no account identity")
+                    results.append(
+                        await self._outlook_cleanup_pass(
+                            principal_id=policy["principal_id"],
+                            conversation_id=policy["conversation_id"],
+                            account_id=str(policy["account_id"]),
+                            cleanup_mode=policy["cleanup_mode"],
+                            cleanup_age_days=policy["retention_days"],
+                            request_id=f"scheduled:{policy_id}:{current.date().isoformat()}",
+                            dry_run=policy["dry_run"],
+                        )
+                    )
+                else:
+                    results.append(await self.run_policy(policy_id, now=current))
             except Exception as exc:
                 logger.exception("Email cleanup pass failed policy=%s", policy_id)
                 results.append(
@@ -1833,10 +3049,13 @@ class EmailAssistantPolicyEngine:
         recipient: str | None,
         display_name: str | None,
         source: str,
+        provider: str = "google_gmail",
+        account_id: str | None = None,
     ) -> bool:
         if not principal_id or not thread_id or not anchor_message_id:
             return False
         now = self._iso(self._now())
+        storage_thread_id = self._provider_storage_id(provider, account_id, thread_id)
         with self._db() as connection:
             connection.execute(
                 "INSERT INTO email_reply_watches "
@@ -1863,7 +3082,7 @@ class EmailAssistantPolicyEngine:
                 "updated_at=excluded.updated_at",
                 (
                     principal_id,
-                    thread_id,
+                    storage_thread_id,
                     anchor_message_id,
                     anchor_epoch_ms,
                     conversation_id,
@@ -1875,7 +3094,28 @@ class EmailAssistantPolicyEngine:
                     now,
                 ),
             )
+            connection.execute(
+                "UPDATE email_reply_watches SET provider=?,account_id=?,provider_thread_id=?,"
+                "provider_message_id=? WHERE principal_id=? AND thread_id=?",
+                (
+                    provider,
+                    account_id,
+                    thread_id,
+                    anchor_message_id,
+                    principal_id,
+                    storage_thread_id,
+                ),
+            )
         return True
+
+    @staticmethod
+    def _provider_storage_id(provider: str, account_id: str | None, value: str) -> str:
+        if provider == "google_gmail":
+            return value
+        digest = hashlib.sha256(
+            f"{provider}:{account_id or ''}:{value}".encode("utf-8")
+        ).hexdigest()
+        return f"provider:{digest}"
 
     async def _sync_verified_send_watches(self, profile: Mapping[str, Any]) -> int:
         receipt_store = getattr(self.registry, "receipt_store", None)
@@ -1884,10 +3124,20 @@ class EmailAssistantPolicyEngine:
         receipts = await receipt_store.list_recent(limit=500)
         principal = str(profile["principal_id"])
         owner_prefix = f"usr:{principal}:"
+        accounts = {
+            str(item.get("provider")): str(item.get("account_id") or "")
+            for item in profile.get("accounts") or ()
+            if isinstance(item, Mapping)
+        }
         added = 0
         for receipt in receipts:
+            provider = (
+                "google_gmail"
+                if receipt.capability_id == "gmail.send"
+                else ("microsoft_outlook" if receipt.capability_id == "outlook.send" else "")
+            )
             if (
-                receipt.capability_id != "gmail.send"
+                not provider
                 or receipt.status is not ReceiptStatus.VERIFIED
                 or not str(receipt.conversation_id or "").startswith(owner_prefix)
             ):
@@ -1913,7 +3163,42 @@ class EmailAssistantPolicyEngine:
                 conversation_id=str(receipt.conversation_id),
                 recipient=recipient,
                 display_name=None,
-                source="verified_gmail_send_receipt",
+                source=f"verified_{provider}_send_receipt",
+                provider=provider,
+                account_id=accounts.get(provider) or None,
+            ):
+                added += 1
+        return added
+
+    async def _bootstrap_outlook_sent_watches(self, profile: Mapping[str, Any]) -> int:
+        execution = await self._execute_read(
+            profile,
+            "outlook.search",
+            {"query": "", "folder": "sentitems", "limit": 100},
+            operation="email_assistant_bootstrap_outlook_sent_threads",
+        )
+        if not execution.success:
+            return 0
+        added = 0
+        for raw in execution.data.get("messages") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            message = dict(raw)
+            if self._upsert_watch(
+                principal_id=str(profile["principal_id"]),
+                thread_id=str(message.get("thread_id") or ""),
+                anchor_message_id=str(message.get("message_id") or ""),
+                anchor_epoch_ms=(
+                    int(message["internal_date_ms"])
+                    if isinstance(message.get("internal_date_ms"), int)
+                    else None
+                ),
+                conversation_id=str(profile["conversation_id"]),
+                recipient=self._address(message.get("to")) or None,
+                display_name=None,
+                source="bounded_recent_outlook_sent_bootstrap",
+                provider="microsoft_outlook",
+                account_id=str(profile.get("account_id") or "") or None,
             ):
                 added += 1
         return added
@@ -1971,12 +3256,20 @@ class EmailAssistantPolicyEngine:
                 added += 1
         return added
 
-    def _active_watch(self, principal_id: str, thread_id: str) -> dict[str, Any] | None:
+    def _active_watch(
+        self,
+        principal_id: str,
+        thread_id: str,
+        *,
+        provider: str = "google_gmail",
+        account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        storage_thread_id = self._provider_storage_id(provider, account_id, thread_id)
         with self._db() as connection:
             row = connection.execute(
                 "SELECT * FROM email_reply_watches WHERE principal_id=? AND thread_id=? "
                 "AND status='active'",
-                (principal_id, thread_id),
+                (principal_id, storage_thread_id),
             ).fetchone()
         return dict(row) if row is not None else None
 
@@ -1991,6 +3284,13 @@ class EmailAssistantPolicyEngine:
         message_id = str(message.get("message_id") or "").strip()
         if not message_id:
             return False
+        provider = str(message.get("provider") or profile.get("provider") or "google_gmail")
+        account_id = str(profile.get("account_id") or "").strip() or None
+        thread_id = str(message.get("thread_id") or "").strip() or None
+        storage_message_id = self._provider_storage_id(provider, account_id, message_id)
+        storage_thread_id = (
+            self._provider_storage_id(provider, account_id, thread_id) if thread_id else None
+        )
         now = self._iso(self._now())
         text = present_user_response(
             self._notification_text(message, classification), allow_technical=False
@@ -2003,8 +3303,8 @@ class EmailAssistantPolicyEngine:
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     profile["principal_id"],
-                    message_id,
-                    str(message.get("thread_id") or "") or None,
+                    storage_message_id,
+                    storage_thread_id,
                     event_kind,
                     classification["level"],
                     profile["conversation_id"],
@@ -2016,6 +3316,20 @@ class EmailAssistantPolicyEngine:
                     now,
                 ),
             ).rowcount
+            if inserted:
+                connection.execute(
+                    "UPDATE email_assistant_events SET provider=?,account_id=?,"
+                    "provider_message_id=?,provider_thread_id=? "
+                    "WHERE principal_id=? AND message_id=?",
+                    (
+                        provider,
+                        account_id,
+                        message_id,
+                        thread_id,
+                        profile["principal_id"],
+                        storage_message_id,
+                    ),
+                )
         return bool(inserted)
 
     async def _deliver_event(self, principal_id: str, message_id: str) -> bool:
@@ -2032,6 +3346,10 @@ class EmailAssistantPolicyEngine:
         if not claimed or row is None:
             return False
         event = dict(row)
+        provider_message_id = str(event.get("provider_message_id") or message_id)
+        provider_thread_id = str(event.get("provider_thread_id") or event.get("thread_id") or "")
+        provider = str(event.get("provider") or "google_gmail")
+        account_id = str(event.get("account_id") or "").strip() or None
         text = present_user_response(str(event["notification_text"]), allow_technical=False)
         try:
             if self.conversations is not None:
@@ -2041,15 +3359,22 @@ class EmailAssistantPolicyEngine:
                 await self.conversations.add_assistant_message(
                     str(event["conversation_id"]),
                     text,
-                    delivery_key=f"email-assistant:{principal_id}:{message_id}",
+                    delivery_key=f"email-assistant:{principal_id}:{provider}:{message_id}",
                 )
-            if self.focus_recorder is not None and event.get("thread_id"):
-                watch = self._active_watch(principal_id, str(event["thread_id"]))
+            if self.focus_recorder is not None and provider_thread_id:
+                watch = self._active_watch(
+                    principal_id,
+                    provider_thread_id,
+                    provider=provider,
+                    account_id=account_id,
+                )
                 await self.focus_recorder(
                     str(event["conversation_id"]),
                     {
-                        "message_id": message_id,
-                        "thread_id": str(event["thread_id"]),
+                        "provider": provider,
+                        "account_id": account_id,
+                        "message_id": provider_message_id,
+                        "thread_id": provider_thread_id,
                         "sent_message_id": (
                             str(watch["anchor_message_id"]) if watch is not None else None
                         ),
@@ -2121,7 +3446,7 @@ class EmailAssistantPolicyEngine:
                 connection.execute(
                     "UPDATE email_reply_watches SET last_reply_message_id=?,updated_at=? "
                     "WHERE principal_id=? AND thread_id=?",
-                    (message_id, now, principal_id, event["thread_id"]),
+                    (provider_message_id, now, principal_id, event["thread_id"]),
                 )
         return True
 
@@ -2236,6 +3561,327 @@ class EmailAssistantPolicyEngine:
         }
 
     async def run_assistant(
+        self, principal_id: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Run every connected mailbox independently through one assistant service."""
+
+        profile = await self.assistant_status(principal_id=principal_id)
+        if profile is None or profile["status"] != "active":
+            return {
+                "service": "email_assistant",
+                "principal_id": principal_id,
+                "status": "paused",
+                "ran": False,
+                "providers": [],
+            }
+        current = (now or self._now()).astimezone(timezone.utc)
+        accounts = [
+            dict(item) for item in profile.get("accounts") or () if isinstance(item, Mapping)
+        ]
+        providers = {str(item.get("provider") or "") for item in accounts}
+        results: list[dict[str, Any]] = []
+        # Preserve the deployed Gmail profile/cursor even before account metadata
+        # is available (for example while a token needs reconnecting).
+        if "google_gmail" in providers or "microsoft_outlook" not in providers:
+            try:
+                results.append(await self._run_gmail_assistant(principal_id, now=current))
+            except Exception as exc:
+                logger.exception("Gmail Email Assistant pass failed principal=%s", principal_id)
+                results.append(
+                    {
+                        "provider": "google_gmail",
+                        "status": "failed",
+                        "ran": True,
+                        "error": redact_text(exc, max_length=300),
+                    }
+                )
+        for account in accounts:
+            if account.get("provider") != "microsoft_outlook":
+                continue
+            try:
+                results.append(
+                    await self._run_outlook_assistant(
+                        profile,
+                        account=account,
+                        now=current,
+                    )
+                )
+            except Exception as exc:
+                logger.exception("Outlook Email Assistant pass failed principal=%s", principal_id)
+                results.append(
+                    {
+                        "provider": "microsoft_outlook",
+                        "account_id": account.get("account_id"),
+                        "status": "failed",
+                        "ran": True,
+                        "error": redact_text(exc, max_length=300),
+                    }
+                )
+        if len(results) == 1:
+            return {**results[0], "providers": results}
+        return {
+            "service": "email_assistant",
+            "principal_id": principal_id,
+            "status": (
+                "healthy"
+                if results and all(item.get("status") == "healthy" for item in results)
+                else "degraded"
+            ),
+            "ran": bool(results),
+            "providers": results,
+            "processed": sum(int(item.get("processed") or 0) for item in results),
+            "notifications_queued": sum(
+                int(item.get("notifications_queued") or 0) for item in results
+            ),
+            "notifications_delivered": sum(
+                int(item.get("notifications_delivered") or 0) for item in results
+            ),
+        }
+
+    async def _run_outlook_assistant(
+        self,
+        profile: Mapping[str, Any],
+        *,
+        account: Mapping[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        principal_id = str(profile["principal_id"])
+        account_id = str(account.get("account_id") or "")
+        scoped = {
+            **dict(profile),
+            "provider": "microsoft_outlook",
+            "account_id": account_id,
+            "account_email": account.get("account_email"),
+        }
+        with self._db() as connection:
+            checkpoint = connection.execute(
+                "SELECT * FROM email_provider_checkpoints WHERE principal_id=? "
+                "AND provider='microsoft_outlook' AND account_id=?",
+                (principal_id, account_id),
+            ).fetchone()
+        cursor = str(checkpoint["cursor"] or "") if checkpoint is not None else ""
+        watches = await self._sync_verified_send_watches(scoped) if profile["reply_alerts"] else 0
+        changes = await self._execute_read(
+            scoped,
+            "outlook.changes",
+            {"delta_link": cursor or None, "limit": 100},
+            operation="email_assistant_incremental_check",
+        )
+        if not changes.success:
+            return await self._outlook_service_failed(
+                scoped, changes.error or "Outlook incremental check failed", now
+            )
+        data = dict(changes.data)
+        delta_link = str(data.get("delta_link") or "")
+        if not delta_link:
+            return await self._outlook_service_failed(
+                scoped, "Outlook delta cursor is missing", now
+            )
+        if data.get("bootstrap") is True and profile["reply_alerts"]:
+            watches += await self._bootstrap_outlook_sent_watches(scoped)
+        queued = 0
+        processed = 0
+        threshold = _PRIORITY_LEVELS[str(profile["importance_threshold"])]
+        for raw in data.get("messages") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            message = dict(raw)
+            message_id = str(message.get("message_id") or "")
+            thread_id = str(message.get("thread_id") or "")
+            if not message_id or not thread_id:
+                continue
+            processed += 1
+            timestamp = (
+                int(message["internal_date_ms"])
+                if isinstance(message.get("internal_date_ms"), int)
+                else None
+            )
+            watch = (
+                self._active_watch(
+                    principal_id,
+                    thread_id,
+                    provider="microsoft_outlook",
+                    account_id=account_id,
+                )
+                if profile["reply_alerts"]
+                else None
+            )
+            watched_reply = bool(
+                watch
+                and message_id != str(watch.get("provider_message_id") or "")
+                and (
+                    watch.get("anchor_epoch_ms") is None
+                    or timestamp is None
+                    or timestamp > int(watch["anchor_epoch_ms"])
+                )
+            )
+            known_contact = await self._known_contact(scoped, message)
+            classification = self.classify_message(
+                message,
+                owner_email=str(account.get("account_email") or ""),
+                known_contact=known_contact is True,
+                watched_reply=watched_reply,
+            )
+            classification = {
+                **classification,
+                "provider": "microsoft_outlook",
+                "account_id": account_id,
+            }
+            should_notify = watched_reply or (
+                profile["important_email_alerts"]
+                and _PRIORITY_LEVELS[str(classification["level"])] >= threshold
+            )
+            if should_notify:
+                delivery_profile = scoped
+                if watched_reply and watch is not None:
+                    delivery_profile = {
+                        **scoped,
+                        "conversation_id": str(watch["conversation_id"]),
+                    }
+                queued += int(
+                    self._queue_event(
+                        delivery_profile,
+                        message,
+                        event_kind="reply" if watched_reply else "important",
+                        classification=classification,
+                    )
+                )
+        next_check = now + timedelta(seconds=int(profile["poll_interval_seconds"]))
+        now_text = self._iso(now)
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO email_provider_checkpoints "
+                "(principal_id,provider,account_id,account_email,cursor,last_check_at,"
+                "next_check_at,consecutive_failures,outage_fingerprint,last_error,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,provider,account_id) "
+                "DO UPDATE SET account_email=excluded.account_email,cursor=excluded.cursor,"
+                "last_check_at=excluded.last_check_at,next_check_at=excluded.next_check_at,"
+                "consecutive_failures=0,outage_fingerprint=NULL,last_error=NULL,"
+                "updated_at=excluded.updated_at",
+                (
+                    principal_id,
+                    "microsoft_outlook",
+                    account_id,
+                    account.get("account_email"),
+                    delta_link,
+                    now_text,
+                    self._iso(next_check),
+                    0,
+                    None,
+                    None,
+                    now_text,
+                    now_text,
+                ),
+            )
+        delivered = await self._deliver_due_events(principal_id, self._now())
+        return {
+            "service": "email_assistant",
+            "provider": "microsoft_outlook",
+            "account_id": account_id,
+            "principal_id": principal_id,
+            "status": "healthy",
+            "ran": True,
+            "bootstrap": bool(data.get("bootstrap")),
+            "processed": processed,
+            "notifications_queued": queued,
+            "notifications_delivered": delivered,
+            "reply_watches_observed": watches,
+            "next_check_at": self._iso(next_check),
+        }
+
+    async def _outlook_service_failed(
+        self, profile: Mapping[str, Any], error: str, now: datetime
+    ) -> dict[str, Any]:
+        safe = redact_text(error, max_length=500)
+        fingerprint = hashlib.sha256(safe.casefold().encode()).hexdigest()[:24]
+        principal = str(profile["principal_id"])
+        account_id = str(profile["account_id"])
+        with self._db() as connection:
+            previous = connection.execute(
+                "SELECT outage_fingerprint,consecutive_failures FROM email_provider_checkpoints "
+                "WHERE principal_id=? AND provider='microsoft_outlook' AND account_id=?",
+                (principal, account_id),
+            ).fetchone()
+        failures = int(previous["consecutive_failures"] if previous else 0) + 1
+        next_check = now + timedelta(seconds=min(3600, 60 * (2 ** min(failures, 6))))
+        now_text = self._iso(now)
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO email_provider_checkpoints "
+                "(principal_id,provider,account_id,account_email,cursor,last_check_at,"
+                "next_check_at,consecutive_failures,outage_fingerprint,last_error,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(principal_id,provider,account_id) "
+                "DO UPDATE SET next_check_at=excluded.next_check_at,"
+                "consecutive_failures=excluded.consecutive_failures,"
+                "outage_fingerprint=excluded.outage_fingerprint,last_error=excluded.last_error,"
+                "updated_at=excluded.updated_at",
+                (
+                    principal,
+                    "microsoft_outlook",
+                    account_id,
+                    profile.get("account_email"),
+                    None,
+                    None,
+                    self._iso(next_check),
+                    failures,
+                    fingerprint,
+                    safe,
+                    now_text,
+                    now_text,
+                ),
+            )
+        queued = False
+        if not previous or str(previous["outage_fingerprint"] or "") != fingerprint:
+            reconnect = any(
+                marker in safe.casefold()
+                for marker in ("oauth", "token", "reconnect", "authentication", "not connected")
+            )
+            text = (
+                "I can’t keep an eye on Outlook right now because Microsoft needs reconnecting."
+                if reconnect
+                else "I can’t keep an eye on Outlook properly right now. I’ll retry shortly."
+            )
+            synthetic = {
+                "provider": "microsoft_outlook",
+                "message_id": f"outage:{fingerprint}:{now_text}",
+                "thread_id": None,
+                "from": "Jarvis",
+                "subject": text,
+            }
+            queued = self._queue_event(
+                profile,
+                synthetic,
+                event_kind="provider_outage",
+                classification={
+                    "level": "important",
+                    "category": "provider_outage",
+                    "provider": "microsoft_outlook",
+                    "provider_truth": True,
+                    "content_is_authority": False,
+                },
+            )
+            if queued:
+                storage_id = self._provider_storage_id(
+                    "microsoft_outlook", account_id, str(synthetic["message_id"])
+                )
+                with self._db() as connection:
+                    connection.execute(
+                        "UPDATE email_assistant_events SET notification_text=? "
+                        "WHERE principal_id=? AND message_id=?",
+                        (text, principal, storage_id),
+                    )
+        await self._deliver_due_events(principal, self._now())
+        return {
+            "service": "email_assistant",
+            "provider": "microsoft_outlook",
+            "account_id": account_id,
+            "status": "provider_failed",
+            "ran": True,
+            "notifications_queued": int(queued),
+            "next_check_at": self._iso(next_check),
+        }
+
+    async def _run_gmail_assistant(
         self, principal_id: str, *, now: datetime | None = None
     ) -> dict[str, Any]:
         current = (now or self._now()).astimezone(timezone.utc)
@@ -2411,6 +4057,34 @@ class EmailAssistantPolicyEngine:
             refresh_health=True,
         )
         return dict(execution.data) if execution.success else None
+
+    async def _read_provider_message(
+        self,
+        *,
+        policy: Mapping[str, Any],
+        provider: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        if provider == "google_gmail":
+            return await self._read_message(policy=policy, message_id=message_id)
+        if provider != "microsoft_outlook":
+            return None
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="outlook.read",
+                payload={"message_id": message_id},
+                request_id=str(uuid.uuid4()),
+                conversation_id=str(policy["conversation_id"]),
+                principal_id=str(policy["principal_id"]),
+                operation="email_retention_inspect",
+                target=message_id,
+            ),
+            refresh_health=True,
+        )
+        if not execution.success:
+            return None
+        value = execution.data.get("message")
+        return dict(value) if isinstance(value, Mapping) else None
 
     @staticmethod
     def _eligible(message: Mapping[str, Any], cutoff: datetime) -> tuple[bool, str]:
@@ -2679,6 +4353,8 @@ class EmailAssistantPolicyEngine:
                         # and live labels again in _eligible before every write.
                         "query": query,
                         "limit": 100,
+                        "all_pages": True,
+                        "max_messages": 10_000,
                     },
                     request_id=str(uuid.uuid4()),
                     conversation_id=policy["conversation_id"],
@@ -2719,7 +4395,9 @@ class EmailAssistantPolicyEngine:
                 str(item) for item in search.data.get("message_ids") or () if str(item).strip()
             ]
             candidate_estimate = int(search.data.get("result_size_estimate") or len(candidate_ids))
-            coverage_partial = candidate_estimate > len(candidate_ids)
+            coverage_partial = bool(search.data.get("truncated")) or candidate_estimate > len(
+                candidate_ids
+            )
             counts = {
                 "trashed": 0,
                 "archived": 0,
@@ -3188,10 +4866,27 @@ class EmailAssistantPolicyEngine:
                     "SELECT COUNT(*) FROM email_assistant_events "
                     "WHERE status IN ('pending','delivering')"
                 ).fetchone()
+                bulk_actions = connection.execute(
+                    "SELECT COUNT(*),"
+                    "SUM(CASE WHEN status IN ('awaiting_confirmation','running','interrupted',"
+                    "'partial') THEN 1 ELSE 0 END) FROM email_bulk_actions"
+                ).fetchone()
                 counters = connection.execute(
                     "SELECT COALESCE(SUM(evaluated_count),0),"
                     "COALESCE(SUM(important_detected_count),0),"
                     "COALESCE(SUM(notified_count),0) FROM email_assistant_profiles"
+                ).fetchone()
+                provider_rows = connection.execute(
+                    "SELECT provider,COUNT(*) AS accounts,MAX(last_check_at) AS last_check_at,"
+                    "MAX(consecutive_failures) AS consecutive_failures,"
+                    "MAX(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS has_error "
+                    "FROM email_provider_checkpoints GROUP BY provider ORDER BY provider"
+                ).fetchall()
+                gmail = connection.execute(
+                    "SELECT MAX(last_check_at) AS last_check_at,"
+                    "MAX(consecutive_failures) AS consecutive_failures,"
+                    "MAX(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS has_error "
+                    "FROM email_assistant_profiles"
                 ).fetchone()
             database_healthy = quick is not None and str(quick[0]).casefold() == "ok"
             worker_running = self._task is not None and not self._task.done()
@@ -3208,9 +4903,37 @@ class EmailAssistantPolicyEngine:
                 "pending_notifications": (
                     int(pending_events[0]) if pending_events is not None else 0
                 ),
+                "bulk_action_count": int(bulk_actions[0]) if bulk_actions is not None else 0,
+                "open_bulk_actions": int(bulk_actions[1] or 0) if bulk_actions is not None else 0,
                 "evaluated_count": int(counters[0]) if counters is not None else 0,
                 "important_detected_count": int(counters[1]) if counters is not None else 0,
                 "notified_count": int(counters[2]) if counters is not None else 0,
+                "providers": [
+                    {
+                        "provider": "google_gmail",
+                        "accounts": int(profiles[0]) if profiles is not None else 0,
+                        "last_check_at": gmail["last_check_at"] if gmail else None,
+                        "status": (
+                            "degraded"
+                            if gmail
+                            and (int(gmail["consecutive_failures"] or 0) or gmail["has_error"])
+                            else "healthy"
+                        ),
+                    },
+                    *[
+                        {
+                            "provider": str(item["provider"]),
+                            "accounts": int(item["accounts"]),
+                            "last_check_at": item["last_check_at"],
+                            "status": (
+                                "degraded"
+                                if int(item["consecutive_failures"] or 0) or item["has_error"]
+                                else "healthy"
+                            ),
+                        }
+                        for item in provider_rows
+                    ],
+                ],
                 "reason": (
                     None
                     if healthy

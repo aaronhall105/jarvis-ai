@@ -75,7 +75,7 @@ public final class IntegrationsActivity extends Activity {
         loadProviders();
         if (oauthBrowserOpened) {
             oauthBrowserOpened = false;
-            coreState.setText("Checking whether Google authorization completed…");
+            coreState.setText("Checking whether account authorization completed…");
         }
     }
 
@@ -91,19 +91,20 @@ public final class IntegrationsActivity extends Activity {
             data == null
                 || !"jarvis".equals(data.getScheme())
                 || !"integrations".equals(data.getHost())
-                || !"/google".equals(data.getPath())
+                || !("/google".equals(data.getPath()) || "/microsoft".equals(data.getPath()))
         ) return;
+        String provider = "/microsoft".equals(data.getPath()) ? "Outlook" : "Google";
         String status = data.getQueryParameter("status");
         if ("success".equals(status)) {
             Toast.makeText(
                 this,
-                "Google returned to Jarvis; verifying provider health",
+                provider + " returned to Jarvis; verifying provider health",
                 Toast.LENGTH_LONG
             ).show();
         } else {
             Toast.makeText(
                 this,
-                "Google authorization was cancelled or failed",
+                provider + " authorization was cancelled or failed",
                 Toast.LENGTH_LONG
             ).show();
         }
@@ -123,7 +124,7 @@ public final class IntegrationsActivity extends Activity {
 
         TextView explanation = text(
             "Connected is shown only after Core verifies provider health. "
-                + "Jarvis never receives your Google password, and tokens stay encrypted in Core.",
+                + "Jarvis never receives your Google or Microsoft password, and tokens stay encrypted in Core.",
             13,
             MID
         );
@@ -219,7 +220,7 @@ public final class IntegrationsActivity extends Activity {
         importanceThreshold = secondaryButton("Importance: Important");
         importanceThreshold.setOnClickListener(view -> cycleImportance());
         card.addView(importanceThreshold, matchWrap(0, dp(6)));
-        cleanupMode = secondaryButton("Cleanup: Trash");
+        cleanupMode = secondaryButton("Cleanup: Bin / Deleted Items");
         cleanupMode.setOnClickListener(view -> cycleCleanupMode());
         card.addView(cleanupMode, matchWrap(0, dp(6)));
         cleanupAge = secondaryButton("Cleanup age: 30 days");
@@ -227,7 +228,7 @@ public final class IntegrationsActivity extends Activity {
         card.addView(cleanupAge, matchWrap(0, dp(8)));
 
         emailAssistantDetails = text(
-            "Cleanup starts in preview mode and never permanently deletes Gmail.",
+            "Cleanup starts in preview mode and never permanently deletes email.",
             12,
             MID
         );
@@ -274,7 +275,11 @@ public final class IntegrationsActivity extends Activity {
         if (settings.inboxCleanup && settings.cleanupDryRun) state += " · cleanup preview only";
         emailAssistantState.setText(state);
         importanceThreshold.setText("Importance: " + titleCase(settings.importanceThreshold));
-        cleanupMode.setText("Cleanup: " + titleCase(settings.cleanupMode));
+        cleanupMode.setText(
+            "Cleanup: " + (
+                "trash".equals(settings.cleanupMode) ? "Bin / Deleted Items" : "Archive"
+            )
+        );
         cleanupAge.setText("Cleanup age: " + settings.cleanupAgeDays + " days");
         String lastCheck = settings.lastGmailCheck.isBlank() ? "Not checked yet" : settings.lastGmailCheck;
         String lastCleanup = settings.lastCleanup.isBlank() ? "Not run yet" : settings.lastCleanup;
@@ -284,7 +289,7 @@ public final class IntegrationsActivity extends Activity {
                 + "\nLast cleanup: " + lastCleanup
                 + "\nNext cleanup: " + nextCleanup
                 + "\nProtected senders: " + settings.protectedSenders.size()
-                + "\nCleanup never permanently deletes Gmail."
+                + "\nCleanup never permanently deletes Gmail or Outlook mail."
         );
     }
 
@@ -439,6 +444,7 @@ public final class IntegrationsActivity extends Activity {
         card.addView(detail, matchWrap());
 
         if ("google".equals(provider.id)) addGoogleActions(card, provider);
+        if ("microsoft".equals(provider.id)) addMicrosoftActions(card, provider);
         return card;
     }
 
@@ -483,6 +489,51 @@ public final class IntegrationsActivity extends Activity {
 
             @Override public void onError(String message) {
                 coreState.setText("Google disconnect failed — " + message);
+            }
+        });
+    }
+
+    private void addMicrosoftActions(LinearLayout card, IntegrationProvider provider) {
+        if (provider.canConnect || provider.canReconnect) {
+            Button connect = button(provider.canReconnect ? "Reconnect Outlook" : "Connect Outlook");
+            connect.setOnClickListener(view -> startMicrosoft());
+            card.addView(connect, matchWrap(dp(12), 0));
+        }
+        if (provider.canDisconnect && !provider.accountId.isBlank()) {
+            Button disconnect = secondaryButton("Disconnect Outlook");
+            disconnect.setOnClickListener(view -> disconnectMicrosoft(provider.accountId));
+            card.addView(disconnect, matchWrap(dp(8), 0));
+        }
+    }
+
+    private void startMicrosoft() {
+        coreState.setText("Starting Microsoft authorization…");
+        client.startMicrosoft(new IntegrationsClient.OAuthCallback() {
+            @Override public void onSuccess(String authorizationUrl) {
+                oauthBrowserOpened = true;
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(authorizationUrl)));
+            }
+
+            @Override public void onError(String message) {
+                coreState.setText("Outlook setup failed — " + message);
+            }
+        });
+    }
+
+    private void disconnectMicrosoft(String accountId) {
+        coreState.setText("Disconnecting Outlook…");
+        client.disconnectMicrosoft(accountId, new IntegrationsClient.ResultCallback() {
+            @Override public void onSuccess() {
+                Toast.makeText(
+                    IntegrationsActivity.this,
+                    "Outlook disconnected from Jarvis",
+                    Toast.LENGTH_LONG
+                ).show();
+                loadProviders();
+            }
+
+            @Override public void onError(String message) {
+                coreState.setText("Outlook disconnect failed — " + message);
             }
         });
     }
