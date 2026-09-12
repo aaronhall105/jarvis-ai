@@ -44,6 +44,29 @@ def test_message_level_and_preview_requests_are_not_bulk_policy_intent(text: str
     assert main._email_cleanup_policy_request(text) is False
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("Yes", "affirmative"),
+        ("Yep", "affirmative"),
+        ("Yeah", "affirmative"),
+        ("Correct", "affirmative"),
+        ("That's right", "affirmative"),
+        ("Do it", "affirmative"),
+        ("Go ahead", "affirmative"),
+        ("Go on", "affirmative"),
+        ("No", "negative"),
+        ("Nope", "negative"),
+        ("Cancel", "negative"),
+        ("Don't", "negative"),
+    ),
+)
+def test_bare_confirmation_vocabulary_is_global_and_authority_free(
+    text: str, expected: str
+) -> None:
+    assert main.bare_confirmation(text) == expected
+
+
 @pytest.fixture(autouse=True)
 def isolated_dialogue(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "dialogue", DialogueManager(str(tmp_path / "dialogue.db")))
@@ -155,6 +178,243 @@ async def test_bulk_cleanup_cancellation_never_enables_mutations(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_live_repeat_cleanup_yes_is_consumed_before_home_assistant_and_survives_restart(
+    monkeypatch, tmp_path
+) -> None:
+    engine = SimpleNamespace(
+        assistant_status=AsyncMock(
+            return_value={
+                "status": "active",
+                "provider": "google_gmail",
+                "account_id": "gmail-account-1",
+                "cleanup_mode": "trash",
+                "cleanup_age_days": 30,
+                "accounts": [
+                    {
+                        "provider": "google_gmail",
+                        "account_id": "gmail-account-1",
+                        "account_email": "aaron@example.test",
+                    }
+                ],
+            }
+        ),
+        snapshot_safe_cleanup_action=AsyncMock(
+            return_value={
+                "success": True,
+                "bulk_action_id": "repeat-bulk-1",
+                "intended_count": 4,
+            }
+        ),
+        execute_bulk_action=AsyncMock(
+            return_value={
+                "success": True,
+                "status": "completed",
+                "bulk_action_id": "repeat-bulk-1",
+                "provider": "google_gmail",
+                "account_id": "gmail-account-1",
+                "operation": "trash",
+                "succeeded_count": 4,
+                "failed_count": 0,
+                "remaining_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+    path = tmp_path / "repeat-cleanup-dialogue.db"
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(path)))
+    conversation = "usr:aaron:live-repeat"
+
+    proposed = await main._try_handle_email_assistant(
+        "Put some more emails in the bin",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="repeat-cleanup-1",
+    )
+    assert proposed is not None
+    assert proposed["response"] == (
+        "Use the same rule as before — read promotional and newsletter emails older "
+        "than 30 days on Gmail, moving them to Bin?"
+    )
+    pending = await main.dialogue.get(conversation)
+    assert pending.active_goal == "email_cleanup_repeat_confirmation"
+    assert pending.slots["original_authorization_text"] == "Put some more emails in the bin"
+
+    # A new Core process reads the same durable dialogue state.
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(path)))
+    confirmed = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="a-retried-android-turn-id",
+    )
+    assert confirmed is not None
+    assert confirmed["intent"] == "email_cleanup_repeat"
+    assert confirmed["response"] == "Done — I moved 4 matching emails to your Gmail Bin."
+    engine.execute_bulk_action.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id=conversation,
+        bulk_action_id="repeat-bulk-1",
+    )
+    assert (await main.dialogue.get(conversation)).active_goal is None
+
+
+@pytest.mark.asyncio
+async def test_repeat_cleanup_no_and_wrong_principal_never_mutate(monkeypatch) -> None:
+    engine = SimpleNamespace(
+        assistant_status=AsyncMock(
+            return_value={
+                "status": "active",
+                "provider": "google_gmail",
+                "account_id": "gmail-account-1",
+                "cleanup_mode": "trash",
+                "cleanup_age_days": 30,
+            }
+        ),
+        snapshot_safe_cleanup_action=AsyncMock(
+            return_value={
+                "success": True,
+                "bulk_action_id": "repeat-isolation-bulk",
+                "intended_count": 3,
+            }
+        ),
+        execute_bulk_action=AsyncMock(),
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:repeat-isolation"
+    await main._try_handle_email_assistant(
+        "Put some more emails in the bin",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="repeat-isolation-1",
+    )
+    rejected = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor("amber"),
+        conversation_id=conversation,
+        request_id="repeat-isolation-2",
+    )
+    assert rejected is not None and rejected["intent"] == "email_cleanup_repeat_invalid"
+    engine.execute_bulk_action.assert_not_awaited()
+
+    await main.dialogue.begin_goal(
+        conversation,
+        "email_cleanup_repeat_confirmation",
+        status="awaiting_confirmation",
+        slots={
+            "principal_id": "aaron",
+            "conversation_id": conversation,
+            "provider": "google_gmail",
+            "account_id": "gmail-account-1",
+            "bulk_action_id": "repeat-isolation-bulk",
+            "original_authorization_text": "Put some more emails in the bin",
+            "idempotency_key": "test",
+        },
+        ttl_seconds=600,
+    )
+    cancelled = await main._try_handle_email_assistant(
+        "No", actor=actor(), conversation_id=conversation, request_id=None
+    )
+    assert cancelled is not None and cancelled["intent"] == "email_cleanup_repeat_cancelled"
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_repeat_cleanup_selects_provider_before_binary_confirmation(monkeypatch) -> None:
+    engine = SimpleNamespace(
+        assistant_status=AsyncMock(
+            return_value={
+                "status": "active",
+                "cleanup_mode": "trash",
+                "cleanup_age_days": 30,
+                "accounts": [
+                    {"provider": "google_gmail", "account_id": "gmail-1"},
+                    {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+                ],
+            }
+        ),
+        snapshot_safe_cleanup_action=AsyncMock(
+            return_value={
+                "success": True,
+                "bulk_action_id": "outlook-repeat-bulk",
+                "intended_count": 2,
+            }
+        ),
+        execute_bulk_action=AsyncMock(
+            return_value={
+                "success": True,
+                "status": "completed",
+                "bulk_action_id": "outlook-repeat-bulk",
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-1",
+                "operation": "trash",
+                "succeeded_count": 2,
+                "failed_count": 0,
+                "remaining_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:multi-provider-cleanup"
+
+    ambiguous = await main._try_handle_email_assistant(
+        "Put some more emails in the bin",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="multi-cleanup-1",
+    )
+    assert ambiguous is not None
+    assert ambiguous["response"] == "Do you mean your Gmail account or your Outlook account?"
+    assert (await main.dialogue.get(conversation)).active_goal == (
+        "email_cleanup_repeat_account_selection"
+    )
+
+    selected = await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="multi-cleanup-2",
+    )
+    assert selected is not None
+    assert selected["response"] == (
+        "Use the same rule as before — read promotional and newsletter emails older "
+        "than 30 days on Outlook, moving them to Deleted Items?"
+    )
+    assert engine.execute_bulk_action.await_count == 0
+
+    confirmed = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="multi-cleanup-3",
+    )
+    assert confirmed is not None
+    assert (
+        confirmed["response"] == "Done — I moved 2 matching emails to your Outlook Deleted Items."
+    )
+    engine.execute_bulk_action.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id=conversation,
+        bulk_action_id="outlook-repeat-bulk",
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_pending_confirmation_is_fail_closed_before_any_tool(tmp_path) -> None:
+    manager = DialogueManager(str(tmp_path / "unknown-pending.db"))
+    await manager.begin_goal(
+        "usr:aaron:unknown",
+        "future_integration_action",
+        status="awaiting_confirmation",
+        prompt="Do you want to continue?",
+        ttl_seconds=600,
+    )
+    resolution = await manager.resolve_pending("usr:aaron:unknown", "Yes")
+    assert resolution.handled is True
+    assert resolution.kind == "unsupported_pending_confirmation"
+    assert resolution.action is None
+
+
+@pytest.mark.asyncio
 async def test_email_assistant_router_never_hijacks_an_existing_pending_goal(monkeypatch) -> None:
     engine = SimpleNamespace(
         assistant_status=AsyncMock(return_value=None),
@@ -226,6 +486,8 @@ def cleanup_item(
     operation: str = "trash",
 ) -> dict[str, object]:
     return {
+        "provider": "google_gmail",
+        "account_id": "gmail-1",
         "message_id": message_id,
         "thread_id": f"thread-{message_id}",
         "sender_display_name": sender,
@@ -287,10 +549,10 @@ async def test_cleanup_totals_and_details_stay_in_deterministic_history_boundary
     )
 
     assert totals is not None
-    assert totals["response"] == "Today I moved 2 emails to Trash."
+    assert totals["response"] == "Today I moved 2 emails to your Gmail Bin."
     assert details is not None
     response = str(details["response"])
-    assert "I moved these emails to Trash" in response
+    assert "I moved these emails to Gmail Bin" in response
     assert "Example Store — ‘Weekly offers’" in response
     assert "visible to me" not in response
     assert "phone" not in response
@@ -462,7 +724,7 @@ async def test_cleanup_history_live_state_requires_provider_read_and_explicit_ph
         conversation_id=conversation_id,
         request_id=None,
     )
-    assert state is not None and state["response"] == "Yes — that email is currently in Trash."
+    assert state is not None and state["response"] == "Yes — that email is currently in Gmail Bin."
     engine.verify_cleanup_items_state.assert_awaited_once_with(
         principal_id="aaron",
         conversation_id=conversation_id,
@@ -599,3 +861,290 @@ async def test_cleanup_restore_pending_is_principal_and_conversation_scoped(monk
     assert rejected is not None
     assert rejected["intent"] == "email_cleanup_restore_expired"
     engine.restore_cleanup_item.assert_not_awaited()
+
+
+def bulk_engine(*, accounts=None, count: int = 38, execution=None):
+    accounts = accounts or [{"provider": "google_gmail", "account_id": "gmail-1"}]
+    provider = accounts[0]["provider"]
+    snapshot = {
+        "success": True,
+        "bulk_action_id": "bulk-1",
+        "provider": provider,
+        "account_id": accounts[0]["account_id"],
+        "operation": "trash",
+        "filter_kind": "unread_inbox",
+        "intended_count": count,
+        "status": "awaiting_confirmation",
+    }
+    return SimpleNamespace(
+        assistant_status=AsyncMock(return_value={"accounts": accounts}),
+        snapshot_bulk_action=AsyncMock(return_value=snapshot),
+        snapshot_safe_cleanup_action=AsyncMock(return_value=snapshot),
+        execute_bulk_action=AsyncMock(
+            return_value=execution
+            or {
+                **snapshot,
+                "success": True,
+                "status": "completed",
+                "succeeded_count": count,
+                "failed_count": 0,
+                "remaining_count": 0,
+            }
+        ),
+        cancel_bulk_action=AsyncMock(return_value=True),
+        mailbox_count=AsyncMock(
+            return_value={
+                "success": True,
+                "provider": provider,
+                "account_id": accounts[0]["account_id"],
+                "count": count,
+                "exact": True,
+            }
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_all_unread_freezes_exact_set_then_yes_executes_all(monkeypatch) -> None:
+    engine = bulk_engine(count=38)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:all-unread"
+
+    proposed = await main._try_handle_email_assistant(
+        "Move all unread emails to the bin",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="all-unread-1",
+    )
+    assert proposed is not None
+    assert "38 unread messages" in proposed["response"]
+    assert "potentially important" in proposed["response"]
+    assert "Gmail Bin" in proposed["response"]
+    engine.execute_bulk_action.assert_not_awaited()
+
+    confirmed = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="all-unread-2",
+    )
+    assert confirmed is not None
+    assert confirmed["response"] == "Done — I moved 38 emails to your Gmail Bin."
+    engine.execute_bulk_action.assert_awaited_once_with(
+        principal_id="aaron", conversation_id=conversation, bulk_action_id="bulk-1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scope_expansion_during_repeat_confirmation_refreezes_without_one_item_shortcut(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(count=86)
+    engine.run_cleanup_now = AsyncMock()
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:expanded-cleanup"
+
+    await main._try_handle_email_assistant(
+        "Put some more emails in the bin",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="expanded-1",
+    )
+    expanded = await main._try_handle_email_assistant(
+        "Yes and more can you move all into trash that are unread",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="expanded-2",
+    )
+    assert expanded is not None
+    assert "86 unread messages" in expanded["response"]
+    engine.run_cleanup_now.assert_not_awaited()
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bulk_provider_selection_precedes_destructive_confirmation(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=12)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:bulk-provider"
+
+    first = await main._try_handle_email_assistant(
+        "Move all unread emails",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-1",
+    )
+    assert first is not None and first["response"] == "Do you mean Gmail, Outlook, or both?"
+    engine.snapshot_bulk_action.assert_not_awaited()
+
+    engine.snapshot_bulk_action.return_value = {
+        **engine.snapshot_bulk_action.return_value,
+        "provider": "microsoft_outlook",
+        "account_id": "outlook-1",
+    }
+    selected = await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-2",
+    )
+    assert selected is not None
+    assert "Outlook Deleted Items" in selected["response"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_cancel_and_cross_principal_confirmation_are_zero_write(monkeypatch) -> None:
+    engine = bulk_engine(count=7)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:bulk-isolation"
+    await main._try_handle_email_assistant(
+        "Move all unread emails to trash",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="isolation-1",
+    )
+
+    rejected = await main._try_handle_email_assistant(
+        "Yes", actor=actor("mallory"), conversation_id=conversation, request_id="isolation-2"
+    )
+    assert rejected is not None and rejected["intent"] == "email_bulk_invalid"
+    engine.execute_bulk_action.assert_not_awaited()
+
+    await main._try_handle_email_assistant(
+        "Move all unread emails to trash",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="isolation-3",
+    )
+    cancelled = await main._try_handle_email_assistant(
+        "No", actor=actor(), conversation_id=conversation, request_id="isolation-4"
+    )
+    assert cancelled is not None and cancelled["intent"] == "email_bulk_cancelled"
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_do_that_then_uses_exact_pending_email_action_not_scheduler(monkeypatch) -> None:
+    engine = bulk_engine(count=4)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:do-that"
+    await main._try_handle_email_assistant(
+        "Move all unread emails to trash",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="do-that-1",
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Do that then",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="do-that-2",
+    )
+    assert result is not None and result["intent"] == "email_bulk_executed"
+    engine.execute_bulk_action.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compound_count_and_all_action_is_not_dropped(monkeypatch) -> None:
+    engine = bulk_engine(count=201)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:compound"
+    state = await main.dialogue.get(conversation)
+    state.focus["email_bulk_action"] = {
+        "bulk_action_id": "old-action",
+        "provider": "google_gmail",
+        "account_id": "gmail-1",
+        "operation": "trash",
+        "status": "partial",
+    }
+    await main.dialogue.save(state, "test_focus", {})
+
+    result = await main._try_handle_email_assistant(
+        "Do all emails. How many emails do I have?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-1",
+    )
+    assert result is not None
+    assert "all 201 messages in your Gmail Inbox" in result["response"]
+    assert (await main.dialogue.get(conversation)).active_goal == "email_bulk_confirmation"
+
+
+@pytest.mark.asyncio
+async def test_mailbox_bin_count_is_current_provider_evidence_not_history(monkeypatch) -> None:
+    engine = bulk_engine(count=1)
+    monkeypatch.setattr(main, "email_policies", engine)
+    result = await main._try_handle_email_assistant(
+        "How many emails are in the bin?",
+        actor=actor(),
+        conversation_id="usr:aaron:count",
+        request_id="count-1",
+    )
+    assert result is not None
+    assert result["response"] == "You've got 1 in Gmail Bin."
+    engine.mailbox_count.assert_awaited_once()
+    assert engine.mailbox_count.await_args.kwargs["filter_kind"] == "bin"
+
+
+@pytest.mark.asyncio
+async def test_partial_bulk_explanation_uses_receipt_halt_reason_only(monkeypatch) -> None:
+    engine = bulk_engine(count=10)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:why-partial"
+    state = await main.dialogue.get(conversation)
+    state.focus["email_bulk_action"] = {
+        "bulk_action_id": "partial-action",
+        "provider": "google_gmail",
+        "account_id": "gmail-1",
+        "operation": "trash",
+        "status": "partial",
+        "intended_count": 10,
+        "succeeded_count": 1,
+        "halt_reason": "Provider rate limit stopped the next batch",
+    }
+    await main.dialogue.save(state, "test_focus", {})
+
+    result = await main._try_handle_email_assistant(
+        "Why?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="why-1",
+    )
+    assert result is not None
+    assert "provider rate limit" in str(result["response"]).casefold()
+    assert "ambiguous" not in result["response"]
+
+
+@pytest.mark.asyncio
+async def test_capability_answer_uses_registered_available_capabilities_only(monkeypatch) -> None:
+    engine = bulk_engine(count=0)
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(
+        main.external_agent,
+        "capability_snapshot",
+        AsyncMock(
+            return_value=[
+                {"capability_id": "gmail.search", "available": True},
+                {"capability_id": "gmail.read", "available": True},
+                {"capability_id": "gmail.trash", "available": True},
+                {"capability_id": "outlook.search", "available": False},
+            ]
+        ),
+    )
+    result = await main._try_handle_email_assistant(
+        "Tell me what you can do",
+        actor=actor(),
+        conversation_id="usr:aaron:capabilities",
+        request_id="capabilities-1",
+    )
+    assert result is not None
+    response = str(result["response"])
+    assert "check and search Gmail" in response
+    assert "Outlook support is available once" in response
+    assert "force" not in response.casefold()
+    assert "sync" not in response.casefold()

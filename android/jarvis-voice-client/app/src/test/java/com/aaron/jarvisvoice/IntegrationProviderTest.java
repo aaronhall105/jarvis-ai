@@ -94,6 +94,22 @@ public final class IntegrationProviderTest {
         ));
     }
 
+    @Test public void microsoftOAuthUrlRequiresExactMicrosoftOriginAndPkceParameters() {
+        String valid = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+            + "?response_type=code&client_id=client&state=state&code_challenge=challenge"
+            + "&code_challenge_method=S256";
+
+        assertTrue(IntegrationsClient.isMicrosoftAuthorizationUrl(valid));
+        assertFalse(IntegrationsClient.isMicrosoftAuthorizationUrl(
+            "https://login.microsoftonline.com.evil.test/common/oauth2/v2.0/authorize"
+                + "?response_type=code&client_id=x&state=x&code_challenge=x"
+        ));
+        assertFalse(IntegrationsClient.isMicrosoftAuthorizationUrl(
+            "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+                + "?response_type=code&client_id=x"
+        ));
+    }
+
     @Test public void reachableAuthenticationFailureIsNotClassifiedAsOffline() {
         IntegrationsClient.Failure unauthorized =
             IntegrationsClient.failureForHttpCode(401);

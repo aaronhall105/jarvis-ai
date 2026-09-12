@@ -58,6 +58,13 @@ from app.google_integration import (
     google_model_tool,
 )
 from app.integration_accounts import CredentialCipher, IntegrationAccountStore
+from app.microsoft_integration import (
+    MICROSOFT_MODEL_TOOL,
+    MicrosoftConnector,
+    MicrosoftOAuthConfig,
+    MicrosoftOAuthService,
+    microsoft_model_tool,
+)
 from app.openai_web_search import OpenAIWebSearchClient, SafeWebFetcher
 from app.research_engine import ResearchEngine
 from app.service_connectors import UNAVAILABLE_CONNECTOR_CATALOG
@@ -88,6 +95,8 @@ _EXTERNAL_SERVICE_WORDS = {
     "monitor",
     "monitoring",
     "monitors",
+    "microsoft",
+    "outlook",
     "product",
     "research",
     "shopping",
@@ -353,6 +362,11 @@ class ExternalAgentRuntime:
         google_oauth_client_secret: str = "",
         google_oauth_redirect_uri: str = "",
         google_android_return_uri: str = "jarvis://integrations/google",
+        microsoft_client_id: str = "",
+        microsoft_client_secret: str = "",
+        microsoft_redirect_uri: str = "",
+        microsoft_authority: str = "common",
+        microsoft_android_return_uri: str = "jarvis://integrations/microsoft",
         web_search_client: OpenAIWebSearchClient | None = None,
         web_fetcher: SafeWebFetcher | None = None,
         monitor_creator: MonitorCreator | None = None,
@@ -421,6 +435,24 @@ class ExternalAgentRuntime:
             timeout_seconds=connector_timeout_seconds,
         )
         self.registry.register(self.google_connector)
+        self.microsoft_oauth = MicrosoftOAuthService(
+            config=MicrosoftOAuthConfig(
+                client_id=microsoft_client_id,
+                client_secret=microsoft_client_secret,
+                redirect_uri=microsoft_redirect_uri,
+                authority=microsoft_authority,
+                android_return_uri=microsoft_android_return_uri,
+            ),
+            accounts=self.integration_accounts,
+            cipher=self.credential_cipher,
+            timeout_seconds=connector_timeout_seconds,
+        )
+        self.microsoft_connector = MicrosoftConnector(
+            oauth=self.microsoft_oauth,
+            accounts=self.integration_accounts,
+            timeout_seconds=connector_timeout_seconds,
+        )
+        self.registry.register(self.microsoft_connector)
         self.planner_executor = ConnectorPlannerExecutor(self.registry)
         self.plans = SQLitePlanStore(data_path / "jarvis_agent_plans.db")
         self.planner = PersonalAgentPlanner(self.plans, self.planner_executor)
@@ -451,6 +483,8 @@ class ExternalAgentRuntime:
             self.web_fetch_connector.aclose(),
             self.google_connector.aclose(),
             self.google_oauth.aclose(),
+            self.microsoft_connector.aclose(),
+            self.microsoft_oauth.aclose(),
         )
 
     def set_monitor_creator(
@@ -470,6 +504,33 @@ class ExternalAgentRuntime:
         """Attach the durable email-policy service after composition."""
 
         self._email_policies = engine
+
+    async def email_accounts(self, principal_id: str) -> list[dict[str, Any]]:
+        """Return principal-owned mailbox identities without credential material."""
+
+        principal = str(principal_id or "").strip()
+        if not principal:
+            return []
+        accounts: list[dict[str, Any]] = []
+        for provider, kind, connector in (
+            ("google_gmail", "google", self.google_connector),
+            ("microsoft_outlook", "microsoft", self.microsoft_connector),
+        ):
+            account = await connector.account_status(principal)
+            if account is None or not account.authenticated:
+                continue
+            accounts.append(
+                {
+                    "provider": provider,
+                    "connector_provider": kind,
+                    "account_id": account.account_id,
+                    "account_email": account.account_email,
+                    "display_name": account.account_display_name,
+                    "healthy": account.healthy,
+                    "reauthorization_required": account.reauthorization_required,
+                }
+            )
+        return accounts
 
     async def providers_snapshot(
         self,
@@ -565,6 +626,10 @@ class ExternalAgentRuntime:
         account = await self.google_connector.account_status(principal)
         google_service_health = self.google_connector.service_health(principal)
         credential_status = await self.google_connector.credential_status(principal)
+        microsoft = statuses.get("microsoft") or {}
+        microsoft_capabilities = set(microsoft.get("executable_capabilities") or ())
+        microsoft_account = await self.microsoft_connector.account_status(principal)
+        microsoft_credential_status = await self.microsoft_connector.credential_status(principal)
 
         def account_state(
             provider_id: str,
@@ -671,13 +736,38 @@ class ExternalAgentRuntime:
             [
                 {
                     "provider_id": "microsoft",
-                    "name": "Microsoft",
-                    "state": "Setup required",
-                    "connected": False,
-                    "healthy": False,
-                    "setup_requirements": [
-                        "A supported Microsoft OAuth connector is not configured"
-                    ],
+                    "name": "Outlook",
+                    "state": (
+                        "Connected"
+                        if microsoft.get("available")
+                        else (
+                            "Reconnect required"
+                            if microsoft_account is not None
+                            and microsoft_account.reauthorization_required
+                            else (
+                                "Provider unavailable"
+                                if microsoft.get("authenticated")
+                                else (
+                                    "Not connected"
+                                    if microsoft.get("configured")
+                                    else "Setup required"
+                                )
+                            )
+                        )
+                    ),
+                    "connected": bool(microsoft.get("available")),
+                    "healthy": bool(microsoft.get("available")),
+                    "account": (
+                        microsoft_account.as_dict() if microsoft_account is not None else None
+                    ),
+                    "credential_status": microsoft_credential_status,
+                    "granted_scopes": list(microsoft.get("scopes") or ()),
+                    "granted_capabilities": sorted(microsoft_capabilities),
+                    "setup_requirements": list(microsoft.get("setup_requirements") or ()),
+                    "health_reason": microsoft.get("health_reason"),
+                    "can_connect": self.microsoft_oauth.configured,
+                    "can_reconnect": bool(microsoft_account is not None),
+                    "can_disconnect": bool(microsoft_account is not None),
                 },
                 {
                     "provider_id": "web",
@@ -1341,6 +1431,7 @@ class ExternalAgentRuntime:
             "gmail": ("email", "gmail", "inbox"),
             "calendar": ("calendar", "diary", "schedule", "free"),
             "contacts": ("contact", "email dave", "phone number"),
+            "microsoft": ("outlook", "microsoft 365", "work email", "deleted items"),
             "communication": ("message", "sms", "notification"),
             "instagram": ("instagram",),
             "facebook": ("facebook",),
@@ -1427,6 +1518,16 @@ class ExternalAgentRuntime:
 
         lowered = f" {str(text or '').casefold()} "
         checks: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+            (
+                "microsoft",
+                "Outlook",
+                (
+                    " outlook ",
+                    " microsoft 365 ",
+                    " deleted items ",
+                    " work email ",
+                ),
+            ),
             (
                 "gmail",
                 "Gmail",
@@ -1530,8 +1631,20 @@ class ExternalAgentRuntime:
         *,
         principal_id: str | None = None,
         history: Sequence[Mapping[str, str]] = (),
+        dialogue_focus: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        if not self.enabled or not self.is_external_request(text, history):
+        focused_email = (dialogue_focus or {}).get("email_message")
+        if not isinstance(focused_email, Mapping):
+            focused_email = (dialogue_focus or {}).get("outlook_message")
+        has_outlook_focus = bool(
+            isinstance(focused_email, Mapping)
+            and focused_email.get("provider") == "microsoft_outlook"
+            and focused_email.get("account_id")
+            and focused_email.get("message_id")
+        )
+        if not self.enabled or (
+            not has_outlook_focus and not self.is_external_request(text, history)
+        ):
             return []
         executable = {
             item.capability_id
@@ -1725,6 +1838,26 @@ class ExternalAgentRuntime:
             and not (briefing_intent and self._email_policies is not None)
         ):
             definitions.append(google_tool)
+        outlook_context = any(
+            marker in f" {lowered} "
+            for marker in (" outlook ", " microsoft 365 ", " deleted items ", " work email ")
+        )
+        outlook_context = outlook_context or has_outlook_focus
+        if outlook_context:
+            outlook_executable = []
+            for capability_id in sorted(executable):
+                if not capability_id.startswith("outlook."):
+                    continue
+                metadata = self.registry.capability_definition(capability_id)
+                if metadata is None:
+                    continue
+                if metadata.access is CapabilityAccess.READ or self._write_authorized(
+                    capability_id, text
+                ):
+                    outlook_executable.append(capability_id)
+            outlook_tool = microsoft_model_tool(outlook_executable)
+            if outlook_tool is not None:
+                definitions.append(outlook_tool)
         required_message_capabilities = {"gmail.draft"}
         if gmail_message_operation == "send":
             required_message_capabilities.add("gmail.send")
@@ -2256,6 +2389,16 @@ class ExternalAgentRuntime:
                 request_id=request_id,
                 user_text=user_text,
                 history=history,
+            )
+        if name == MICROSOFT_MODEL_TOOL:
+            return await self._execute_microsoft_model_tool(
+                arguments,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                request_id=request_id,
+                user_text=user_text,
+                history=history,
+                dialogue_focus=dialogue_focus,
             )
         if name == "prepare_gmail_message":
             return await self._prepare_gmail_message(
@@ -3572,6 +3715,18 @@ class ExternalAgentRuntime:
     def _write_authorized(capability_id: str, user_text: str) -> bool:
         """Recognize explicit CURRENT user authority for an external write."""
 
+        original_capability_id = capability_id
+        capability_id = {
+            "outlook.reply": "gmail.reply",
+            "outlook.draft": "gmail.draft",
+            "outlook.send": "gmail.send",
+            "outlook.archive": "gmail.archive",
+            "outlook.trash": "gmail.trash",
+            "outlook.restore": "gmail.restore",
+            "outlook.mark_read": "gmail.mark_read",
+            "outlook.mark_unread": "gmail.mark_unread",
+        }.get(capability_id, capability_id)
+
         request_prefix = str(user_text or "")[:5_000]
 
         # Do not let quoted/body content grant authority for another action.
@@ -3757,6 +3912,13 @@ class ExternalAgentRuntime:
             )
 
         if capability_id == "gmail.trash":
+            if (
+                original_capability_id == "outlook.trash"
+                and "move" in word_set
+                and "deleted" in word_set
+                and bool(word_set & {"email", "emails", "message", "messages", "outlook"})
+            ):
+                return True
             return (
                 bool(word_set & {"trash", "bin"})
                 or (
@@ -4017,6 +4179,120 @@ class ExternalAgentRuntime:
         )
         return execution.as_dict()
 
+    async def _execute_microsoft_model_tool(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        conversation_id: str,
+        principal_id: str,
+        request_id: str | None,
+        user_text: str,
+        history: Sequence[Mapping[str, str]] = (),
+        dialogue_focus: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Execute Graph only when provider, account and current-turn authority agree."""
+
+        capability_id = str(arguments.get("capability_id") or "").strip()
+        payload_value = arguments.get("arguments")
+        if not isinstance(payload_value, Mapping):
+            raise ValueError("Outlook capability arguments must be an object")
+        payload = dict(payload_value)
+        metadata = self.registry.capability_definition(capability_id)
+        if metadata is None or metadata.provider_id != "microsoft":
+            raise ValueError("The requested Outlook capability is not registered")
+        confirmed = False
+        if metadata.access is CapabilityAccess.WRITE:
+            if not self._write_authorized(capability_id, user_text):
+                raise ValueError(
+                    "The user's current request did not explicitly authorize this Outlook write"
+                )
+            confirmed = True
+        if capability_id == "outlook.draft":
+            # The model creates content; the server resolves and binds the
+            # recipient from trusted evidence exactly as it does for Gmail.
+            # Any model-supplied `to` value is ignored.
+            resolution = await self._resolve_gmail_message_recipient(
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                user_text=user_text,
+                history=history,
+                dialogue_focus=dialogue_focus,
+            )
+            if resolution.get("resolved") is not True:
+                return {
+                    "handled": True,
+                    "success": resolution.get("clarification_required") is True,
+                    "write_executed": False,
+                    "provider": "microsoft_outlook",
+                    **resolution,
+                }
+            payload["to"] = str(resolution["recipient"])
+        account = await self.microsoft_connector.account_status(principal_id)
+        if account is None or not account.authenticated:
+            raise ValueError("A connected principal-owned Outlook account is required")
+        focused_email = (dialogue_focus or {}).get("email_message")
+        if not isinstance(focused_email, Mapping):
+            focused_email = (dialogue_focus or {}).get("outlook_message")
+        referential = bool(
+            re.search(
+                r"\b(?:it|that|this|reply|delete|trash|archive|restore|mark)\b",
+                str(user_text or "").casefold(),
+            )
+        )
+        focused_capabilities = {
+            "outlook.read",
+            "outlook.reply",
+            "outlook.archive",
+            "outlook.trash",
+            "outlook.restore",
+            "outlook.mark_read",
+            "outlook.mark_unread",
+        }
+        if referential and capability_id in focused_capabilities:
+            if (
+                not isinstance(focused_email, Mapping)
+                or focused_email.get("provider") != "microsoft_outlook"
+                or str(focused_email.get("account_id") or "") != str(account.account_id)
+                or not str(focused_email.get("message_id") or "").strip()
+            ):
+                raise ValueError("An exact principal-owned Outlook message focus is required")
+            # Model-supplied IDs are untrusted. Referential actions are bound
+            # to the exact provider/account/message evidence in dialogue state.
+            payload["message_id"] = str(focused_email["message_id"])
+        resolved_request_id = str(request_id or uuid.uuid4())
+        material = json.dumps(
+            payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+        )
+        key = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"microsoft:{principal_id}:{account.account_id}:{conversation_id}:"
+                f"{resolved_request_id}:{capability_id}:{material}",
+            )
+        )
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability_id,
+                payload=payload,
+                request_id=resolved_request_id,
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                target=next(
+                    (
+                        payload[name]
+                        for name in ("draft_id", "message_id", "conversation_id", "to")
+                        if payload.get(name) not in (None, "")
+                    ),
+                    None,
+                ),
+                operation=capability_id,
+                confirmed=confirmed,
+                idempotency_key=key,
+            ),
+            refresh_health=True,
+        )
+        return execution.as_dict()
+
     async def search(self, query: str, *, limit: int = 8) -> dict[str, Any]:
         return await self.execute("web.search", {"query": query, "limit": limit})
 
@@ -4133,6 +4409,13 @@ class ExternalAgentRuntime:
             account = await self.google_connector.account_status(resolved_principal)
             if account is None or not account.authenticated:
                 raise RuntimeError("A connected Google account is required for this monitor")
+            provider_account_id = account.account_id
+        elif metadata.provider_id == "microsoft":
+            if not resolved_principal:
+                raise RuntimeError("An Outlook monitor requires an authenticated principal")
+            account = await self.microsoft_connector.account_status(resolved_principal)
+            if account is None or not account.authenticated:
+                raise RuntimeError("A connected Outlook account is required for this monitor")
             provider_account_id = account.account_id
         interval = int(polling_interval_seconds)
         minimum_interval = int(metadata.minimum_poll_interval_seconds or 0)

@@ -23,6 +23,7 @@ class ProactiveRegistry:
     def __init__(self) -> None:
         self.receipt_store = EmptyReceipts()
         self.change_results: list[dict[str, Any] | BaseException] = []
+        self.outlook_change_results: list[dict[str, Any] | BaseException] = []
         self.sent_messages: list[dict[str, Any]] = []
         self.messages: dict[str, dict[str, Any]] = {}
         self.known_contacts: set[str] = set()
@@ -52,6 +53,20 @@ class ProactiveRegistry:
             if isinstance(result, BaseException):
                 return SimpleNamespace(success=False, data={}, error=str(result))
             return self.result(result, reference=str(result.get("history_id") or ""))
+        if capability == "outlook.changes":
+            if not self.outlook_change_results:
+                return self.result(
+                    {
+                        "delta_link": "https://graph.microsoft.test/delta-1",
+                        "messages": [],
+                        "bootstrap": True,
+                        "account_email": "aaron@work.example",
+                    }
+                )
+            result = self.outlook_change_results.pop(0)
+            if isinstance(result, BaseException):
+                return SimpleNamespace(success=False, data={}, error=str(result))
+            return self.result(result, reference=str(result.get("delta_link") or ""))
         if capability == "gmail.search":
             query = str(request.payload.get("query") or "")
             values = self.sent_messages if "in:sent" in query else list(self.messages.values())
@@ -61,6 +76,10 @@ class ProactiveRegistry:
                     "messages": [dict(item) for item in values],
                 }
             )
+        if capability == "outlook.search":
+            folder = str(request.payload.get("folder") or "")
+            values = self.sent_messages if folder == "sentitems" else list(self.messages.values())
+            return self.result({"messages": [dict(item) for item in values], "count": len(values)})
         if capability == "gmail.read":
             message_id = str(request.payload["message_id"])
             self.reads.append(message_id)
@@ -68,6 +87,13 @@ class ProactiveRegistry:
             if message is None:
                 return SimpleNamespace(success=False, data={}, error="message disappeared")
             return self.result(dict(message), reference=str(message["message_id"]))
+        if capability == "outlook.read":
+            message_id = str(request.payload["message_id"])
+            self.reads.append(message_id)
+            message = self.messages.get(message_id)
+            if message is None:
+                return SimpleNamespace(success=False, data={}, error="message disappeared")
+            return self.result({"message": dict(message)}, reference=message_id)
         if capability == "contacts.search":
             if not self.contacts_available:
                 return SimpleNamespace(success=False, data={}, error="Contacts unavailable")
@@ -99,6 +125,39 @@ class ProactiveRegistry:
                 status=ExecutionStatus.VERIFIED,
                 receipt=SimpleNamespace(action_id=f"action-{capability}-{message_id}"),
                 verification={"verified": True},
+            )
+        if capability in {"outlook.trash", "outlook.archive", "outlook.restore"}:
+            source_id = str(request.payload["message_id"])
+            self.writes.append((capability, source_id))
+            result_id = f"moved-{source_id}"
+            destination = (
+                "deleted-id"
+                if capability == "outlook.trash"
+                else "archive-id"
+                if capability == "outlook.archive"
+                else "inbox-id"
+            )
+            if source_id in self.messages:
+                moved = dict(self.messages[source_id])
+                moved["message_id"] = result_id
+                moved["parent_folder_id"] = destination
+                labels = set(moved.get("label_ids") or ())
+                labels.discard("INBOX")
+                if capability == "outlook.trash":
+                    labels.add("TRASH")
+                elif capability == "outlook.restore":
+                    labels.discard("TRASH")
+                    labels.add("INBOX")
+                moved["label_ids"] = sorted(labels)
+                self.messages[result_id] = moved
+            return SimpleNamespace(
+                success=True,
+                data={"message_id": result_id, "destination_id": destination},
+                error=None,
+                provider_reference=result_id,
+                status=ExecutionStatus.VERIFIED,
+                receipt=SimpleNamespace(action_id=f"action-{capability}-{source_id}"),
+                verification={"verified": True, "provider": "microsoft"},
             )
         raise AssertionError(f"Unexpected capability: {capability}")
 
@@ -132,6 +191,20 @@ def change(
         "bootstrap": bootstrap,
         "cursor_expired": cursor_expired,
         "account_email": "aaron@example.test" if bootstrap or cursor_expired else None,
+    }
+
+
+def outlook_change(
+    cursor: str,
+    *messages: dict[str, Any],
+    bootstrap: bool = False,
+) -> dict[str, Any]:
+    return {
+        "delta_link": f"https://graph.microsoft.test/{cursor}",
+        "messages": list(messages),
+        "bootstrap": bootstrap,
+        "cursor_expired": False,
+        "account_email": "aaron@work.example",
     }
 
 
@@ -214,6 +287,177 @@ async def test_important_alert_is_incremental_natural_deduplicated_and_restart_s
     replay = await restarted.run_assistant("aaron")
     assert replay["notifications_queued"] == 0
     assert len(notifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_outlook_important_and_reply_alerts_are_incremental_isolated_and_restart_safe(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    conversations = Conversations()
+    notifications: list[str] = []
+    focuses: list[dict[str, Any]] = []
+
+    async def accounts(_principal: str):
+        return [
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-work-1",
+                "account_email": "aaron@work.example",
+                "healthy": True,
+            }
+        ]
+
+    async def notify(_principal: str, text: str, _title: str):
+        notifications.append(text)
+        return {"success": True}
+
+    async def focus(_conversation: str, evidence: dict[str, Any]):
+        focuses.append(evidence)
+
+    sent = mail(
+        "outlook-sent-1",
+        thread_id="outlook-conversation-1",
+        labels={"SENT", "OUTLOOK"},
+        recipient="David <david@example.test>",
+    )
+    registry.sent_messages = [sent]
+    path = tmp_path / "unified-email.db"
+    engine = EmailAssistantPolicyEngine(
+        path,
+        registry,  # type: ignore[arg-type]
+        conversations=conversations,
+        notifier=notify,
+        focus_recorder=focus,
+        account_resolver=accounts,
+    )
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:work-mail",
+        important_email_alerts=True,
+        reply_alerts=True,
+    )
+    registry.outlook_change_results.append(outlook_change("delta-1", bootstrap=True))
+    first = await engine.run_assistant("aaron")
+    assert first["provider"] == "microsoft_outlook"
+    assert notifications == []
+
+    reply = mail(
+        "outlook-reply-1",
+        thread_id="outlook-conversation-1",
+        labels={"INBOX", "UNREAD", "OUTLOOK"},
+        sender="David <david@example.test>",
+        subject="Re: Friday's start",
+        body=(
+            "Perfect, see you tomorrow.\n\nFrom: Aaron\nSent: yesterday\n"
+            "To: David\nSubject: Friday's start\nEarlier text"
+        ),
+        recipient="aaron@work.example",
+    )
+    reply["internal_date_ms"] = int(sent["internal_date_ms"]) + 1_000
+    registry.outlook_change_results.append(outlook_change("delta-2", reply))
+    observed = await engine.run_assistant("aaron")
+    assert observed["notifications_queued"] == 1
+    assert notifications == ["David replied — Perfect, see you tomorrow."]
+    assert focuses[-1]["provider"] == "microsoft_outlook"
+    assert focuses[-1]["account_id"] == "outlook-work-1"
+    assert focuses[-1]["thread_id"] == "outlook-conversation-1"
+
+    restarted = EmailAssistantPolicyEngine(
+        path,
+        registry,  # type: ignore[arg-type]
+        conversations=conversations,
+        notifier=notify,
+        focus_recorder=focus,
+        account_resolver=accounts,
+    )
+    registry.outlook_change_results.append(outlook_change("delta-3", reply))
+    replay = await restarted.run_assistant("aaron")
+    assert replay["notifications_queued"] == 0
+    assert notifications == ["David replied — Perfect, see you tomorrow."]
+    with restarted._db() as connection:
+        checkpoint = connection.execute(
+            "SELECT cursor FROM email_provider_checkpoints WHERE principal_id=? "
+            "AND provider=? AND account_id=?",
+            ("aaron", "microsoft_outlook", "outlook-work-1"),
+        ).fetchone()
+    assert checkpoint is not None and checkpoint["cursor"].endswith("delta-3")
+
+
+@pytest.mark.asyncio
+async def test_outlook_cleanup_preview_is_zero_write_and_verified_cleanup_is_deleted_items(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    candidate = mail(
+        "outlook-promotion",
+        labels={"INBOX", "CATEGORY_PROMOTIONS", "OUTLOOK"},
+        sender="Offers <offers@example.test>",
+        subject="Weekly offers",
+        body="Newsletter unsubscribe",
+        recipient="aaron@work.example",
+        age_days=45,
+    )
+    candidate["parent_folder_id"] = "inbox-id"
+    registry.messages = {"outlook-promotion": candidate}
+
+    async def accounts(_principal: str):
+        return [
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-work-1",
+                "account_email": "aaron@work.example",
+                "healthy": True,
+            }
+        ]
+
+    engine = EmailAssistantPolicyEngine(
+        tmp_path / "outlook-cleanup.db",
+        registry,  # type: ignore[arg-type]
+        account_resolver=accounts,
+    )
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:work-mail",
+        inbox_cleanup=False,
+        cleanup_dry_run=True,
+    )
+    preview = await engine.preview_cleanup(
+        principal_id="aaron",
+        conversation_id="usr:aaron:work-mail",
+        provider="microsoft_outlook",
+        account_id="outlook-work-1",
+        now=datetime(2026, 9, 11, 12, tzinfo=timezone.utc),
+    )
+    assert preview["dry_run_candidates"] == 1
+    assert registry.writes == []
+    policy = next(
+        item
+        for item in await engine.list(principal_id="aaron")
+        if item["provider"] == "microsoft_outlook"
+    )
+    assert policy["dry_run"] is True and policy["status"] == "paused"
+
+    executed = await engine.run_cleanup_now(
+        principal_id="aaron",
+        conversation_id="usr:aaron:work-mail",
+        provider="microsoft_outlook",
+        account_id="outlook-work-1",
+        cleanup_mode="trash",
+        cleanup_age_days=30,
+        request_id="confirmed-outlook-cleanup",
+    )
+    assert executed["trashed"] == 1
+    assert registry.writes == [("outlook.trash", "outlook-promotion")]
+    history = await engine.cleanup_history_items(principal_id="aaron", provider="microsoft_outlook")
+    assert history["total"] == 1
+    assert history["items"][0]["provider"] == "microsoft_outlook"
+    assert history["items"][0]["provider_reference"] == "moved-outlook-promotion"
+    assert history["items"][0]["previous_labels"] == [
+        "CATEGORY_PROMOTIONS",
+        "INBOX",
+        "OUTLOOK",
+    ]
 
 
 @pytest.mark.asyncio
@@ -530,6 +774,63 @@ async def test_safe_cleanup_dry_run_protects_mail_then_verified_trash_and_undo(
     )
     assert undo == {"success": True, "restored": 1}
     assert registry.writes[-1] == ("gmail.restore", "promotion")
+
+
+@pytest.mark.asyncio
+async def test_repeat_safe_cleanup_freezes_preview_ids_before_any_write(tmp_path: Path) -> None:
+    registry = ProactiveRegistry()
+    registry.messages = {
+        f"promotion-{index}": mail(
+            f"promotion-{index}",
+            labels={"INBOX", "CATEGORY_PROMOTIONS"},
+            sender="Offers <offers@example.test>",
+            subject=f"Weekly deals {index}",
+            body="Newsletter. Unsubscribe here.",
+            age_days=31,
+        )
+        for index in range(12)
+    }
+
+    async def accounts(principal: str):
+        return [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-1",
+                "account_email": f"{principal}@example.test",
+            }
+        ]
+
+    engine = EmailAssistantPolicyEngine(
+        tmp_path / "frozen-safe.db",
+        registry,  # type: ignore[arg-type]
+        account_resolver=accounts,
+    )
+    frozen = await engine.snapshot_safe_cleanup_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:safe",
+        provider="google_gmail",
+        account_id="gmail-1",
+        operation="trash",
+        cleanup_age_days=30,
+        original_authorization_text="Put some more emails in the bin",
+        request_id="safe-frozen-1",
+    )
+    assert frozen["intended_count"] == 12
+    assert registry.writes == []
+
+    registry.messages["arrived-after-confirmation"] = mail(
+        "arrived-after-confirmation",
+        labels={"INBOX", "CATEGORY_PROMOTIONS"},
+        body="Newsletter unsubscribe",
+        age_days=40,
+    )
+    result = await engine.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:safe",
+        bulk_action_id=frozen["bulk_action_id"],
+    )
+    assert result["succeeded_count"] == 12
+    assert "arrived-after-confirmation" not in {item[1] for item in registry.writes}
 
 
 @pytest.mark.asyncio

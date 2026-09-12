@@ -60,6 +60,15 @@
                     android:host="integrations"
                     android:path="/google" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="jarvis"
+                    android:host="integrations"
+                    android:path="/microsoft" />
+            </intent-filter>
         </activity>
 
         <activity

@@ -25,8 +25,53 @@ _CANCEL_COMMANDS = frozenset(
 )
 
 _AFFIRMATIVE_COMMANDS = frozenset(
-    {"yes", "yeah", "yep", "correct", "that one", "the one you said", "go ahead", "do it"}
+    {
+        "yes",
+        "yeah",
+        "yep",
+        "correct",
+        "that's right",
+        "thats right",
+        "that one",
+        "the one you said",
+        "go ahead",
+        "go on",
+        "do it",
+        "do that",
+        "do that then",
+        "do the rest",
+        "all of them",
+        "carry on",
+    }
 )
+
+_NEGATIVE_COMMANDS = frozenset(
+    {
+        "no",
+        "nope",
+        "no thanks",
+        "cancel",
+        "cancel it",
+        "don't",
+        "dont",
+        "don't do it",
+        "dont do it",
+        "never mind",
+        "nevermind",
+    }
+)
+
+
+def bare_confirmation(text: str) -> str | None:
+    """Classify a context-only Yes/No without granting it independent authority."""
+
+    command = normalized_command(text)
+    if command in _AFFIRMATIVE_COMMANDS:
+        return "affirmative"
+    if command in _NEGATIVE_COMMANDS:
+        return "negative"
+    return None
+
 
 _CONTROL_PRONOUN_PATTERN = re.compile(
     r"^\s*(?:turn|switch|put|power)\s+(?:(?P<state1>on|off)\s+)?"
@@ -338,32 +383,49 @@ class DialogueManager:
     async def record_email_notification_focus(
         self, conversation_id: str, evidence: Mapping[str, Any]
     ) -> DialogueState:
-        """Ground conversational follow-ups in a verified proactive Gmail event."""
+        """Ground follow-ups in one verified, provider-scoped email event."""
 
         message_id = str(evidence.get("message_id") or "").strip()
         thread_id = str(evidence.get("thread_id") or "").strip()
         if not message_id or not thread_id:
-            raise ValueError("Verified Gmail message and thread identifiers are required")
+            raise ValueError("Verified email message and thread identifiers are required")
+        provider = str(evidence.get("provider") or "google_gmail").strip()
+        account_id = str(evidence.get("account_id") or "").strip() or None
+        focused_message = {
+            "provider": provider,
+            "account_id": account_id,
+            "message_id": message_id,
+            "thread_id": thread_id,
+            "recipient": evidence.get("recipient"),
+            "recipient_name": evidence.get("recipient_name"),
+            "sent_message_id": evidence.get("sent_message_id"),
+            "event_kind": str(evidence.get("event_kind") or "important"),
+            "observed_at": str(evidence.get("observed_at") or self._iso(self._utc_now())),
+            "anchor_source": "proactive_email_assistant",
+        }
         state = await self.get(conversation_id)
         state.focus = {
             **state.focus,
-            "gmail_reply": {
-                "recipient": evidence.get("recipient"),
-                "recipient_name": evidence.get("recipient_name"),
-                "sent_message_id": evidence.get("sent_message_id"),
-                "thread_id": thread_id,
-                "latest_reply_message_id": message_id,
-                "event_kind": str(evidence.get("event_kind") or "important"),
-                "observed_at": str(evidence.get("observed_at") or self._iso(self._utc_now())),
-                "anchor_source": "proactive_email_assistant",
-            },
+            "email_message": focused_message,
             "intent": "proactive_email_notification",
             "updated_at": self._iso(self._utc_now()),
         }
+        if provider == "google_gmail":
+            state.focus["gmail_reply"] = {
+                **focused_message,
+                "latest_reply_message_id": message_id,
+            }
+        elif provider == "microsoft_outlook":
+            state.focus["outlook_message"] = focused_message
         return await self.save(
             state,
             "proactive_email_focused",
-            {"message_id": message_id, "thread_id": thread_id},
+            {
+                "provider": provider,
+                "account_id": account_id,
+                "message_id": message_id,
+                "thread_id": thread_id,
+            },
         )
 
     async def record_email_cleanup_history_focus(
@@ -383,6 +445,8 @@ class DialogueManager:
                     "sender_address",
                     "subject",
                     "operation",
+                    "provider",
+                    "account_id",
                     "classification",
                     "eligibility_reason",
                 )
@@ -399,6 +463,10 @@ class DialogueManager:
                 "items": items,
                 "operation": (
                     str(evidence.get("operation")) if evidence.get("operation") else None
+                ),
+                "provider": (str(evidence.get("provider")) if evidence.get("provider") else None),
+                "account_id": (
+                    str(evidence.get("account_id")) if evidence.get("account_id") else None
                 ),
                 "since": str(evidence.get("since") or "") or None,
                 "offset": max(0, int(evidence.get("offset") or 0)),
@@ -417,6 +485,47 @@ class DialogueManager:
                 "operation": str(evidence.get("operation") or "all"),
                 "item_count": len(message_ids),
                 "has_more": bool(evidence.get("has_more")),
+            },
+        )
+
+    async def record_email_bulk_focus(
+        self, conversation_id: str, evidence: Mapping[str, Any]
+    ) -> DialogueState:
+        """Focus a provider-scoped bulk transaction without granting authority."""
+
+        required = ("bulk_action_id", "provider", "account_id", "operation")
+        if any(not str(evidence.get(key) or "").strip() for key in required):
+            raise ValueError("Exact bulk email action evidence is required")
+        state = await self.get(conversation_id)
+        state.focus = {
+            **state.focus,
+            "email_bulk_action": {
+                key: evidence.get(key)
+                for key in (
+                    "bulk_action_id",
+                    "provider",
+                    "account_id",
+                    "operation",
+                    "filter_kind",
+                    "status",
+                    "intended_count",
+                    "attempted_count",
+                    "succeeded_count",
+                    "failed_count",
+                    "remaining_count",
+                    "halt_reason",
+                )
+            },
+            "intent": "email_bulk_action",
+            "updated_at": self._iso(self._utc_now()),
+        }
+        return await self.save(
+            state,
+            "email_bulk_action_focused",
+            {
+                "provider": evidence.get("provider"),
+                "operation": evidence.get("operation"),
+                "status": evidence.get("status"),
             },
         )
 
@@ -710,6 +819,28 @@ class DialogueManager:
                     rewritten_text=f"Turn {action} {target}",
                     clear_goal=True,
                 )
+
+        confirmation = bare_confirmation(value)
+        if confirmation == "negative":
+            return DialogueResolution(
+                handled=True,
+                kind="cancel_goal",
+                reply="Okay, cancelled.",
+                clear_goal=True,
+            )
+        if confirmation == "affirmative":
+            # A confirmation may only advance a workflow with an explicit
+            # resolver above.  Keeping it inside the dialogue boundary stops
+            # a stale or future pending kind from becoming a fresh Home
+            # Assistant/entity/model command.
+            return DialogueResolution(
+                handled=True,
+                kind="unsupported_pending_confirmation",
+                reply=(
+                    state.prompt
+                    or "I can’t safely continue that unfinished request. Please tell me what to do."
+                ),
+            )
 
         return DialogueResolution()
 
