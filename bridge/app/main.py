@@ -1449,39 +1449,53 @@ async def _try_handle_email_assistant(
             if item.get("available") is True
         }
         registered = {str(item.get("capability_id") or "") for item in capabilities}
-        parts: list[str] = []
-        if any(item.startswith("gmail.") for item in available):
-            gmail_actions = []
-            if {"gmail.search", "gmail.read"} & available:
-                gmail_actions.append("check and search Gmail")
-            if {"gmail.send", "gmail.reply"} & available:
-                gmail_actions.append("send and reply safely")
-            if {"gmail.trash", "gmail.archive"} & available:
-                gmail_actions.append("tidy its Inbox into Gmail Bin or archive")
-            if gmail_actions:
-                parts.append(", ".join(gmail_actions))
-        if any(item.startswith("outlook.") for item in available):
-            outlook_actions = []
-            if {"outlook.search", "outlook.read"} & available:
-                outlook_actions.append("check and search Outlook")
-            if {"outlook.send", "outlook.reply"} & available:
-                outlook_actions.append("send and reply from Outlook")
-            if {"outlook.trash", "outlook.archive"} & available:
-                outlook_actions.append("tidy Outlook into Deleted Items or Archive")
-            if outlook_actions:
-                parts.append(", ".join(outlook_actions))
-        if not any(item.startswith("outlook.") for item in available) and any(
-            item.startswith("outlook.") for item in registered
-        ):
-            parts.append("Outlook support is available once you connect your Microsoft account")
-        if parts:
-            response = "I can " + "; and I can ".join(parts) + "."
-            if {"gmail.changes", "outlook.changes"} & available:
-                response += (
-                    " I can also watch connected mailboxes for important messages and replies."
+        gmail_available = any(item.startswith("gmail.") for item in available)
+        outlook_available = any(item.startswith("outlook.") for item in available)
+        outlook_registered = any(item.startswith("outlook.") for item in registered)
+
+        def provider_phrase(provider: str, display_name: str) -> str | None:
+            actions: list[str] = []
+            if {f"{provider}.search", f"{provider}.read"} & available:
+                actions.append(f"check and search {display_name}")
+            if {f"{provider}.send", f"{provider}.reply"} & available:
+                actions.append("send and reply safely")
+            if {f"{provider}.trash", f"{provider}.archive"} & available:
+                destination = (
+                    "Gmail Bin or archive"
+                    if provider == "gmail"
+                    else ("Outlook Deleted Items or Archive")
+                )
+                actions.append(f"tidy mail into {destination}")
+            if not actions:
+                return None
+            if len(actions) == 1:
+                return actions[0]
+            return f"{', '.join(actions[:-1])}, and {actions[-1]}"
+
+        provider_phrases = [
+            phrase
+            for phrase in (
+                provider_phrase("gmail", "Gmail") if gmail_available else None,
+                provider_phrase("outlook", "Outlook") if outlook_available else None,
+            )
+            if phrase
+        ]
+        operational_phrases = list(provider_phrases)
+        if {"gmail.changes", "outlook.changes"} & available:
+            operational_phrases.append(
+                "watch connected mailboxes for important messages and replies"
+            )
+        if operational_phrases:
+            if len(operational_phrases) == 1:
+                response = f"I can {operational_phrases[0]}."
+            else:
+                response = (
+                    f"I can {'; '.join(operational_phrases[:-1])}; and {operational_phrases[-1]}."
                 )
         else:
             response = "I don't currently have a healthy connected email capability to use."
+        if not outlook_available and outlook_registered:
+            response += " Outlook support is available once you connect your Microsoft account."
         return {"success": True, "response": response, "intent": "email_capabilities"}
 
     bulk_focus = (

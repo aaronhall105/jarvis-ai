@@ -1820,21 +1820,33 @@ class GoogleConnector(Connector):
                 break
         else:
             raise GoogleProviderError("Gmail history pagination exceeded the safe bounded limit")
-        details: list[dict[str, Any]] = []
-        for offset in range(0, len(ids), 25):
-            details.extend(
-                await asyncio.gather(
-                    *(
-                        self._request(
-                            principal,
-                            "GET",
-                            f"{GMAIL_API}/messages/{self._segment(message_id)}",
-                            params={"format": "full"},
-                        )
-                        for message_id in ids[offset : offset + 25]
-                    )
+
+        async def history_message(message_id: str) -> dict[str, Any] | None:
+            try:
+                return await self._request(
+                    principal,
+                    "GET",
+                    f"{GMAIL_API}/messages/{self._segment(message_id)}",
+                    params={"format": "full"},
                 )
+            except GoogleProviderError as exc:
+                # Gmail history can retain a messageAdded reference after the
+                # message itself has disappeared. Only that exact, confirmed
+                # provider response is safe to skip. Authentication, quota,
+                # transport, malformed-response, and server failures must
+                # still abort the delta so its cursor is not committed.
+                if exc.status_code == 404:
+                    return None
+                raise
+
+        details: list[dict[str, Any]] = []
+        skipped_not_found_count = 0
+        for offset in range(0, len(ids), 25):
+            batch = await asyncio.gather(
+                *(history_message(message_id) for message_id in ids[offset : offset + 25])
             )
+            details.extend(item for item in batch if item is not None)
+            skipped_not_found_count += sum(item is None for item in batch)
         messages: list[dict[str, Any]] = []
         for item in details:
             summary = self._message_summary(item)
@@ -1847,8 +1859,9 @@ class GoogleConnector(Connector):
             "history_id": current,
             "previous_history_id": supplied,
             "messages": messages,
-            "message_ids": ids,
+            "message_ids": [str(item.get("id")) for item in details if item.get("id")],
             "count": len(messages),
+            "skipped_not_found_count": skipped_not_found_count,
             "bootstrap": False,
             "cursor_expired": False,
         }, current

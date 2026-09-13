@@ -32,6 +32,7 @@ from app.google_integration import (
     GoogleConnector,
     GoogleOAuthConfig,
     GoogleOAuthService,
+    GoogleProviderError,
 )
 from app.integration_accounts import CredentialCipher, IntegrationAccountStore, OAuthSessionError
 
@@ -66,6 +67,7 @@ class GoogleFixture:
         self.gmail_search_pages: dict[str, dict] = {}
         self.gmail_history_pages: dict[str, dict[str, object]] = {}
         self.gmail_history_expired = False
+        self.gmail_message_statuses: dict[str, int] = {}
         self.gmail_send_timeout = False
         self.calendar_probe_status = 200
         self.contacts_probe_status = 200
@@ -272,6 +274,28 @@ class GoogleFixture:
                                 "body": {"attachmentId": "attachment-1", "size": 321},
                             }
                         ],
+                    },
+                },
+            )
+        if path.startswith("/gmail/v1/users/me/messages/history-message-"):
+            message_id = path.rsplit("/", 1)[-1]
+            status = self.gmail_message_statuses.get(message_id, 200)
+            if status != 200:
+                return httpx.Response(status, json={"error": {"code": status}})
+            return httpx.Response(
+                200,
+                json={
+                    "id": message_id,
+                    "threadId": f"thread-{message_id}",
+                    "labelIds": ["INBOX", "UNREAD"],
+                    "snippet": f"Body for {message_id}",
+                    "payload": {
+                        "headers": [
+                            {"name": "From", "value": "Person <person@example.test>"},
+                            {"name": "Subject", "value": message_id},
+                        ],
+                        "mimeType": "text/plain",
+                        "body": {"data": "SGVsbG8"},
                     },
                 },
             )
@@ -945,6 +969,146 @@ async def test_gmail_changes_bootstraps_paginates_and_recovers_expired_cursor(
     assert expired_reference == "500"
     assert expired["cursor_expired"] is True
     assert expired["messages"] == []
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_changes_skips_only_missing_history_messages(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_history_pages = {
+        "first": {
+            "historyId": "504",
+            "history": [
+                {
+                    "id": "504",
+                    "messagesAdded": [
+                        {"message": {"id": "history-message-valid-1"}},
+                        {"message": {"id": "history-message-missing"}},
+                        {"message": {"id": "history-message-valid-2"}},
+                    ],
+                }
+            ],
+        }
+    }
+    fixture.gmail_message_statuses["history-message-missing"] = 404
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    fixture.calls.clear()
+
+    changes, reference = await connector._gmail_changes("aaron", {"history_id": "500"})
+
+    assert reference == "504"
+    assert changes["history_id"] == "504"
+    assert changes["message_ids"] == [
+        "history-message-valid-1",
+        "history-message-valid-2",
+    ]
+    assert changes["count"] == 2
+    assert changes["skipped_not_found_count"] == 1
+    assert all(key.startswith("GET ") for key in fixture.calls)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_changes_all_missing_still_advances_cursor(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_history_pages = {
+        "first": {
+            "historyId": "505",
+            "history": [
+                {
+                    "id": "505",
+                    "messagesAdded": [
+                        {"message": {"id": "history-message-missing-1"}},
+                        {"message": {"id": "history-message-missing-2"}},
+                    ],
+                }
+            ],
+        }
+    }
+    fixture.gmail_message_statuses.update(
+        {"history-message-missing-1": 404, "history-message-missing-2": 404}
+    )
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    changes, reference = await connector._gmail_changes("aaron", {"history_id": "500"})
+
+    assert reference == "505"
+    assert changes["message_ids"] == []
+    assert changes["messages"] == []
+    assert changes["count"] == 0
+    assert changes["skipped_not_found_count"] == 2
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+async def test_gmail_changes_does_not_skip_non_404_provider_errors(
+    tmp_path: Path, status: int
+) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_history_pages = {
+        "first": {
+            "historyId": "506",
+            "history": [
+                {
+                    "id": "506",
+                    "messagesAdded": [{"message": {"id": "history-message-provider-error"}}],
+                }
+            ],
+        }
+    }
+    fixture.gmail_message_statuses["history-message-provider-error"] = status
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    with pytest.raises(GoogleProviderError, match=f"HTTP {status}"):
+        await connector._gmail_changes("aaron", {"history_id": "500"})
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gmail_changes_skips_missing_messages_across_history_pages(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_history_pages = {
+        "first": {
+            "historyId": "507",
+            "history": [
+                {
+                    "id": "507",
+                    "messagesAdded": [
+                        {"message": {"id": "history-message-missing-1"}},
+                        {"message": {"id": "history-message-valid-1"}},
+                    ],
+                }
+            ],
+            "nextPageToken": "second",
+        },
+        "second": {
+            "historyId": "508",
+            "history": [
+                {
+                    "id": "508",
+                    "messagesAdded": [
+                        {"message": {"id": "history-message-missing-2"}},
+                        {"message": {"id": "history-message-valid-2"}},
+                    ],
+                }
+            ],
+        },
+    }
+    fixture.gmail_message_statuses.update(
+        {"history-message-missing-1": 404, "history-message-missing-2": 404}
+    )
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    changes, reference = await connector._gmail_changes("aaron", {"history_id": "500"})
+
+    assert reference == "508"
+    assert changes["message_ids"] == [
+        "history-message-valid-1",
+        "history-message-valid-2",
+    ]
+    assert changes["skipped_not_found_count"] == 2
+    assert fixture.calls["GET /gmail/v1/users/me/history"] == 2
     await client.aclose()
 
 
