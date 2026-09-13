@@ -1,8 +1,8 @@
 # Jarvis Android Phone and Wear OS clients
 
-This Gradle project builds the current `v19.0.0-alpha27` Phone and Watch
+This Gradle project builds the current `v19.0.0-alpha28` Phone and Watch
 clients for the unified Jarvis Brain/Core. Both clients use package
-`com.aaron.jarvisvoice`, versionCode `190290`, realtime protocol `2`, and one
+`com.aaron.jarvisvoice`, versionCode `190300`, realtime protocol `2`, and one
 approved product source revision.
 
 ## Modules
@@ -30,7 +30,8 @@ The Phone client provides:
 - Android default-assistant role, compact overlay, wake-word/background support,
   and foreground-service disclosures
 - top-level Integrations settings, `IntegrationsActivity`, provider health, and
-  the `jarvis://integrations/google` OAuth return route
+  the `jarvis://integrations/google` and `jarvis://integrations/microsoft`
+  OAuth return routes
 - Developer/Codex access through the separately authenticated gateway
 - signed in-place OTA updates with checksum, package, version, and signer
   verification

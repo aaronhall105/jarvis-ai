@@ -2,7 +2,7 @@
 
 `jarvis/unified-production` is the sole authoritative source for future Jarvis
 Core deployments, Android and Wear builds, OTA manifests, and production
-releases. The current published product is `v19.0.0-alpha27`, with Core
+releases. The current published product is `v19.0.0-alpha28`, with Core
 application version `3.7.0` and realtime protocol `2`.
 
 ## Lineage decision
@@ -40,7 +40,7 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 - Secure web/research tooling with SSRF and DNS-rebinding defenses
 - Encrypted integration-account credentials
 - Google OAuth with CSRF, callback replay, redirect, refresh, expiry, revocation, and health checks
-- Gmail, Calendar, Contacts, and durable email/reply monitoring
+- Gmail, Outlook/Microsoft 365, Calendar, Contacts, and durable email/reply monitoring
 
 ### Android
 
@@ -51,7 +51,7 @@ The pre-reconciliation production container was built from `fa1273b7b550ef38a81f
 - Standard and Live voice, interruption, wake word, overlay, and default assistant
 - Durable realtime delivery/recovery and current endpoint failover
 - Developer/Codex mode and current menus/actions
-- Top-level Integrations settings entry, `IntegrationsActivity`, and Google OAuth deep link
+- Top-level Integrations settings entry, `IntegrationsActivity`, and Google/Microsoft OAuth deep links
 - Truthful Setup Required / Not Connected provider states
 - Truthful staged-versus-installed OTA integrity evidence retained across an
   in-place update

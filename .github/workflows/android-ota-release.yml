@@ -40,8 +40,13 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           test "$GITHUB_REF_NAME" = "v$version"
           grep -Fq "versionName = \"$version\"" android/jarvis-voice-client/app/build.gradle.kts
+          grep -Fq "versionName = \"$version\"" android/jarvis-voice-client/wear/build.gradle.kts
           grep -Fq "RELEASE = \"$version\"" android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisVersion.java
           grep -Fq "JARVIS_RELEASE = \"$version\"" bridge/app/version.py
+          notes_key="${version^^}"
+          notes_key="${notes_key//./_}"
+          notes_key="${notes_key//-/_}"
+          test -f "docs/releases/CHANGES_V${notes_key}.md"
           test "$(git rev-list -n1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
           python tools/verify_product_baseline.py --skip-ref
           git diff --check
@@ -130,6 +135,7 @@ jobs:
           grep -Fq '="jarvis"' apk-manifest.txt
           grep -Fq '="integrations"' apk-manifest.txt
           grep -Fq '="/google"' apk-manifest.txt
+          grep -Fq '="/microsoft"' apk-manifest.txt
           unzip -p "$apk" classes.dex > "$RUNNER_TEMP/classes.dex"
           unzip -p "$wear_apk" classes.dex > "$RUNNER_TEMP/wear-classes.dex"
           dexdump="$ANDROID_HOME/build-tools/$build_tools/dexdump"
@@ -145,6 +151,10 @@ jobs:
           grep -Fq 'Open integrations & accounts' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Google, email, calendar, contacts and external services.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'settings_integrations_open' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Connect Outlook' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Reconnect Outlook' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Disconnect Outlook' "$RUNNER_TEMP/classes-dexdump.txt"
+          grep -Fq 'Cleanup never permanently deletes Gmail or Outlook mail.' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'J A R V I S' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'What can I help with?' "$RUNNER_TEMP/classes-dexdump.txt"
           grep -Fq 'Clear current chat' "$RUNNER_TEMP/classes-dexdump.txt"
@@ -168,7 +178,8 @@ jobs:
             echo "Version: $version ($code)"
             echo "SettingsActivity: present with top-level Integrations runtime UI"
             echo "IntegrationsActivity: present and manifest-declared"
-            echo "Deep link: jarvis://integrations/google"
+            echo "Deep links: jarvis://integrations/google and jarvis://integrations/microsoft"
+            echo "Outlook Connect, Reconnect, and Disconnect controls: present"
             echo "Developer, delete-current-chat, realtime recovery, Wear bridge, and current branding: present"
             echo "Signer SHA-256: ${actual,,}"
           } > apk-inspection.txt
