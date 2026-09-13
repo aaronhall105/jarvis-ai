@@ -428,6 +428,98 @@ class DialogueManager:
             },
         )
 
+    async def record_email_read_focus(
+        self, conversation_id: str, evidence: Mapping[str, Any]
+    ) -> DialogueState:
+        """Persist bounded, provider-scoped mailbox evidence for read follow-ups."""
+
+        provider = str(evidence.get("provider") or "").strip()
+        account_id = str(evidence.get("account_id") or "").strip()
+        principal_id = str(evidence.get("principal_id") or "").strip()
+        if (
+            provider not in {"google_gmail", "microsoft_outlook"}
+            or not account_id
+            or not principal_id
+        ):
+            raise ValueError("Exact principal, email provider and account evidence are required")
+        messages = [
+            {
+                key: item.get(key)
+                for key in (
+                    "provider",
+                    "account_id",
+                    "message_id",
+                    "thread_id",
+                    "conversation_id",
+                    "from",
+                    "sender_name",
+                    "subject",
+                    "snippet",
+                    "internal_date_ms",
+                    "received_at",
+                )
+            }
+            for item in evidence.get("messages") or ()
+            if isinstance(item, Mapping) and str(item.get("message_id") or "").strip()
+        ][:25]
+        selected_index = max(0, int(evidence.get("selected_index") or 0))
+        if messages:
+            selected_index = min(selected_index, len(messages) - 1)
+        selected = messages[selected_index] if messages else None
+        observed_at = str(evidence.get("observed_at") or self._iso(self._utc_now()))
+        expires_at = self._iso(self._utc_now() + timedelta(hours=24))
+        read_focus = {
+            "principal_id": principal_id,
+            "provider": provider,
+            "account_id": account_id,
+            "query_kind": str(evidence.get("query_kind") or "latest"),
+            "filter_kind": evidence.get("filter_kind"),
+            "contact": evidence.get("contact"),
+            "literal_query": evidence.get("literal_query"),
+            "messages": messages,
+            "selected_index": selected_index,
+            "observed_at": observed_at,
+            "expires_at": expires_at,
+        }
+        state = await self.get(conversation_id)
+        state.focus = {
+            **state.focus,
+            "email_read_query": read_focus,
+            "intent": "email_mailbox_read",
+            "updated_at": self._iso(self._utc_now()),
+        }
+        if selected is not None:
+            message_focus = {
+                "provider": provider,
+                "account_id": account_id,
+                "message_id": selected.get("message_id"),
+                "thread_id": selected.get("thread_id") or selected.get("conversation_id"),
+                "recipient": selected.get("from"),
+                "recipient_name": selected.get("sender_name"),
+                "observed_at": observed_at,
+                "anchor_source": "verified_mailbox_read",
+            }
+            state.focus["email_message"] = message_focus
+            if provider == "microsoft_outlook":
+                state.focus["outlook_message"] = message_focus
+            else:
+                state.focus["gmail_reply"] = {
+                    **message_focus,
+                    "latest_reply_message_id": selected.get("message_id"),
+                }
+        return await self.save(
+            state,
+            "email_mailbox_read_focused",
+            {
+                "provider": provider,
+                "account_id": account_id,
+                "principal_id": principal_id,
+                "query_kind": read_focus["query_kind"],
+                "message_count": len(messages),
+                "selected_index": selected_index,
+            },
+        )
+
     async def record_email_cleanup_history_focus(
         self, conversation_id: str, evidence: Mapping[str, Any]
     ) -> DialogueState:

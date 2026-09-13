@@ -1663,6 +1663,35 @@ class GoogleConnector(Connector):
         query = str(payload.get("query") or "in:inbox").strip()
         if len(query) > 1_000:
             raise ValueError("query is too long")
+        if payload.get("count_only") is True:
+            filter_kind = str(payload.get("filter_kind") or "").strip()
+            if filter_kind == "all_mail":
+                value = await self._request(principal, "GET", f"{GMAIL_API}/profile")
+                count = value.get("messagesTotal")
+                source = "profile.messagesTotal"
+            else:
+                label_id = "TRASH" if filter_kind == "bin" else "INBOX"
+                field = "messagesUnread" if filter_kind == "unread_inbox" else "messagesTotal"
+                if filter_kind not in {"all_inbox", "unread_inbox", "bin"}:
+                    raise ValueError("That Gmail mailbox count is not supported")
+                value = await self._request(
+                    principal,
+                    "GET",
+                    f"{GMAIL_API}/labels/{self._segment(label_id)}",
+                )
+                count = value.get(field)
+                source = f"label.{label_id}.{field}"
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise GoogleProviderError("Google returned an invalid mailbox count")
+            return {
+                "messages": [],
+                "message_ids": [],
+                "count": count,
+                "exact": True,
+                "count_source": source,
+                "pages": 1,
+                "truncated": False,
+            }, None
         all_pages = payload.get("all_pages") is True
         maximum = max(1, min(int(payload.get("max_messages") or 5_000), 10_000))
         requested = self._limit(payload)

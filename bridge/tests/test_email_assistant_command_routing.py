@@ -10,6 +10,7 @@ os.environ.setdefault("JARVIS_DATA_DIR", "/tmp/jarvis-email-assistant-command-te
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from app import main
+from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
 from app.user_context import UserContext
 
@@ -901,6 +902,48 @@ def bulk_engine(*, accounts=None, count: int = 38, execution=None):
                 "exact": True,
             }
         ),
+        search_mailbox=AsyncMock(
+            return_value={
+                "success": True,
+                "provider": provider,
+                "account_id": accounts[0]["account_id"],
+                "messages": [
+                    {
+                        "message_id": "message-new",
+                        "thread_id": "thread-new",
+                        "from": "David <david@example.test>",
+                        "sender_name": "David",
+                        "subject": "Tomorrow's job",
+                        "snippet": "The start time is 7:30.",
+                        "received_at": "2026-09-13T08:30:00Z",
+                    },
+                    {
+                        "message_id": "message-before",
+                        "thread_id": "thread-before",
+                        "from": "Sarah <sarah@example.test>",
+                        "sender_name": "Sarah",
+                        "subject": "Earlier message",
+                        "snippet": "See you later.",
+                        "received_at": "2026-09-12T08:30:00Z",
+                    },
+                ],
+                "count": 2,
+                "exact": True,
+                "query_kind": "latest",
+            }
+        ),
+        resolve_email_contact=AsyncMock(
+            return_value={
+                "resolved": True,
+                "ambiguous": False,
+                "available": True,
+                "contact": {
+                    "display_name": "Amber",
+                    "email_addresses": ["amber@example.test"],
+                },
+                "addresses": ["amber@example.test"],
+            }
+        ),
     )
 
 
@@ -1086,9 +1129,342 @@ async def test_mailbox_bin_count_is_current_provider_evidence_not_history(monkey
         request_id="count-1",
     )
     assert result is not None
-    assert result["response"] == "You've got 1 in Gmail Bin."
+    assert result["response"] == "You've got 1 email in your Gmail Bin."
     engine.mailbox_count.assert_awaited_once()
     assert engine.mailbox_count.await_args.kwargs["filter_kind"] == "bin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "utterance",
+    (
+        "What is my latest Outlook email?",
+        "What's my newest Outlook email?",
+        "Show me my most recent Outlook message.",
+        "What was the last email I got on Outlook?",
+        "Latest Outlook email.",
+    ),
+)
+async def test_latest_outlook_routes_to_graph_before_generic_web(monkeypatch, utterance) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        utterance,
+        actor=actor(),
+        conversation_id="usr:aaron:latest-outlook",
+        request_id=f"latest-{utterance}",
+    )
+
+    assert result is not None and result["intent"] == "email_mailbox_read"
+    assert "latest Outlook email is from David" in str(result["response"])
+    engine.search_mailbox.assert_awaited()
+    assert engine.search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
+    assert engine.search_mailbox.await_args.kwargs["literal_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_full_request_pipeline_short_circuits_before_ai_and_web(
+    monkeypatch, tmp_path
+) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(
+        main, "conversations", ConversationEngine(str(tmp_path / "conversations.db"))
+    )
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(tmp_path / "pipeline-dialogue.db")))
+    ask = AsyncMock(side_effect=AssertionError("generic AI/web routing must not run"))
+    monkeypatch.setattr(main.ai, "ask", ask)
+
+    result = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="What is my latest Outlook email?",
+            conversation_id="pipeline-email-read",
+            request_id="pipeline-email-read-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert result["model"] == "email-assistant"
+    assert result["deterministic"] is True
+    assert "latest Outlook email" in str(result["response"])
+    ask.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_latest_gmail_and_provider_focus_follow_up_are_grounded(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        value = dict(engine.search_mailbox.return_value)
+        value.update(provider=kwargs["provider"], account_id=kwargs["account_id"])
+        return value
+
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:provider-focus"
+
+    outlook = await main._try_handle_email_assistant(
+        "Latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="focus-1",
+    )
+    gmail = await main._try_handle_email_assistant(
+        "What about Gmail?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="focus-2",
+    )
+
+    assert outlook is not None and "Outlook" in str(outlook["response"])
+    assert gmail is not None and "Gmail" in str(gmail["response"])
+    assert [call.kwargs["provider"] for call in engine.search_mailbox.await_args_list] == [
+        "microsoft_outlook",
+        "google_gmail",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", (0, 1, 47))
+async def test_outlook_unread_count_is_exact_provider_scoped(monkeypatch, count) -> None:
+    engine = bulk_engine(
+        accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}], count=count
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "How many unread Outlook emails do I have?",
+        actor=actor(),
+        conversation_id=f"usr:aaron:unread:{count}",
+        request_id=f"unread-{count}",
+    )
+
+    assert result is not None and result["success"] is True
+    assert f"{count} unread email" in str(result["response"])
+    assert "Outlook Inbox" in str(result["response"])
+    assert engine.mailbox_count.await_args.kwargs["provider"] == "microsoft_outlook"
+
+
+@pytest.mark.asyncio
+async def test_unread_count_and_provider_list_follow_ups_keep_scope(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=12)
+
+    async def count(**kwargs):
+        return {
+            "success": True,
+            "provider": kwargs["provider"],
+            "account_id": kwargs["account_id"],
+            "count": 12,
+            "exact": True,
+        }
+
+    async def search(**kwargs):
+        value = dict(engine.search_mailbox.return_value)
+        value.update(provider=kwargs["provider"], account_id=kwargs["account_id"])
+        return value
+
+    engine.mailbox_count.side_effect = count
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:count-follow-ups"
+
+    await main._try_handle_email_assistant(
+        "How many unread Outlook emails do I have?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="count-focus-1",
+    )
+    focused_count = await main._try_handle_email_assistant(
+        "How many unread emails do I have?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="count-focus-2",
+    )
+    gmail_count = await main._try_handle_email_assistant(
+        "What about Gmail?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="count-focus-3",
+    )
+    outlook_list = await main._try_handle_email_assistant(
+        "Show me the Outlook ones.",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="count-focus-4",
+    )
+
+    assert focused_count is not None and "Outlook Inbox" in str(focused_count["response"])
+    assert gmail_count is not None and "Gmail Inbox" in str(gmail_count["response"])
+    assert outlook_list is not None and "matching Outlook emails" in str(outlook_list["response"])
+    assert engine.search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
+    assert engine.search_mailbox.await_args.kwargs["filter_kind"] == "unread_inbox"
+
+
+@pytest.mark.asyncio
+async def test_outlook_person_search_uses_unique_trusted_sender_not_literal_text(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Search Outlook for emails from Amber.",
+        actor=actor(),
+        conversation_id="usr:aaron:amber-search",
+        request_id="amber-search-1",
+    )
+
+    assert result is not None and "from Amber" in str(result["response"])
+    engine.resolve_email_contact.assert_awaited_once()
+    arguments = engine.search_mailbox.await_args.kwargs
+    assert arguments["provider"] == "microsoft_outlook"
+    assert arguments["sender_address"] == "amber@example.test"
+    assert arguments["literal_query"] is None
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_or_unknown_contact_never_invents_sender(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": True,
+        "available": True,
+    }
+    ambiguous = await main._try_handle_email_assistant(
+        "Find messages Dave sent me",
+        actor=actor(),
+        conversation_id="usr:aaron:dave-search",
+        request_id="dave-search-1",
+    )
+    assert ambiguous is not None and ambiguous["intent"] == "email_contact_ambiguous"
+    engine.search_mailbox.assert_not_awaited()
+
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": False,
+        "available": True,
+    }
+    unknown = await main._try_handle_email_assistant(
+        "Any Outlook emails from Someone Unknown?",
+        actor=actor(),
+        conversation_id="usr:aaron:unknown-search",
+        request_id="unknown-search-1",
+    )
+    assert unknown is not None and unknown["intent"] == "email_contact_unresolved"
+    assert "exact email address" in str(unknown["response"])
+    engine.search_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_literal_outlook_search_preserves_literal_semantics(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Search Outlook for the exact text Amber",
+        actor=actor(),
+        conversation_id="usr:aaron:literal-search",
+        request_id="literal-search-1",
+    )
+
+    assert result is not None and "matching that exact text" in str(result["response"])
+    engine.resolve_email_contact.assert_not_awaited()
+    assert engine.search_mailbox.await_args.kwargs["literal_query"] == "Amber"
+
+
+@pytest.mark.asyncio
+async def test_mail_read_focus_survives_restart_and_selects_previous_message(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "restart-dialogue.db"
+    first_manager = DialogueManager(str(database))
+    monkeypatch.setattr(main, "dialogue", first_manager)
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:read-restart"
+    await main._try_handle_email_assistant(
+        "Latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="restart-read-1",
+    )
+
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(database)))
+    previous = await main._try_handle_email_assistant(
+        "What about the one before that?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="restart-read-2",
+    )
+    sender = await main._try_handle_email_assistant(
+        "Who sent it?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="restart-read-3",
+    )
+
+    assert previous is not None and "Earlier message" in str(previous["response"])
+    assert sender is not None and sender["response"] == "It was from Sarah."
+
+
+@pytest.mark.asyncio
+async def test_mail_read_focus_is_principal_scoped(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "shared-unscoped-test-conversation"
+    await main._try_handle_email_assistant(
+        "Latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="principal-read-1",
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Who sent it?",
+        actor=actor("mallory"),
+        conversation_id=conversation,
+        request_id="principal-read-2",
+    )
+
+    assert result is not None and result["intent"] == "email_read_needs_context"
+
+
+@pytest.mark.asyncio
+async def test_contact_focus_supports_hers_follow_up_without_re_resolving(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:contact-focus"
+    await main._try_handle_email_assistant(
+        "Search Outlook for emails from Amber",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="contact-focus-1",
+    )
+    engine.resolve_email_contact.reset_mock()
+    engine.search_mailbox.reset_mock()
+
+    result = await main._try_handle_email_assistant(
+        "What about hers?",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="contact-focus-2",
+    )
+
+    assert result is not None and "from Amber" in str(result["response"])
+    engine.resolve_email_contact.assert_not_awaited()
+    assert engine.search_mailbox.await_args.kwargs["sender_address"] == "amber@example.test"
 
 
 @pytest.mark.asyncio

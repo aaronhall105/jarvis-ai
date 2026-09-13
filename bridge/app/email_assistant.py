@@ -1078,10 +1078,20 @@ class EmailAssistantPolicyEngine:
             principal_id=principal_id, provider=provider, account_id=account_id
         )
         capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
+        base_payload = self._bulk_search_payload(provider, filter_kind)
+        # Both providers expose authoritative mailbox counters. Using them
+        # avoids downloading every message (and timing out on a large
+        # mailbox) merely to answer a read-only count question.
+        payload: dict[str, Any] = {"count_only": True, "filter_kind": filter_kind}
+        if provider == "microsoft_outlook":
+            payload.update(
+                folder=base_payload["folder"],
+                unread=filter_kind == "unread_inbox",
+            )
         result = await self.registry.execute(
             CapabilityRequest(
                 capability_id=capability,
-                payload=self._bulk_search_payload(provider, filter_kind),
+                payload=payload,
                 request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"mail-count:{request_id}")),
                 conversation_id=conversation_id,
                 principal_id=principal_id,
@@ -1090,21 +1100,182 @@ class EmailAssistantPolicyEngine:
             refresh_health=True,
         )
         if not result.success:
-            return {"success": False, "error": result.error, "count": 0, "exact": False}
-        ids = [str(item) for item in result.data.get("message_ids") or () if str(item).strip()]
-        if not ids:
-            ids = [
-                str(item.get("message_id"))
-                for item in result.data.get("messages") or ()
-                if isinstance(item, Mapping) and item.get("message_id")
-            ]
+            return {
+                "success": False,
+                "error": result.error,
+                "count": 0,
+                "exact": False,
+                "provider": provider,
+                "account_id": account_id,
+            }
+        provider_count = result.data.get("count")
+        if provider in {"google_gmail", "microsoft_outlook"} and (
+            isinstance(provider_count, bool)
+            or not isinstance(provider_count, int)
+            or provider_count < 0
+        ):
+            return {
+                "success": False,
+                "error": "The provider did not return a trustworthy mailbox count",
+                "count": 0,
+                "exact": False,
+                "provider": provider,
+                "account_id": account_id,
+            }
+        assert isinstance(provider_count, int) and not isinstance(provider_count, bool)
         return {
             "success": True,
-            "count": len(dict.fromkeys(ids)),
-            "exact": not bool(result.data.get("truncated")),
+            "count": provider_count,
+            "exact": bool(result.data.get("exact")),
             "provider": provider,
             "account_id": account_id,
             "filter_kind": filter_kind,
+        }
+
+    async def search_mailbox(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        request_id: str,
+        sender_address: str | None = None,
+        literal_query: str | None = None,
+        filter_kind: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Run one provider/account-grounded mailbox read and normalise its evidence."""
+
+        await self._require_email_account(
+            principal_id=principal_id, provider=provider, account_id=account_id
+        )
+        capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
+        if sum(bool(item) for item in (sender_address, literal_query, filter_kind)) > 1:
+            raise ValueError("Mailbox read filters cannot be combined")
+        requested = max(1, min(int(limit), 25))
+        if provider == "google_gmail":
+            if sender_address:
+                query = f"from:({sender_address}) -in:spam -in:trash"
+            elif literal_query:
+                query = literal_query
+            elif filter_kind:
+                query = str(self._bulk_search_payload(provider, filter_kind)["query"])
+            else:
+                query = "in:inbox"
+            payload: dict[str, Any] = {"query": query, "limit": requested}
+        else:
+            payload = {"folder": "inbox", "limit": requested}
+            if sender_address:
+                payload["sender"] = sender_address
+            elif literal_query:
+                payload.pop("folder", None)
+                payload["query"] = literal_query
+            elif filter_kind:
+                base = self._bulk_search_payload(provider, filter_kind)
+                payload["folder"] = base["folder"]
+                if base.get("unread") is True:
+                    payload["unread"] = True
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability,
+                payload=payload,
+                request_id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"mail-read:{request_id}:{provider}:{account_id}:"
+                        f"{sender_address or literal_query or filter_kind or 'latest'}",
+                    )
+                ),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="email_mailbox_read",
+            ),
+            refresh_health=True,
+        )
+        if not execution.success:
+            return {
+                "success": False,
+                "provider": provider,
+                "account_id": account_id,
+                "error": execution.error,
+                "messages": [],
+            }
+        messages = [
+            dict(item)
+            for item in execution.data.get("messages") or ()
+            if isinstance(item, Mapping) and str(item.get("message_id") or "").strip()
+        ]
+
+        def timestamp(item: Mapping[str, Any]) -> float:
+            value = item.get("internal_date_ms")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+            raw = str(item.get("received_at") or "")
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000
+            except ValueError:
+                return 0.0
+
+        messages.sort(key=timestamp, reverse=True)
+        return {
+            "success": True,
+            "provider": provider,
+            "account_id": account_id,
+            "messages": messages[:requested],
+            "count": int(execution.data.get("count") or len(messages)),
+            "exact": not bool(execution.data.get("truncated")),
+            "query_kind": (
+                "sender_search"
+                if sender_address
+                else "literal_search"
+                if literal_query
+                else "list_filter"
+                if filter_kind
+                else "latest"
+            ),
+        }
+
+    async def resolve_email_contact(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        query: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a person only through the principal's trusted contact provider."""
+
+        execution = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="contacts.resolve",
+                payload={"query": query},
+                request_id=str(
+                    uuid.uuid5(uuid.NAMESPACE_URL, f"mail-contact:{request_id}:{query.casefold()}")
+                ),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="resolve_email_search_contact",
+            ),
+            refresh_health=True,
+        )
+        if not execution.success:
+            return {"resolved": False, "ambiguous": False, "available": False}
+        data = dict(execution.data)
+        contact = data.get("contact")
+        addresses = []
+        if isinstance(contact, Mapping):
+            addresses = [
+                str(item).strip().casefold()
+                for item in contact.get("email_addresses") or ()
+                if str(item).strip()
+            ]
+        return {
+            "resolved": data.get("resolved") is True and len(set(addresses)) == 1,
+            "ambiguous": data.get("ambiguous") is True or len(set(addresses)) > 1,
+            "available": True,
+            "contact": dict(contact) if isinstance(contact, Mapping) else None,
+            "addresses": list(dict.fromkeys(addresses)),
         }
 
     async def snapshot_bulk_action(

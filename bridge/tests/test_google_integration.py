@@ -65,6 +65,10 @@ class GoogleFixture:
         self.gmail_search_status = 200
         self.gmail_search_malformed = False
         self.gmail_search_pages: dict[str, dict] = {}
+        self.gmail_total = 321
+        self.gmail_inbox_total = 201
+        self.gmail_inbox_unread = 86
+        self.gmail_bin_total = 10
         self.gmail_history_pages: dict[str, dict[str, object]] = {}
         self.gmail_history_expired = False
         self.gmail_message_statuses: dict[str, int] = {}
@@ -162,7 +166,11 @@ class GoogleFixture:
         if path == "/gmail/v1/users/me/profile":
             return httpx.Response(
                 200,
-                json={"emailAddress": "aaron@example.test", "historyId": "500"},
+                json={
+                    "emailAddress": "aaron@example.test",
+                    "historyId": "500",
+                    "messagesTotal": self.gmail_total,
+                },
             )
         if path == "/gmail/v1/users/me/history":
             if self.gmail_history_expired:
@@ -214,6 +222,26 @@ class GoogleFixture:
                             "labelListVisibility": "labelShow",
                         },
                     ]
+                },
+            )
+        if path == "/gmail/v1/users/me/labels/INBOX" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "INBOX",
+                    "name": "Inbox",
+                    "messagesTotal": self.gmail_inbox_total,
+                    "messagesUnread": self.gmail_inbox_unread,
+                },
+            )
+        if path == "/gmail/v1/users/me/labels/TRASH" and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "TRASH",
+                    "name": "Trash",
+                    "messagesTotal": self.gmail_bin_total,
+                    "messagesUnread": 0,
                 },
             )
         if path == "/gmail/v1/users/me/messages/message-2/modify":
@@ -923,6 +951,34 @@ async def test_gmail_search_snapshots_every_provider_page(tmp_path: Path) -> Non
     assert result["message_ids"] == first_ids + second_ids
     assert result["pages"] == 2
     assert result["truncated"] is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filter_kind", "expected", "path"),
+    (
+        ("all_mail", 321, "GET /gmail/v1/users/me/profile"),
+        ("all_inbox", 201, "GET /gmail/v1/users/me/labels/INBOX"),
+        ("unread_inbox", 86, "GET /gmail/v1/users/me/labels/INBOX"),
+        ("bin", 10, "GET /gmail/v1/users/me/labels/TRASH"),
+    ),
+)
+async def test_gmail_mailbox_counts_use_exact_provider_metadata(
+    tmp_path: Path, filter_kind: str, expected: int, path: str
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    result, reference = await connector._gmail_search(
+        "aaron", {"count_only": True, "filter_kind": filter_kind}
+    )
+
+    assert result["count"] == expected
+    assert result["exact"] is True
+    assert result["message_ids"] == []
+    assert reference is None
+    assert fixture.calls[path] >= 1
     await client.aclose()
 
 

@@ -56,6 +56,16 @@ class BulkRegistry:
                 request.payload.get("query") or ""
             ):
                 values = [item for item in values if "UNREAD" in item["label_ids"]]
+            if request.payload.get("count_only") is True:
+                return self.result(
+                    {
+                        "message_ids": [],
+                        "messages": [],
+                        "count": len(values),
+                        "exact": True,
+                        "truncated": False,
+                    }
+                )
             return self.result(
                 {
                     "message_ids": [item["message_id"] for item in values],
@@ -121,6 +131,27 @@ def engine(path: Path, registry: BulkRegistry) -> EmailAssistantPolicyEngine:
         registry,  # type: ignore[arg-type]
         account_resolver=account_resolver(registry.provider),
     )
+
+
+@pytest.mark.asyncio
+async def test_outlook_mailbox_count_uses_exact_folder_counter_without_enumeration(
+    tmp_path: Path,
+) -> None:
+    registry = BulkRegistry(143, provider="microsoft_outlook")
+    service = engine(tmp_path / "outlook-count.db", registry)
+
+    result = await service.mailbox_count(
+        principal_id="aaron",
+        conversation_id="usr:aaron:outlook-count",
+        provider="microsoft_outlook",
+        account_id="microsoft_outlook-account",
+        filter_kind="unread_inbox",
+        request_id="outlook-count-1",
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 143
+    assert result["exact"] is True
 
 
 async def snapshot(
