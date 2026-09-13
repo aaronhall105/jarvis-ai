@@ -6,13 +6,13 @@ device evidence.
 
 ## Validated source and release
 
-- Current release candidate: `v19.0.0-alpha27`
+- Current release candidate: `v19.0.0-alpha28`
 - Release source: the immutable tag, product manifest, and OTA manifest must
   record the exact approved `jarvis/unified-production` revision
 - Authoritative branch: `jarvis/unified-production`
 - Core application version: `3.7.0`
 - Realtime protocol: `2`
-- Android Phone and Wear versionCode: `190290`
+- Android Phone and Wear versionCode: `190300`
 
 The tag-triggered workflow fails closed unless the tag equals the current
 authoritative branch head. It builds Phone and Watch from that one revision,
@@ -22,13 +22,12 @@ from the exact published bytes.
 
 ## Core and repository checks
 
-The final Google Personal Integrations v1 regression run before alpha27 release
-preparation recorded 748 passing tests, 3 intentional skips, and 133 passing
-subtests. Ruff, formatting, mypy, compileall, Bandit, dependency audit,
-actionlint, gitleaks, product-baseline, Home Assistant, Phone/Wear unit tests,
-Android lint/build, GitHub CI, and CodeQL passed with zero open CodeQL alerts.
+The alpha28 release candidate packages the already-merged Email Assistant v3,
+Outlook/Microsoft Graph, dialogue safety, bulk-cleanup, and Gmail history
+resilience work. Its complete test and release-gate evidence is recorded in the
+release PR and immutable OTA workflow run rather than inferred here.
 
-The protected release PR and post-merge alpha27 head must repeat the applicable
+The protected release PR and post-merge alpha28 head must repeat the applicable
 checks before the immutable release tag is created.
 
 ## Google Personal Integrations v1
@@ -57,7 +56,7 @@ closed without inventing addresses.
 
 ## Android Phone and Wear OS
 
-The alpha27 source retains the approved Phone/Watch lineage, shared protocol,
+The alpha28 source retains the approved Phone/Watch lineage, shared protocol,
 Integrations activity and OAuth deep link, Developer capability,
 delete-current-chat, realtime recovery, assistant/overlay/wake support, Wear
 bridge, Tile, voice, and current branding. The Android connected-provider
@@ -65,7 +64,7 @@ parser now renders null/missing/blank detail as no detail rather than the
 literal text `null`; tests cover both empty detail and verified account email.
 
 Package, version, versionCode, production signature, resources, manifest, and
-compiled markers are verified again from the final signed alpha27 APKs during
+compiled markers are verified again from the final signed alpha28 APKs during
 publication.
 
 ## Persistence and runtime
@@ -76,19 +75,18 @@ mounts and all Core/speaker stores passed `PRAGMA quick_check`. Conversations,
 messages, memory, durable jobs, receipts, integration accounts, OAuth sessions,
 and encrypted credentials remained intact.
 
-Core and Developer reported the verified Google integration source revision
-before alpha27 preparation. If exact alpha27 provenance requires redeployment
-after the release-only merge, the guarded deployment path must preserve those
-stores and recheck provider health.
+Core and Developer report the deployed source revision. If exact alpha28
+provenance requires redeployment after the release-only merge, the guarded
+deployment path must preserve those stores and recheck provider health.
 
 ## Physical validation status
 
 The alpha26 Phone completed an earlier in-place OTA with data preservation and
-serves as the physical rollback baseline. Alpha27 publication does not prove an
-alpha27 install.
+serves as the physical rollback baseline. Publishing alpha28 does not by itself
+prove an alpha28 install.
 
-- Phone alpha27: pending in-place user OTA validation.
-- Watch alpha27: pending in-place user validation.
+- Phone alpha28: pending in-place user OTA validation.
+- Watch alpha28: pending in-place user validation.
 
 Neither application should be uninstalled or have its data cleared during
 validation.

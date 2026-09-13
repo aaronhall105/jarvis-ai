@@ -2,6 +2,22 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha28 — Email Assistant v3 and Outlook
+
+Alpha28 packages the already-merged Email Assistant v3 and its unified Gmail
+and Outlook/Microsoft 365 provider architecture. It adds Microsoft Graph and
+the Android Outlook connection controls, durable dialogue continuations,
+bounded frozen-set bulk cleanup, provider-specific Bin/Deleted Items language,
+and resilient Gmail incremental-history handling.
+
+Outlook support is included, but it remains **Setup Required** until Microsoft
+application configuration and Aaron's browser consent are complete. See
+[the complete alpha28 release notes](docs/releases/CHANGES_V19_0_0_ALPHA28.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
+## Historical releases
+
 ### v19.0.0-alpha27 — Google Personal Integrations v1
 
 Alpha27 packages the live-verified Google Personal Integrations v1 runtime with
@@ -16,8 +32,6 @@ See [the complete alpha27 release notes](docs/releases/CHANGES_V19_0_0_ALPHA27.m
 and the [published GitHub prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha27).
 
 Core application version remains `3.7.0`; realtime protocol remains `2`.
-
-## Historical releases
 
 Recent prerelease notes are indexed in
 [`docs/releases/README.md`](docs/releases/README.md). Older version-specific
