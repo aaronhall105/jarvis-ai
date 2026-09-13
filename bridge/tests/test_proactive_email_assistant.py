@@ -181,6 +181,7 @@ def change(
     *messages: dict[str, Any],
     bootstrap: bool = False,
     cursor_expired: bool = False,
+    skipped_not_found_count: int = 0,
 ):
     return {
         "history_id": history_id,
@@ -190,6 +191,7 @@ def change(
         "count": len(messages),
         "bootstrap": bootstrap,
         "cursor_expired": cursor_expired,
+        "skipped_not_found_count": skipped_not_found_count,
         "account_email": "aaron@example.test" if bootstrap or cursor_expired else None,
     }
 
@@ -287,6 +289,58 @@ async def test_important_alert_is_incremental_natural_deduplicated_and_restart_s
     replay = await restarted.run_assistant("aaron")
     assert replay["notifications_queued"] == 0
     assert len(notifications) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_gmail_history_message_advances_durable_cursor_without_replay(
+    tmp_path: Path,
+) -> None:
+    registry = ProactiveRegistry()
+    notifications: list[str] = []
+
+    async def notify(_principal: str, text: str, _title: str):
+        notifications.append(text)
+        return {"success": True}
+
+    path = tmp_path / "email.db"
+    engine = EmailAssistantPolicyEngine(path, registry, notifier=notify)  # type: ignore[arg-type]
+    await engine.configure_assistant(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mail",
+        important_email_alerts=True,
+    )
+    registry.change_results.append(change("100", bootstrap=True))
+    await engine.run_assistant("aaron")
+    registry.change_results.append(change("101", skipped_not_found_count=1))
+
+    observed = await engine.run_assistant("aaron")
+
+    assert observed["status"] == "healthy"
+    assert observed["history_not_found_skipped"] == 1
+    assert observed["notifications_queued"] == 0
+    status = await engine.assistant_status(principal_id="aaron")
+    assert status is not None
+    assert status["history_not_found_skipped_count"] == 1
+    assert notifications == []
+
+    restarted = EmailAssistantPolicyEngine(path, registry, notifier=notify)  # type: ignore[arg-type]
+    important = mail("security-after-skip", subject="Security alert")
+    registry.change_results.append(change("102", important))
+    resumed = await restarted.run_assistant("aaron")
+
+    assert resumed["status"] == "healthy"
+    assert resumed["notifications_queued"] == 1
+    assert len(notifications) == 1
+    restarted_status = await restarted.assistant_status(principal_id="aaron")
+    assert restarted_status is not None
+    assert restarted_status["history_not_found_skipped_count"] == 1
+
+    replayed = EmailAssistantPolicyEngine(path, registry, notifier=notify)  # type: ignore[arg-type]
+    registry.change_results.append(change("103", important))
+    replay = await replayed.run_assistant("aaron")
+    assert replay["notifications_queued"] == 0
+    assert len(notifications) == 1
+    assert registry.writes == []
 
 
 @pytest.mark.asyncio

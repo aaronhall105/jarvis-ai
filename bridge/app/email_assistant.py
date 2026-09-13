@@ -188,6 +188,7 @@ class EmailAssistantPolicyEngine:
                   evaluated_count INTEGER NOT NULL DEFAULT 0,
                   important_detected_count INTEGER NOT NULL DEFAULT 0,
                   notified_count INTEGER NOT NULL DEFAULT 0,
+                  history_not_found_skipped_count INTEGER NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -332,6 +333,7 @@ class EmailAssistantPolicyEngine:
                 "evaluated_count",
                 "important_detected_count",
                 "notified_count",
+                "history_not_found_skipped_count",
             ):
                 if column not in profile_columns:
                     connection.execute(
@@ -806,6 +808,7 @@ class EmailAssistantPolicyEngine:
             "evaluated_count": int(row["evaluated_count"]),
             "important_detected_count": int(row["important_detected_count"]),
             "notified_count": int(row["notified_count"]),
+            "history_not_found_skipped_count": int(row["history_not_found_skipped_count"]),
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
         }
@@ -3930,6 +3933,7 @@ class EmailAssistantPolicyEngine:
         account_email = str(data.get("account_email") or profile.get("account_email") or "")
         queued = 0
         processed = 0
+        skipped_not_found = max(0, int(data.get("skipped_not_found_count") or 0))
         threshold = _PRIORITY_LEVELS[str(profile["importance_threshold"])]
         for raw_message in data.get("messages") or ():
             if not isinstance(raw_message, Mapping):
@@ -4021,8 +4025,16 @@ class EmailAssistantPolicyEngine:
             connection.execute(
                 "UPDATE email_assistant_profiles SET evaluated_count=evaluated_count+?,"
                 "important_detected_count=important_detected_count+?,"
-                "notified_count=notified_count+?,updated_at=? WHERE principal_id=?",
-                (processed, queued, delivered, self._iso(self._now()), principal_id),
+                "notified_count=notified_count+?,history_not_found_skipped_count="
+                "history_not_found_skipped_count+?,updated_at=? WHERE principal_id=?",
+                (
+                    processed,
+                    queued,
+                    delivered,
+                    skipped_not_found,
+                    self._iso(self._now()),
+                    principal_id,
+                ),
             )
         return {
             "service": "email_assistant",
@@ -4032,6 +4044,7 @@ class EmailAssistantPolicyEngine:
             "bootstrap": bool(data.get("bootstrap")),
             "cursor_expired": bool(data.get("cursor_expired")),
             "processed": processed,
+            "history_not_found_skipped": skipped_not_found,
             "notifications_queued": queued,
             "notifications_delivered": delivered,
             "reply_watches_observed": watches,

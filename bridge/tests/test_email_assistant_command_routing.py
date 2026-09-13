@@ -1148,3 +1148,73 @@ async def test_capability_answer_uses_registered_available_capabilities_only(mon
     assert "Outlook support is available once" in response
     assert "force" not in response.casefold()
     assert "sync" not in response.casefold()
+    assert "I can Outlook" not in response
+    assert response.count("I can") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capabilities", "expected"),
+    [
+        (
+            [
+                {"capability_id": "gmail.search", "available": True},
+                {"capability_id": "gmail.send", "available": True},
+                {"capability_id": "gmail.changes", "available": True},
+                {"capability_id": "outlook.search", "available": False},
+            ],
+            ("check and search Gmail", "Outlook support is available once"),
+        ),
+        (
+            [
+                {"capability_id": "gmail.search", "available": True},
+                {"capability_id": "gmail.changes", "available": True},
+                {"capability_id": "outlook.search", "available": True},
+                {"capability_id": "outlook.changes", "available": True},
+            ],
+            ("check and search Gmail", "check and search Outlook"),
+        ),
+        (
+            [
+                {"capability_id": "gmail.search", "available": False},
+                {"capability_id": "outlook.search", "available": True},
+                {"capability_id": "outlook.send", "available": True},
+            ],
+            ("check and search Outlook", "send and reply safely"),
+        ),
+        (
+            [
+                {"capability_id": "gmail.search", "available": False},
+                {"capability_id": "outlook.search", "available": False},
+            ],
+            (
+                "I don't currently have a healthy connected email capability",
+                "Outlook support is available once",
+            ),
+        ),
+    ],
+)
+async def test_email_capability_answer_is_grammatical_for_provider_states(
+    monkeypatch, capabilities, expected
+) -> None:
+    monkeypatch.setattr(main, "email_policies", bulk_engine(count=0))
+    monkeypatch.setattr(
+        main.external_agent,
+        "capability_snapshot",
+        AsyncMock(return_value=capabilities),
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Tell me what you can do",
+        actor=actor(),
+        conversation_id=f"usr:aaron:capabilities:{len(capabilities)}:{expected[0]}",
+        request_id="capabilities-provider-state",
+    )
+
+    assert result is not None
+    response = str(result["response"])
+    assert all(fragment in response for fragment in expected)
+    assert "I can Outlook" not in response
+    assert "force" not in response.casefold()
+    assert "sync" not in response.casefold()
+    assert response.count("I can") <= 1
