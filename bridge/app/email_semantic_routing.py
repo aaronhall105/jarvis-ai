@@ -7,7 +7,6 @@ those decisions remain at the capability and policy boundaries.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 
@@ -32,25 +31,72 @@ def provider_from_text(text: str) -> str | None:
 def _person_reference(text: str) -> str | None:
     """Extract a person phrase from general sender-oriented email grammar."""
 
-    cleaned = " ".join(str(text or "").strip().split()).strip(" .?!")
-    patterns = (
-        r"\b(?:emails?|messages?|mail)\s+from\s+(.+)$",
-        r"\bfrom\s+(.+?)\s+(?:in|on)\s+(?:gmail|outlook|microsoft 365)$",
-        r"\b(?:emails?|messages?)\s+(.+?)\s+sent\s+(?:to\s+)?me$",
-        r"^(?:show me\s+)?(.+?)(?:'s|’s)\s+(?:latest|newest|most recent|last)\s+(?:email|message)$",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
-        if not match:
-            continue
-        value = re.sub(
-            r"\s+(?:on|in|from)\s+(?:my\s+)?(?:gmail|outlook|microsoft 365)(?:\s+account)?$",
-            "",
-            match.group(1),
-            flags=re.IGNORECASE,
-        ).strip(" ,.'\"")
-        if value and value.casefold() not in {"me", "my", "the", "a", "an"}:
-            return value
+    cleaned = " ".join(str(text or "")[:4_096].strip().split()).strip(" .?!")
+    lowered = cleaned.casefold().replace("’", "'")
+
+    def trim_provider_suffix(value: str) -> str:
+        lowered_value = value.casefold()
+        suffixes = tuple(
+            f" {preposition} {possessive}{provider}{account}"
+            for preposition in ("on", "in", "from")
+            for possessive in ("", "my ")
+            for provider in ("gmail", "outlook", "microsoft 365")
+            for account in ("", " account")
+        )
+        for suffix in suffixes:
+            if lowered_value.endswith(suffix):
+                return value[: -len(suffix)]
+        return value
+
+    value = ""
+    for marker in (
+        " emails from ",
+        " email from ",
+        " messages from ",
+        " message from ",
+        " mail from ",
+    ):
+        index = lowered.rfind(marker)
+        if index >= 0:
+            value = cleaned[index + len(marker) :]
+            break
+    if not value:
+        index = lowered.rfind(" from ")
+        if index >= 0 and any(
+            lowered.endswith(suffix)
+            for suffix in (
+                " in gmail",
+                " on gmail",
+                " in outlook",
+                " on outlook",
+                " in microsoft 365",
+                " on microsoft 365",
+            )
+        ):
+            value = cleaned[index + len(" from ") :]
+    if not value:
+        for noun in ("emails ", "email ", "messages ", "message "):
+            start = lowered.find(noun)
+            if start < 0:
+                continue
+            for suffix in (" sent to me", " sent me"):
+                if lowered.endswith(suffix):
+                    value = cleaned[start + len(noun) : -len(suffix)]
+                    break
+            if value:
+                break
+    if not value:
+        prefix_length = len("show me ") if lowered.startswith("show me ") else 0
+        possessive = lowered.find("'s ", prefix_length)
+        if possessive >= 0 and any(
+            lowered.endswith(f" {recency} {noun}")
+            for recency in ("latest", "newest", "most recent", "last")
+            for noun in ("email", "message")
+        ):
+            value = cleaned[prefix_length:possessive]
+    value = trim_provider_suffix(value).strip(" ,.'\"")
+    if value and value.casefold() not in {"me", "my", "the", "a", "an"}:
+        return value
     return None
 
 
@@ -62,59 +108,100 @@ def classify_email_read(
 ) -> EmailReadIntent | None:
     """Classify explicit mailbox reads and grounded conversational follow-ups."""
 
-    raw = " ".join(str(text or "").strip().split())
+    raw = " ".join(str(text or "")[:4_096].strip().split())
     command = raw.casefold().strip(" .?!")
     provider = provider_from_text(command)
-    email_domain = provider is not None or bool(
-        re.search(r"\b(?:emails?|messages?|mailbox|inbox|unread|bin|deleted items)\b", command)
+    email_domain = provider is not None or any(
+        token in f" {command} "
+        for token in (
+            " email ",
+            " emails ",
+            " message ",
+            " messages ",
+            " mailbox ",
+            " inbox ",
+            " unread ",
+            " bin ",
+            " deleted items ",
+        )
     )
 
-    provider_switch = re.fullmatch(
-        r"(?:and\s+)?what about\s+(?:my\s+)?(?:gmail|outlook)(?:\s+(?:account|ones?))?",
-        command,
-    )
-    if provider_switch and focused_kind:
+    provider_switches = {
+        f"{prefix}what about {possessive}{provider}{suffix}"
+        for prefix in ("", "and ")
+        for possessive in ("", "my ")
+        for provider in ("gmail", "outlook")
+        for suffix in ("", " account", " one", " ones")
+    }
+    if command in provider_switches and focused_kind:
         return EmailReadIntent(kind=focused_kind, provider=provider or focused_provider)
 
-    provider_list = re.fullmatch(
-        r"show me (?:the )?(?:gmail|outlook) (?:ones|emails|messages)", command
-    )
-    if provider_list and focused_kind == "count":
+    provider_lists = {
+        f"show me {article}{provider} {noun}"
+        for article in ("", "the ")
+        for provider in ("gmail", "outlook")
+        for noun in ("one", "ones", "email", "emails", "message", "messages")
+    }
+    if command in provider_lists and focused_kind == "count":
         return EmailReadIntent(kind="list_filter", provider=provider or focused_provider)
 
-    possessive_follow_up = re.fullmatch(
-        r"what about (.+?)(?:'s|’s) (?:emails|messages)", raw, flags=re.IGNORECASE
-    )
-    if possessive_follow_up:
-        return EmailReadIntent(
-            kind="sender_search",
-            provider=provider or focused_provider,
-            person=possessive_follow_up.group(1).strip(),
-        )
+    possessive_follow_up = command.removeprefix("what about ")
+    for suffix in ("'s emails", "'s email", "'s messages", "'s message"):
+        if possessive_follow_up.endswith(suffix):
+            followup_person = raw[len("what about ") : -len(suffix)].strip()
+            if followup_person:
+                return EmailReadIntent(
+                    kind="sender_search",
+                    provider=provider or focused_provider,
+                    person=followup_person,
+                )
 
     if command in {"what about hers", "what about her emails", "show me her emails"}:
         if focused_kind == "sender_search":
             return EmailReadIntent(kind="sender_search", provider=focused_provider)
         return None
 
-    if re.fullmatch(r"(?:what about\s+)?(?:the\s+)?one before (?:that|it)", command):
+    if command in {
+        "one before that",
+        "one before it",
+        "the one before that",
+        "the one before it",
+        "what about one before that",
+        "what about one before it",
+        "what about the one before that",
+        "what about the one before it",
+    }:
         return EmailReadIntent(kind="previous", provider=focused_provider)
-    if re.fullmatch(r"who (?:sent|was|is) (?:it|that)(?: from)?", command):
+    if command in {
+        "who sent it",
+        "who sent that",
+        "who was it",
+        "who was that",
+        "who is it",
+        "who is that",
+        "who was it from",
+        "who was that from",
+        "who is it from",
+        "who is that from",
+    }:
         return EmailReadIntent(kind="focused_sender", provider=focused_provider)
 
-    literal = re.search(
-        r"\b(?:search|find|look for)\b.*?\bexact (?:text|phrase)\s+(.+)$",
-        raw,
-        flags=re.IGNORECASE,
-    )
-    if literal and email_domain:
-        query = literal.group(1).strip(" .?!'\"")
-        return EmailReadIntent(kind="literal_search", provider=provider, literal_query=query)
+    literal_query = ""
+    if any(term in f" {command} " for term in (" search ", " find ", " look for ")):
+        for marker in (" exact text ", " exact phrase "):
+            index = command.find(marker)
+            if index >= 0:
+                literal_query = raw[index + len(marker) :].strip(" .?!'\"")
+                break
+    if literal_query and email_domain:
+        return EmailReadIntent(
+            kind="literal_search", provider=provider, literal_query=literal_query
+        )
 
     if email_domain and "how many" in command:
         filter_kind = (
             "bin"
-            if "deleted items" in command or re.search(r"\b(?:the\s+)?bin\b", command)
+            if "deleted items" in command or " bin " in f" {command} "
             else "unread_inbox"
             if "unread" in command
             else "all_mail"
@@ -131,10 +218,14 @@ def classify_email_read(
     if (
         person
         and email_domain
-        and any(
-            marker in command for marker in ("search", "find", "show", "any email", "any message")
+        and (
+            any(
+                marker in command
+                for marker in ("search", "find", "show", "any email", "any message")
+            )
+            or command.startswith("any ")
         )
-    ) or (person and email_domain and command.startswith("any ")):
+    ):
         return EmailReadIntent(kind="sender_search", provider=provider, person=person)
 
     if command in {"show me the latest one", "show the latest one"} and focused_kind:
