@@ -947,6 +947,40 @@ def bulk_engine(*, accounts=None, count: int = 38, execution=None):
     )
 
 
+def ambiguous_amber_resolution(*, unique_gill: bool = False) -> dict[str, object]:
+    gill_candidates = [
+        {
+            "contact_id": "people/amber-gill",
+            "display_name": "Amber Gill",
+            "address": "amber.gill.work@example.test",
+            "label": "work",
+        }
+    ]
+    if not unique_gill:
+        gill_candidates.append(
+            {
+                "contact_id": "people/amber-gill",
+                "display_name": "Amber Gill",
+                "address": "amber.gill.personal@example.test",
+                "label": "personal",
+            }
+        )
+    return {
+        "resolved": False,
+        "ambiguous": True,
+        "available": True,
+        "candidates": [
+            *gill_candidates,
+            {
+                "contact_id": "people/amber-jones",
+                "display_name": "Amber Jones",
+                "address": "amber.jones@example.test",
+                "label": None,
+            },
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_all_unread_freezes_exact_set_then_yes_executes_all(monkeypatch) -> None:
     engine = bulk_engine(count=38)
@@ -1348,7 +1382,8 @@ async def test_ambiguous_or_unknown_contact_never_invents_sender(monkeypatch) ->
         conversation_id="usr:aaron:dave-search",
         request_id="dave-search-1",
     )
-    assert ambiguous is not None and ambiguous["intent"] == "email_contact_ambiguous"
+    assert ambiguous is not None
+    assert ambiguous["intent"] == "email_read_contact_clarification"
     engine.search_mailbox.assert_not_awaited()
 
     engine.resolve_email_contact.return_value = {
@@ -1362,9 +1397,358 @@ async def test_ambiguous_or_unknown_contact_never_invents_sender(monkeypatch) ->
         conversation_id="usr:aaron:unknown-search",
         request_id="unknown-search-1",
     )
-    assert unknown is not None and unknown["intent"] == "email_contact_unresolved"
+    assert unknown is not None
+    assert unknown["intent"] == "email_read_contact_clarification"
     assert "exact email address" in str(unknown["response"])
     engine.search_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_latest_sender_clarification_fills_provider_name_and_address_slots(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(
+        accounts=[
+            {"provider": "google_gmail", "account_id": "gmail-1"},
+            {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+        ]
+    )
+    engine.resolve_email_contact.return_value = ambiguous_amber_resolution()
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:amber-latest-slots"
+
+    provider = await main._try_handle_email_assistant(
+        "Show me Amber's latest email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-slots-1",
+    )
+    contact = await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-slots-2",
+    )
+    address = await main._try_handle_email_assistant(
+        "Amber Gill",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-slots-3",
+    )
+
+    assert provider is not None and provider["response"] == "Do you mean Gmail or Outlook?"
+    assert contact is not None and "Amber Gill or Amber Jones" in str(contact["response"])
+    assert address is not None
+    assert address["response"] == "Do you mean Amber Gill's work address or personal address?"
+    assert "Fetching" not in str(address["response"])
+    engine.search_mailbox.assert_not_awaited()
+
+    completed = await main._try_handle_email_assistant(
+        "work",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-slots-4",
+    )
+
+    assert completed is not None
+    assert "Amber Gill's latest Outlook email" in str(completed["response"])
+    assert "Tomorrow's job" in str(completed["response"])
+    assert "Fetching" not in str(completed["response"])
+    assert engine.search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
+    assert (
+        engine.search_mailbox.await_args.kwargs["sender_address"] == "amber.gill.work@example.test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unique_full_name_executes_latest_sender_read_without_extra_question(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(
+        accounts=[
+            {"provider": "google_gmail", "account_id": "gmail-1"},
+            {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+        ]
+    )
+    engine.resolve_email_contact.return_value = ambiguous_amber_resolution(unique_gill=True)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:amber-unique-full-name"
+
+    await main._try_handle_email_assistant(
+        "Show me Amber's latest email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-unique-1",
+    )
+    await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-unique-2",
+    )
+    result = await main._try_handle_email_assistant(
+        "Amber Gill",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="amber-unique-3",
+    )
+
+    assert result is not None and "Amber Gill's latest Outlook email" in str(result["response"])
+    assert engine.search_mailbox.await_count == 1
+    assert (
+        engine.search_mailbox.await_args.kwargs["sender_address"] == "amber.gill.work@example.test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_full_name_during_contact_clarification_never_invents_identity(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(
+        accounts=[
+            {"provider": "google_gmail", "account_id": "gmail-1"},
+            {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+        ]
+    )
+    engine.resolve_email_contact.side_effect = [
+        ambiguous_amber_resolution(),
+        {"resolved": False, "ambiguous": False, "available": True, "candidates": []},
+    ]
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:unknown-full-name"
+    await main._try_handle_email_assistant(
+        "Show me Amber's latest email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="unknown-full-1",
+    )
+    await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="unknown-full-2",
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Someone Unknown",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="unknown-full-3",
+    )
+
+    assert result is not None and "exact email address" in str(result["response"])
+    engine.search_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_same_name_contacts_remain_ambiguous_until_exact_identity(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": True,
+        "available": True,
+        "candidates": [
+            {
+                "contact_id": "people/1",
+                "display_name": "Alex Smith",
+                "address": "alex.one@example.test",
+                "label": None,
+            },
+            {
+                "contact_id": "people/2",
+                "display_name": "Alex Smith",
+                "address": "alex.two@example.test",
+                "label": None,
+            },
+        ],
+    }
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    first = await main._try_handle_email_assistant(
+        "Show me Alex Smith's latest Outlook email",
+        actor=actor(),
+        conversation_id="usr:aaron:same-name",
+        request_id="same-name-1",
+    )
+    repeated = await main._try_handle_email_assistant(
+        "Alex Smith",
+        actor=actor(),
+        conversation_id="usr:aaron:same-name",
+        request_id="same-name-2",
+    )
+
+    assert first is not None and "more than one trusted email address" in str(first["response"])
+    assert repeated is not None and "more than one trusted email address" in str(
+        repeated["response"]
+    )
+    engine.search_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_personal_selector_uses_only_grounded_personal_candidate(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    resolution = ambiguous_amber_resolution()
+    resolution["candidates"] = list(resolution["candidates"])[:2]
+    engine.resolve_email_contact.return_value = resolution
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:personal-address"
+    await main._try_handle_email_assistant(
+        "Show me Amber Gill's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="personal-1",
+    )
+    result = await main._try_handle_email_assistant(
+        "personal",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="personal-2",
+    )
+
+    assert result is not None and "latest Outlook email" in str(result["response"])
+    assert (
+        engine.search_mailbox.await_args.kwargs["sender_address"]
+        == "amber.gill.personal@example.test"
+    )
+
+
+@pytest.mark.asyncio
+async def test_contact_clarification_survives_restart_and_remains_scoped(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "contact-restart.db"
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(database)))
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    resolution = ambiguous_amber_resolution()
+    resolution["candidates"] = list(resolution["candidates"])[:2]
+    engine.resolve_email_contact.return_value = resolution
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:contact-restart"
+    await main._try_handle_email_assistant(
+        "Show me Amber Gill's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="contact-restart-1",
+    )
+
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(database)))
+    result = await main._try_handle_email_assistant(
+        "work",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="contact-restart-2",
+    )
+
+    assert result is not None and "Amber Gill's latest Outlook email" in str(result["response"])
+    assert engine.search_mailbox.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_contact_clarification_cannot_cross_principal_or_conversation(monkeypatch) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    resolution = ambiguous_amber_resolution()
+    resolution["candidates"] = list(resolution["candidates"])[:2]
+    engine.resolve_email_contact.return_value = resolution
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "shared-contact-conversation"
+    await main._try_handle_email_assistant(
+        "Show me Amber Gill's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="contact-scope-1",
+    )
+
+    other_principal = await main._try_handle_email_assistant(
+        "work",
+        actor=actor("mallory"),
+        conversation_id=conversation,
+        request_id="contact-scope-2",
+    )
+    other_conversation = await main._try_handle_email_assistant(
+        "work",
+        actor=actor(),
+        conversation_id="usr:aaron:different-conversation",
+        request_id="contact-scope-3",
+    )
+
+    assert other_principal is not None and other_principal["success"] is False
+    assert other_conversation is None
+    engine.search_mailbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_switch_re_resolves_contact_for_selected_mailbox(monkeypatch) -> None:
+    engine = bulk_engine(
+        accounts=[
+            {"provider": "google_gmail", "account_id": "gmail-1"},
+            {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+        ]
+    )
+    engine.resolve_email_contact.side_effect = [
+        ambiguous_amber_resolution(),
+        {
+            "resolved": True,
+            "ambiguous": False,
+            "available": True,
+            "candidates": [
+                {
+                    "contact_id": "people/amber",
+                    "display_name": "Amber Gill",
+                    "address": "amber.gmail@example.test",
+                    "label": "personal",
+                }
+            ],
+        },
+    ]
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:provider-switch-contact"
+    await main._try_handle_email_assistant(
+        "Show me Amber's latest email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-switch-1",
+    )
+    await main._try_handle_email_assistant(
+        "Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-switch-2",
+    )
+    result = await main._try_handle_email_assistant(
+        "Actually Gmail",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-switch-3",
+    )
+
+    assert result is not None and "latest Gmail email" in str(result["response"])
+    assert engine.search_mailbox.await_args.kwargs["provider"] == "google_gmail"
+    assert engine.resolve_email_contact.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_resolved_contact_provider_failure_is_truthful_without_progress_claim(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    engine.search_mailbox.return_value = {
+        "success": False,
+        "provider": "microsoft_outlook",
+        "account_id": "outlook-1",
+        "messages": [],
+    }
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Show me Amber's latest Outlook email",
+        actor=actor(),
+        conversation_id="usr:aaron:contact-provider-failure",
+        request_id="contact-provider-failure-1",
+    )
+
+    assert result is not None and result["success"] is False
+    assert "couldn't read Outlook safely" in str(result["response"])
+    assert "fetch" not in str(result["response"]).casefold()
 
 
 @pytest.mark.asyncio

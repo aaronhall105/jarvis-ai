@@ -89,13 +89,28 @@ def _person_reference(text: str) -> str | None:
         prefix_length = len("show me ") if lowered.startswith("show me ") else 0
         possessive = lowered.find("'s ", prefix_length)
         if possessive >= 0 and any(
-            lowered.endswith(f" {recency} {noun}")
+            lowered.endswith(f" {recency} {provider}{noun}")
             for recency in ("latest", "newest", "most recent", "last")
+            for provider in ("", "gmail ", "outlook ", "microsoft 365 ")
             for noun in ("email", "message")
         ):
             value = cleaned[prefix_length:possessive]
     value = trim_provider_suffix(value).strip(" ,.'\"")
-    if value and value.casefold() not in {"me", "my", "the", "a", "an"}:
+    if value and value.casefold() not in {
+        "me",
+        "my",
+        "the",
+        "a",
+        "an",
+        "what",
+        "who",
+        "where",
+        "when",
+        "how",
+        "it",
+        "that",
+        "there",
+    }:
         return value
     return None
 

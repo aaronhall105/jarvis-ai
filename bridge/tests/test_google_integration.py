@@ -425,7 +425,13 @@ class GoogleFixture:
                 "person": {
                     "resourceName": "people/1",
                     "names": [{"displayName": "John Smith"}],
-                    "emailAddresses": [{"value": "john.one@example.test"}],
+                    "emailAddresses": [
+                        {
+                            "value": "john.one@example.test",
+                            "type": "work",
+                            "formattedType": "Work",
+                        }
+                    ],
                     "phoneNumbers": [{"value": "+441111111111"}],
                     "organizations": [{"name": "Example Ltd", "title": "Manager"}],
                 }
@@ -1657,6 +1663,14 @@ async def test_contacts_unique_and_duplicate_results_preserve_provider_details(
 
     assert unique.data["resolved"] is True
     assert unique.data["contact"]["email_addresses"] == ["john.one@example.test"]
+    assert unique.data["contact"]["email_identities"] == [
+        {
+            "address": "john.one@example.test",
+            "label": "work",
+            "provider_type": "work",
+            "formatted_type": "Work",
+        }
+    ]
     assert unique.data["contact"]["organization"] == {
         "name": "Example Ltd",
         "title": "Manager",

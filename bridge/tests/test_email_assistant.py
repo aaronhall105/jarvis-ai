@@ -85,6 +85,64 @@ class BriefingRegistry:
         )
 
 
+class ContactRegistry:
+    async def execute(self, request, *, refresh_health=False):
+        assert refresh_health is True
+        assert request.capability_id == "contacts.resolve"
+        return SimpleNamespace(
+            success=True,
+            error=None,
+            data={
+                "resolved": True,
+                "ambiguous": False,
+                "contact": {
+                    "resource_name": "people/amber",
+                    "display_name": "Amber Gill",
+                    "email_addresses": [
+                        "amber.work@example.test",
+                        "amber.personal@example.test",
+                    ],
+                    "email_identities": [
+                        {"address": "amber.work@example.test", "label": "work"},
+                        {"address": "amber.personal@example.test", "label": "personal"},
+                    ],
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_contact_resolution_preserves_each_trusted_address_identity(tmp_path: Path) -> None:
+    engine = EmailAssistantPolicyEngine(
+        tmp_path / "contact-email.db",
+        ContactRegistry(),  # type: ignore[arg-type]
+    )
+
+    result = await engine.resolve_email_contact(
+        principal_id="aaron",
+        conversation_id="usr:aaron:contacts",
+        query="Amber Gill",
+        request_id="contact-1",
+    )
+
+    assert result["resolved"] is False
+    assert result["ambiguous"] is True
+    assert result["candidates"] == [
+        {
+            "contact_id": "people/amber",
+            "display_name": "Amber Gill",
+            "address": "amber.work@example.test",
+            "label": "work",
+        },
+        {
+            "contact_id": "people/amber",
+            "display_name": "Amber Gill",
+            "address": "amber.personal@example.test",
+            "label": "personal",
+        },
+    ]
+
+
 def message(message_id: str, *, age_days: int, labels: set[str], now: datetime) -> dict[str, Any]:
     return {
         "message_id": message_id,

@@ -38,7 +38,7 @@ from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
 from app.email_assistant import EmailAssistantPolicyEngine
-from app.email_semantic_routing import classify_email_read
+from app.email_semantic_routing import classify_email_read, provider_from_text
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.intent_engine import IntentEngine, IntentError
@@ -808,6 +808,138 @@ def _sender_search_response(
     )
 
 
+def _latest_sender_response(
+    provider: str,
+    person: str,
+    messages: Sequence[Mapping[str, Any]],
+) -> str:
+    """Render the completed result of a provider-backed latest-sender read."""
+
+    provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+    if not messages:
+        return f"I couldn't find any {provider_name} emails from {person}."
+    message = messages[0]
+    subject = _safe_mail_text(message.get("subject"), limit=240) or "No subject"
+    snippet = _safe_mail_text(message.get("snippet"), limit=280)
+    received = _mail_time(message)
+    timing = f", received {received}" if received else ""
+    detail = f" {snippet}" if snippet else ""
+    return f"{person}'s latest {provider_name} email is ‘{subject}’{timing}.{detail}"
+
+
+def _trusted_contact_candidates(resolution: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return bounded contact/address identities without inventing address labels."""
+
+    raw_candidates = resolution.get("candidates")
+    candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, Sequence) and not isinstance(raw_candidates, (str, bytes)):
+        candidates = [dict(item) for item in raw_candidates if isinstance(item, Mapping)]
+    if not candidates:
+        contact = resolution.get("contact")
+        display_name = (
+            str(contact.get("display_name") or "").strip() if isinstance(contact, Mapping) else ""
+        )
+        candidates = [
+            {
+                "contact_id": (
+                    str(contact.get("resource_name") or "").strip() or None
+                    if isinstance(contact, Mapping)
+                    else None
+                ),
+                "display_name": display_name,
+                "address": str(address).strip().casefold(),
+                "label": None,
+            }
+            for address in resolution.get("addresses") or ()
+            if str(address).strip()
+        ]
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in candidates[:100]:
+        address = str(item.get("address") or "").strip().casefold()
+        _, parsed = parseaddr(address)
+        if not parsed or "@" not in parsed:
+            continue
+        display_name = _safe_mail_text(item.get("display_name"), limit=160)
+        label = str(item.get("label") or "").strip().casefold()
+        if label not in {"work", "personal"}:
+            label = ""
+        key = (display_name.casefold(), parsed.casefold(), label)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            {
+                "contact_id": _safe_mail_text(item.get("contact_id"), limit=320) or None,
+                "display_name": display_name,
+                "address": parsed.casefold(),
+                "label": label or None,
+            }
+        )
+    return result
+
+
+def _contact_clarification_prompt(person: str, candidates: Sequence[Mapping[str, Any]]) -> str:
+    """Ask only distinctions that trusted candidate metadata actually supports."""
+
+    names = list(
+        dict.fromkeys(
+            _safe_mail_text(item.get("display_name"), limit=160)
+            for item in candidates
+            if _safe_mail_text(item.get("display_name"), limit=160)
+        )
+    )
+    labels = {
+        str(item.get("label") or "").casefold()
+        for item in candidates
+        if str(item.get("label") or "").casefold() in {"work", "personal"}
+    }
+    display = names[0] if len(names) == 1 else person
+    if len(names) > 1:
+        shown = " or ".join(names[:3])
+        return f"Which {person} do you mean — {shown}?"
+    if labels == {"work", "personal"}:
+        return f"Do you mean {display}'s work address or personal address?"
+    if len(candidates) > 1:
+        return (
+            f"I’ve got more than one trusted email address for {display}. "
+            "Which exact address do you mean?"
+        )
+    return f"Which exact email address do you mean for {display}?"
+
+
+def _select_trusted_contact_candidates(
+    text: str, candidates: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Narrow one pending contact slot strictly from grounded candidate fields."""
+
+    command = " ".join(str(text or "").strip().split()).casefold().strip(" .?!")
+    if command in {"work", "work account", "work address", "their work address"}:
+        return [dict(item) for item in candidates if item.get("label") == "work"]
+    if command in {
+        "personal",
+        "personal account",
+        "personal address",
+        "home",
+        "home address",
+        "their personal address",
+    }:
+        return [dict(item) for item in candidates if item.get("label") == "personal"]
+    _, literal_address = parseaddr(command)
+    if literal_address and "@" in literal_address:
+        canonical = literal_address.casefold()
+        return [
+            dict(item)
+            for item in candidates
+            if str(item.get("address") or "").casefold() == canonical
+        ]
+    return [
+        dict(item)
+        for item in candidates
+        if str(item.get("display_name") or "").strip().casefold() == command
+    ]
+
+
 def _repeat_cleanup_prompt(provider: str, *, age_days: int, mode: str) -> str:
     provider_name = "Gmail" if provider == "google_gmail" else "Outlook"
     destination = (
@@ -957,6 +1089,312 @@ async def _try_handle_email_assistant(
             and str(item.get("account_id") or "").strip()
             and item.get("healthy") is not False
         ]
+
+    def scoped_accounts(accounts: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+        return [
+            {
+                "provider": str(item.get("provider") or ""),
+                "account_id": str(item.get("account_id") or ""),
+            }
+            for item in accounts
+            if str(item.get("provider") or "") and str(item.get("account_id") or "")
+        ]
+
+    async def execute_sender_read(
+        account: Mapping[str, Any],
+        *,
+        person: str,
+        address: str,
+        candidate: Mapping[str, Any] | None,
+        latest_only: bool,
+    ) -> dict[str, object]:
+        """Execute and render a resolved sender lookup in this same turn."""
+
+        provider = str(account["provider"])
+        account_id = str(account["account_id"])
+        result = await email_policies.search_mailbox(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            provider=provider,
+            account_id=account_id,
+            request_id=request_id or str(uuid.uuid4()),
+            sender_address=address,
+            literal_query=None,
+            filter_kind=None,
+            limit=10,
+        )
+        if not result.get("success"):
+            await dialogue.clear_goal(conversation_id, outcome="failed")
+            provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+            return {
+                "success": False,
+                "response": f"I couldn't read {provider_name} safely just now.",
+                "intent": "email_read_failed",
+            }
+        messages = [
+            dict(item) for item in result.get("messages") or () if isinstance(item, Mapping)
+        ]
+        for message in messages:
+            message["provider"] = provider
+            message["account_id"] = account_id
+        contact = {
+            "contact_id": (candidate or {}).get("contact_id"),
+            "display_name": person,
+            "email_addresses": [address],
+            "selected_label": (candidate or {}).get("label"),
+        }
+        await dialogue.clear_goal(conversation_id, outcome="completed")
+        await dialogue.record_email_read_focus(
+            conversation_id,
+            {
+                **result,
+                "principal_id": actor.user_key,
+                "provider": provider,
+                "account_id": account_id,
+                "query_kind": "sender_search",
+                "messages": messages,
+                "contact": contact,
+                "selected_index": 0,
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        response = (
+            _latest_sender_response(provider, person, messages)
+            if latest_only
+            else _sender_search_response(
+                provider,
+                person,
+                messages,
+                exact=bool(result.get("exact")),
+            )
+        )
+        return {"success": True, "response": response, "intent": "email_mailbox_read"}
+
+    async def begin_contact_clarification(
+        accounts: Sequence[Mapping[str, Any]],
+        *,
+        provider: str | None,
+        account_id: str | None,
+        person_query: str,
+        candidates: Sequence[Mapping[str, Any]],
+        latest_only: bool,
+        prompt: str,
+        missing_slot: str,
+    ) -> dict[str, object]:
+        await dialogue.begin_goal(
+            conversation_id,
+            "email_read_contact_clarification",
+            status="awaiting_slot",
+            slots={
+                "principal_id": actor.user_key,
+                "conversation_id": conversation_id,
+                "intent": "latest_email_from_person" if latest_only else "email_from_person",
+                "provider": provider,
+                "account_id": account_id,
+                "accounts": scoped_accounts(accounts),
+                "person_query": person_query,
+                "candidates": [dict(item) for item in candidates[:100]],
+                "latest_only": latest_only,
+                "request_id": request_id or str(uuid.uuid4()),
+            },
+            missing_slots=(missing_slot,),
+            prompt=prompt,
+            ttl_seconds=600,
+        )
+        return {
+            "success": True,
+            "response": prompt,
+            "intent": "email_read_contact_clarification",
+        }
+
+    async def resolve_contact_for_account(
+        account: Mapping[str, Any],
+        *,
+        accounts: Sequence[Mapping[str, Any]],
+        person_query: str,
+        latest_only: bool,
+        resolution_query: str | None = None,
+    ) -> dict[str, object]:
+        query = str(resolution_query or person_query).strip()
+        resolution = await email_policies.resolve_email_contact(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            query=query,
+            request_id=request_id or str(uuid.uuid4()),
+        )
+        candidates = _trusted_contact_candidates(resolution)
+        unique_addresses = list(
+            dict.fromkeys(str(item.get("address") or "") for item in candidates)
+        )
+        if len(unique_addresses) == 1:
+            selected = next(
+                item for item in candidates if item.get("address") == unique_addresses[0]
+            )
+            display_name = str(selected.get("display_name") or query).strip() or query
+            return await execute_sender_read(
+                account,
+                person=display_name,
+                address=unique_addresses[0],
+                candidate=selected,
+                latest_only=latest_only,
+            )
+        if candidates:
+            prompt = _contact_clarification_prompt(query, candidates)
+        elif resolution.get("available") is False:
+            prompt = (
+                "I couldn't verify that contact safely just now. "
+                "Which exact email address do you mean?"
+            )
+        else:
+            prompt = (
+                f"I couldn't uniquely match {query} to a trusted contact. "
+                "Which exact email address do you mean?"
+            )
+        return await begin_contact_clarification(
+            accounts,
+            provider=str(account["provider"]),
+            account_id=str(account["account_id"]),
+            person_query=query,
+            candidates=candidates,
+            latest_only=latest_only,
+            prompt=prompt,
+            missing_slot="contact_identity",
+        )
+
+    if (
+        dialogue_state.active_goal == "email_read_contact_clarification"
+        and dialogue_state.status == "awaiting_slot"
+    ):
+        slots = dict(dialogue_state.slots)
+        if (
+            str(slots.get("principal_id") or "") != actor.user_key
+            or str(slots.get("conversation_id") or "") != conversation_id
+        ):
+            await dialogue.clear_goal(conversation_id, outcome="invalid")
+            return {
+                "success": False,
+                "response": "I can't safely recover that email clarification.",
+                "intent": "email_read_contact_invalid",
+            }
+        if command in _EMAIL_HISTORY_CANCELLATIONS:
+            await dialogue.clear_goal(conversation_id, outcome="cancelled")
+            return {
+                "success": True,
+                "response": "Okay, I won't search that mailbox.",
+                "intent": "email_read_contact_cancelled",
+            }
+        available_accounts = await connected_accounts()
+        allowed = {
+            (str(item.get("provider") or ""), str(item.get("account_id") or ""))
+            for item in slots.get("accounts") or ()
+            if isinstance(item, Mapping)
+        }
+        available_accounts = [
+            item
+            for item in available_accounts
+            if (str(item.get("provider") or ""), str(item.get("account_id") or "")) in allowed
+        ]
+        selected_provider = str(slots.get("provider") or "") or None
+        provider_reply = provider_from_text(command)
+        if provider_reply is not None:
+            selected_provider = provider_reply
+        selected_accounts = [
+            item for item in available_accounts if item.get("provider") == selected_provider
+        ]
+        if selected_provider is None:
+            return await begin_contact_clarification(
+                available_accounts,
+                provider=None,
+                account_id=None,
+                person_query=str(slots.get("person_query") or "that person"),
+                candidates=[],
+                latest_only=bool(slots.get("latest_only")),
+                prompt="Do you mean Gmail or Outlook?",
+                missing_slot="provider",
+            )
+        if len(selected_accounts) != 1:
+            return await begin_contact_clarification(
+                available_accounts,
+                provider=selected_provider,
+                account_id=None,
+                person_query=str(slots.get("person_query") or "that person"),
+                candidates=[],
+                latest_only=bool(slots.get("latest_only")),
+                prompt=(
+                    f"Which {'Outlook' if selected_provider == 'microsoft_outlook' else 'Gmail'} "
+                    "account do you mean?"
+                ),
+                missing_slot="account_identity",
+            )
+        account = selected_accounts[0]
+        previous_provider = str(slots.get("provider") or "") or None
+        if previous_provider != selected_provider or not slots.get("candidates"):
+            return await resolve_contact_for_account(
+                account,
+                accounts=available_accounts,
+                person_query=str(slots.get("person_query") or "that person"),
+                latest_only=bool(slots.get("latest_only")),
+            )
+        contact_candidates = [
+            dict(item) for item in slots.get("candidates") or () if isinstance(item, Mapping)
+        ]
+        contact_matches = _select_trusted_contact_candidates(text, contact_candidates)
+        unique_addresses = list(
+            dict.fromkeys(str(item.get("address") or "") for item in contact_matches)
+        )
+        if len(unique_addresses) == 1:
+            selected_contact = next(
+                item for item in contact_matches if item.get("address") == unique_addresses[0]
+            )
+            display_name = (
+                str(
+                    selected_contact.get("display_name")
+                    or slots.get("person_query")
+                    or "that sender"
+                ).strip()
+                or "that sender"
+            )
+            return await execute_sender_read(
+                account,
+                person=display_name,
+                address=unique_addresses[0],
+                candidate=selected_contact,
+                latest_only=bool(slots.get("latest_only")),
+            )
+        if contact_matches:
+            return await begin_contact_clarification(
+                available_accounts,
+                provider=selected_provider,
+                account_id=str(account["account_id"]),
+                person_query=str(slots.get("person_query") or "that person"),
+                candidates=contact_matches,
+                latest_only=bool(slots.get("latest_only")),
+                prompt=_contact_clarification_prompt(
+                    str(
+                        contact_matches[0].get("display_name")
+                        or slots.get("person_query")
+                        or "that person"
+                    ),
+                    contact_matches,
+                ),
+                missing_slot="contact_identity",
+            )
+        _, literal_address = parseaddr(str(text))
+        if literal_address and "@" in literal_address:
+            return await execute_sender_read(
+                account,
+                person=str(slots.get("person_query") or literal_address),
+                address=literal_address.casefold(),
+                candidate=None,
+                latest_only=bool(slots.get("latest_only")),
+            )
+        return await resolve_contact_for_account(
+            account,
+            accounts=available_accounts,
+            person_query=str(slots.get("person_query") or "that person"),
+            latest_only=bool(slots.get("latest_only")),
+            resolution_query=str(text),
+        )
 
     async def snapshot_and_confirm(
         accounts: Sequence[Mapping[str, Any]],
@@ -1819,6 +2257,10 @@ async def _try_handle_email_assistant(
         "list_filter",
     }:
         accounts = await connected_accounts()
+        latest_sender_request = read_intent.kind == "sender_search" and any(
+            marker in command
+            for marker in ("latest", "newest", "most recent", "last email", "last message")
+        )
         selected_provider = read_intent.provider
         if selected_provider:
             accounts = [item for item in accounts if item.get("provider") == selected_provider]
@@ -1837,6 +2279,17 @@ async def _try_handle_email_assistant(
                 "intent": "email_read_provider_unavailable",
             }
         if len(accounts) != 1:
+            if read_intent.kind == "sender_search" and read_intent.person:
+                return await begin_contact_clarification(
+                    accounts,
+                    provider=None,
+                    account_id=None,
+                    person_query=read_intent.person,
+                    candidates=[],
+                    latest_only=latest_sender_request,
+                    prompt="Do you mean Gmail or Outlook?",
+                    missing_slot="provider",
+                )
             return {
                 "success": True,
                 "response": "Do you mean Gmail or Outlook?",
@@ -1876,20 +2329,32 @@ async def _try_handle_email_assistant(
                         request_id=request_id or str(uuid.uuid4()),
                     )
                     if resolution.get("ambiguous"):
-                        return {
-                            "success": True,
-                            "response": f"Which {person} do you mean?",
-                            "intent": "email_contact_ambiguous",
-                        }
+                        resolved_candidates = _trusted_contact_candidates(resolution)
+                        prompt = _contact_clarification_prompt(person, resolved_candidates)
+                        return await begin_contact_clarification(
+                            accounts,
+                            provider=provider,
+                            account_id=str(account["account_id"]),
+                            person_query=person,
+                            candidates=resolved_candidates,
+                            latest_only=latest_sender_request,
+                            prompt=prompt,
+                            missing_slot="contact_identity",
+                        )
                     if not resolution.get("resolved"):
-                        return {
-                            "success": True,
-                            "response": (
+                        return await begin_contact_clarification(
+                            accounts,
+                            provider=provider,
+                            account_id=str(account["account_id"]),
+                            person_query=person,
+                            candidates=_trusted_contact_candidates(resolution),
+                            latest_only=latest_sender_request,
+                            prompt=(
                                 f"I couldn't uniquely match {person} to a trusted contact. "
                                 "Which exact email address do you mean?"
                             ),
-                            "intent": "email_contact_unresolved",
-                        }
+                            missing_slot="contact_identity",
+                        )
                     contact_value = resolution.get("contact")
                     contact = dict(contact_value) if isinstance(contact_value, Mapping) else None
                     sender_address = str((resolution.get("addresses") or [""])[0])
@@ -1900,6 +2365,22 @@ async def _try_handle_email_assistant(
                     "response": "Which person or exact sender address should I search for?",
                     "intent": "email_contact_needed",
                 }
+            return await execute_sender_read(
+                account,
+                person=person,
+                address=sender_address,
+                candidate=(
+                    {
+                        "contact_id": (contact or {}).get("resource_name"),
+                        "display_name": person,
+                        "address": sender_address,
+                        "label": (contact or {}).get("selected_label"),
+                    }
+                    if contact
+                    else None
+                ),
+                latest_only=latest_sender_request,
+            )
         literal_query = (
             read_intent.literal_query
             if read_intent.kind == "literal_search"
