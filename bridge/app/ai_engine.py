@@ -682,6 +682,13 @@ _UNSUPPORTED_MAIL_APP_SYNC_PATTERN = re.compile(
     re.I,
 )
 
+_UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN = re.compile(
+    r"(?:^|[.!?]\s+)(?:i(?:'m| am|'ll| will)\s+)?"
+    r"(?:fetching|checking|retrieving|searching|looking\s+(?:it|that|this|them)\s+up)"
+    r"\b[^.!?\n]{0,180}(?:\bnow\b)?[.!?]*\s*$",
+    re.I,
+)
+
 
 def _verified_external_write_evidence(
     completed_calls: Sequence[dict[str, Any]],
@@ -786,6 +793,25 @@ def unbacked_future_promise_reply(
         "I can’t schedule or monitor that in the background from this Core yet, so I "
         "won’t promise a later update."
     )
+
+
+def unbacked_synchronous_read_promise_reply(
+    reply: str,
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Reject progress prose when no synchronous provider read actually completed."""
+
+    if not _UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN.search(str(reply or "").strip()):
+        return None
+    provider_read_completed = any(
+        call.get("tool") in {"google_integration", "microsoft_email_integration"}
+        and isinstance(call.get("result"), Mapping)
+        and call["result"].get("success") is True
+        for call in completed_calls
+    )
+    if provider_read_completed:
+        return None
+    return "I haven't completed that provider lookup, so I can't give you a mailbox result yet."
 
 
 def verified_monitor_creation_reply(
@@ -7004,6 +7030,13 @@ class AIEngine:
         plan_reply = verified_plan_creation_reply(completed_calls)
         if plan_reply is not None:
             final_reply = plan_reply
+
+        unbacked_read_reply = unbacked_synchronous_read_promise_reply(
+            final_reply,
+            completed_calls,
+        )
+        if unbacked_read_reply is not None:
+            final_reply = unbacked_read_reply
 
         unbacked_promise_reply = unbacked_future_promise_reply(
             final_reply,
