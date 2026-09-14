@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -37,6 +38,7 @@ from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
 from app.email_assistant import EmailAssistantPolicyEngine
+from app.email_semantic_routing import classify_email_read
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.intent_engine import IntentEngine, IntentError
@@ -730,6 +732,82 @@ def _email_provider_from_command(command: str) -> str | None:
     return None
 
 
+def _recent_email_read_focus(focus: object) -> dict[str, Any] | None:
+    if not isinstance(focus, Mapping):
+        return None
+    expires = str(focus.get("expires_at") or "")
+    try:
+        expiry = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    if expiry.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return None
+    return dict(focus)
+
+
+def _safe_mail_text(value: object, *, limit: int = 240) -> str:
+    return " ".join(str(value or "").replace("\x00", " ").split())[:limit]
+
+
+def _mail_sender(message: Mapping[str, Any]) -> tuple[str, str]:
+    explicit_name = _safe_mail_text(message.get("sender_name"), limit=120)
+    raw = _safe_mail_text(message.get("from"), limit=320)
+    parsed_name, parsed_address = parseaddr(raw)
+    address = _safe_mail_text(parsed_address or raw, limit=320)
+    display = (
+        explicit_name or _safe_mail_text(parsed_name, limit=120) or address or "an unknown sender"
+    )
+    return display, address
+
+
+def _mail_time(message: Mapping[str, Any]) -> str:
+    raw = str(message.get("received_at") or "").strip()
+    if not raw and isinstance(message.get("internal_date_ms"), (int, float)):
+        raw = datetime.fromtimestamp(
+            float(message["internal_date_ms"]) / 1000, tz=timezone.utc
+        ).isoformat()
+    try:
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%d %B at %H:%M").lstrip("0")
+
+
+def _latest_mail_response(provider: str, message: Mapping[str, Any]) -> str:
+    provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+    sender, _ = _mail_sender(message)
+    subject = _safe_mail_text(message.get("subject"), limit=240) or "No subject"
+    snippet = _safe_mail_text(message.get("snippet"), limit=280)
+    received = _mail_time(message)
+    timing = f", received {received}" if received else ""
+    detail = f" {snippet}" if snippet else ""
+    return f"Your latest {provider_name} email is from {sender} — ‘{subject}’{timing}.{detail}"
+
+
+def _sender_search_response(
+    provider: str,
+    person: str,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    exact: bool,
+) -> str:
+    provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+    count = len(messages)
+    if not count:
+        return f"I couldn't find any {provider_name} emails from {person}."
+    subject = _safe_mail_text(messages[0].get("subject"), limit=240) or "No subject"
+    qualifier = "" if exact else "at least "
+    noun = "email" if count == 1 else "emails"
+    return (
+        f"I found {qualifier}{count} {provider_name} {noun} from {person}. "
+        f"The latest is ‘{subject}’."
+    )
+
+
 def _repeat_cleanup_prompt(provider: str, *, age_days: int, mode: str) -> str:
     provider_name = "Gmail" if provider == "google_gmail" else "Outlook"
     destination = (
@@ -864,6 +942,7 @@ async def _try_handle_email_assistant(
             if isinstance(item, Mapping)
             and item.get("provider") in {"google_gmail", "microsoft_outlook"}
             and str(item.get("account_id") or "").strip()
+            and item.get("healthy") is not False
         ]
         if values:
             return values
@@ -876,6 +955,7 @@ async def _try_handle_email_assistant(
             if isinstance(item, Mapping)
             and item.get("provider") in {"google_gmail", "microsoft_outlook"}
             and str(item.get("account_id") or "").strip()
+            and item.get("healthy") is not False
         ]
 
     async def snapshot_and_confirm(
@@ -1601,10 +1681,65 @@ async def _try_handle_email_assistant(
             action_request_id=request_id or str(uuid.uuid4()),
         )
 
-    count_filter = _email_count_filter(command)
-    if count_filter is not None:
+    read_focus = _recent_email_read_focus(
+        dialogue_state.focus.get("email_read_query")
+        if isinstance(dialogue_state.focus, Mapping)
+        else None
+    )
+    if read_focus and str(read_focus.get("principal_id") or "") != actor.user_key:
+        read_focus = None
+    read_intent = classify_email_read(
+        text,
+        focused_provider=str((read_focus or {}).get("provider") or "") or None,
+        focused_kind=str((read_focus or {}).get("query_kind") or "") or None,
+    )
+    if read_intent is not None and read_intent.kind in {"focused_sender", "previous"}:
+        messages = [
+            dict(item)
+            for item in (read_focus or {}).get("messages") or ()
+            if isinstance(item, Mapping)
+        ]
+        selected_index = int((read_focus or {}).get("selected_index") or 0)
+        if not messages:
+            return {
+                "success": True,
+                "response": "Which email do you mean?",
+                "intent": "email_read_needs_context",
+            }
+        if read_intent.kind == "focused_sender":
+            sender, _ = _mail_sender(messages[min(selected_index, len(messages) - 1)])
+            return {
+                "success": True,
+                "response": f"It was from {sender}.",
+                "intent": "email_focused_sender",
+            }
+        next_index = selected_index + 1
+        if next_index >= len(messages):
+            return {
+                "success": True,
+                "response": "I don't have the preceding email in this grounded result.",
+                "intent": "email_previous_unavailable",
+            }
+        await dialogue.record_email_read_focus(
+            conversation_id,
+            {**dict(read_focus or {}), "selected_index": next_index, "messages": messages},
+        )
+        return {
+            "success": True,
+            "response": _latest_mail_response(
+                str((read_focus or {}).get("provider") or ""), messages[next_index]
+            ).replace("Your latest ", "The one before was an ", 1),
+            "intent": "email_previous_message",
+        }
+
+    if read_intent is not None and read_intent.kind == "count":
+        count_filter = read_intent.filter_kind or str((read_focus or {}).get("filter_kind") or "")
+        if not count_filter:
+            count_filter = "all_mail"
         accounts = await connected_accounts()
-        selected_provider = _email_provider_from_command(command)
+        selected_provider = read_intent.provider
+        if selected_provider is None and read_focus and read_focus.get("provider"):
+            selected_provider = str(read_focus["provider"])
         if selected_provider is None and count_filter == "bin":
             if "deleted items" in command:
                 selected_provider = "microsoft_outlook"
@@ -1630,28 +1765,226 @@ async def _try_handle_email_assistant(
             )
             counts.append(count_result)
         if not all(item.get("success") for item in counts):
+            failed_provider = next(
+                (
+                    "Outlook" if item.get("provider") == "microsoft_outlook" else "Gmail"
+                    for item in counts
+                    if not item.get("success")
+                ),
+                "that mailbox",
+            )
             return {
                 "success": False,
-                "response": "I couldn't get a trustworthy mailbox count just now.",
+                "response": f"I couldn't verify the current {failed_provider} count just now.",
                 "intent": "email_count_failed",
             }
         parts = []
         for item in counts:
             provider_name = "Gmail" if item["provider"] == "google_gmail" else "Outlook"
             qualifier = "at least " if not item.get("exact") else ""
-            destination = (
-                "Gmail Bin"
-                if count_filter == "bin" and item["provider"] == "google_gmail"
-                else "Outlook Deleted Items"
-                if count_filter == "bin"
-                else provider_name
+            count = int(item["count"])
+            noun = "email" if count == 1 else "emails"
+            if count_filter == "bin":
+                destination = (
+                    "Gmail Bin" if item["provider"] == "google_gmail" else "Outlook Deleted Items"
+                )
+                parts.append(f"{qualifier}{count} {noun} in your {destination}")
+            elif count_filter == "unread_inbox":
+                parts.append(f"{qualifier}{count} unread {noun} in your {provider_name} Inbox")
+            else:
+                location = "Outlook Inbox" if item["provider"] == "microsoft_outlook" else "Gmail"
+                parts.append(f"{qualifier}{count} {noun} in {location}")
+            await dialogue.record_email_read_focus(
+                conversation_id,
+                {
+                    "principal_id": actor.user_key,
+                    "provider": item["provider"],
+                    "account_id": item["account_id"],
+                    "query_kind": "count",
+                    "filter_kind": count_filter,
+                    "messages": [],
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                },
             )
-            parts.append(f"{qualifier}{int(item['count'])} in {destination}")
         return {
             "success": True,
             "response": "You've got " + " and ".join(parts) + ".",
             "intent": "email_mailbox_count",
         }
+
+    if read_intent is not None and read_intent.kind in {
+        "latest",
+        "sender_search",
+        "literal_search",
+        "list_filter",
+    }:
+        accounts = await connected_accounts()
+        selected_provider = read_intent.provider
+        if selected_provider:
+            accounts = [item for item in accounts if item.get("provider") == selected_provider]
+        elif read_focus and read_focus.get("provider"):
+            accounts = [
+                item
+                for item in accounts
+                if item.get("provider") == read_focus.get("provider")
+                and item.get("account_id") == read_focus.get("account_id")
+            ]
+        if not accounts:
+            provider_name = "Outlook" if selected_provider == "microsoft_outlook" else "Gmail"
+            return {
+                "success": False,
+                "response": f"{provider_name} isn't connected and healthy right now.",
+                "intent": "email_read_provider_unavailable",
+            }
+        if len(accounts) != 1:
+            return {
+                "success": True,
+                "response": "Do you mean Gmail or Outlook?",
+                "intent": "email_read_needs_account",
+            }
+        account = accounts[0]
+        provider = str(account["provider"])
+        person = read_intent.person
+        sender_address: str | None = None
+        contact: dict[str, Any] | None = None
+        if read_intent.kind == "sender_search":
+            if person is None and read_focus:
+                previous_contact = read_focus.get("contact")
+                if isinstance(previous_contact, Mapping):
+                    contact = dict(previous_contact)
+                    person = str(contact.get("display_name") or "").strip() or None
+                    addresses = [
+                        str(item).strip()
+                        for item in contact.get("email_addresses") or ()
+                        if str(item).strip()
+                    ]
+                    if len(set(addresses)) == 1:
+                        sender_address = addresses[0]
+            if person and sender_address is None:
+                _, literal_address = parseaddr(person)
+                if literal_address and "@" in literal_address:
+                    sender_address = literal_address.casefold()
+                    contact = {
+                        "display_name": person,
+                        "email_addresses": [sender_address],
+                    }
+                else:
+                    resolution = await email_policies.resolve_email_contact(
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        query=person,
+                        request_id=request_id or str(uuid.uuid4()),
+                    )
+                    if resolution.get("ambiguous"):
+                        return {
+                            "success": True,
+                            "response": f"Which {person} do you mean?",
+                            "intent": "email_contact_ambiguous",
+                        }
+                    if not resolution.get("resolved"):
+                        return {
+                            "success": True,
+                            "response": (
+                                f"I couldn't uniquely match {person} to a trusted contact. "
+                                "Which exact email address do you mean?"
+                            ),
+                            "intent": "email_contact_unresolved",
+                        }
+                    contact_value = resolution.get("contact")
+                    contact = dict(contact_value) if isinstance(contact_value, Mapping) else None
+                    sender_address = str((resolution.get("addresses") or [""])[0])
+                    person = str((contact or {}).get("display_name") or person)
+            if not person or not sender_address:
+                return {
+                    "success": True,
+                    "response": "Which person or exact sender address should I search for?",
+                    "intent": "email_contact_needed",
+                }
+        literal_query = (
+            read_intent.literal_query
+            if read_intent.kind == "literal_search"
+            else str((read_focus or {}).get("literal_query") or "") or None
+        )
+        filter_kind = (
+            str((read_focus or {}).get("filter_kind") or "") or None
+            if read_intent.kind == "list_filter"
+            else None
+        )
+        result = await email_policies.search_mailbox(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            provider=provider,
+            account_id=str(account["account_id"]),
+            request_id=request_id or str(uuid.uuid4()),
+            sender_address=sender_address,
+            literal_query=literal_query,
+            filter_kind=filter_kind,
+            limit=10,
+        )
+        if not result.get("success"):
+            provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+            return {
+                "success": False,
+                "response": f"I couldn't read {provider_name} safely just now.",
+                "intent": "email_read_failed",
+            }
+        messages = [
+            dict(item) for item in result.get("messages") or () if isinstance(item, Mapping)
+        ]
+        for message in messages:
+            message["provider"] = provider
+            message["account_id"] = str(account["account_id"])
+        focus_evidence = {
+            **result,
+            "principal_id": actor.user_key,
+            "provider": provider,
+            "account_id": str(account["account_id"]),
+            "query_kind": read_intent.kind,
+            "messages": messages,
+            "contact": contact,
+            "literal_query": literal_query,
+            "filter_kind": filter_kind,
+            "selected_index": 0,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await dialogue.record_email_read_focus(conversation_id, focus_evidence)
+        if read_intent.kind == "latest":
+            response = (
+                _latest_mail_response(provider, messages[0])
+                if messages
+                else f"There aren't any messages in your {'Outlook' if provider == 'microsoft_outlook' else 'Gmail'} Inbox."
+            )
+        elif read_intent.kind == "sender_search":
+            response = _sender_search_response(
+                provider,
+                person or sender_address or "that sender",
+                messages,
+                exact=bool(result.get("exact")),
+            )
+        elif read_intent.kind == "list_filter":
+            provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+            if not messages:
+                response = f"There aren't any matching messages in your {provider_name} mailbox."
+            else:
+                labels = []
+                for item in messages[:5]:
+                    sender, _ = _mail_sender(item)
+                    subject = _safe_mail_text(item.get("subject"), limit=160) or "No subject"
+                    labels.append(f"{sender} — ‘{subject}’")
+                qualifier = "latest " if not result.get("exact") else ""
+                response = (
+                    f"Here are the {qualifier}{len(labels)} matching {provider_name} emails: "
+                    + "; ".join(labels)
+                    + "."
+                )
+        else:
+            provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+            count = len(messages)
+            response = (
+                f"I found {'at least ' if not result.get('exact') else ''}{count} "
+                f"{provider_name} message{'s' if count != 1 else ''} matching that exact text."
+            )
+        return {"success": True, "response": response, "intent": "email_mailbox_read"}
 
     if command in {"do that", "do that then", "go ahead", "do it", "all of them"}:
         return {

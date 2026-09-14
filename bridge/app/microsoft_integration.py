@@ -998,13 +998,55 @@ class MicrosoftConnector(Connector):
         all_pages = payload.get("all_pages") is True
         maximum = max(1, min(int(payload.get("max_messages") or 5_000), 10_000))
         folder = str(payload.get("folder") or "").strip()
+        if payload.get("count_only") is True:
+            if not folder:
+                raise ValueError("An exact Outlook folder is required for a mailbox count")
+            value = await self._request(
+                principal,
+                "GET",
+                f"{GRAPH_API}/me/mailFolders/{self._segment(folder)}",
+                params={"$select": "id,displayName,totalItemCount,unreadItemCount"},
+            )
+            field = "unreadItemCount" if payload.get("unread") is True else "totalItemCount"
+            count = value.get(field)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise MicrosoftProviderError("Microsoft returned an invalid mail folder count")
+            return {
+                "messages": [],
+                "message_ids": [],
+                "count": count,
+                "exact": True,
+                "folder": str(value.get("displayName") or folder),
+                "count_field": field,
+                "pages": 1,
+                "truncated": False,
+            }, str(value.get("id") or "") or None
         path = f"/me/mailFolders/{self._segment(folder)}/messages" if folder else "/me/messages"
-        initial_params: dict[str, Any] = {"$top": limit, "$select": self._select()}
+        initial_params: dict[str, Any] = {
+            "$top": limit,
+            "$select": self._select(),
+            "$orderby": "receivedDateTime desc",
+        }
         if query:
             initial_params["$search"] = f'"{query.replace(chr(34), "")}"'
-        if payload.get("unread") is True:
+            # Microsoft Search supplies relevance order and rejects a competing
+            # orderby expression for some tenants.
+            initial_params.pop("$orderby", None)
+        sender = str(payload.get("sender") or "").strip()
+        if sender:
             if query:
-                raise ValueError("Outlook unread filtering cannot be combined with text search")
+                raise ValueError("Outlook sender filtering cannot be combined with text search")
+            address = self._recipient(sender).replace("'", "''")
+            # Graph's efficient-filter rule requires the order-by property to
+            # occur first in the filter.  This keeps sender results newest
+            # first without reverting to an ungrounded full-text search.
+            initial_params["$filter"] = (
+                "receivedDateTime ge 1900-01-01T00:00:00Z and "
+                f"from/emailAddress/address eq '{address}'"
+            )
+        if payload.get("unread") is True:
+            if query or sender:
+                raise ValueError("Outlook unread filtering cannot be combined with another filter")
             initial_params["$filter"] = "isRead eq false"
         params: Mapping[str, Any] | None = initial_params
         messages: list[dict[str, Any]] = []
@@ -1014,10 +1056,11 @@ class MicrosoftConnector(Connector):
         while pages < 100 and len(messages) < maximum:
             pages += 1
             value = await self._request(principal, "GET", url, params=params)
+            raw_messages = value.get("value")
+            if not isinstance(raw_messages, list):
+                raise MicrosoftProviderError("Microsoft returned an invalid message list")
             messages.extend(
-                self._message(item)
-                for item in value.get("value") or ()
-                if isinstance(item, Mapping)
+                self._message(item) for item in raw_messages if isinstance(item, Mapping)
             )
             next_link = str(value.get("@odata.nextLink") or "").strip()
             if not all_pages or not next_link:
@@ -1040,6 +1083,7 @@ class MicrosoftConnector(Connector):
             "count": len(messages),
             "pages": pages,
             "truncated": bool(next_link),
+            "exact": not bool(next_link),
         }, None
 
     async def _changes(

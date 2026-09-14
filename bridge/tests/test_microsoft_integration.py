@@ -18,6 +18,7 @@ from app.microsoft_integration import (
     MicrosoftConnector,
     MicrosoftOAuthConfig,
     MicrosoftOAuthService,
+    MicrosoftProviderError,
     microsoft_model_tool,
 )
 
@@ -41,6 +42,11 @@ class GraphFixture:
             "sent-1": "sent-id",
         }
         self.is_read = False
+        self.inbox_total = 201
+        self.inbox_unread = 47
+        self.inbox_status = 200
+        self.inbox_malformed = False
+        self.last_request_params: dict[str, str] = {}
 
     @staticmethod
     def message(message_id: str = "message-1", *, subject: str = "Friday's start") -> dict:
@@ -72,6 +78,7 @@ class GraphFixture:
     def response(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls[f"{request.method} {path}"] += 1
+        self.last_request_params = dict(request.url.params)
         if path.endswith("/oauth2/v2.0/token"):
             if self.refresh_revoked and b"grant_type=refresh_token" in request.content:
                 return httpx.Response(400, json={"error": "invalid_grant"})
@@ -96,7 +103,22 @@ class GraphFixture:
                 },
             )
         if path == "/v1.0/me/mailFolders/inbox":
-            return httpx.Response(200, json={"id": "inbox-id", "displayName": "Inbox"})
+            if self.inbox_status != 200:
+                return httpx.Response(
+                    self.inbox_status,
+                    json={"error": {"code": "fixtureFailure"}},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "id": "inbox-id",
+                    "displayName": "Inbox",
+                    "totalItemCount": ("not-a-count" if self.inbox_malformed else self.inbox_total),
+                    "unreadItemCount": (
+                        "not-a-count" if self.inbox_malformed else self.inbox_unread
+                    ),
+                },
+            )
         if path == "/v1.0/me/mailFolders/archive":
             return httpx.Response(200, json={"id": "archive-id", "displayName": "Archive"})
         if path == "/v1.0/me/mailFolders/deleteditems":
@@ -301,6 +323,94 @@ async def test_outlook_search_snapshots_all_delta_safe_pages(tmp_path: Path) -> 
     assert result["message_ids"][-1] == "message-142"
     assert result["pages"] == 2
     assert result["truncated"] is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("unread", "expected"), ((True, 47), (False, 201)))
+async def test_outlook_folder_count_uses_exact_graph_metadata(
+    tmp_path: Path, unread: bool, expected: int
+) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    result, reference = await connector._search(
+        "aaron",
+        {"folder": "inbox", "unread": unread, "count_only": True},
+    )
+
+    assert result["count"] == expected
+    assert result["exact"] is True
+    assert result["message_ids"] == []
+    assert reference == "inbox-id"
+    assert fixture.calls["GET /v1.0/me/mailFolders/inbox"] >= 1
+    assert fixture.calls["GET /v1.0/me/mailFolders/inbox/messages"] == 0
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_sender_search_uses_exact_address_filter_not_literal_search(
+    tmp_path: Path,
+) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    result, _ = await connector._search(
+        "aaron", {"folder": "inbox", "sender": "amber@example.test", "limit": 10}
+    )
+
+    assert result["count"] == 1
+    assert fixture.last_request_params["$filter"] == (
+        "receivedDateTime ge 1900-01-01T00:00:00Z and "
+        "from/emailAddress/address eq 'amber@example.test'"
+    )
+    assert "$search" not in fixture.last_request_params
+    assert fixture.last_request_params["$orderby"] == "receivedDateTime desc"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_latest_requests_provider_timestamp_order(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    await connector._search("aaron", {"folder": "inbox", "limit": 1})
+
+    assert fixture.last_request_params["$orderby"] == "receivedDateTime desc"
+    assert fixture.last_request_params["$top"] == "1"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", (401, 403, 429, 500, 503))
+async def test_outlook_folder_count_preserves_graph_failures(tmp_path: Path, status: int) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+    fixture.inbox_status = status
+    if status == 401:
+        fixture.refresh_revoked = True
+
+    with pytest.raises(MicrosoftProviderError) as error:
+        await connector._search("aaron", {"folder": "inbox", "unread": True, "count_only": True})
+
+    assert error.value.status_code in {status, 400}  # revoked refresh is an OAuth 400
+    assert error.value.retryable is (status in {429, 500, 503})
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_folder_count_rejects_malformed_provider_evidence(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+    fixture.inbox_malformed = True
+
+    with pytest.raises(MicrosoftProviderError, match="invalid mail folder count"):
+        await connector._search("aaron", {"folder": "inbox", "unread": True, "count_only": True})
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_latest_rejects_malformed_message_list(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+    fixture.search_pages = {"first": {"value": "not-a-message-list"}}
+
+    with pytest.raises(MicrosoftProviderError, match="invalid message list"):
+        await connector._search("aaron", {"folder": "inbox", "limit": 10})
     await client.aclose()
 
 
