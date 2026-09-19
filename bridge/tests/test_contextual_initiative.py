@@ -82,7 +82,14 @@ class ContextualInitiativeTests(unittest.TestCase):
     def test_spoken_initiative_uses_native_start_conversation(self) -> None:
         self.engine.speaker_entity = "assist_satellite.living_room"
         self.engine.quiet = lambda settings, now=None: False
-        self.engine.save_settings(SettingsModel(user_id="aaron", speak_enabled=True))
+        self.engine.presence = {"aaron": "home", "amber": "not_home"}
+        self.engine.save_settings(
+            SettingsModel(
+                user_id="aaron",
+                speak_enabled=True,
+                notification_mode="all_useful",
+            )
+        )
         calls = []
 
         async def fake_service(service_domain, service, payload):
@@ -112,6 +119,15 @@ class ContextualInitiativeTests(unittest.TestCase):
         self.assertGreater(event["reply_until"], int(time.time()))
 
     def test_reply_window_is_deterministic_and_feedback_suppresses_future_speech(self) -> None:
+        self.engine.presence = {"aaron": "home", "amber": "not_home"}
+        self.engine.quiet = lambda settings, now=None: False
+        self.engine.save_settings(
+            SettingsModel(
+                user_id="aaron",
+                speak_enabled=True,
+                notification_mode="all_useful",
+            )
+        )
         candidate = Candidate(
             "cameras",
             "package",
@@ -132,6 +148,7 @@ class ContextualInitiativeTests(unittest.TestCase):
                 "UPDATE proactive_events SET created_at=? WHERE id=?",
                 (int(time.time()) - 31, event["id"]),
             )
+            connection.execute("UPDATE proactive_incidents SET status='resolved',cooldown_until=0")
         later = asyncio.run(self.engine.record(candidate))
         self.assertEqual("disabled_by_user_feedback", later["decision"]["suppressed_reason"])
 
@@ -152,6 +169,9 @@ class ContextualInitiativeTests(unittest.TestCase):
                 connection.execute(
                     "UPDATE proactive_events SET created_at=? WHERE id=?",
                     (int(time.time()) - 31, event["id"]),
+                )
+                connection.execute(
+                    "UPDATE proactive_incidents SET status='resolved',cooldown_until=0"
                 )
         proposals = self.engine.proposals()
         self.assertEqual(1, len(proposals))
