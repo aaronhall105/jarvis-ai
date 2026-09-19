@@ -14,7 +14,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequenc
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -751,6 +751,49 @@ def _safe_mail_text(value: object, *, limit: int = 240) -> str:
     return " ".join(str(value or "").replace("\x00", " ").split())[:limit]
 
 
+def _explicit_read_sender_address(value: object) -> tuple[str, str] | None:
+    """Return one explicit current-turn sender address for a read-only filter.
+
+    This deliberately does not establish contact trust or recipient authority.  It
+    only recognises a bounded, injection-safe address supplied in the current user
+    turn so a pending mailbox read can use it as an exact sender filter.
+    """
+
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 500 or any(character in raw for character in "\r\n\x00"):
+        return None
+    cleaned = raw.rstrip(" \t.,!?;:")
+    if not cleaned:
+        return None
+    parsed = getaddresses([cleaned])
+    if len(parsed) != 1:
+        return None
+    display_name, address = parsed[0]
+    address = address.strip()
+    local, separator, domain = address.rpartition("@")
+    if (
+        separator != "@"
+        or address.count("@") != 1
+        or not local
+        or not domain
+        or len(address) > 320
+        or any(character.isspace() or ord(character) < 32 for character in address)
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or ".." in domain
+    ):
+        return None
+
+    if "<" in cleaned or ">" in cleaned:
+        display_match = re.fullmatch(r"[^<>]{0,160}<\s*([^<>\s]+)\s*>", cleaned)
+        if display_match is None or display_match.group(1).casefold() != address.casefold():
+            return None
+    elif cleaned.casefold() != address.casefold():
+        return None
+
+    return _safe_mail_text(display_name, limit=160), address.casefold()
+
+
 def _mail_sender(message: Mapping[str, Any]) -> tuple[str, str]:
     explicit_name = _safe_mail_text(message.get("sender_name"), limit=120)
     raw = _safe_mail_text(message.get("from"), limit=320)
@@ -925,9 +968,9 @@ def _select_trusted_contact_candidates(
         "their personal address",
     }:
         return [dict(item) for item in candidates if item.get("label") == "personal"]
-    _, literal_address = parseaddr(command)
-    if literal_address and "@" in literal_address:
-        canonical = literal_address.casefold()
+    explicit_address = _explicit_read_sender_address(text)
+    if explicit_address is not None:
+        _, canonical = explicit_address
         return [
             dict(item)
             for item in candidates
@@ -1107,6 +1150,7 @@ async def _try_handle_email_assistant(
         address: str,
         candidate: Mapping[str, Any] | None,
         latest_only: bool,
+        source: str | None = None,
     ) -> dict[str, object]:
         """Execute and render a resolved sender lookup in this same turn."""
 
@@ -1142,6 +1186,8 @@ async def _try_handle_email_assistant(
             "display_name": person,
             "email_addresses": [address],
             "selected_label": (candidate or {}).get("label"),
+            "source": source
+            or ("trusted_contact" if candidate else "explicit_current_turn_address"),
         }
         await dialogue.clear_goal(conversation_id, outcome="completed")
         await dialogue.record_email_read_focus(
@@ -1295,7 +1341,8 @@ async def _try_handle_email_assistant(
             if (str(item.get("provider") or ""), str(item.get("account_id") or "")) in allowed
         ]
         selected_provider = str(slots.get("provider") or "") or None
-        provider_reply = provider_from_text(command)
+        address_like_reply = any(marker in str(text) for marker in ("@", "<", ">"))
+        provider_reply = None if address_like_reply else provider_from_text(command)
         if provider_reply is not None:
             selected_provider = provider_reply
         selected_accounts = [
@@ -1328,7 +1375,7 @@ async def _try_handle_email_assistant(
             )
         account = selected_accounts[0]
         previous_provider = str(slots.get("provider") or "") or None
-        if previous_provider != selected_provider or not slots.get("candidates"):
+        if previous_provider != selected_provider:
             return await resolve_contact_for_account(
                 account,
                 accounts=available_accounts,
@@ -1338,6 +1385,53 @@ async def _try_handle_email_assistant(
         contact_candidates = [
             dict(item) for item in slots.get("candidates") or () if isinstance(item, Mapping)
         ]
+        explicit_address = _explicit_read_sender_address(text)
+        if explicit_address is not None:
+            display_name, canonical_address = explicit_address
+            selected_contact = next(
+                (
+                    item
+                    for item in contact_candidates
+                    if str(item.get("address") or "").casefold() == canonical_address
+                ),
+                None,
+            )
+            sender_display = (
+                str((selected_contact or {}).get("display_name") or display_name).strip()
+                or str(slots.get("person_query") or canonical_address).strip()
+                or canonical_address
+            )
+            return await execute_sender_read(
+                account,
+                person=sender_display,
+                address=canonical_address,
+                candidate=selected_contact,
+                latest_only=bool(slots.get("latest_only")),
+                source=(
+                    "trusted_contact"
+                    if selected_contact is not None
+                    else "explicit_current_turn_address"
+                ),
+            )
+        if "@" in str(text) or "<" in str(text) or ">" in str(text):
+            return await begin_contact_clarification(
+                available_accounts,
+                provider=selected_provider,
+                account_id=str(account["account_id"]),
+                person_query=str(slots.get("person_query") or "that person"),
+                candidates=contact_candidates,
+                latest_only=bool(slots.get("latest_only")),
+                prompt="Please give me one exact email address.",
+                missing_slot="contact_identity",
+            )
+        if not contact_candidates:
+            return await resolve_contact_for_account(
+                account,
+                accounts=available_accounts,
+                person_query=str(slots.get("person_query") or "that person"),
+                latest_only=bool(slots.get("latest_only")),
+                resolution_query=str(text),
+            )
         contact_matches = _select_trusted_contact_candidates(text, contact_candidates)
         unique_addresses = list(
             dict.fromkeys(str(item.get("address") or "") for item in contact_matches)
@@ -1378,15 +1472,6 @@ async def _try_handle_email_assistant(
                     contact_matches,
                 ),
                 missing_slot="contact_identity",
-            )
-        _, literal_address = parseaddr(str(text))
-        if literal_address and "@" in literal_address:
-            return await execute_sender_read(
-                account,
-                person=str(slots.get("person_query") or literal_address),
-                address=literal_address.casefold(),
-                candidate=None,
-                latest_only=bool(slots.get("latest_only")),
             )
         return await resolve_contact_for_account(
             account,

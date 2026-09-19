@@ -1404,6 +1404,194 @@ async def test_ambiguous_or_unknown_contact_never_invents_sender(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "initial_request"),
+    (
+        ("microsoft_outlook", "Show me Amber's latest Outlook email"),
+        ("google_gmail", "Show me Amber's latest Gmail email"),
+    ),
+)
+@pytest.mark.parametrize(
+    ("clarification", "canonical"),
+    (
+        ("amber@example.test", "amber@example.test"),
+        ("AMBER@EXAMPLE.TEST", "amber@example.test"),
+        ("Amber Gill <amber@example.test>", "amber@example.test"),
+        ("amber@example.test.", "amber@example.test"),
+        ("amber@outlook.com", "amber@outlook.com"),
+    ),
+)
+async def test_exact_current_turn_address_completes_empty_candidate_read_clarification(
+    monkeypatch,
+    provider: str,
+    initial_request: str,
+    clarification: str,
+    canonical: str,
+) -> None:
+    account_id = "outlook-1" if provider == "microsoft_outlook" else "gmail-1"
+    engine = bulk_engine(accounts=[{"provider": provider, "account_id": account_id}])
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": False,
+        "available": True,
+        "candidates": [],
+    }
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = f"usr:aaron:explicit-address:{provider}:{clarification}"
+
+    prompt = await main._try_handle_email_assistant(
+        initial_request,
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="explicit-address-1",
+    )
+    completed = await main._try_handle_email_assistant(
+        clarification,
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="explicit-address-2",
+    )
+
+    assert prompt is not None and "exact email address" in str(prompt["response"])
+    assert completed is not None and completed["intent"] == "email_mailbox_read"
+    assert completed["response"] != prompt["response"]
+    assert "latest" in str(completed["response"]).casefold()
+    engine.resolve_email_contact.assert_awaited_once()
+    engine.search_mailbox.assert_awaited_once()
+    assert engine.search_mailbox.await_args.kwargs["provider"] == provider
+    assert engine.search_mailbox.await_args.kwargs["sender_address"] == canonical
+    state = await main.dialogue.get(conversation)
+    assert state.active_goal is None
+    contact = state.focus["email_read_query"]["contact"]
+    assert contact["source"] == "explicit_current_turn_address"
+    assert contact["email_addresses"] == [canonical]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "clarification",
+    (
+        "amber@@example.test",
+        "amber@example.test, other@example.test",
+        "Amber <amber@example.test> Other <other@example.test>",
+        "amber@example.test\nBcc: other@example.test",
+        "x" * 501 + "@example.test",
+    ),
+)
+async def test_invalid_or_multiple_current_turn_addresses_do_not_execute_mailbox_read(
+    monkeypatch, clarification: str
+) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": False,
+        "available": True,
+        "candidates": [],
+    }
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = f"usr:aaron:invalid-address:{len(clarification)}"
+    await main._try_handle_email_assistant(
+        "Show me Amber's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="invalid-address-1",
+    )
+
+    result = await main._try_handle_email_assistant(
+        clarification,
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="invalid-address-2",
+    )
+
+    assert result is not None and "one exact email address" in str(result["response"])
+    engine.resolve_email_contact.assert_awaited_once()
+    engine.search_mailbox.assert_not_awaited()
+    assert (await main.dialogue.get(conversation)).active_goal == (
+        "email_read_contact_clarification"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("clarification", "expected_address", "expected_source"),
+    (
+        ("amber.gill.work@example.test", "amber.gill.work@example.test", "trusted_contact"),
+        ("different@example.test", "different@example.test", "explicit_current_turn_address"),
+    ),
+)
+async def test_exact_address_can_select_trusted_candidate_or_explicit_read_filter(
+    monkeypatch,
+    clarification: str,
+    expected_address: str,
+    expected_source: str,
+) -> None:
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    resolution = ambiguous_amber_resolution()
+    resolution["candidates"] = list(resolution["candidates"])[:2]
+    engine.resolve_email_contact.return_value = resolution
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = f"usr:aaron:candidate-address:{expected_source}"
+    await main._try_handle_email_assistant(
+        "Show me Amber Gill's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="candidate-address-1",
+    )
+
+    result = await main._try_handle_email_assistant(
+        clarification,
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="candidate-address-2",
+    )
+
+    assert result is not None and result["intent"] == "email_mailbox_read"
+    assert engine.search_mailbox.await_args.kwargs["sender_address"] == expected_address
+    state = await main.dialogue.get(conversation)
+    contact = state.focus["email_read_query"]["contact"]
+    assert contact["source"] == expected_source
+    if expected_source == "explicit_current_turn_address":
+        assert contact["contact_id"] is None
+        assert contact["selected_label"] is None
+
+
+@pytest.mark.asyncio
+async def test_exact_address_completes_contact_clarification_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    database = tmp_path / "explicit-address-restart.db"
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(database)))
+    engine = bulk_engine(accounts=[{"provider": "microsoft_outlook", "account_id": "outlook-1"}])
+    engine.resolve_email_contact.return_value = {
+        "resolved": False,
+        "ambiguous": False,
+        "available": True,
+        "candidates": [],
+    }
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:explicit-address-restart"
+    await main._try_handle_email_assistant(
+        "Show me Amber's latest Outlook email",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="explicit-restart-1",
+    )
+
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(database)))
+    result = await main._try_handle_email_assistant(
+        "amber@example.test",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="explicit-restart-2",
+    )
+
+    assert result is not None and result["intent"] == "email_mailbox_read"
+    assert engine.search_mailbox.await_args.kwargs["sender_address"] == "amber@example.test"
+    assert (await main.dialogue.get(conversation)).active_goal is None
+
+
+@pytest.mark.asyncio
 async def test_latest_sender_clarification_fills_provider_name_and_address_slots(
     monkeypatch,
 ) -> None:
