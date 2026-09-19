@@ -2972,11 +2972,35 @@ class GoogleConnector(Connector):
         organizations = [
             item for item in person.get("organizations") or () if isinstance(item, Mapping)
         ]
-        emails = [
-            str(item.get("value")).strip()
-            for item in person.get("emailAddresses") or ()
-            if isinstance(item, Mapping) and item.get("value")
-        ]
+        email_identities: list[dict[str, str | None]] = []
+        seen_emails: set[str] = set()
+        for item in person.get("emailAddresses") or ():
+            if not isinstance(item, Mapping) or not item.get("value"):
+                continue
+            address = str(item["value"]).strip()
+            canonical = address.casefold()
+            if not address or canonical in seen_emails:
+                continue
+            seen_emails.add(canonical)
+            raw_type = str(item.get("type") or "").strip().casefold()
+            formatted_type = str(item.get("formattedType") or "").strip()
+            label_source = f"{raw_type} {formatted_type.casefold()}"
+            label = (
+                "work"
+                if "work" in label_source
+                else "personal"
+                if any(value in label_source for value in ("home", "personal"))
+                else None
+            )
+            email_identities.append(
+                {
+                    "address": address,
+                    "label": label,
+                    "provider_type": raw_type or None,
+                    "formatted_type": formatted_type or None,
+                }
+            )
+        emails = [item["address"] for item in email_identities]
         phones = [
             str(item.get("value")).strip()
             for item in person.get("phoneNumbers") or ()
@@ -2986,6 +3010,7 @@ class GoogleConnector(Connector):
             "resource_name": person.get("resourceName"),
             "display_name": names[0].get("displayName") if names else None,
             "email_addresses": list(dict.fromkeys(item for item in emails if item))[:100],
+            "email_identities": email_identities[:100],
             "phone_numbers": list(dict.fromkeys(item for item in phones if item))[:100],
             "organization": (
                 {

@@ -4,6 +4,7 @@ from app.ai_engine import (
     RequestIntent,
     RequestRouter,
     remove_unbacked_executable_offer,
+    unbacked_synchronous_read_promise_reply,
     unbacked_future_promise_reply,
     unsupported_external_capability_reply,
     verified_gmail_reply_status_reply,
@@ -229,6 +230,31 @@ def test_unbacked_future_commitment_is_blocked() -> None:
     assert unbacked_future_promise_reply("I'll get back to you later.", []) is not None
     assert (
         unbacked_future_promise_reply("I'll get back to you later.", [{"tool": "task"}]) is not None
+    )
+
+
+def test_synchronous_provider_read_progress_claim_requires_completed_execution() -> None:
+    for reply in (
+        "Fetching Amber Gill's latest Outlook email now.",
+        "Checking that for you now.",
+        "Looking that up now.",
+        "Retrieving the message now.",
+        "Searching Outlook now.",
+    ):
+        replacement = unbacked_synchronous_read_promise_reply(reply, [])
+        assert replacement is not None
+        assert "haven't completed" in replacement
+    assert (
+        unbacked_synchronous_read_promise_reply(
+            "Fetching that now.",
+            [
+                {
+                    "tool": "microsoft_email_integration",
+                    "result": {"success": True, "data": {"messages": [{}]}},
+                }
+            ],
+        )
+        is None
     )
     assert unbacked_future_promise_reply("I'll keep an eye on it.", []) is not None
     assert unbacked_future_promise_reply("I'll watch it.", []) is not None

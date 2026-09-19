@@ -1263,19 +1263,53 @@ class EmailAssistantPolicyEngine:
             return {"resolved": False, "ambiguous": False, "available": False}
         data = dict(execution.data)
         contact = data.get("contact")
-        addresses = []
-        if isinstance(contact, Mapping):
-            addresses = [
-                str(item).strip().casefold()
-                for item in contact.get("email_addresses") or ()
-                if str(item).strip()
+        contacts = (
+            [dict(contact)]
+            if isinstance(contact, Mapping)
+            else [dict(item) for item in data.get("matches") or () if isinstance(item, Mapping)]
+        )
+        candidates: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for candidate_contact in contacts:
+            display_name = str(candidate_contact.get("display_name") or query).strip() or query
+            resource_name = str(candidate_contact.get("resource_name") or "").strip() or None
+            identities = [
+                dict(item)
+                for item in candidate_contact.get("email_identities") or ()
+                if isinstance(item, Mapping) and str(item.get("address") or "").strip()
             ]
+            if not identities:
+                identities = [
+                    {"address": item, "label": None}
+                    for item in candidate_contact.get("email_addresses") or ()
+                    if str(item).strip()
+                ]
+            for identity in identities:
+                address = str(identity.get("address") or "").strip().casefold()
+                label = str(identity.get("label") or "").strip().casefold()
+                if label not in {"work", "personal"}:
+                    label = ""
+                key = (display_name.casefold(), address, label)
+                if not address or key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(
+                    {
+                        "contact_id": resource_name,
+                        "display_name": display_name,
+                        "address": address,
+                        "label": label or None,
+                    }
+                )
+        addresses = list(dict.fromkeys(str(item["address"]) for item in candidates))
         return {
-            "resolved": data.get("resolved") is True and len(set(addresses)) == 1,
-            "ambiguous": data.get("ambiguous") is True or len(set(addresses)) > 1,
+            "resolved": len(addresses) == 1,
+            "ambiguous": data.get("ambiguous") is True or len(addresses) > 1,
             "available": True,
             "contact": dict(contact) if isinstance(contact, Mapping) else None,
-            "addresses": list(dict.fromkeys(addresses)),
+            "contacts": contacts,
+            "candidates": candidates,
+            "addresses": addresses,
         }
 
     async def snapshot_bulk_action(
