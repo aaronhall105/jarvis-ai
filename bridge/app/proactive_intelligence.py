@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -26,6 +26,13 @@ from .proactive_policy import (
     proactive_notification_tag,
     proactive_speech_allowed,
     safety_kind,
+)
+from .notification_policy import (
+    CRITICAL_SAFETY_KINDS,
+    NOTIFICATION_MODES,
+    decide_notification,
+    normalise_mode,
+    notification_recipients,
 )
 
 
@@ -155,7 +162,9 @@ class Rules:
         name = friendly(current)
         lowered = f"{entity_id} {name}".lower()
         age = max(0, now - first_seen)
-        away = all(value != "home" for value in presence.values())
+        away = bool(presence) and all(
+            value not in {"", "home", "unknown", "unavailable"} for value in presence.values()
+        )
         result: list[Candidate] = []
 
         safety = safety_kind(previous, current)
@@ -213,15 +222,25 @@ class Rules:
             word in lowered for word in ("door", "window", "contact", "opening")
         )
         if door and state in {"on", "open", "true"} and age >= self.door_seconds:
+            appliance_opening = any(
+                word in lowered
+                for word in (
+                    "washing machine",
+                    "washing_machine",
+                    "washer",
+                    "dryer",
+                    "dishwasher",
+                )
+            )
             result.append(
                 Candidate(
-                    "security",
-                    "door_open",
+                    "appliances" if appliance_opening else "security",
+                    "appliance_door_open" if appliance_opening else "door_open",
                     entity_id,
-                    "Door or window left open",
+                    "Appliance door open" if appliance_opening else "Door or window left open",
                     f"{name} has been open for {max(1, age // 60)} minutes.",
                     f"{entity_id} remained {state} for {age} seconds",
-                    90 if away else 86,
+                    35 if appliance_opening else 90 if away else 86,
                 )
             )
 
@@ -368,6 +387,14 @@ class SettingsModel(BaseModel):
     min_importance: int = Field(80, ge=0, le=100)
     notify_enabled: bool = True
     speak_enabled: bool = False
+    notification_mode: (
+        Literal[
+            "important_only",
+            "all_useful",
+            "critical_only",
+        ]
+        | None
+    ) = None
     quiet_start_hour: int = Field(22, ge=0, le=23)
     quiet_end_hour: int = Field(7, ge=0, le=23)
     categories: dict[str, bool] = Field(default_factory=dict)
@@ -403,6 +430,14 @@ class ProactiveEngine:
         self.enabled = enabled
         self.min_importance = max(0, min(100, min_importance))
         self.cooldown = max(30, cooldown)
+        self.camera_incident_cooldown = max(
+            self.cooldown,
+            int(env("JARVIS_PROACTIVE_CAMERA_INCIDENT_COOLDOWN_SECONDS", default="1800")),
+        )
+        self.household_incident_cooldown = max(
+            self.cooldown,
+            int(env("JARVIS_PROACTIVE_INCIDENT_COOLDOWN_SECONDS", default="3600")),
+        )
         self.poll_seconds = max(5, poll_seconds)
         self.speaker_entity = speaker_entity.strip()
         self.reply_window_seconds = max(
@@ -508,7 +543,8 @@ class ProactiveEngine:
             " min_importance INTEGER NOT NULL, notify_enabled INTEGER NOT NULL,\n"
             " speak_enabled INTEGER NOT NULL, quiet_start_hour INTEGER NOT NULL,\n"
             " quiet_end_hour INTEGER NOT NULL, categories_json TEXT NOT NULL,\n"
-            " updated_at INTEGER NOT NULL\n"
+            " updated_at INTEGER NOT NULL,\n"
+            " notification_mode TEXT NOT NULL DEFAULT 'important_only'\n"
             ");\n"
         )
         with self.connection() as connection:
@@ -529,6 +565,15 @@ class ProactiveEngine:
                     connection.execute(
                         f"ALTER TABLE proactive_events ADD COLUMN {column} {definition}"
                     )
+            settings_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(proactive_settings)").fetchall()
+            }
+            if "notification_mode" not in settings_columns:
+                connection.execute(
+                    "ALTER TABLE proactive_settings ADD COLUMN notification_mode "
+                    "TEXT NOT NULL DEFAULT 'important_only'"
+                )
             connection.executescript(
                 "CREATE TABLE IF NOT EXISTS proactive_feedback ("
                 " id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,"
@@ -541,7 +586,33 @@ class ProactiveEngine:
                 "CREATE TABLE IF NOT EXISTS initiative_suppressions ("
                 " fingerprint TEXT PRIMARY KEY, reason TEXT NOT NULL,"
                 " created_at INTEGER NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS proactive_incidents ("
+                " incident_id TEXT PRIMARY KEY, incident_key TEXT NOT NULL,"
+                " category TEXT NOT NULL, kind TEXT NOT NULL, entity_id TEXT NOT NULL,"
+                " target_user TEXT NOT NULL, status TEXT NOT NULL,"
+                " first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,"
+                " resolved_at INTEGER, occurrence_count INTEGER NOT NULL DEFAULT 1,"
+                " notification_count INTEGER NOT NULL DEFAULT 0,"
+                " delivery_attempts INTEGER NOT NULL DEFAULT 0, next_retry_at INTEGER,"
+                " last_notified_at INTEGER, cooldown_until INTEGER,"
+                " last_event_id TEXT, last_decision_json TEXT NOT NULL DEFAULT '{}');"
+                "CREATE INDEX IF NOT EXISTS idx_proactive_incidents_key_status "
+                "ON proactive_incidents(incident_key,status,last_seen DESC);"
+                "CREATE INDEX IF NOT EXISTS idx_proactive_incidents_entity_status "
+                "ON proactive_incidents(entity_id,status,last_seen DESC);"
             )
+            incident_columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(proactive_incidents)").fetchall()
+            }
+            for column, definition in {
+                "delivery_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "next_retry_at": "INTEGER",
+            }.items():
+                if column not in incident_columns:
+                    connection.execute(
+                        f"ALTER TABLE proactive_incidents ADD COLUMN {column} {definition}"
+                    )
         self.initialised = True
 
     async def start(self) -> None:
@@ -575,6 +646,7 @@ class ProactiveEngine:
             "min_importance": self.min_importance,
             "notify_enabled": True,
             "speak_enabled": False,
+            "notification_mode": "important_only",
             "quiet_start_hour": 22,
             "quiet_end_hour": 7,
             "categories": {category: True for category in CATEGORIES},
@@ -619,6 +691,7 @@ class ProactiveEngine:
             "min_importance": int(row["min_importance"]),
             "notify_enabled": bool(row["notify_enabled"]),
             "speak_enabled": bool(row["speak_enabled"]),
+            "notification_mode": normalise_mode(row["notification_mode"]),
             "quiet_start_hour": int(row["quiet_start_hour"]),
             "quiet_end_hour": int(row["quiet_end_hour"]),
             "categories": categories,
@@ -627,13 +700,21 @@ class ProactiveEngine:
     def save_settings(self, model: SettingsModel) -> dict[str, Any]:
         self.initialise()
         user = normalise_user(model.user_id)
+        notification_mode = (
+            normalise_mode(model.notification_mode)
+            if model.notification_mode is not None
+            else self.settings(user)["notification_mode"]
+        )
         categories = self.default_settings(user)["categories"]
         for key, value in model.categories.items():
             if key in CATEGORIES:
                 categories[key] = bool(value)
         with self.connection() as connection:
             connection.execute(
-                "INSERT INTO proactive_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "INSERT INTO proactive_settings ("
+                "user_id,enabled,min_importance,notify_enabled,speak_enabled,"
+                "quiet_start_hour,quiet_end_hour,categories_json,updated_at,"
+                "notification_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id) DO UPDATE SET "
                 "enabled=excluded.enabled, min_importance=excluded.min_importance, "
                 "notify_enabled=excluded.notify_enabled, "
@@ -641,7 +722,8 @@ class ProactiveEngine:
                 "quiet_start_hour=excluded.quiet_start_hour, "
                 "quiet_end_hour=excluded.quiet_end_hour, "
                 "categories_json=excluded.categories_json, "
-                "updated_at=excluded.updated_at",
+                "updated_at=excluded.updated_at, "
+                "notification_mode=excluded.notification_mode",
                 (
                     user,
                     int(model.enabled),
@@ -652,6 +734,7 @@ class ProactiveEngine:
                     model.quiet_end_hour,
                     json.dumps(categories, sort_keys=True),
                     int(time.time()),
+                    notification_mode,
                 ),
             )
         return self.settings(user)
@@ -678,6 +761,7 @@ class ProactiveEngine:
         if entity_id.startswith("person."):
             owner = "amber" if "amber" in entity_id.lower() else "aaron"
             self.presence[owner] = str(current.get("state") or "unknown").lower()
+        self._resolve_inactive_incidents(current, now)
         candidates = self.rules.evaluate(
             previous,
             current,
@@ -692,27 +776,180 @@ class ProactiveEngine:
                 created.append(event)
         return created
 
+    @staticmethod
+    def _persistent_incident(kind: str) -> bool:
+        return kind in {
+            *CRITICAL_SAFETY_KINDS,
+            "door_open",
+            "appliance_door_open",
+            "person_detected",
+            "oven_left_on",
+            "critical_unavailable",
+        }
+
+    @staticmethod
+    def _incident_still_active(kind: str, state: str) -> bool:
+        active = state.strip().casefold()
+        if kind in CRITICAL_SAFETY_KINDS:
+            return active in {"on", "true", "detected", "wet"}
+        if kind in {"door_open", "appliance_door_open"}:
+            return active in {"on", "open", "true"}
+        if kind == "person_detected":
+            return active in {"on", "person", "detected", "true"}
+        if kind == "oven_left_on":
+            return active in {"on", "heating", "preheating"}
+        if kind == "critical_unavailable":
+            return active == "unavailable"
+        return False
+
+    def _resolve_inactive_incidents(self, current: dict[str, Any], now: int) -> None:
+        entity_id = str(current.get("entity_id") or "")
+        if not entity_id:
+            return
+        state = str(current.get("state") or "")
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT incident_id,kind FROM proactive_incidents "
+                "WHERE entity_id=? AND status='active'",
+                (entity_id,),
+            ).fetchall()
+            for row in rows:
+                if self._incident_still_active(str(row["kind"]), state):
+                    continue
+                connection.execute(
+                    "UPDATE proactive_incidents SET status='resolved',resolved_at=?,last_seen=? "
+                    "WHERE incident_id=?",
+                    (now, now, str(row["incident_id"])),
+                )
+
+    def _incident_cooldown_seconds(self, kind: str) -> int:
+        if kind == "person_detected":
+            return self.camera_incident_cooldown
+        if kind in CRITICAL_SAFETY_KINDS:
+            return self.cooldown
+        return self.household_incident_cooldown
+
+    def _begin_incident(
+        self,
+        connection: sqlite3.Connection,
+        candidate: Candidate,
+        now: int,
+    ) -> tuple[str, bool]:
+        incident_key = candidate.fingerprint
+        active = connection.execute(
+            "SELECT * FROM proactive_incidents WHERE incident_key=? AND status='active' "
+            "ORDER BY last_seen DESC LIMIT 1",
+            (incident_key,),
+        ).fetchone()
+        if active is not None:
+            try:
+                previous_decision = json.loads(str(active["last_decision_json"] or "{}"))
+            except (json.JSONDecodeError, TypeError):
+                previous_decision = {}
+            attempts = int(active["delivery_attempts"] or 0)
+            next_retry_at = int(active["next_retry_at"] or 0)
+            if (
+                previous_decision.get("notification_outcome") == "delivery_failed"
+                and attempts < 3
+                and next_retry_at <= now
+            ):
+                connection.execute(
+                    "UPDATE proactive_incidents SET last_seen=?,"
+                    "occurrence_count=occurrence_count+1 WHERE incident_id=?",
+                    (now, str(active["incident_id"])),
+                )
+                return str(active["incident_id"]), False
+            if previous_decision.get("notification_outcome") == "delivery_failed":
+                connection.execute(
+                    "UPDATE proactive_incidents SET last_seen=?,"
+                    "occurrence_count=occurrence_count+1 WHERE incident_id=?",
+                    (now, str(active["incident_id"])),
+                )
+                return str(active["incident_id"]), True
+            detail = {
+                "notify": False,
+                "activity_only": True,
+                "reason_code": "incident_already_active",
+                "reason": "The same incident is already active and will not interrupt again.",
+            }
+            connection.execute(
+                "UPDATE proactive_incidents SET last_seen=?,occurrence_count=occurrence_count+1,"
+                "last_decision_json=? WHERE incident_id=?",
+                (
+                    now,
+                    json.dumps(detail, separators=(",", ":")),
+                    str(active["incident_id"]),
+                ),
+            )
+            return str(active["incident_id"]), True
+
+        recent = connection.execute(
+            "SELECT * FROM proactive_incidents WHERE incident_key=? "
+            "ORDER BY last_seen DESC LIMIT 1",
+            (incident_key,),
+        ).fetchone()
+        if recent is not None and int(recent["cooldown_until"] or 0) > now:
+            detail = {
+                "notify": False,
+                "activity_only": True,
+                "reason_code": "incident_cooldown",
+                "reason": "The incident recurred within its notification cooldown.",
+                "cooldown_until": int(recent["cooldown_until"]),
+            }
+            connection.execute(
+                "UPDATE proactive_incidents SET last_seen=?,occurrence_count=occurrence_count+1,"
+                "last_decision_json=? WHERE incident_id=?",
+                (
+                    now,
+                    json.dumps(detail, separators=(",", ":")),
+                    str(recent["incident_id"]),
+                ),
+            )
+            return str(recent["incident_id"]), True
+
+        incident_id = str(uuid.uuid4())
+        connection.execute(
+            "INSERT INTO proactive_incidents ("
+            "incident_id,incident_key,category,kind,entity_id,target_user,status,"
+            "first_seen,last_seen) VALUES (?,?,?,?,?,?, 'active',?,?)",
+            (
+                incident_id,
+                incident_key,
+                candidate.category,
+                candidate.kind,
+                candidate.entity_id,
+                candidate.target_user,
+                now,
+                now,
+            ),
+        )
+        return incident_id, False
+
     async def record(self, candidate: Candidate) -> dict[str, Any] | None:
         self.initialise()
         now = int(time.time())
         with self.connection() as connection:
-            duplicate = connection.execute(
-                "SELECT created_at FROM proactive_events "
-                "WHERE fingerprint = ? ORDER BY created_at DESC LIMIT 1",
-                (candidate.fingerprint,),
-            ).fetchone()
-            if duplicate and now - int(duplicate["created_at"]) < self.cooldown:
+            incident_id, duplicate = self._begin_incident(connection, candidate, now)
+            if duplicate:
                 return None
             event_id = str(uuid.uuid4())
             confidence = max(0.0, min(1.0, float(candidate.confidence)))
             room = candidate.room.strip().lower().replace(" ", "_")
-            decision = self._decision(candidate, confidence, room, now, connection)
+            decision = self._decision(
+                candidate,
+                confidence,
+                room,
+                now,
+                connection,
+                incident_id=incident_id,
+            )
+            event_status = "active" if decision["should_notify"] else "activity"
             connection.execute(
                 "INSERT INTO proactive_events ("
                 "id, fingerprint, category, kind, entity_id, title, message, "
                 "reason, importance, target_user, actions_json, status, "
                 "created_at, updated_at, confidence, evidence_json, decision_json, room) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     event_id,
                     candidate.fingerprint,
@@ -725,6 +962,7 @@ class ProactiveEngine:
                     candidate.importance,
                     candidate.target_user,
                     json.dumps(list(candidate.actions)),
+                    event_status,
                     now,
                     now,
                     confidence,
@@ -733,9 +971,32 @@ class ProactiveEngine:
                     room,
                 ),
             )
+            connection.execute(
+                "UPDATE proactive_incidents SET last_event_id=?,last_decision_json=? "
+                "WHERE incident_id=?",
+                (
+                    event_id,
+                    json.dumps(decision, separators=(",", ":")),
+                    incident_id,
+                ),
+            )
             self._consider_learning(connection, candidate, now)
         event = self.get_event(event_id)
         await self.deliver(event)
+        if not self._persistent_incident(candidate.kind):
+            resolved_at = int(time.time())
+            with self.connection() as connection:
+                connection.execute(
+                    "UPDATE proactive_incidents SET status='resolved',resolved_at=?,last_seen=?,"
+                    "cooldown_until=COALESCE(cooldown_until,?) "
+                    "WHERE incident_id=?",
+                    (
+                        resolved_at,
+                        resolved_at,
+                        resolved_at + self.cooldown,
+                        incident_id,
+                    ),
+                )
         return self.get_event(event_id)
 
     def _decision(
@@ -745,8 +1006,10 @@ class ProactiveEngine:
         room: str,
         now: int,
         connection: sqlite3.Connection,
+        *,
+        incident_id: str,
     ) -> dict[str, Any]:
-        critical = candidate.importance >= 95 and candidate.category in {"security", "cameras"}
+        critical = candidate.kind in CRITICAL_SAFETY_KINDS
         day_start = now - (now % 86400)
         spoken_today = int(
             connection.execute(
@@ -766,6 +1029,48 @@ class ProactiveEngine:
         elif spoken_today >= self.daily_speech_budget and not critical:
             suppressed_reason = "daily_attention_budget_exhausted"
         speaker = self.speaker_map.get(room) or self.speaker_entity
+        event = {
+            "category": candidate.category,
+            "kind": candidate.kind,
+            "entity_id": candidate.entity_id,
+            "title": candidate.title,
+            "message": candidate.message,
+            "reason": candidate.reason,
+            "importance": candidate.importance,
+            "target_user": candidate.target_user,
+        }
+        recipient_decisions: dict[str, dict[str, Any]] = {}
+        for recipient in notification_recipients(event):
+            settings = self.settings(recipient)
+            resolved = decide_notification(
+                event,
+                settings=settings,
+                presence=self.presence,
+                recipient=recipient,
+                quiet_hours=self.quiet(settings),
+            ).as_dict()
+            if (
+                suppressed_reason
+                in {
+                    "disabled_by_user_feedback",
+                    "confidence_below_announcement_threshold",
+                }
+                and not critical
+            ):
+                resolved.update(
+                    {
+                        "notify": False,
+                        "activity_only": True,
+                        "reason_code": suppressed_reason,
+                        "reason": (
+                            "This event type was disabled by explicit user feedback."
+                            if suppressed_reason == "disabled_by_user_feedback"
+                            else "This event does not have enough confidence to interrupt."
+                        ),
+                    }
+                )
+            recipient_decisions[recipient] = resolved
+        should_notify = any(bool(value.get("notify")) for value in recipient_decisions.values())
         return {
             "critical": critical,
             "confidence": confidence,
@@ -776,6 +1081,12 @@ class ProactiveEngine:
             "suppress_speech": bool(suppressed_reason),
             "suppressed_reason": suppressed_reason,
             "why": candidate.reason,
+            "policy": "contextual_interruption_v1",
+            "incident_id": incident_id,
+            "notification_mode_options": list(NOTIFICATION_MODES),
+            "recipient_decisions": recipient_decisions,
+            "should_notify": should_notify,
+            "notification_outcome": "eligible" if should_notify else "activity_only",
         }
 
     def _consider_learning(
@@ -837,6 +1148,39 @@ class ProactiveEngine:
             ).fetchall()
         return [self.row(row) for row in rows]
 
+    def incidents(self, limit: int = 100) -> list[dict[str, Any]]:
+        self.initialise()
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM proactive_incidents ORDER BY last_seen DESC LIMIT ?",
+                (max(1, min(250, int(limit))),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["last_decision"] = json.loads(item.pop("last_decision_json"))
+            except (json.JSONDecodeError, TypeError):
+                item["last_decision"] = {}
+            result.append(item)
+        return result
+
+    def incident(self, incident_id: str) -> dict[str, Any] | None:
+        self.initialise()
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM proactive_incidents WHERE incident_id=?",
+                (incident_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        try:
+            item["last_decision"] = json.loads(item.pop("last_decision_json"))
+        except (json.JSONDecodeError, TypeError):
+            item["last_decision"] = {}
+        return item
+
     async def action(
         self,
         event_id: str,
@@ -874,33 +1218,44 @@ class ProactiveEngine:
         return self.get_event(event_id)
 
     async def deliver(self, event: dict[str, Any]) -> None:
-        users = (
-            ["aaron", "amber"]
-            if event["target_user"] == "all"
-            else [normalise_user(event["target_user"])]
-        )
+        decision = dict(event.get("decision") or {})
+        recipient_decisions = decision.get("recipient_decisions")
+        if not isinstance(recipient_decisions, dict):
+            recipient_decisions = {}
         notified = False
         speak = False
-        for user in users:
+        delivery_results: dict[str, dict[str, Any]] = {}
+        for user, user_decision in recipient_decisions.items():
+            if not isinstance(user_decision, dict) or not bool(user_decision.get("notify")):
+                continue
             settings = self.settings(user)
-            if not settings["enabled"]:
-                continue
-            if not settings["categories"].get(event["category"], True):
-                continue
-            if event["importance"] < settings["min_importance"]:
-                continue
-            critical = event["category"] in {"security", "cameras"} and event["importance"] >= 95
-            if settings["notify_enabled"] and (not self.quiet(settings) or critical):
-                target = self.targets.get(user, "")
-                if target.startswith("notify."):
-                    try:
-                        await self.mobile_notify(target, event)
-                        notified = True
-                    except Exception:
-                        logger.exception("Mobile proactive notification failed")
+            target = self.targets.get(user, "")
+            if target.startswith("notify."):
+                try:
+                    await self.mobile_notify(target, event)
+                    notified = True
+                    delivery_results[user] = {
+                        "accepted": True,
+                        "target": target,
+                    }
+                except Exception as exc:
+                    delivery_results[user] = {
+                        "accepted": False,
+                        "error": type(exc).__name__,
+                    }
+                    logger.exception("Mobile proactive notification failed")
+            else:
+                delivery_results[user] = {
+                    "accepted": False,
+                    "error": "notification_target_unavailable",
+                }
             if (
                 settings["speak_enabled"]
-                and not event["decision"].get("suppress_speech", False)
+                and not decision.get("suppress_speech", False)
+                and (
+                    bool(decision.get("critical"))
+                    or any(value == "home" for value in self.presence.values())
+                )
                 and proactive_speech_allowed(
                     event,
                     quiet=self.quiet(settings),
@@ -942,12 +1297,52 @@ class ProactiveEngine:
                 logger.exception("Proactive announcement failed")
 
         fields = {"updated_at": int(time.time())}
+        now = int(time.time())
         if notified:
-            fields["notified_at"] = int(time.time())
+            fields["notified_at"] = now
         if spoken:
-            fields["spoken_at"] = int(time.time())
-            fields["reply_until"] = int(time.time()) + self.reply_window_seconds
+            fields["spoken_at"] = now
+            fields["reply_until"] = now + self.reply_window_seconds
         self.update(event["id"], **fields)
+        decision["delivery_results"] = delivery_results
+        decision["notification_outcome"] = (
+            "delivered" if notified else "delivery_failed" if delivery_results else "activity_only"
+        )
+        incident_id = str(decision.get("incident_id") or "")
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE proactive_events SET decision_json=?,updated_at=? WHERE id=?",
+                (json.dumps(decision, separators=(",", ":")), now, event["id"]),
+            )
+            if incident_id:
+                if notified:
+                    cooldown_until = now + self._incident_cooldown_seconds(event["kind"])
+                    connection.execute(
+                        "UPDATE proactive_incidents SET notification_count=notification_count+1,"
+                        "last_notified_at=?,cooldown_until=?,last_decision_json=?,"
+                        "delivery_attempts=0,next_retry_at=NULL "
+                        "WHERE incident_id=?",
+                        (
+                            now,
+                            cooldown_until,
+                            json.dumps(decision, separators=(",", ":")),
+                            incident_id,
+                        ),
+                    )
+                else:
+                    attempts = 1 if delivery_results else 0
+                    next_retry_at = now + 30 if delivery_results else None
+                    connection.execute(
+                        "UPDATE proactive_incidents SET last_decision_json=?,"
+                        "delivery_attempts=delivery_attempts+?,next_retry_at=? "
+                        "WHERE incident_id=?",
+                        (
+                            json.dumps(decision, separators=(",", ":")),
+                            attempts,
+                            next_retry_at,
+                            incident_id,
+                        ),
+                    )
 
     def active_reply_event(self, user: str, now: int | None = None) -> dict[str, Any] | None:
         self.initialise()
@@ -1278,6 +1673,8 @@ async def status(_: None = Depends(authorise)) -> dict[str, Any]:
         "reply_window_seconds": engine.reply_window_seconds,
         "daily_speech_budget": engine.daily_speech_budget,
         "learning_threshold": engine.learning_threshold,
+        "notification_modes": list(NOTIFICATION_MODES),
+        "default_notification_mode": "important_only",
     }
 
 
@@ -1302,6 +1699,7 @@ async def explain_event(
         event = engine.get_event(event_id)
     except KeyError as exc:
         raise HTTPException(404, "Proactive event not found") from exc
+    incident_id = str(event["decision"].get("incident_id") or "")
     return {
         "event_id": event_id,
         "why": event["reason"],
@@ -1309,7 +1707,17 @@ async def explain_event(
         "evidence": event["evidence"],
         "decision": event["decision"],
         "room": event["room"],
+        "incident": engine.incident(incident_id) if incident_id else None,
     }
+
+
+@router.get("/incidents")
+async def incidents(
+    limit: int = Query(100, ge=1, le=250),
+    _: None = Depends(authorise),
+) -> dict[str, Any]:
+    values = engine.incidents(limit)
+    return {"count": len(values), "incidents": values}
 
 
 @router.get("/proposals")
