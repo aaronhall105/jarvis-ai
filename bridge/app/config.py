@@ -10,6 +10,13 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_model: str = "gpt-5-mini"
+    jarvis_model_router_enabled: bool = True
+    jarvis_executive_enabled: bool = True
+    jarvis_executive_model: str = "gpt-6-astra"
+    jarvis_executive_reasoning: str = "medium"
+    jarvis_executive_max_reasoning: str = "high"
+    jarvis_executive_timeout_seconds: int = 90
+    jarvis_executive_websocket_enabled: bool = True
     jarvis_external_agent_enabled: bool = True
     jarvis_web_search_enabled: bool = True
     jarvis_web_search_model: str = "gpt-5-mini"

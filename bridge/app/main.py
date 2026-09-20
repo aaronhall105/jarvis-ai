@@ -39,6 +39,7 @@ from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
 from app.email_assistant import EmailAssistantPolicyEngine
 from app.email_semantic_routing import classify_email_read, provider_from_text
+from app.executive_agent import ExecutiveConfig, ExecutiveTaskStore
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.intent_engine import IntentEngine, IntentError
@@ -226,6 +227,7 @@ external_agent.set_monitor_creator(
 )
 intents = IntentEngine(registry, tools)
 speech_corrections = SpeechCorrectionEngine(str(data_directory / "jarvis_speech_corrections.db"))
+executive_store = ExecutiveTaskStore(data_directory / "jarvis_executive_tasks.db")
 ai = AIEngine(
     api_key=settings.openai_api_key,
     model=settings.openai_model,
@@ -241,6 +243,16 @@ ai = AIEngine(
     # The runtime is always present for durable Home Assistant write receipts.
     # Its own enabled flag independently controls optional external-agent tools.
     external_runtime=external_agent,
+    executive_config=ExecutiveConfig(
+        enabled=settings.jarvis_executive_enabled,
+        router_enabled=settings.jarvis_model_router_enabled,
+        model=settings.jarvis_executive_model,
+        reasoning=settings.jarvis_executive_reasoning,
+        max_reasoning=settings.jarvis_executive_max_reasoning,
+        timeout_seconds=settings.jarvis_executive_timeout_seconds,
+        websocket_enabled=settings.jarvis_executive_websocket_enabled,
+    ),
+    executive_store=executive_store,
 )
 
 _external_agent_state: dict[str, object] = {
@@ -438,6 +450,10 @@ class AgentReplanRequest(BaseModel):
     goal: str | None = Field(default=None, min_length=1, max_length=2000)
     steps: list[AgentPlanStepRequest] = Field(min_length=1, max_length=12)
     start: bool = True
+
+
+class ExecutiveSteerRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
 
 
 class ExternalMonitorRequest(BaseModel):
@@ -3402,6 +3418,21 @@ async def lifespan(_: FastAPI):
         )
         logger.exception("External agent platform initialization failed")
 
+    executive_recovery = await ai.recover_executive_tasks()
+    logger.info(
+        "Executive task recovery recovered=%s failed_closed=%s",
+        executive_recovery["recovered"],
+        executive_recovery["failed_closed"],
+    )
+    executive_probe = await ai.probe_executive_model()
+    logger.info(
+        "Executive model probe supported=%s model=%s latency_ms=%s error_category=%s",
+        executive_probe.get("supported"),
+        executive_probe.get("model"),
+        executive_probe.get("latency_ms"),
+        executive_probe.get("error_category"),
+    )
+
     status = await connection_test_with_timeout(home_assistant)
 
     if status.connected:
@@ -3490,12 +3521,14 @@ async def health_ready() -> JSONResponse:
     followup_health = await followups.health_snapshot()
     email_policy_health = await email_policies.health_snapshot()
     conversation_health = await conversations.health_snapshot()
+    executive_health = await ai.executive_status()
     external_database = external_health.get("database") or {}
     database_healthy = (
         bool(external_database.get("healthy"))
         and bool(followup_health.get("database_healthy"))
         and bool(email_policy_health.get("database_healthy"))
         and bool(conversation_health.get("healthy"))
+        and bool((executive_health.get("database") or {}).get("healthy"))
     )
     ready = bool(
         ha_status.connected
@@ -3530,6 +3563,7 @@ async def health_ready() -> JSONResponse:
             "followups": followup_health.get("database"),
             "email_policies": email_policy_health.get("database"),
             "conversations": conversation_health,
+            "executive": executive_health.get("database"),
         },
         "realtime_voice": {
             "enabled": realtime.get("enabled"),
@@ -3537,6 +3571,7 @@ async def health_ready() -> JSONResponse:
             "active_sessions": realtime.get("active_sessions"),
             "last_error": realtime.get("last_error"),
         },
+        "executive_agent": executive_health,
     }
     return JSONResponse(payload, status_code=200 if ready else 503)
 
@@ -3552,6 +3587,7 @@ async def system_status() -> dict[str, object]:
         runtime_metrics.record_error("registry", "registry status unavailable")
         registry_status = {"error": "registry status unavailable"}
     runtime = runtime_metrics.snapshot()
+    executive_status = await ai.executive_status()
     try:
         external_status: dict[str, object] = await external_agent.health_snapshot()
     except Exception:
@@ -3597,6 +3633,7 @@ async def system_status() -> dict[str, object]:
         and bool(followup_status.get("database_healthy"))
         and bool(email_policy_status.get("database_healthy"))
         and bool(conversation_status.get("healthy"))
+        and bool((executive_status.get("database") or {}).get("healthy"))
     )
     return {
         "release": JARVIS_RELEASE,
@@ -3610,6 +3647,7 @@ async def system_status() -> dict[str, object]:
             "initialized": bool(_external_agent_state.get("initialized")),
             **external_status,
         },
+        "executive_agent": executive_status,
         "followup_worker": followup_status,
         "email_policy_worker": email_policy_status,
         "database": {
@@ -3618,6 +3656,7 @@ async def system_status() -> dict[str, object]:
             "followups": followup_status.get("database"),
             "email_policies": email_policy_status.get("database"),
             "conversations": conversation_status,
+            "executive": executive_status.get("database"),
         },
         "realtime_voice": realtime,
         "configuration": configuration_report(settings, realtime),
@@ -4255,6 +4294,51 @@ async def cancel_agent_plan(
         raise HTTPException(status_code=404, detail="Agent plan not found.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/executive/status")
+async def executive_agent_status(
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    return await ai.executive_status()
+
+
+@app.get("/api/executive/tasks/{task_id}")
+async def executive_task_status(
+    task_id: str,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    task = await executive_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Executive task not found.")
+    owner = settings.jarvis_integrations_owner_principal.strip()
+    if owner and str(task.get("principal_id") or "") != owner:
+        raise HTTPException(status_code=404, detail="Executive task not found.")
+    return task
+
+
+@app.post("/api/executive/tasks/{task_id}/steer")
+async def steer_executive_task(
+    task_id: str,
+    request: ExecutiveSteerRequest,
+    x_jarvis_integrations_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    _require_integrations_token(x_jarvis_integrations_token)
+    task = await executive_store.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Executive task not found.")
+    owner = settings.jarvis_integrations_owner_principal.strip()
+    if owner and str(task.get("principal_id") or "") != owner:
+        raise HTTPException(status_code=404, detail="Executive task not found.")
+    steered = bool(
+        ai.executive_transport is not None
+        and await ai.executive_transport.steer(task_id, request.instruction)
+    )
+    if not steered:
+        raise HTTPException(status_code=409, detail="Task is not at a steerable model point.")
+    return {"success": True, "task_id": task_id, "status": "steering_applied"}
 
 
 @app.post("/api/external-monitors")

@@ -25,8 +25,22 @@ from openai import (
 from app.admin_engine import AdminEngine, AdminEngineError
 from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
+from app.connectors.credentials import redact_text
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, DialogueResolution
+from app.executive_agent import (
+    AsyncCallStatus,
+    EXECUTIVE_INSTRUCTIONS,
+    ExecutiveConfig,
+    ExecutiveModelRouter,
+    ExecutiveReason,
+    ExecutiveResponsesTransport,
+    ExecutiveRoute,
+    ExecutiveRoutingDecision,
+    ExecutiveTaskStatus,
+    ExecutiveTaskStore,
+    reasoning_configuration_item,
+)
 from app.house_context import HouseContextEngine
 from app.house_awareness import HouseAwarenessEngine
 from app.memory_engine import MemoryEngine
@@ -1430,6 +1444,8 @@ class AIEngine:
         code_awareness: CodeAwarenessEngine | None = None,
         speech_corrections: SpeechCorrectionEngine | None = None,
         external_runtime: "ExternalAgentRuntime | None" = None,
+        executive_config: ExecutiveConfig | None = None,
+        executive_store: ExecutiveTaskStore | None = None,
     ) -> None:
         if not api_key.strip():
             raise AIEngineError("OPENAI_API_KEY is not configured.")
@@ -1467,6 +1483,28 @@ class AIEngine:
         self.speech_corrections = speech_corrections
         self.external_runtime = external_runtime
         self.router = RequestRouter()
+        self.executive_config = executive_config or ExecutiveConfig(enabled=False)
+        self.executive_router = ExecutiveModelRouter(
+            self.executive_config,
+            standard_model=self.model,
+        )
+        self.executive_store = executive_store
+        self.executive_transport = (
+            ExecutiveResponsesTransport(
+                self.client,
+                executive_store,
+                timeout_seconds=self.executive_config.timeout_seconds,
+            )
+            if executive_store is not None and self.executive_config.websocket_enabled
+            else None
+        )
+        self._astra_available: bool | None = None
+        self._astra_probe: dict[str, Any] = {
+            "supported": None,
+            "model": self.executive_config.model,
+            "latency_ms": None,
+            "error_category": None,
+        }
         self.understanding = UnderstandingEngine(registry)
         self.house_context = HouseContextEngine(registry)
         self.tone = ToneEngine()
@@ -2494,6 +2532,7 @@ class AIEngine:
         request_id: str | None = None,
         authorization_text: str | None = None,
         history: Sequence[Mapping[str, str]] = (),
+        on_plan_created: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         request_id = str(request_id or uuid.uuid4())
         try:
@@ -2558,6 +2597,11 @@ class AIEngine:
                 if name in {"check_recent_gmail_reply", "prepare_gmail_message"}:
                     dialogue_state = await self.dialogue.get(conversation_id)
                     dialogue_focus = dict(dialogue_state.focus)
+                plan_callback = (
+                    {"on_plan_created": on_plan_created}
+                    if name == "create_personal_plan" and on_plan_created is not None
+                    else {}
+                )
                 result = await external_runtime.execute_model_tool(
                     name,
                     arguments,
@@ -2567,6 +2611,7 @@ class AIEngine:
                     user_text=authoritative_user_text,
                     history=history,
                     dialogue_focus=dialogue_focus,
+                    **plan_callback,
                 )
                 return {
                     "tool": name,
@@ -4248,6 +4293,11 @@ class AIEngine:
         input_items: list[Any],
         tool_definitions: list[dict[str, Any]],
         actor: UserContext,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        instructions: str | None = None,
+        force_plan: bool = False,
     ) -> dict[str, Any]:
         request_text = ReplyBudgetPolicy.latest_user_text(input_items)
         max_output_tokens = ReplyBudgetPolicy.output_tokens(
@@ -4256,29 +4306,41 @@ class AIEngine:
             text_cap=self.max_output_tokens,
             voice_cap=self.voice_max_output_tokens,
         )
+        selected_model = str(model or self.model)
+        selected_reasoning = str(reasoning_effort or self.reasoning_effort)
         kwargs: dict[str, Any] = {
-            "model": self.model,
-            "instructions": JARVIS_INSTRUCTIONS,
+            "model": selected_model,
+            "instructions": instructions or JARVIS_INSTRUCTIONS,
             "input": input_items,
             "store": False,
             "max_output_tokens": max_output_tokens,
+            "prompt_cache_key": "jarvis-executive-v1"  # gitleaks:allow
+            if selected_model == self.executive_config.model
+            else "jarvis-core-v1",
         }
 
         if tool_definitions:
             kwargs.update(
                 {
                     "tools": tool_definitions,
-                    "tool_choice": "auto",
-                    "parallel_tool_calls": False,
+                    "tool_choice": (
+                        {"type": "function", "name": "create_personal_plan"}
+                        if force_plan
+                        else "auto"
+                    ),
+                    "parallel_tool_calls": selected_model == self.executive_config.model,
                 }
             )
 
-        model_name = self.model.lower()
-        if model_name.startswith("gpt-5"):
+        model_name = selected_model.lower()
+        if model_name.startswith("gpt-6"):
+            kwargs["reasoning"] = {"effort": selected_reasoning}
+            kwargs["include"] = ["reasoning.encrypted_content"]
+        elif model_name.startswith("gpt-5"):
             kwargs["text"] = {"verbosity": self.text_verbosity}
-            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+            kwargs["reasoning"] = {"effort": selected_reasoning}
         elif model_name.startswith(("o1", "o3", "o4")):
-            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+            kwargs["reasoning"] = {"effort": selected_reasoning}
 
         return kwargs
 
@@ -4288,13 +4350,29 @@ class AIEngine:
         tool_definitions: list[dict[str, Any]],
         actor: UserContext,
         on_text_delta: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        instructions: str | None = None,
+        force_plan: bool = False,
+        executive_task_id: str | None = None,
     ) -> Any:
         try:
             response_kwargs = self._response_kwargs(
                 input_items,
                 tool_definitions,
                 actor,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                instructions=instructions,
+                force_plan=force_plan,
             )
+
+            if executive_task_id and self.executive_transport is not None:
+                return await self.executive_transport.create(
+                    executive_task_id,
+                    **response_kwargs,
+                )
 
             # Stream only when no tools are exposed. Tool-capable turns must be
             # fully inspected before any text is shown because the first model
@@ -4525,6 +4603,171 @@ class AIEngine:
         details = getattr(usage, "input_tokens_details", None)
         cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
         return input_tokens, output_tokens, cached_tokens
+
+    @staticmethod
+    def _executive_task_status_for_plan(
+        plan_status: str,
+        *,
+        request_success: bool,
+    ) -> ExecutiveTaskStatus:
+        return {
+            "completed": ExecutiveTaskStatus.COMPLETED,
+            "cancelled": ExecutiveTaskStatus.CANCELLED,
+            "pending": ExecutiveTaskStatus.RUNNING,
+            "running": ExecutiveTaskStatus.RUNNING,
+            "awaiting_approval": ExecutiveTaskStatus.WAITING_USER,
+            "partial": ExecutiveTaskStatus.PARTIAL,
+            "blocked": ExecutiveTaskStatus.WAITING_TOOL,
+            "failed": ExecutiveTaskStatus.FAILED,
+        }.get(
+            str(plan_status or ""),
+            ExecutiveTaskStatus.COMPLETED if request_success else ExecutiveTaskStatus.FAILED,
+        )
+
+    async def probe_executive_model(self) -> dict[str, Any]:
+        """Perform one tiny read-only model capability probe without exposing credentials."""
+
+        if not self.executive_config.enabled:
+            self._astra_available = False
+            self._astra_probe = {
+                "supported": False,
+                "model": self.executive_config.model,
+                "latency_ms": 0,
+                "error_category": "disabled",
+            }
+            return dict(self._astra_probe)
+        started = time.monotonic()
+        try:
+            async with asyncio.timeout(min(10, self.executive_config.timeout_seconds)):
+                response = await self.client.responses.create(
+                    model=self.executive_config.model,
+                    input="Reply with exactly: available",
+                    reasoning={"effort": "low"},
+                    max_output_tokens=16,
+                    store=False,
+                )
+        except AuthenticationError:
+            category = "authentication"
+        except RateLimitError:
+            category = "rate_limit"
+        except APITimeoutError:
+            category = "timeout"
+        except TimeoutError:
+            category = "timeout"
+        except APIConnectionError:
+            category = "connection"
+        except APIStatusError as exc:
+            category = f"http_{getattr(exc, 'status_code', 'error')}"
+        except Exception:
+            category = "provider_error"
+        else:
+            returned_model = str(getattr(response, "model", "") or self.executive_config.model)
+            self._astra_available = True
+            self._astra_probe = {
+                "supported": True,
+                "model": returned_model,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+                "error_category": None,
+            }
+            return dict(self._astra_probe)
+
+        self._astra_available = False
+        self._astra_probe = {
+            "supported": False,
+            "model": self.executive_config.model,
+            "latency_ms": round((time.monotonic() - started) * 1000),
+            "error_category": category,
+        }
+        return dict(self._astra_probe)
+
+    async def executive_status(self) -> dict[str, Any]:
+        diagnostics = (
+            await self.executive_store.diagnostics() if self.executive_store is not None else {}
+        )
+        database = (
+            await self.executive_store.health_snapshot()
+            if self.executive_store is not None
+            else {"healthy": False, "reason": "not_configured"}
+        )
+        return {
+            "enabled": self.executive_config.enabled,
+            "router_enabled": self.executive_config.router_enabled,
+            "configured_model": self.executive_config.model,
+            "default_reasoning": self.executive_config.reasoning,
+            "max_reasoning": self.executive_config.max_reasoning,
+            "websocket_enabled": self.executive_transport is not None,
+            "availability": dict(self._astra_probe),
+            "database": database,
+            "usage": diagnostics,
+        }
+
+    async def recover_executive_tasks(self) -> dict[str, int]:
+        """Resume only persisted plans; never replay a model call after restart."""
+
+        if self.executive_store is None:
+            return {"recovered": 0, "failed_closed": 0}
+        recovered = 0
+        failed_closed = 0
+        for task in await self.executive_store.recoverable_tasks():
+            task_id = str(task["task_id"])
+            await self.executive_store.mark_inflight_calls_stale(task_id)
+            plan_id = str(task.get("plan_id") or "")
+            if not plan_id or self.external_runtime is None:
+                await self.executive_store.update_task(
+                    task_id,
+                    status=ExecutiveTaskStatus.FAILED.value,
+                    active_response_id=None,
+                    waiting_reason=None,
+                    error_summary=(
+                        "Core restarted before a durable plan was committed; no tool was replayed."
+                    ),
+                )
+                failed_closed += 1
+                continue
+            try:
+                plan = await self.external_runtime.resume_plan(plan_id)
+            except Exception:
+                logger.exception(
+                    "Could not reconcile executive plan after restart plan=%s", plan_id
+                )
+                await self.executive_store.update_task(
+                    task_id,
+                    status=ExecutiveTaskStatus.WAITING_USER.value,
+                    active_response_id=None,
+                    waiting_reason="restart_reconciliation_failed",
+                    error_summary="The durable plan needs reconciliation before it can continue.",
+                )
+                failed_closed += 1
+                continue
+            plan_status = str(plan.get("status") or "")
+            status = self._executive_task_status_for_plan(
+                plan_status,
+                request_success=True,
+            )
+            await self.executive_store.update_task(
+                task_id,
+                status=status.value,
+                active_response_id=None,
+                waiting_reason=(
+                    "user_approval"
+                    if status is ExecutiveTaskStatus.WAITING_USER
+                    else (
+                        "provider_reconciliation"
+                        if status is ExecutiveTaskStatus.WAITING_TOOL
+                        else None
+                    )
+                ),
+                last_verified_result=json.dumps(
+                    {
+                        "plan_id": plan_id,
+                        "status": plan_status,
+                        "step_count": len(plan.get("steps") or ()),
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            recovered += 1
+        return {"recovered": recovered, "failed_closed": failed_closed}
 
     @staticmethod
     def _normalise_device_phrase(value: str) -> str:
@@ -6165,6 +6408,274 @@ class AIEngine:
             content=user_text,
         )
 
+        # A new turn in the same authenticated conversation may steer or cancel
+        # a still-running executive task. This is separate from audio barge-in:
+        # realtime voice still owns speech interruption, while this state changes
+        # only the durable semantic objective.
+        if self.executive_store is not None:
+            active_executive = await self.executive_store.active_task(
+                actor.user_key,
+                resolved_conversation_id,
+            )
+            steering_kind = self.executive_router.steering_kind(user_text)
+            if active_executive is None and steering_kind == "cancel":
+                latest_executive = await self.executive_store.latest_task(
+                    actor.user_key,
+                    resolved_conversation_id,
+                )
+                if latest_executive is not None and str(latest_executive.get("status") or "") in {
+                    ExecutiveTaskStatus.COMPLETED.value,
+                    ExecutiveTaskStatus.PARTIAL.value,
+                }:
+                    active_executive = latest_executive
+            if active_executive is not None and steering_kind in {"steer", "cancel"}:
+                task_id = str(active_executive["task_id"])
+                plan_id = str(active_executive.get("plan_id") or "")
+                partial_cancel = False
+                cancellation_queued = False
+                cancellation_applied = True
+                durable_steering = False
+                steering_queued = False
+                completed_scope = False
+                cancellation_status: ExecutiveTaskStatus | None = None
+                already_completed = str(active_executive.get("status") or "") in {
+                    ExecutiveTaskStatus.COMPLETED.value,
+                    ExecutiveTaskStatus.PARTIAL.value,
+                }
+                if already_completed:
+                    cancellation_applied = False
+                if (
+                    steering_kind == "cancel"
+                    and plan_id
+                    and not already_completed
+                    and self.external_runtime is not None
+                ):
+                    try:
+                        persisted_plan = await self.external_runtime.planner.get(plan_id)
+                        if persisted_plan is None:
+                            raise KeyError(plan_id)
+                        steering_domains = self.executive_router.domains_for(user_text)
+                        prefixes = {
+                            "email": ("gmail.", "microsoft.", "outlook.", "email."),
+                            "calendar": ("calendar.",),
+                            "home": ("homeassistant.",),
+                            "research": ("web.", "research."),
+                            "tasks": ("personal.", "monitor."),
+                        }
+                        matched_steps = [
+                            step
+                            for step in persisted_plan.steps
+                            if any(
+                                step.capability.capability_id.startswith(prefix)
+                                for domain in steering_domains
+                                for prefix in prefixes.get(domain, ())
+                            )
+                        ]
+                        selected_steps = [
+                            step.step_id
+                            for step in matched_steps
+                            if str(step.status.value)
+                            not in {"succeeded", "cancelled", "superseded"}
+                        ]
+                        if selected_steps:
+                            if str(persisted_plan.status.value) == "running":
+                                await self.external_runtime.planner.request_cancel_steps(
+                                    plan_id,
+                                    selected_steps,
+                                )
+                                cancellation_queued = True
+                            else:
+                                cancelled_plan = await self.external_runtime.planner.cancel_steps(
+                                    plan_id,
+                                    selected_steps,
+                                )
+                                cancellation_status = {
+                                    "cancelled": ExecutiveTaskStatus.CANCELLED,
+                                    "partial": ExecutiveTaskStatus.PARTIAL,
+                                    "awaiting_approval": ExecutiveTaskStatus.WAITING_USER,
+                                }.get(
+                                    str(cancelled_plan.status.value),
+                                    ExecutiveTaskStatus.RUNNING,
+                                )
+                            partial_cancel = True
+                        elif steering_domains:
+                            completed_scope = any(
+                                str(step.status.value) == "succeeded" for step in matched_steps
+                            )
+                            cancellation_applied = False
+                        else:
+                            if str(persisted_plan.status.value) == "running":
+                                await self.external_runtime.planner.request_cancel(plan_id)
+                                cancellation_queued = True
+                            else:
+                                await self.external_runtime.planner.cancel(plan_id)
+                    except (KeyError, ValueError):
+                        logger.info("Executive plan could not be cancelled plan=%s", plan_id)
+                        cancellation_applied = False
+                if (
+                    steering_kind == "steer"
+                    and plan_id
+                    and not already_completed
+                    and self.external_runtime is not None
+                ):
+                    try:
+                        persisted_plan = await self.external_runtime.planner.get(plan_id)
+                        if persisted_plan is None:
+                            raise KeyError(plan_id)
+                        excluded_prefixes = self.executive_router.excluded_capability_prefixes(
+                            user_text
+                        )
+                        selected_steps = [
+                            step.step_id
+                            for step in persisted_plan.steps
+                            if any(
+                                step.capability.capability_id.startswith(prefix)
+                                for prefix in excluded_prefixes
+                            )
+                        ]
+                        if selected_steps:
+                            if str(persisted_plan.status.value) == "running":
+                                await self.external_runtime.planner.request_supersede_steps(
+                                    plan_id,
+                                    selected_steps,
+                                )
+                                steering_queued = True
+                            else:
+                                await self.external_runtime.planner.supersede_steps(
+                                    plan_id,
+                                    selected_steps,
+                                )
+                            durable_steering = True
+                    except (KeyError, ValueError):
+                        logger.info("Executive plan could not be superseded plan=%s", plan_id)
+                steer_model_lane = steering_kind == "steer" or not plan_id
+                steered = bool(
+                    steer_model_lane
+                    and self.executive_transport is not None
+                    and await self.executive_transport.steer(task_id, user_text)
+                )
+                steering_applied = steered or durable_steering
+                if steering_kind == "cancel":
+                    if not already_completed and not completed_scope:
+                        await self.executive_store.update_task(
+                            task_id,
+                            status=(
+                                (
+                                    cancellation_status.value
+                                    if cancellation_status is not None
+                                    else ExecutiveTaskStatus.RUNNING.value
+                                )
+                                if cancellation_applied and partial_cancel
+                                else (
+                                    ExecutiveTaskStatus.WAITING_USER.value
+                                    if not cancellation_applied
+                                    else (
+                                        ExecutiveTaskStatus.RUNNING.value
+                                        if cancellation_queued
+                                        else ExecutiveTaskStatus.CANCELLED.value
+                                    )
+                                )
+                            ),
+                            waiting_reason=(
+                                "cancellation_requested" if cancellation_queued else None
+                            ),
+                        )
+                    final_reply = (
+                        "That part had already completed, so I haven't pretended to undo it."
+                        if already_completed or completed_scope
+                        else (
+                            "I couldn't safely cancel that part because its outcome needs checking."
+                            if not cancellation_applied
+                            else (
+                                (
+                                    "I’ve queued that cancellation. Work already in progress may "
+                                    "finish, but Jarvis won’t start the unfinished part you cancelled."
+                                )
+                                if cancellation_queued
+                                else (
+                                    "Okay — I’ve cancelled that unfinished part and kept the rest."
+                                    if partial_cancel
+                                    else "Okay — I’ve cancelled the unfinished executive work."
+                                )
+                            )
+                        )
+                    )
+                elif steering_applied:
+                    await self.executive_store.update_task(
+                        task_id,
+                        objective=redact_text(user_text[:2000]),
+                        status=ExecutiveTaskStatus.RUNNING.value,
+                        waiting_reason=("steering_requested" if steering_queued else None),
+                    )
+                    final_reply = (
+                        "I’ve queued that change. Work already in progress may finish, but Jarvis "
+                        "won’t start the superseded part."
+                        if steering_queued
+                        else "Understood — I’ve updated the work that’s still in progress."
+                    )
+                else:
+                    final_reply = (
+                        "That task is no longer at a safe steering point, so I haven’t "
+                        "changed or repeated any action."
+                    )
+                await self.conversations.add_assistant_message(
+                    conversation_id=resolved_conversation_id,
+                    content=final_reply,
+                )
+                await self.dialogue.record_result(
+                    resolved_conversation_id,
+                    intent=f"executive_{steering_kind}",
+                    success=(
+                        cancellation_applied if steering_kind == "cancel" else steering_applied
+                    ),
+                    response=final_reply,
+                    calls=[],
+                )
+                return {
+                    "success": (
+                        cancellation_applied if steering_kind == "cancel" else steering_applied
+                    ),
+                    "response": final_reply,
+                    "model": self.executive_config.model,
+                    "intent": f"executive_{steering_kind}",
+                    "deterministic": True,
+                    "tool_called": False,
+                    "tool_rounds": 0,
+                    "calls": [],
+                    "memory_used": False,
+                    "conversation_id": resolved_conversation_id,
+                    "executive": {
+                        "task_id": task_id,
+                        "status": (
+                            (
+                                ExecutiveTaskStatus.RUNNING.value
+                                if cancellation_queued
+                                else (
+                                    (
+                                        cancellation_status.value
+                                        if cancellation_status is not None
+                                        else ExecutiveTaskStatus.RUNNING.value
+                                    )
+                                    if cancellation_applied and partial_cancel
+                                    else (
+                                        (
+                                            ExecutiveTaskStatus.CANCELLED.value
+                                            if cancellation_applied
+                                            else ExecutiveTaskStatus.WAITING_USER.value
+                                        )
+                                        if not (already_completed or completed_scope)
+                                        else str(active_executive.get("status") or "completed")
+                                    )
+                                )
+                            )
+                            if steering_kind == "cancel"
+                            else str(active_executive.get("status") or "running")
+                        ),
+                        "steered": steering_applied,
+                    },
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
+                }
+
         awareness_reply = await self._try_house_awareness_reply(user_text, actor)
         if awareness_reply is not None:
             final_reply, awareness_calls = awareness_reply
@@ -6536,6 +7047,26 @@ class AIEngine:
                 },
             }
 
+        executive_decision = self.executive_router.classify(
+            user_text,
+            base_intent=decision.intent.value,
+            voice_mode=actor.voice_mode,
+            astra_available=self._astra_available is not False,
+        )
+        executive_task: dict[str, Any] | None = None
+        executive_task_id: str | None = None
+        executive_store = self.executive_store
+        if executive_decision.route is ExecutiveRoute.EXECUTIVE and executive_store is not None:
+            executive_task = await executive_store.create_task(
+                principal_id=actor.user_key,
+                conversation_id=resolved_conversation_id,
+                objective=user_text,
+                decision=executive_decision,
+            )
+            executive_task_id = str(executive_task["task_id"])
+        created_executive_task_id = executive_task_id
+        initial_executive_decision = executive_decision
+
         relevant_memory = ""
         if decision.use_long_term_memory:
             relevant_memory = await self.memory.context_for(
@@ -6719,6 +7250,40 @@ class AIEngine:
             history,
             dialogue_focus=dict(tool_dialogue_state.focus),
         )
+        fast_tool_definitions = list(tool_definitions)
+        preflight_fallback_count = 0
+        if executive_task_id is not None:
+            executive_tools = (
+                await external_runtime.executive_openai_tools(
+                    principal_id=actor.user_key,
+                )
+                if external_runtime is not None
+                else []
+            )
+            if executive_tools:
+                tool_definitions = executive_tools
+            else:
+                # A complex request cannot be forced through a planner that has
+                # no grounded multi-capability surface. Fall back to the normal
+                # route without weakening tool or authority validation.
+                if executive_store is None:  # pragma: no cover - construction invariant
+                    raise AIEngineError("Executive task storage is unavailable.")
+                await executive_store.update_task(
+                    executive_task_id,
+                    status=ExecutiveTaskStatus.RUNNING.value,
+                    error_summary="No grounded multi-capability planner surface was available.",
+                )
+                executive_decision = ExecutiveRoutingDecision(
+                    route=ExecutiveRoute.FAST,
+                    model=self.model,
+                    reasoning_effort=self.reasoning_effort,
+                    reason_code=ExecutiveReason.FALLBACK_STANDARD,
+                    confidence=1.0,
+                    estimated_complexity=executive_decision.estimated_complexity,
+                    domains=executive_decision.domains,
+                )
+                executive_task_id = None
+                preflight_fallback_count = 1
 
         if code_awareness_requested and self.code_awareness is not None:
             tool_definitions.extend(self.code_awareness.openai_tools())
@@ -6737,6 +7302,8 @@ class AIEngine:
         completed_calls: list[dict[str, Any]] = []
         seen_call_signatures: set[tuple[str, str]] = set()
         tool_rounds = 0
+        model_rounds = 0
+        fallback_count = preflight_fallback_count
         total_input_tokens = 0
         total_output_tokens = 0
         total_cached_tokens = 0
@@ -6745,22 +7312,73 @@ class AIEngine:
 
         for _ in range(request_max_tool_rounds + 1):
             try:
+                is_executive_round = executive_task_id is not None
+                response_input = working_input
+                response_reasoning = self.reasoning_effort
+                if is_executive_round:
+                    response_reasoning = self.executive_config.reasoning
+                    if executive_decision.reasoning_effort != self.executive_config.reasoning:
+                        response_input = [
+                            reasoning_configuration_item(executive_decision.reasoning_effort),
+                            *working_input,
+                        ]
                 response = await self._create_response(
-                    input_items=working_input,
+                    input_items=response_input,
                     tool_definitions=tool_definitions,
                     actor=actor,
                     on_text_delta=(
                         on_text_delta if not tool_definitions and tool_rounds == 0 else None
                     ),
+                    model=(executive_decision.model if is_executive_round else self.model),
+                    reasoning_effort=(response_reasoning),
+                    instructions=(
+                        f"{JARVIS_INSTRUCTIONS}\n\n{EXECUTIVE_INSTRUCTIONS}"
+                        if is_executive_round
+                        else JARVIS_INSTRUCTIONS
+                    ),
+                    force_plan=is_executive_round and tool_rounds == 0,
+                    executive_task_id=(
+                        executive_task_id if is_executive_round and tool_rounds == 0 else None
+                    ),
                 )
-            except AIEngineError:
-                if completed_calls:
+                model_rounds += 1
+            except (AIEngineError, TimeoutError, RuntimeError):
+                if executive_task_id is not None and not completed_calls:
+                    logger.warning(
+                        "Astra executive request failed; using standard safe route",
+                        exc_info=True,
+                    )
+                    fallback_count += 1
+                    runtime_metrics.increment("astra_fallbacks")
+                    if executive_store is None:  # pragma: no cover - construction invariant
+                        raise AIEngineError("Executive task storage is unavailable.")
+                    await executive_store.update_task(
+                        executive_task_id,
+                        status=ExecutiveTaskStatus.RUNNING.value,
+                        error_summary="Astra was unavailable; the standard safe route was used.",
+                    )
+                    executive_task_id = None
+                    tool_definitions = fast_tool_definitions
+                    authorised_tools = {
+                        str(definition["name"])
+                        for definition in tool_definitions
+                        if definition.get("name")
+                    }
+                    response = await self._create_response(
+                        input_items=working_input,
+                        tool_definitions=tool_definitions,
+                        actor=actor,
+                        on_text_delta=None,
+                    )
+                    model_rounds += 1
+                elif completed_calls:
                     logger.exception(
                         "AI continuation failed after tool execution; "
                         "using a deterministic tool reply"
                     )
                     break
-                raise
+                else:
+                    raise
 
             last_response = response
 
@@ -6795,6 +7413,50 @@ class AIEngine:
                 if not call_id:
                     raise AIEngineError("OpenAI returned a tool call without a call ID.")
 
+                executive_generation = 0
+                if executive_task_id is not None:
+                    if executive_store is None:  # pragma: no cover - construction invariant
+                        raise AIEngineError("Executive task storage is unavailable.")
+                    current_task = await executive_store.get_task(executive_task_id)
+                    if current_task is None or str(current_task.get("status") or "") in {
+                        ExecutiveTaskStatus.CANCELLED.value,
+                        ExecutiveTaskStatus.SUPERSEDED.value,
+                    }:
+                        completed = self._tool_failure(
+                            name=name,
+                            arguments={},
+                            code="executive_task_cancelled",
+                            message="The executive task was cancelled before this tool ran.",
+                        )
+                        completed_calls.append(completed)
+                        output_items.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": json.dumps(completed["result"], separators=(",", ":")),
+                            }
+                        )
+                        continue
+                    executive_generation = int(current_task.get("generation") or 0)
+                    await executive_store.register_call(
+                        call_id=call_id,
+                        task_id=executive_task_id,
+                        tool_name=name,
+                        response_id=str(getattr(response, "id", "") or "") or None,
+                        generation=executive_generation,
+                    )
+                    await executive_store.transition_call(
+                        call_id,
+                        task_id=executive_task_id,
+                        status=AsyncCallStatus.RUNNING,
+                    )
+                    await executive_store.update_task(
+                        executive_task_id,
+                        status=ExecutiveTaskStatus.WAITING_TOOL.value,
+                        current_step=name,
+                        waiting_reason="provider_tool",
+                    )
+
                 try:
                     canonical_arguments = json.dumps(
                         json.loads(arguments_json),
@@ -6805,6 +7467,7 @@ class AIEngine:
                     canonical_arguments = arguments_json
 
                 signature = (name, canonical_arguments)
+                tool_timed_out = False
                 if len(completed_calls) >= request_max_tool_calls:
                     logger.error("Jarvis total tool-call limit reached")
                     completed = self._tool_failure(
@@ -6822,19 +7485,97 @@ class AIEngine:
                     )
                 else:
                     seen_call_signatures.add(signature)
-                    completed = await self._execute_function(
-                        name=name,
-                        arguments_json=arguments_json,
-                        user_text=user_text,
-                        authorised_tools=authorised_tools,
-                        conversation_id=resolved_conversation_id,
-                        actor=actor,
-                        request_id=resolved_request_id,
-                        authorization_text=raw_user_text,
-                        history=history,
-                    )
+                    try:
+
+                        async def link_executive_plan(plan_id: str) -> None:
+                            if executive_task_id is None or executive_store is None:
+                                return
+                            await executive_store.update_task(
+                                executive_task_id,
+                                plan_id=plan_id,
+                                status=ExecutiveTaskStatus.RUNNING.value,
+                                waiting_reason="durable_plan_running",
+                            )
+                            await executive_store.link_call_to_plan(
+                                call_id,
+                                task_id=executive_task_id,
+                                plan_id=plan_id,
+                            )
+
+                        async with asyncio.timeout(
+                            self.executive_config.timeout_seconds
+                            if executive_task_id is not None
+                            else 180
+                        ):
+                            completed = await self._execute_function(
+                                name=name,
+                                arguments_json=arguments_json,
+                                user_text=user_text,
+                                authorised_tools=authorised_tools,
+                                conversation_id=resolved_conversation_id,
+                                actor=actor,
+                                request_id=resolved_request_id,
+                                authorization_text=raw_user_text,
+                                history=history,
+                                on_plan_created=link_executive_plan,
+                            )
+                    except TimeoutError:
+                        tool_timed_out = True
+                        completed = self._tool_failure(
+                            name=name,
+                            arguments={},
+                            code="tool_timeout",
+                            message="The provider tool timed out before returning evidence.",
+                        )
+                        if executive_task_id is not None:
+                            if executive_store is None:  # pragma: no cover
+                                raise AIEngineError("Executive task storage is unavailable.")
+                            await executive_store.transition_call(
+                                call_id,
+                                task_id=executive_task_id,
+                                status=AsyncCallStatus.TIMED_OUT,
+                            )
 
                 completed_calls.append(completed)
+                if executive_task_id is not None:
+                    if executive_store is None:  # pragma: no cover - construction invariant
+                        raise AIEngineError("Executive task storage is unavailable.")
+                    tool_result = completed.get("result")
+                    result_mapping = tool_result if isinstance(tool_result, Mapping) else {}
+                    plan_payload = result_mapping.get("data")
+                    plan_payload = (
+                        plan_payload.get("plan") if isinstance(plan_payload, Mapping) else None
+                    )
+                    plan_id = (
+                        str(plan_payload.get("plan_id") or "")
+                        if isinstance(plan_payload, Mapping)
+                        else ""
+                    )
+                    if plan_id:
+                        await executive_store.update_task(
+                            executive_task_id,
+                            plan_id=plan_id,
+                        )
+                        await executive_store.link_call_to_plan(
+                            call_id,
+                            task_id=executive_task_id,
+                            plan_id=plan_id,
+                        )
+                    receipt = result_mapping.get("receipt")
+                    receipt_id = (
+                        str(receipt.get("action_id") or "")
+                        if isinstance(receipt, Mapping)
+                        else None
+                    )
+                    if not tool_timed_out:
+                        await executive_store.complete_call(
+                            call_id,
+                            task_id=executive_task_id,
+                            generation=executive_generation,
+                            result=result_mapping,
+                            receipt_id=receipt_id,
+                            failed=result_mapping.get("success") is not True,
+                        )
                 output_items.append(
                     {
                         "type": "function_call_output",
@@ -7084,6 +7825,72 @@ class AIEngine:
             final_reply=final_reply,
         )
 
+        if created_executive_task_id is not None and executive_store is not None:
+            plan_status = ""
+            last_verified_result = ""
+            for call in reversed(completed_calls):
+                call_result = call.get("result")
+                data = call_result.get("data") if isinstance(call_result, Mapping) else None
+                plan = data.get("plan") if isinstance(data, Mapping) else None
+                if isinstance(plan, Mapping):
+                    plan_status = str(plan.get("status") or "")
+                    last_verified_result = json.dumps(
+                        {
+                            "plan_id": plan.get("plan_id"),
+                            "status": plan_status,
+                            "step_count": len(plan.get("steps") or ()),
+                        },
+                        separators=(",", ":"),
+                    )
+                    break
+            task_status = self._executive_task_status_for_plan(
+                plan_status,
+                request_success=success,
+            )
+            persisted_task = await executive_store.get_task(created_executive_task_id)
+            persisted_status = str((persisted_task or {}).get("status") or "")
+            if persisted_status in {
+                ExecutiveTaskStatus.CANCELLED.value,
+                ExecutiveTaskStatus.SUPERSEDED.value,
+            }:
+                task_status = ExecutiveTaskStatus(persisted_status)
+            await executive_store.update_task(
+                created_executive_task_id,
+                status=task_status.value,
+                waiting_reason=(
+                    "user_approval"
+                    if task_status is ExecutiveTaskStatus.WAITING_USER
+                    else (
+                        "provider_reconciliation"
+                        if task_status is ExecutiveTaskStatus.WAITING_TOOL
+                        else None
+                    )
+                ),
+                current_step=None,
+                active_response_id=None,
+                last_verified_result=last_verified_result or None,
+            )
+
+        latency_ms = round((time.monotonic() - started) * 1000)
+        if executive_store is not None:
+            await executive_store.record_usage(
+                task_id=created_executive_task_id,
+                decision=executive_decision,
+                input_tokens=total_input_tokens,
+                cached_tokens=total_cached_tokens,
+                output_tokens=total_output_tokens,
+                model_rounds=model_rounds,
+                tool_calls=len(completed_calls),
+                elapsed_ms=latency_ms,
+                fallback_count=fallback_count,
+                failed=not success,
+            )
+        runtime_metrics.increment(
+            "executive_tasks" if created_executive_task_id else "fast_model_tasks"
+        )
+        if fallback_count:
+            runtime_metrics.increment("astra_failures")
+
         await self.dialogue.record_result(
             resolved_conversation_id,
             intent=decision.intent.value,
@@ -7102,8 +7909,8 @@ class AIEngine:
                 ttl_seconds=self.admin.confirmation_ttl_seconds,
             )
 
-        latency_ms = round((time.monotonic() - started) * 1000)
         response_id = str(getattr(last_response, "id", "") or "")
+        returned_model = str(getattr(last_response, "model", "") or self.model)
 
         logger.info(
             "AI request complete conversation=%s intent=%s model=%s latency_ms=%s "
@@ -7111,7 +7918,7 @@ class AIEngine:
             "cached_tokens=%s success=%s response_id=%s",
             resolved_conversation_id[-12:],
             decision.intent.value,
-            self.model,
+            returned_model,
             latency_ms,
             tool_rounds,
             len(completed_calls),
@@ -7125,7 +7932,7 @@ class AIEngine:
         return {
             "success": success,
             "response": final_reply,
-            "model": self.model,
+            "model": returned_model,
             "intent": decision.intent.value,
             "deterministic": False,
             "streamed": bool(on_text_delta is not None and not tool_definitions),
@@ -7143,5 +7950,11 @@ class AIEngine:
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
                 "cached_tokens": total_cached_tokens,
+            },
+            "executive_route": {
+                **executive_decision.as_dict(),
+                "initial_reason_code": initial_executive_decision.reason_code.value,
+                "task_id": created_executive_task_id,
+                "fallback_count": fallback_count,
             },
         }
