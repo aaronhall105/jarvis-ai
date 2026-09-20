@@ -595,6 +595,11 @@ class AgentPlannerTests(unittest.IsolatedAsyncioTestCase):
         resumed = await self.planner.resume(plan.plan_id)
         self.assertEqual(StepStatus.OUTCOME_UNKNOWN, resumed.step("publish").status)
         self.assertEqual(1, len(self.executor.calls))
+        with self.assertRaisesRegex(PlanValidationError, "reconciled before cancellation"):
+            await self.planner.cancel(plan.plan_id)
+        persisted = await self.store.get(plan.plan_id)
+        assert persisted is not None
+        self.assertEqual(StepStatus.OUTCOME_UNKNOWN, persisted.step("publish").status)
 
     async def test_write_with_unverified_receipt_cannot_complete(self):
         self.executor.states["email.send"] = capability("email.send", write=True, verify=True)
@@ -704,6 +709,198 @@ class AgentPlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(StepStatus.CANCELLED, cancelled.step("send").status)
         self.assertEqual(PlanStatus.CANCELLED, resumed.status)
         self.assertEqual(1, len(self.executor.calls))
+
+    async def test_partial_cancel_preserves_other_pending_work_and_rejects_completed_undo(self):
+        self.executor.states.update(
+            {
+                "gmail.read": capability("gmail.read"),
+                "calendar.read": capability("calendar.read"),
+                "email.send": capability("email.send", write=True, verify=True),
+            }
+        )
+        plan = await self.create(
+            [
+                read_step("gmail", "gmail.read"),
+                read_step("calendar", "calendar.read"),
+                write_step("send", "email.send", depends_on=("gmail",)),
+            ]
+        )
+
+        cancelled = await self.planner.cancel_steps(plan.plan_id, ["send"])
+
+        self.assertEqual(StepStatus.CANCELLED, cancelled.step("send").status)
+        self.assertEqual(StepStatus.PENDING, cancelled.step("gmail").status)
+        self.assertEqual(StepStatus.PENDING, cancelled.step("calendar").status)
+
+        self.executor.results["gmail.read"].append(accepted_result(found=True))
+        self.executor.results["calendar.read"].append(accepted_result(events=[]))
+        resumed = await self.planner.resume(plan.plan_id)
+        self.assertEqual(StepStatus.SUCCEEDED, resumed.step("gmail").status)
+        self.assertEqual(StepStatus.SUCCEEDED, resumed.step("calendar").status)
+        with self.assertRaises(PlanValidationError):
+            await self.planner.cancel_steps(plan.plan_id, ["gmail"])
+
+    async def test_durable_cancel_request_stops_unstarted_write_after_running_read(self):
+        self.executor.states.update(
+            {
+                "gmail.read": capability("gmail.read"),
+                "email.send": capability("email.send", write=True, verify=True),
+            }
+        )
+        self.executor.results["gmail.read"].append(accepted_result(found=True))
+        self.executor.results["email.send"].append(verified_write("must-not-send"))
+        self.executor.delay = 0.05
+        plan = await self.create(
+            [
+                read_step("gmail", "gmail.read"),
+                write_step("send", "email.send", depends_on=("gmail",)),
+            ]
+        )
+
+        running = asyncio.create_task(self.planner.resume(plan.plan_id))
+        for _ in range(100):
+            if self.executor.active_reads:
+                break
+            await asyncio.sleep(0.001)
+        self.assertEqual(1, self.executor.active_reads)
+        await self.planner.request_cancel_steps(plan.plan_id, ["send"])
+
+        cancelled = await running
+        self.assertEqual(StepStatus.SUCCEEDED, cancelled.step("gmail").status)
+        self.assertEqual(StepStatus.CANCELLED, cancelled.step("send").status)
+        self.assertEqual(["gmail.read"], [call.capability_id for call in self.executor.calls])
+
+        # The applied request is durable and cannot be replayed after restart.
+        restarted = PersonalAgentPlanner(SQLitePlanStore(self.database_path), self.executor)
+        resumed = await restarted.resume(plan.plan_id)
+        self.assertEqual(StepStatus.CANCELLED, resumed.step("send").status)
+        self.assertEqual(["gmail.read"], [call.capability_id for call in self.executor.calls])
+
+    async def test_full_cancel_before_execution_runs_no_steps(self):
+        self.executor.states.update(
+            {
+                "gmail.read": capability("gmail.read"),
+                "calendar.read": capability("calendar.read"),
+            }
+        )
+        plan = await self.create(
+            [read_step("gmail", "gmail.read"), read_step("calendar", "calendar.read")]
+        )
+
+        cancelled = await self.planner.cancel(plan.plan_id)
+        resumed = await self.planner.resume(plan.plan_id)
+
+        self.assertEqual(PlanStatus.CANCELLED, cancelled.status)
+        self.assertEqual(PlanStatus.CANCELLED, resumed.status)
+        self.assertEqual([], self.executor.calls)
+
+    async def test_pending_cancel_survives_restart_and_blocks_write(self):
+        self.executor.states.update(
+            {
+                "gmail.read": capability("gmail.read"),
+                "email.send": capability("email.send", write=True, verify=True),
+            }
+        )
+        self.executor.results["gmail.read"].append(accepted_result(found=True))
+        self.executor.results["email.send"].append(verified_write("must-not-send"))
+        plan = await self.create(
+            [
+                read_step("gmail", "gmail.read"),
+                write_step("send", "email.send", depends_on=("gmail",)),
+            ]
+        )
+        await self.planner.request_cancel_steps(plan.plan_id, ["send"])
+
+        restarted = PersonalAgentPlanner(SQLitePlanStore(self.database_path), self.executor)
+        resumed = await restarted.resume(plan.plan_id)
+
+        self.assertEqual(StepStatus.SUCCEEDED, resumed.step("gmail").status)
+        self.assertEqual(StepStatus.CANCELLED, resumed.step("send").status)
+        self.assertEqual(["gmail.read"], [call.capability_id for call in self.executor.calls])
+
+    async def test_supersession_preserves_completed_evidence_and_runs_unrelated_work(self):
+        self.executor.states.update(
+            {
+                "gmail.read": capability("gmail.read"),
+                "outlook.read": capability("outlook.read", available=False),
+                "calendar.read": capability("calendar.read", available=False),
+            }
+        )
+        self.executor.results["gmail.read"].append(accepted_result(messages=2))
+        first = await self.create(
+            [
+                read_step("gmail", "gmail.read"),
+                read_step("outlook", "outlook.read", depends_on=("gmail",)),
+                read_step("calendar", "calendar.read", depends_on=("gmail",)),
+            ]
+        )
+        partial = await self.planner.resume(first.plan_id)
+        self.assertEqual(StepStatus.SUCCEEDED, partial.step("gmail").status)
+
+        superseded = await self.planner.supersede_steps(first.plan_id, ["outlook"])
+        self.executor.states["outlook.read"] = capability("outlook.read")
+        self.executor.states["calendar.read"] = capability("calendar.read")
+        self.executor.results["calendar.read"].append(accepted_result(events=1))
+        resumed = await self.planner.resume(first.plan_id)
+
+        self.assertEqual(StepStatus.SUCCEEDED, resumed.step("gmail").status)
+        self.assertEqual({"messages": 2}, resumed.step("gmail").result)
+        self.assertEqual(StepStatus.SUPERSEDED, superseded.step("outlook").status)
+        self.assertEqual(StepStatus.SUPERSEDED, resumed.step("outlook").status)
+        self.assertEqual(StepStatus.SUCCEEDED, resumed.step("calendar").status)
+        self.assertEqual(
+            ["gmail.read", "calendar.read"],
+            [call.capability_id for call in self.executor.calls],
+        )
+
+    async def test_cancel_after_verified_write_cannot_erase_or_repeat_receipt(self):
+        self.executor.states["email.send"] = capability("email.send", write=True, verify=True)
+        self.executor.results["email.send"].append(verified_write("sent-once"))
+        plan = await self.create([write_step("send", "email.send")])
+        completed = await self.planner.resume(plan.plan_id)
+
+        with self.assertRaises(PlanValidationError):
+            await self.planner.cancel(completed.plan_id)
+        restarted = PersonalAgentPlanner(SQLitePlanStore(self.database_path), self.executor)
+        reconciled = await restarted.resume(completed.plan_id)
+
+        self.assertEqual(StepStatus.SUCCEEDED, reconciled.step("send").status)
+        self.assertEqual("sent-once", reconciled.step("send").action_receipt["action_id"])
+        self.assertEqual(1, len(self.executor.calls))
+
+    async def test_queued_supersession_survives_batch_and_restart(self):
+        self.executor.states.update(
+            {
+                "calendar.read": capability("calendar.read"),
+                "gmail.read": capability("gmail.read"),
+            }
+        )
+        self.executor.results["calendar.read"].append(accepted_result(events=1))
+        self.executor.results["gmail.read"].append(accepted_result(messages=4))
+        self.executor.delay = 0.05
+        plan = await self.create(
+            [
+                read_step("calendar", "calendar.read"),
+                read_step("gmail", "gmail.read", depends_on=("calendar",)),
+            ]
+        )
+
+        running = asyncio.create_task(self.planner.resume(plan.plan_id))
+        for _ in range(100):
+            if self.executor.active_reads:
+                break
+            await asyncio.sleep(0.001)
+        await self.planner.request_supersede_steps(plan.plan_id, ["gmail"])
+        superseded = await running
+
+        self.assertEqual(StepStatus.SUCCEEDED, superseded.step("calendar").status)
+        self.assertEqual(StepStatus.SUPERSEDED, superseded.step("gmail").status)
+        self.assertEqual(["calendar.read"], [call.capability_id for call in self.executor.calls])
+
+        restarted = PersonalAgentPlanner(SQLitePlanStore(self.database_path), self.executor)
+        resumed = await restarted.resume(plan.plan_id)
+        self.assertEqual(StepStatus.SUPERSEDED, resumed.step("gmail").status)
+        self.assertEqual(["calendar.read"], [call.capability_id for call in self.executor.calls])
 
 
 if __name__ == "__main__":

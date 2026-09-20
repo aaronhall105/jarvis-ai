@@ -2298,7 +2298,8 @@ class ExternalAgentRuntime:
             "name": "create_personal_plan",
             "description": (
                 "Create and start a resumable multi-step personal-agent plan. "
-                "Use only for genuine goals with two or more dependent steps."
+                "Use only for genuine goals with two or more coordinated steps; "
+                "independent reads may run in parallel."
             ),
             "parameters": {
                 "type": "object",
@@ -2369,6 +2370,29 @@ class ExternalAgentRuntime:
             "strict": False,
         }
 
+    async def executive_openai_tools(
+        self,
+        *,
+        principal_id: str,
+    ) -> list[dict[str, Any]]:
+        """Expose only the durable planner boundary to the executive model.
+
+        Astra does not receive an alternate direct-execution back door.  Its plan
+        must name capabilities from the current principal-scoped executable
+        registry, and ``PersonalAgentPlanner`` validates them again at execution.
+        """
+
+        if not self.enabled:
+            return []
+        executable = await self.registry.executable_capabilities(
+            principal_id=principal_id,
+        )
+        if len(executable) < 2:
+            return []
+        planner = self._planner_tool()
+        planner["async"] = True
+        return [planner]
+
     async def execute_model_tool(
         self,
         name: str,
@@ -2380,6 +2404,7 @@ class ExternalAgentRuntime:
         user_text: str = "",
         history: Sequence[Mapping[str, str]] = (),
         dialogue_focus: Mapping[str, Any] | None = None,
+        on_plan_created: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         if name == GOOGLE_MODEL_TOOL:
             return await self._execute_google_model_tool(
@@ -2499,7 +2524,12 @@ class ExternalAgentRuntime:
                 principal_id=principal_id,
                 goal=str(arguments.get("goal") or ""),
                 steps=proposed_steps,
+                start=False,
             )
+            plan_id = str(plan.get("plan_id") or "")
+            if on_plan_created is not None:
+                await on_plan_created(plan_id)
+            plan = await self.resume_plan(plan_id)
             return {
                 "success": True,
                 "plan_created": True,

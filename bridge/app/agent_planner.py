@@ -9,6 +9,7 @@ approval gates, durable state, evidence requirements, and conservative recovery.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import sqlite3
 import uuid
@@ -72,6 +73,7 @@ class StepStatus(str, Enum):
     BLOCKED = "blocked"
     OUTCOME_UNKNOWN = "outcome_unknown"
     CANCELLED = "cancelled"
+    SUPERSEDED = "superseded"
 
 
 class PlanStatus(str, Enum):
@@ -457,6 +459,18 @@ class SQLitePlanStore:
                     ON agent_plans(conversation_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_agent_plans_status
                     ON agent_plans(status, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS agent_plan_controls (
+                    request_id TEXT PRIMARY KEY,
+                    plan_id TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    step_ids_json TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT,
+                    FOREIGN KEY(plan_id) REFERENCES agent_plans(plan_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_plan_controls_pending
+                    ON agent_plan_controls(plan_id, status, created_at);
                 """
             )
 
@@ -534,6 +548,74 @@ class SQLitePlanStore:
         limit: int = 100,
     ) -> list[AgentPlan]:
         return await asyncio.to_thread(self._list_sync, conversation_id, status, limit)
+
+    def _request_control_sync(
+        self,
+        plan_id: str,
+        operation: str,
+        step_ids: Sequence[str] | None,
+    ) -> str:
+        request_id = str(uuid.uuid4())
+        encoded = json.dumps(
+            list(step_ids) if step_ids is not None else None, separators=(",", ":")
+        )
+        with self._database() as connection:
+            connection.execute(
+                """INSERT INTO agent_plan_controls(
+                    request_id,plan_id,operation,step_ids_json,status,created_at
+                ) VALUES (?,?,?,?,?,?)""",
+                (request_id, plan_id, operation, encoded, "pending", _utc_now()),
+            )
+        return request_id
+
+    async def request_control(
+        self,
+        plan_id: str,
+        operation: str,
+        step_ids: Sequence[str] | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            self._request_control_sync,
+            plan_id,
+            operation,
+            step_ids,
+        )
+
+    def _pending_controls_sync(self, plan_id: str) -> builtins.list[dict[str, Any]]:
+        with self._database() as connection:
+            rows = connection.execute(
+                """SELECT request_id,operation,step_ids_json,created_at
+                FROM agent_plan_controls
+                WHERE plan_id=? AND status='pending'
+                ORDER BY created_at,request_id""",
+                (plan_id,),
+            ).fetchall()
+        controls: builtins.list[dict[str, Any]] = []
+        for row in rows:
+            step_ids = json.loads(str(row["step_ids_json"]))
+            controls.append(
+                {
+                    "request_id": str(row["request_id"]),
+                    "operation": str(row["operation"]),
+                    "step_ids": step_ids,
+                    "created_at": str(row["created_at"]),
+                }
+            )
+        return controls
+
+    async def pending_controls(self, plan_id: str) -> builtins.list[dict[str, Any]]:
+        return await asyncio.to_thread(self._pending_controls_sync, plan_id)
+
+    def _complete_control_sync(self, request_id: str) -> None:
+        with self._database() as connection:
+            connection.execute(
+                """UPDATE agent_plan_controls SET status='applied',applied_at=?
+                WHERE request_id=? AND status='pending'""",
+                (_utc_now(), request_id),
+            )
+
+    async def complete_control(self, request_id: str) -> None:
+        await asyncio.to_thread(self._complete_control_sync, request_id)
 
 
 _DYNAMIC_BLOCK_CODES = {
@@ -891,6 +973,7 @@ class PersonalAgentPlanner:
                     StepStatus.FAILED,
                     StepStatus.OUTCOME_UNKNOWN,
                     StepStatus.CANCELLED,
+                    StepStatus.SUPERSEDED,
                 }
             ]
             if unsafe:
@@ -1092,6 +1175,7 @@ class PersonalAgentPlanner:
                         StepStatus.BLOCKED,
                         StepStatus.OUTCOME_UNKNOWN,
                         StepStatus.CANCELLED,
+                        StepStatus.SUPERSEDED,
                     }
                 ]
                 if blocked_dependencies:
@@ -1135,7 +1219,7 @@ class PersonalAgentPlanner:
                 if any(status is StepStatus.SUCCEEDED for status in statuses)
                 else PlanStatus.FAILED
             )
-        elif any(status is StepStatus.CANCELLED for status in statuses):
+        elif any(status in {StepStatus.CANCELLED, StepStatus.SUPERSEDED} for status in statuses):
             plan.status = PlanStatus.PARTIAL
         else:
             plan.status = PlanStatus.BLOCKED
@@ -1161,6 +1245,7 @@ class PersonalAgentPlanner:
                 StepStatus.FAILED,
                 StepStatus.OUTCOME_UNKNOWN,
                 StepStatus.CANCELLED,
+                StepStatus.SUPERSEDED,
             }:
                 continue
             state = snapshot.get(step.capability.capability_id)
@@ -1451,6 +1536,70 @@ class PersonalAgentPlanner:
         for step, result in zip(executable, results, strict=True):
             self._apply_execution_result(step, result)
 
+    async def _apply_pending_controls(self, plan: AgentPlan) -> bool:
+        """Apply durable user cancellation requests at a safe batch boundary."""
+
+        controls = await self.store.pending_controls(plan.plan_id)
+        if not controls:
+            return False
+        changed = False
+        now = _utc_now()
+        for control in controls:
+            operation = str(control.get("operation") or "")
+            raw_step_ids = control.get("step_ids")
+            selected = (
+                {str(value) for value in raw_step_ids}
+                if isinstance(raw_step_ids, builtins.list)
+                else {step.step_id for step in plan.steps}
+            )
+            if operation not in {"cancel", "cancel_steps", "supersede_steps"}:
+                await self.store.complete_control(str(control["request_id"]))
+                continue
+            for step in plan.steps:
+                if step.step_id not in selected:
+                    continue
+                if step.status not in {
+                    StepStatus.PENDING,
+                    StepStatus.AWAITING_APPROVAL,
+                    StepStatus.BLOCKED,
+                    StepStatus.FAILED,
+                }:
+                    continue
+                step.status = (
+                    StepStatus.SUPERSEDED
+                    if operation == "supersede_steps"
+                    else StepStatus.CANCELLED
+                )
+                step.failure = StepFailure(
+                    code=(
+                        "step_superseded" if operation == "supersede_steps" else "step_cancelled"
+                    ),
+                    message=(
+                        "A later user instruction superseded this part of the plan."
+                        if operation == "supersede_steps"
+                        else "The user cancelled this part of the plan."
+                    ),
+                    retryable=False,
+                )
+                step.completed_at = now
+                changed = True
+            self._propagate_dependency_blocks(plan)
+            self._derive_status(plan)
+            if operation == "cancel" and all(
+                step.status
+                in {
+                    StepStatus.SUCCEEDED,
+                    StepStatus.CANCELLED,
+                    StepStatus.SUPERSEDED,
+                }
+                for step in plan.steps
+            ):
+                plan.status = PlanStatus.CANCELLED
+            plan.updated_at = now
+            await self.store.save(plan)
+            await self.store.complete_control(str(control["request_id"]))
+        return changed
+
     async def resume(self, plan_id: str, *, retry_failed: bool = True) -> AgentPlan:
         lock = await self._plan_lock(plan_id)
         async with lock:
@@ -1466,6 +1615,9 @@ class PersonalAgentPlanner:
                 self._derive_status(plan)
                 # Persist receipt reconciliation before any new snapshot or call.
                 await self.store.save(plan)
+            await self._apply_pending_controls(plan)
+            if plan.status is PlanStatus.CANCELLED:
+                return plan
             self._clear_dynamic_blocks(plan)
             if retry_failed:
                 self._reset_retryable_failures(plan)
@@ -1486,6 +1638,7 @@ class PersonalAgentPlanner:
                 ]
                 if reads:
                     await self._execute_batch(plan, reads)
+                    await self._apply_pending_controls(plan)
                     self._propagate_dependency_blocks(plan)
                     plan.updated_at = _utc_now()
                     self._derive_status(plan)
@@ -1494,6 +1647,7 @@ class PersonalAgentPlanner:
 
                 # Writes are deliberately serialized, even when independent.
                 await self._execute_batch(plan, executable[:1])
+                await self._apply_pending_controls(plan)
                 self._propagate_dependency_blocks(plan)
                 plan.updated_at = _utc_now()
                 self._derive_status(plan)
@@ -1523,6 +1677,7 @@ class PersonalAgentPlanner:
                 StepStatus.FAILED,
                 StepStatus.OUTCOME_UNKNOWN,
                 StepStatus.CANCELLED,
+                StepStatus.SUPERSEDED,
             }:
                 raise PlanValidationError("A terminal step cannot be approved")
             if approved:
@@ -1553,8 +1708,21 @@ class PersonalAgentPlanner:
                 raise KeyError(plan_id)
             if plan.status is PlanStatus.COMPLETED:
                 raise PlanValidationError("A completed plan cannot be cancelled")
+            unresolved = [
+                step.step_id
+                for step in plan.steps
+                if step.status in {StepStatus.RUNNING, StepStatus.OUTCOME_UNKNOWN}
+            ]
+            if unresolved:
+                raise PlanValidationError(
+                    "Running or outcome-unknown steps must be reconciled before cancellation"
+                )
             for step in plan.steps:
-                if step.status is not StepStatus.SUCCEEDED:
+                if step.status not in {
+                    StepStatus.SUCCEEDED,
+                    StepStatus.CANCELLED,
+                    StepStatus.SUPERSEDED,
+                }:
                     step.status = StepStatus.CANCELLED
                     step.failure = StepFailure(
                         code="plan_cancelled",
@@ -1566,6 +1734,126 @@ class PersonalAgentPlanner:
             plan.updated_at = _utc_now()
             await self.store.save(plan)
             return plan
+
+    async def cancel_steps(self, plan_id: str, step_ids: Sequence[str]) -> AgentPlan:
+        """Cancel selected uncompleted steps while preserving verified effects."""
+
+        requested = {str(step_id).strip() for step_id in step_ids if str(step_id).strip()}
+        if not requested:
+            raise PlanValidationError("At least one step is required for partial cancellation")
+        lock = await self._plan_lock(plan_id)
+        async with lock:
+            plan = await self.store.get(plan_id)
+            if plan is None:
+                raise KeyError(plan_id)
+            known = {step.step_id for step in plan.steps}
+            if not requested <= known:
+                raise PlanValidationError("Partial cancellation named an unknown plan step")
+            if plan.status in {PlanStatus.CANCELLED, PlanStatus.COMPLETED}:
+                raise PlanValidationError("A terminal plan cannot be partially cancelled")
+            now = _utc_now()
+            for step in plan.steps:
+                if step.step_id not in requested:
+                    continue
+                if step.status is StepStatus.SUCCEEDED:
+                    raise PlanValidationError(
+                        f"Completed step {step.step_id!r} cannot be cancelled or undone"
+                    )
+                if step.status in {StepStatus.RUNNING, StepStatus.OUTCOME_UNKNOWN}:
+                    raise PlanValidationError(
+                        f"Step {step.step_id!r} must be reconciled before cancellation"
+                    )
+                step.status = StepStatus.CANCELLED
+                step.failure = StepFailure(
+                    code="step_cancelled",
+                    message="The user cancelled this part of the plan.",
+                    retryable=False,
+                )
+                step.completed_at = now
+            self._propagate_dependency_blocks(plan)
+            plan.updated_at = now
+            self._derive_status(plan)
+            await self.store.save(plan)
+            return plan
+
+    async def request_cancel_steps(self, plan_id: str, step_ids: Sequence[str]) -> str:
+        """Persist cancellation for unstarted work without waiting on a running batch."""
+
+        requested = tuple(str(step_id).strip() for step_id in step_ids if str(step_id).strip())
+        if not requested:
+            raise PlanValidationError("At least one step is required for partial cancellation")
+        plan = await self.store.get(plan_id)
+        if plan is None:
+            raise KeyError(plan_id)
+        known = {step.step_id for step in plan.steps}
+        if not set(requested) <= known:
+            raise PlanValidationError("Partial cancellation named an unknown plan step")
+        if plan.status in {PlanStatus.CANCELLED, PlanStatus.COMPLETED}:
+            raise PlanValidationError("A terminal plan cannot be partially cancelled")
+        return await self.store.request_control(plan_id, "cancel_steps", requested)
+
+    async def request_cancel(self, plan_id: str) -> str:
+        """Persist full-plan cancellation for the next safe batch boundary."""
+
+        plan = await self.store.get(plan_id)
+        if plan is None:
+            raise KeyError(plan_id)
+        if plan.status is PlanStatus.COMPLETED:
+            raise PlanValidationError("A completed plan cannot be cancelled")
+        return await self.store.request_control(plan_id, "cancel")
+
+    async def supersede_steps(self, plan_id: str, step_ids: Sequence[str]) -> AgentPlan:
+        """Supersede selected unstarted steps while preserving completed evidence."""
+
+        requested = {str(step_id).strip() for step_id in step_ids if str(step_id).strip()}
+        if not requested:
+            raise PlanValidationError("At least one step is required for supersession")
+        lock = await self._plan_lock(plan_id)
+        async with lock:
+            plan = await self.store.get(plan_id)
+            if plan is None:
+                raise KeyError(plan_id)
+            known = {step.step_id for step in plan.steps}
+            if not requested <= known:
+                raise PlanValidationError("Supersession named an unknown plan step")
+            if plan.status in {PlanStatus.CANCELLED, PlanStatus.COMPLETED}:
+                raise PlanValidationError("A terminal plan cannot be superseded")
+            now = _utc_now()
+            for step in plan.steps:
+                if step.step_id not in requested or step.status is StepStatus.SUCCEEDED:
+                    continue
+                if step.status in {StepStatus.RUNNING, StepStatus.OUTCOME_UNKNOWN}:
+                    raise PlanValidationError(
+                        f"Step {step.step_id!r} must be reconciled before supersession"
+                    )
+                step.status = StepStatus.SUPERSEDED
+                step.failure = StepFailure(
+                    code="step_superseded",
+                    message="A later user instruction superseded this part of the plan.",
+                    retryable=False,
+                )
+                step.completed_at = now
+            self._propagate_dependency_blocks(plan)
+            plan.updated_at = now
+            self._derive_status(plan)
+            await self.store.save(plan)
+            return plan
+
+    async def request_supersede_steps(self, plan_id: str, step_ids: Sequence[str]) -> str:
+        """Persist supersession for the next safe batch boundary."""
+
+        requested = tuple(str(step_id).strip() for step_id in step_ids if str(step_id).strip())
+        if not requested:
+            raise PlanValidationError("At least one step is required for supersession")
+        plan = await self.store.get(plan_id)
+        if plan is None:
+            raise KeyError(plan_id)
+        known = {step.step_id for step in plan.steps}
+        if not set(requested) <= known:
+            raise PlanValidationError("Supersession named an unknown plan step")
+        if plan.status in {PlanStatus.CANCELLED, PlanStatus.COMPLETED}:
+            raise PlanValidationError("A terminal plan cannot be superseded")
+        return await self.store.request_control(plan_id, "supersede_steps", requested)
 
     # Compatibility alias for callers predating the unambiguous method name.  It is
     # intentionally declared last so it cannot shadow ``list[...]`` annotations in

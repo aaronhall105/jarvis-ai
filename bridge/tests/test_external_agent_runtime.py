@@ -618,6 +618,85 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
 
 
 @pytest.mark.asyncio
+async def test_executive_surface_is_only_async_durable_planner(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    value.registry.executable_capabilities = AsyncMock(
+        return_value=[
+            SimpleNamespace(capability_id="gmail.read"),
+            SimpleNamespace(capability_id="calendar.read"),
+        ]
+    )
+
+    tools = await value.executive_openai_tools(principal_id="aaron")
+
+    assert [tool["name"] for tool in tools] == ["create_personal_plan"]
+    assert tools[0]["async"] is True
+
+
+@pytest.mark.asyncio
+async def test_executive_plan_is_linked_durably_before_execution(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    events: list[str] = []
+
+    async def create_plan(**_kwargs):
+        events.append("created")
+        return {"plan_id": "plan-1", "status": "pending", "steps": []}
+
+    async def plan_created(plan_id: str) -> None:
+        assert plan_id == "plan-1"
+        events.append("linked")
+
+    async def resume_plan(plan_id: str):
+        assert plan_id == "plan-1"
+        events.append("executed")
+        return {"plan_id": plan_id, "status": "completed", "steps": []}
+
+    value.create_plan = AsyncMock(side_effect=create_plan)
+    value.resume_plan = AsyncMock(side_effect=resume_plan)
+    result = await value.execute_model_tool(
+        "create_personal_plan",
+        {
+            "goal": "Check two sources",
+            "steps": [
+                {
+                    "step_id": "mail",
+                    "title": "Read mail",
+                    "capability_id": "gmail.read",
+                    "access": "read",
+                    "evidence": "accepted",
+                    "arguments": {},
+                    "depends_on": [],
+                    "risk": "low",
+                    "requires_confirmation": False,
+                    "max_attempts": 1,
+                },
+                {
+                    "step_id": "calendar",
+                    "title": "Read calendar",
+                    "capability_id": "calendar.read",
+                    "access": "read",
+                    "evidence": "accepted",
+                    "arguments": {},
+                    "depends_on": [],
+                    "risk": "low",
+                    "requires_confirmation": False,
+                    "max_attempts": 1,
+                },
+            ],
+        },
+        conversation_id="conversation-a",
+        principal_id="aaron",
+        user_text="Check my email and calendar",
+        on_plan_created=plan_created,
+    )
+
+    assert result["success"] is True
+    assert events == ["created", "linked", "executed"]
+
+
+@pytest.mark.asyncio
 async def test_contextual_gmail_management_requires_recent_email_context(runtime):
     value, _, _, _ = runtime
     await value.initialize()
