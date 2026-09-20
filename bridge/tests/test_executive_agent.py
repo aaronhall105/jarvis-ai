@@ -539,18 +539,22 @@ async def test_steer_acceptance_is_not_commit_until_successor_response_created(t
     creating = asyncio.create_task(
         transport.create(task_id, model="gpt-6-astra", input="Do the work")
     )
-    for _ in range(20):
+    for _ in range(1000):
         current = await store.get_task(task_id)
         if current and current["active_response_id"] == "resp-original":
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
+    else:
+        pytest.fail("Original response did not become steerable")
 
     steering = asyncio.create_task(transport.steer(task_id, "Actually ignore Gmail"))
-    for _ in range(20):
+    for _ in range(1000):
         current = await store.get_task(task_id)
         if current and current["waiting_reason"] == "steering_accepted_pending_commit":
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
+    else:
+        pytest.fail("Steering acceptance was not observed before successor events")
     assert not steering.done()
 
     await connection.events.put(
