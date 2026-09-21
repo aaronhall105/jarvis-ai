@@ -425,6 +425,31 @@ async def test_outlook_search_combines_unread_and_grounded_age_filter(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_outlook_cleanup_snapshot_uses_bounded_metadata_projection(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    result, _ = await connector._search(
+        "aaron",
+        {
+            "folder": "inbox",
+            "unread": True,
+            "received_before": "2026-09-18T12:00:00Z",
+            "all_pages": True,
+            "metadata_only": True,
+        },
+    )
+
+    assert result["count"] == 1
+    selected = fixture.last_request_params["$select"]
+    assert "id" in selected
+    assert "subject" in selected
+    assert "from" in selected
+    assert "body" not in selected
+    assert "bodyPreview" not in selected
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_outlook_latest_rejects_malformed_message_list(tmp_path: Path) -> None:
     _, _, connector, fixture, client = await connected_graph(tmp_path)
     fixture.search_pages = {"first": {"value": "not-a-message-list"}}

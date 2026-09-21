@@ -1708,6 +1708,7 @@ async def _try_handle_email_assistant(
                     "success": bool(snapshot.get("success")),
                     "intended_count": int(snapshot.get("intended_count") or 0),
                     "status": snapshot.get("status"),
+                    "error": snapshot.get("error"),
                     "unsupported_clauses": list(snapshot.get("unsupported_clauses") or ()),
                 }
             )

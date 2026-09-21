@@ -994,9 +994,12 @@ class MicrosoftConnector(Connector):
         query = str(payload.get("query") or "").strip()
         if len(query) > 1000:
             raise ValueError("query is invalid")
-        limit = max(1, min(int(payload.get("limit") or 20), 100))
+        metadata_only = payload.get("metadata_only") is True
+        limit_maximum = 1_000 if metadata_only and payload.get("all_pages") is True else 100
+        limit = max(1, min(int(payload.get("limit") or 20), limit_maximum))
         all_pages = payload.get("all_pages") is True
-        maximum = max(1, min(int(payload.get("max_messages") or 5_000), 10_000))
+        maximum_limit = 50_000 if metadata_only else 10_000
+        maximum = max(1, min(int(payload.get("max_messages") or 5_000), maximum_limit))
         folder = str(payload.get("folder") or "").strip()
         if payload.get("count_only") is True:
             if not folder:
@@ -1022,9 +1025,18 @@ class MicrosoftConnector(Connector):
                 "truncated": False,
             }, str(value.get("id") or "") or None
         path = f"/me/mailFolders/{self._segment(folder)}/messages" if folder else "/me/messages"
+        select = self._select()
+        if metadata_only:
+            # Frozen cleanup snapshots need exact IDs and safe audit metadata,
+            # not every full message body.  Avoiding body expansion keeps a
+            # bounded multi-page Graph read inside the capability timeout.
+            select = (
+                "id,conversationId,parentFolderId,subject,from,receivedDateTime,"
+                "isRead,importance,flag,hasAttachments"
+            )
         initial_params: dict[str, Any] = {
             "$top": limit,
-            "$select": self._select(),
+            "$select": select,
             "$orderby": "receivedDateTime desc",
         }
         if query:
