@@ -1491,9 +1491,10 @@ class EmailAssistantPolicyEngine:
                         clause_type,
                         {
                             "query": f"in:inbox {{{category_terms}}}",
-                            "limit": 100,
+                            "limit": 500,
                             "all_pages": True,
-                            "max_messages": 10_000,
+                            "max_messages": 50_000,
+                            "metadata_only": True,
                         },
                     )
                 )
@@ -1502,16 +1503,25 @@ class EmailAssistantPolicyEngine:
                 continue
             if clause_type in {"unread", "unread_age"}:
                 payload = self._bulk_search_payload(provider, "unread_inbox")
+                payload["limit"] = 500 if provider == "google_gmail" else 1_000
+                payload["all_pages"] = True
+                payload["max_messages"] = 50_000
                 days = clause.get("older_than_days")
                 if isinstance(days, int) and not isinstance(days, bool) and days > 0:
                     if provider == "google_gmail":
                         payload["query"] = f"in:inbox is:unread older_than:{days}d"
                     else:
                         payload["received_before"] = self._iso(self._now() - timedelta(days=days))
+                payload["metadata_only"] = True
                 payloads.append((clause_type, payload))
                 continue
             if clause_type == "all_inbox":
-                payloads.append((clause_type, self._bulk_search_payload(provider, "all_inbox")))
+                payload = self._bulk_search_payload(provider, "all_inbox")
+                payload["limit"] = 500 if provider == "google_gmail" else 1_000
+                payload["all_pages"] = True
+                payload["max_messages"] = 50_000
+                payload["metadata_only"] = True
+                payloads.append((clause_type, payload))
                 continue
             unsupported.append(clause)
         return payloads, unsupported
@@ -1586,6 +1596,7 @@ class EmailAssistantPolicyEngine:
                     operation="email_compound_bulk_snapshot",
                 ),
                 refresh_health=True,
+                result_item_limit=50_000,
             )
             if not search.success:
                 return {

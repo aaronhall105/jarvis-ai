@@ -652,6 +652,74 @@ async def test_read_failures_retry_only_when_retryable_and_never_fabricate_resul
     assert failed.attempts == 1
 
 
+def test_only_compound_metadata_snapshot_receives_bounded_long_read_timeout() -> None:
+    ordinary = CapabilityRequest(
+        capability_id="gmail.search",
+        payload={"all_pages": True, "metadata_only": True},
+        operation="email_search",
+    )
+    snapshot = CapabilityRequest(
+        capability_id="gmail.search",
+        payload={"all_pages": True, "metadata_only": True},
+        operation="email_compound_bulk_snapshot",
+    )
+    missing_metadata_boundary = CapabilityRequest(
+        capability_id="gmail.search",
+        payload={"all_pages": True},
+        operation="email_compound_bulk_snapshot",
+    )
+
+    assert ConnectorRegistry._read_timeout(READ_CAPABILITY, ordinary) == 0.1
+    assert ConnectorRegistry._read_timeout(READ_CAPABILITY, missing_metadata_boundary) == 0.1
+    gmail_metadata = CapabilityMetadata(
+        capability_id="gmail.search",
+        provider_id="google",
+        name="Search Gmail",
+        timeout_seconds=30,
+    )
+    assert ConnectorRegistry._read_timeout(gmail_metadata, snapshot) == 120.0
+
+
+@pytest.mark.asyncio
+async def test_large_read_result_is_available_only_to_internal_frozen_snapshot(
+    tmp_path: Path,
+) -> None:
+    large_ids = [f"message-{index}" for index in range(350)]
+    gmail_metadata = CapabilityMetadata(
+        capability_id="gmail.search",
+        provider_id="fixture",
+        name="Search Gmail",
+        required_scopes=frozenset({"fixture.read"}),
+        timeout_seconds=30,
+    )
+    connector = FakeConnector(capabilities=(gmail_metadata,))
+    connector.execute_results = [
+        ConnectorResult.succeeded({"message_ids": large_ids}),
+        ConnectorResult.succeeded({"message_ids": large_ids}),
+    ]
+    registry, _ = make_registry(tmp_path, connector)
+
+    ordinary = await registry.execute(
+        CapabilityRequest(
+            capability_id="gmail.search",
+            payload={"all_pages": True, "metadata_only": True},
+            operation="email_search",
+        ),
+        result_item_limit=50_000,
+    )
+    internal = await registry.execute(
+        CapabilityRequest(
+            capability_id="gmail.search",
+            payload={"all_pages": True, "metadata_only": True},
+            operation="email_compound_bulk_snapshot",
+        ),
+        result_item_limit=50_000,
+    )
+
+    assert len(ordinary.data["message_ids"]) == 200
+    assert internal.data["message_ids"] == large_ids
+
+
 @pytest.mark.asyncio
 async def test_unavailable_write_cannot_produce_success_or_call_provider(
     tmp_path: Path,

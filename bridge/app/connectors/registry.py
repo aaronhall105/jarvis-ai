@@ -547,18 +547,39 @@ class ConnectorRegistry:
             return "Confirmation or an explicit scoped standing permission is required"
         return None
 
+    @staticmethod
+    def _read_timeout(metadata: CapabilityMetadata, request: CapabilityRequest) -> float:
+        """Allow a bounded long read only for an exact cleanup snapshot.
+
+        Ordinary mailbox reads retain their latency bound.  The wider window
+        applies only to the server-owned, metadata-only, all-pages operation
+        that must freeze a potentially large candidate set before confirmation.
+        """
+
+        if (
+            request.operation == "email_compound_bulk_snapshot"
+            and metadata.capability_id in {"gmail.search", "outlook.search"}
+            and request.payload.get("all_pages") is True
+            and request.payload.get("metadata_only") is True
+        ):
+            return max(float(metadata.timeout_seconds), 120.0)
+        return float(metadata.timeout_seconds)
+
     async def _execute_read(
         self,
         connector: Connector,
         metadata: CapabilityMetadata,
         request: CapabilityRequest,
+        *,
+        result_item_limit: int = 200,
     ) -> CapabilityExecution:
         last_error = "Provider execution failed"
+        timeout_seconds = self._read_timeout(metadata, request)
         for attempt in range(1, self.read_attempts + 1):
             try:
                 result = await asyncio.wait_for(
                     connector.execute(metadata, request),
-                    timeout=metadata.timeout_seconds,
+                    timeout=timeout_seconds,
                 )
                 if not isinstance(result, ConnectorResult):
                     raise TypeError("Connector returned an invalid execution result")
@@ -584,7 +605,7 @@ class ConnectorRegistry:
                         capability_id=metadata.capability_id,
                         provider_id=metadata.provider_id,
                         status=ExecutionStatus.SUCCEEDED,
-                        data=redact_secrets(result.data),
+                        data=redact_secrets(result.data, max_items=result_item_limit),
                         provider_reference=(
                             redact_text(result.provider_reference, max_length=1_000)
                             if result.provider_reference
@@ -788,6 +809,7 @@ class ConnectorRegistry:
         allowed_scopes: frozenset[str] | set[str] | None = None,
         idempotency_key: str | None = None,
         refresh_health: bool = False,
+        result_item_limit: int = 200,
     ) -> CapabilityExecution:
         if isinstance(request, str):
             request = CapabilityRequest(
@@ -818,6 +840,14 @@ class ConnectorRegistry:
                 error="No executable connector provides this capability",
             )
         connector = self._connectors[metadata.provider_id]
+        bounded_result_items = max(1, min(int(result_item_limit), 50_000))
+        if bounded_result_items > 200 and not (
+            request.operation == "email_compound_bulk_snapshot"
+            and metadata.capability_id in {"gmail.search", "outlook.search"}
+            and request.payload.get("all_pages") is True
+            and request.payload.get("metadata_only") is True
+        ):
+            bounded_result_items = 200
 
         receipt: ActionReceipt | None = None
         if metadata.is_write:
@@ -932,4 +962,9 @@ class ConnectorRegistry:
             if receipt is None:  # pragma: no cover - guarded above
                 raise AssertionError("write execution lacks a durable receipt")
             return await self._execute_write(connector, metadata, request, receipt)
-        return await self._execute_read(connector, metadata, request)
+        return await self._execute_read(
+            connector,
+            metadata,
+            request,
+            result_item_limit=bounded_result_items,
+        )

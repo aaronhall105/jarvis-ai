@@ -961,6 +961,31 @@ async def test_gmail_search_snapshots_every_provider_page(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_gmail_completed_page_walk_does_not_trust_larger_size_estimate(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    ids = [f"page-message-{index}" for index in range(100)]
+    fixture.gmail_search_pages = {
+        "first": {
+            "messages": [{"id": item} for item in ids],
+            "resultSizeEstimate": 201,
+        }
+    }
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    result, _ = await connector._gmail_search(
+        "aaron",
+        {"query": "in:inbox", "all_pages": True, "max_messages": 1_000},
+    )
+
+    assert result["count"] == 100
+    assert result["result_size_estimate"] == 201
+    assert result["truncated"] is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("filter_kind", "expected", "path"),
     (

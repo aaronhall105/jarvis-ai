@@ -49,8 +49,8 @@ class BulkRegistry:
             verification={"provider_verified": status is ExecutionStatus.VERIFIED},
         )
 
-    async def execute(self, request, *, refresh_health=False):
-        del refresh_health
+    async def execute(self, request, *, refresh_health=False, result_item_limit=200):
+        del refresh_health, result_item_limit
         capability = request.capability_id
         self.requests.append((capability, dict(request.payload)))
         if capability in {"gmail.search", "outlook.search"}:
@@ -417,13 +417,18 @@ async def test_compound_snapshot_freezes_before_write_with_provider_grounded_fil
     searches = [
         payload for capability, payload in registry.requests if capability.endswith("search")
     ]
+    assert all(item["all_pages"] is True for item in searches)
+    assert all(item["metadata_only"] is True for item in searches)
+    assert all(item["max_messages"] == 50_000 for item in searches)
     if provider == "google_gmail":
         assert len(searches) == 2
+        assert all(item["limit"] == 500 for item in searches)
         assert any("category:promotions" in str(item.get("query")) for item in searches)
         assert any("older_than:3d" in str(item.get("query")) for item in searches)
         assert action["unsupported_clauses"] == []
     else:
         assert len(searches) == 1
+        assert searches[0]["limit"] == 1_000
         assert searches[0]["folder"] == "inbox"
         assert searches[0]["unread"] is True
         assert searches[0]["received_before"]

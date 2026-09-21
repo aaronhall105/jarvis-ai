@@ -1532,7 +1532,12 @@ class GoogleConnector(Connector):
 
     @staticmethod
     def _limit(payload: Mapping[str, Any], default: int = 20) -> int:
-        return max(1, min(int(payload.get("limit") or default), 100))
+        maximum = (
+            500
+            if payload.get("all_pages") is True and payload.get("metadata_only") is True
+            else 100
+        )
+        return max(1, min(int(payload.get("limit") or default), maximum))
 
     @staticmethod
     def _message_summary(message: Mapping[str, Any]) -> dict[str, Any]:
@@ -1693,7 +1698,8 @@ class GoogleConnector(Connector):
                 "truncated": False,
             }, None
         all_pages = payload.get("all_pages") is True
-        maximum = max(1, min(int(payload.get("max_messages") or 5_000), 10_000))
+        maximum_limit = 50_000 if payload.get("metadata_only") is True else 10_000
+        maximum = max(1, min(int(payload.get("max_messages") or 5_000), maximum_limit))
         requested = self._limit(payload)
         messages: list[Mapping[str, Any]] = []
         page_token: str | None = None
@@ -1703,7 +1709,7 @@ class GoogleConnector(Connector):
             pages += 1
             params: dict[str, Any] = {
                 "q": query,
-                "maxResults": min(requested if not all_pages else 100, maximum - len(messages)),
+                "maxResults": min(requested, maximum - len(messages)),
             }
             if page_token:
                 params["pageToken"] = page_token
@@ -1723,7 +1729,11 @@ class GoogleConnector(Connector):
             page_token = str(result.get("nextPageToken") or "").strip() or None
             if not all_pages or not page_token:
                 break
-        truncated = bool(page_token) or result_size_estimate > len(messages)
+        # Gmail documents resultSizeEstimate as an estimate.  Once an all-pages
+        # walk reaches a response without nextPageToken, a larger estimate is
+        # not proof that IDs were omitted.  A remaining page token still fails
+        # closed when the page or maximum bound stops the walk.
+        truncated = bool(page_token) or (not all_pages and result_size_estimate > len(messages))
         ids = [str(item.get("id")) for item in messages if item.get("id")]
         details = await asyncio.gather(
             *(
