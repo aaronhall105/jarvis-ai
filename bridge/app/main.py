@@ -39,7 +39,7 @@ from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
 from app.email_assistant import EmailAssistantPolicyEngine
 from app.email_semantic_routing import classify_email_read, provider_from_text
-from app.executive_agent import ExecutiveConfig, ExecutiveTaskStore
+from app.executive_agent import ExecutiveConfig, ExecutiveRoute, ExecutiveTaskStore
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
 from app.intent_engine import IntentEngine, IntentError
@@ -5114,7 +5114,15 @@ async def _execute_ai_request(
         )
     requested_timezone = str((trusted_context or {}).get("timezone") or "").strip()
     personal_result = memory_result
-    if personal_result is None and not pending_confirmation:
+    executive_preflight = ai.executive_preflight_decision(
+        request.text,
+        voice_mode=request.voice_mode,
+    )
+    if (
+        personal_result is None
+        and not pending_confirmation
+        and executive_preflight.route is not ExecutiveRoute.EXECUTIVE
+    ):
         personal_result = await _try_handle_personal_task(
             request.text,
             actor=actor,
