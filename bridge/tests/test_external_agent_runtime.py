@@ -623,8 +623,8 @@ async def test_executive_surface_is_only_async_durable_planner(runtime):
     await value.initialize()
     value.registry.executable_capabilities = AsyncMock(
         return_value=[
-            SimpleNamespace(capability_id="gmail.read"),
-            SimpleNamespace(capability_id="calendar.read"),
+            SimpleNamespace(capability_id="calendar.list"),
+            SimpleNamespace(capability_id="outlook.search"),
         ]
     )
 
@@ -632,6 +632,11 @@ async def test_executive_surface_is_only_async_durable_planner(runtime):
 
     assert [tool["name"] for tool in tools] == ["create_personal_plan"]
     assert tools[0]["async"] is True
+    description = str(tools[0]["description"])
+    assert "calendar.list" in description
+    assert "timeMin/timeMax" in description
+    assert "outlook.search" in description
+    assert "query and optional limit/folder" in description
 
 
 @pytest.mark.asyncio

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.ai_engine import AIEngine, RequestRouter
+from app.ai_engine import AIEngine, RequestRouter, verified_plan_creation_reply
 from app.executive_agent import (
     AsyncCallStatus,
     EXECUTIVE_INSTRUCTIONS,
@@ -326,6 +326,81 @@ async def test_task_state_machine_clears_terminal_waits_and_rejects_reanimation(
 
 
 @pytest.mark.asyncio
+async def test_executive_task_plan_link_is_immutable(tmp_path) -> None:
+    store = ExecutiveTaskStore(tmp_path / "executive.db")
+    task = await store.create_task(
+        principal_id="aaron",
+        conversation_id="conversation-a",
+        objective="Check email and calendar",
+        decision=executive_decision(),
+    )
+    task_id = str(task["task_id"])
+
+    linked = await store.update_task(task_id, plan_id="plan-1", status="running")
+    assert linked is not None
+    assert linked["plan_id"] == "plan-1"
+    same = await store.update_task(task_id, plan_id="plan-1")
+    assert same is not None
+    assert same["plan_id"] == "plan-1"
+
+    with pytest.raises(ValueError, match="already bound"):
+        await store.update_task(task_id, plan_id="plan-2")
+    persisted = await store.get_task(task_id)
+    assert persisted is not None
+    assert persisted["plan_id"] == "plan-1"
+
+
+def test_completed_plan_preserves_grounded_model_synthesis() -> None:
+    calls = [
+        {
+            "tool": "create_personal_plan",
+            "result": {
+                "success": True,
+                "plan_created": True,
+                "data": {
+                    "plan": {
+                        "plan_id": "plan-1",
+                        "status": "completed",
+                        "steps": [],
+                    }
+                },
+            },
+        }
+    ]
+    reply = "You have one meeting tomorrow, and Outlook has nothing urgent."
+
+    assert verified_plan_creation_reply(calls, model_reply=reply) is None
+    assert "completed" in str(verified_plan_creation_reply(calls)).casefold()
+
+
+def test_partial_plan_uses_truthful_durable_fallback_over_model_claim() -> None:
+    calls = [
+        {
+            "tool": "create_personal_plan",
+            "result": {
+                "success": True,
+                "plan_created": True,
+                "data": {
+                    "plan": {
+                        "plan_id": "plan-1",
+                        "status": "partial",
+                        "steps": [{"failure": {"message": "Calendar could not be checked."}}],
+                    }
+                },
+            },
+        }
+    ]
+
+    rendered = verified_plan_creation_reply(
+        calls,
+        model_reply="Everything is clear tomorrow.",
+    )
+    assert rendered is not None
+    assert "has not completed" in rendered
+    assert "Calendar could not be checked" in rendered
+
+
+@pytest.mark.asyncio
 async def test_async_call_correlation_rejects_duplicate_stale_and_wrong_task(tmp_path) -> None:
     store = ExecutiveTaskStore(tmp_path / "executive.db")
     task = await store.create_task(
@@ -364,6 +439,26 @@ async def test_async_call_correlation_rejects_duplicate_stale_and_wrong_task(tmp
         await store.complete_call("call-2", task_id=task_id, generation=0, result={"success": True})
         == "duplicate"
     )
+
+
+@pytest.mark.asyncio
+async def test_async_call_plan_link_cannot_be_rebound(tmp_path) -> None:
+    store = ExecutiveTaskStore(tmp_path / "executive.db")
+    task = await store.create_task(
+        principal_id="aaron",
+        conversation_id="conversation-a",
+        objective="Check email and calendar",
+        decision=executive_decision(),
+    )
+    task_id = str(task["task_id"])
+    await store.register_call(
+        call_id="call-1",
+        task_id=task_id,
+        tool_name="create_personal_plan",
+    )
+
+    assert await store.link_call_to_plan("call-1", task_id=task_id, plan_id="plan-1")
+    assert not await store.link_call_to_plan("call-1", task_id=task_id, plan_id="plan-2")
 
 
 @pytest.mark.asyncio
