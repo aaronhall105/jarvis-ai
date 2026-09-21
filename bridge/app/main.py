@@ -38,7 +38,13 @@ from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
 from app.email_assistant import EmailAssistantPolicyEngine
-from app.email_semantic_routing import classify_email_read, provider_from_text
+from app.email_semantic_routing import (
+    EmailCleanupClause,
+    EmailCleanupIntent,
+    classify_email_cleanup,
+    classify_email_read,
+    provider_from_text,
+)
 from app.executive_agent import ExecutiveConfig, ExecutiveRoute, ExecutiveTaskStore
 from app.external_agent_runtime import ExternalAgentRuntime
 from app.followup_engine import FollowUpEngine
@@ -658,6 +664,44 @@ def _bulk_email_scope(command: str) -> tuple[str, str] | None:
     ):
         return operation, "all_inbox"
     return None
+
+
+def _merge_cleanup_intent(
+    current: EmailCleanupIntent,
+    update: EmailCleanupIntent,
+) -> EmailCleanupIntent:
+    """Apply a clarification to unresolved cleanup slots without widening authority."""
+
+    clauses = list(current.clauses)
+    if update.remove_clause_types:
+        removed = set(update.remove_clause_types)
+        clauses = [item for item in clauses if item.type not in removed]
+    for new_clause in update.clauses:
+        clauses = [item for item in clauses if item.type != new_clause.type]
+        if new_clause.type == "unread_age" and new_clause.older_than_days is None:
+            previous = next(
+                (item for item in current.clauses if item.type == "unread_age"),
+                None,
+            )
+            if previous is not None:
+                new_clause = EmailCleanupClause(
+                    type="unread_age",
+                    unread=True,
+                    older_than_days=previous.older_than_days,
+                )
+        clauses.append(new_clause)
+    return EmailCleanupIntent(
+        operation=update.operation or current.operation,
+        provider_scope=update.provider_scope or current.provider_scope,
+        clauses=tuple(clauses),
+        combination="OR",
+    )
+
+
+def _cleanup_scope_warning(scope: EmailCleanupIntent) -> str:
+    if any(item.type in {"unread", "unread_age", "all_inbox"} for item in scope.clauses):
+        return " The unread-mail part can include personal or important messages."
+    return ""
 
 
 def _email_count_filter(command: str) -> str | None:
@@ -1593,6 +1637,218 @@ async def _try_handle_email_assistant(
             "intent": "email_bulk_awaiting_confirmation",
         }
 
+    def accounts_for_cleanup_scope(
+        accounts: Sequence[Mapping[str, Any]], scope: EmailCleanupIntent
+    ) -> list[dict[str, Any]]:
+        selected = [dict(item) for item in accounts]
+        if scope.provider_scope in {"google_gmail", "microsoft_outlook"}:
+            selected = [item for item in selected if item.get("provider") == scope.provider_scope]
+        return selected
+
+    async def begin_compound_cleanup_clarification(
+        accounts: Sequence[Mapping[str, Any]],
+        *,
+        scope: EmailCleanupIntent,
+        authorization_text: str,
+        action_request_id: str,
+        prompt: str,
+    ) -> dict[str, object]:
+        await dialogue.begin_goal(
+            conversation_id,
+            "email_compound_cleanup_scope",
+            status="awaiting_slot",
+            slots={
+                "principal_id": actor.user_key,
+                "conversation_id": conversation_id,
+                "accounts": scoped_accounts(accounts),
+                "scope": scope.as_dict(),
+                "original_authorization_text": authorization_text,
+                "idempotency_key": action_request_id,
+            },
+            missing_slots=("cleanup_scope",),
+            prompt=prompt,
+            ttl_seconds=600,
+        )
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "awaiting_clarification",
+            "response": prompt,
+            "intent": "email_compound_cleanup_needs_scope",
+        }
+
+    async def snapshot_compound_and_confirm(
+        accounts: Sequence[Mapping[str, Any]],
+        *,
+        scope: EmailCleanupIntent,
+        authorization_text: str,
+        action_request_id: str,
+    ) -> dict[str, object]:
+        snapshots: list[dict[str, Any]] = []
+        provider_results: list[dict[str, Any]] = []
+        clauses = [item.as_dict() for item in scope.clauses]
+        for selected in accounts:
+            provider = str(selected["provider"])
+            account_id = str(selected["account_id"])
+            snapshot = await email_policies.snapshot_compound_bulk_action(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                provider=provider,
+                account_id=account_id,
+                operation=str(scope.operation),
+                clauses=clauses,
+                combination=scope.combination,
+                original_authorization_text=authorization_text,
+                request_id=f"{action_request_id}:{provider}:{account_id}:compound",
+            )
+            provider_results.append(
+                {
+                    "provider": provider,
+                    "account_id": account_id,
+                    "success": bool(snapshot.get("success")),
+                    "intended_count": int(snapshot.get("intended_count") or 0),
+                    "status": snapshot.get("status"),
+                    "unsupported_clauses": list(snapshot.get("unsupported_clauses") or ()),
+                }
+            )
+            if snapshot.get("success"):
+                snapshots.append(snapshot)
+
+        failures = [
+            item
+            for item in provider_results
+            if not item["success"] and item.get("status") != "unsupported_scope"
+        ]
+        if failures:
+            for snapshot in snapshots:
+                await email_policies.cancel_bulk_action(
+                    principal_id=actor.user_key,
+                    conversation_id=conversation_id,
+                    bulk_action_id=str(snapshot["bulk_action_id"]),
+                )
+            failed_names = [
+                "Outlook" if item["provider"] == "microsoft_outlook" else "Gmail"
+                for item in failures
+            ]
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "not_started",
+                "provider_results": provider_results,
+                "response": (
+                    f"I couldn't safely build the exact set for {' and '.join(failed_names)}, "
+                    "so nothing was changed."
+                ),
+                "intent": "email_compound_cleanup_snapshot_failed",
+            }
+
+        actionable = [item for item in snapshots if int(item.get("intended_count") or 0) > 0]
+        for snapshot in snapshots:
+            if int(snapshot.get("intended_count") or 0) == 0:
+                await email_policies.cancel_bulk_action(
+                    principal_id=actor.user_key,
+                    conversation_id=conversation_id,
+                    bulk_action_id=str(snapshot["bulk_action_id"]),
+                )
+        if not actionable:
+            await dialogue.clear_goal(conversation_id, outcome="no_candidates")
+            unsupported_outlook_categories = any(
+                item["provider"] == "microsoft_outlook"
+                and item.get("status") == "unsupported_scope"
+                and any(
+                    str(clause.get("type") or "") == "category"
+                    for clause in item["unsupported_clauses"]
+                    if isinstance(clause, Mapping)
+                )
+                for item in provider_results
+            )
+            return {
+                "success": True,
+                "turn_handled": True,
+                "action_outcome": "not_started",
+                "provider_results": provider_results,
+                "response": (
+                    "Outlook doesn't expose Gmail-style Promotions or Social labels, so I "
+                    "can't safely build that Outlook cleanup set. Nothing was changed."
+                    if unsupported_outlook_categories
+                    else "I couldn't find any messages matching that exact scope."
+                ),
+                "intent": "email_compound_cleanup_no_candidates",
+            }
+
+        counts = " and ".join(
+            f"{int(item['intended_count'])} "
+            f"{'Outlook message' if item['provider'] == 'microsoft_outlook' else 'Gmail message'}"
+            f"{'s' if int(item['intended_count']) != 1 else ''}"
+            for item in provider_results
+        )
+        destinations = " and ".join(
+            dict.fromkeys(
+                _email_destination(str(item["provider"]), str(scope.operation))
+                for item in actionable
+            )
+        )
+        unsupported_outlook_categories = any(
+            item["provider"] == "microsoft_outlook"
+            and any(
+                str(clause.get("type") or "") == "category"
+                for clause in item["unsupported_clauses"]
+                if isinstance(clause, Mapping)
+            )
+            for item in provider_results
+        )
+        limitation = (
+            " Outlook doesn't expose Gmail-style promotion or social labels, so its set "
+            "uses only the other grounded filters you requested."
+            if unsupported_outlook_categories
+            else ""
+        )
+        verb = "archive" if scope.operation == "archive" else "move"
+        prompt = (
+            f"I found {counts} matching that exact scope."
+            f"{_cleanup_scope_warning(scope)}{limitation} Shall I {verb} this exact frozen set"
+            f"{' to ' + destinations if verb == 'move' else ''}?"
+        )
+        await dialogue.begin_goal(
+            conversation_id,
+            "email_bulk_confirmation",
+            status="awaiting_confirmation",
+            slots={
+                "principal_id": actor.user_key,
+                "conversation_id": conversation_id,
+                "bulk_action_ids": [str(item["bulk_action_id"]) for item in actionable],
+                "bulk_action_context": [
+                    {
+                        "bulk_action_id": str(item["bulk_action_id"]),
+                        "provider": item["provider"],
+                        "account_id": item["account_id"],
+                        "intended_count": int(item["intended_count"]),
+                    }
+                    for item in actionable
+                ],
+                "provider_accounts": [
+                    {"provider": item["provider"], "account_id": item["account_id"]}
+                    for item in provider_results
+                ],
+                "operation": scope.operation,
+                "filter_kind": "compound",
+                "structured_scope": scope.as_dict(),
+                "provider_results": provider_results,
+                "original_authorization_text": authorization_text,
+                "idempotency_key": action_request_id,
+            },
+            prompt=prompt,
+            ttl_seconds=600,
+        )
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "awaiting_confirmation",
+            "provider_results": provider_results,
+            "response": prompt,
+            "intent": "email_compound_cleanup_awaiting_confirmation",
+        }
+
     async def snapshot_repeat_cleanup(
         account: Mapping[str, Any],
         *,
@@ -1657,6 +1913,107 @@ async def _try_handle_email_assistant(
             "response": prompt,
             "intent": "email_cleanup_repeat_awaiting_confirmation",
         }
+
+    if (
+        dialogue_state.active_goal == "email_compound_cleanup_scope"
+        and dialogue_state.status == "awaiting_slot"
+    ):
+        slots = dict(dialogue_state.slots)
+        if (
+            str(slots.get("principal_id") or "") != actor.user_key
+            or str(slots.get("conversation_id") or "") != conversation_id
+        ):
+            await dialogue.clear_goal(conversation_id, outcome="invalid")
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "not_started",
+                "response": "I can't safely recover that cleanup request, so nothing was changed.",
+                "intent": "email_compound_cleanup_invalid",
+            }
+        if command in _EMAIL_HISTORY_CANCELLATIONS:
+            await dialogue.clear_goal(conversation_id, outcome="cancelled")
+            return {
+                "success": True,
+                "turn_handled": True,
+                "action_outcome": "cancelled",
+                "response": "Okay, I haven't changed any email.",
+                "intent": "email_compound_cleanup_cancelled",
+            }
+        raw_scope = slots.get("scope")
+        existing_scope = EmailCleanupIntent.from_dict(
+            dict(raw_scope) if isinstance(raw_scope, Mapping) else {}
+        )
+        update = classify_email_cleanup(text)
+        if update is None:
+            return await begin_compound_cleanup_clarification(
+                [dict(item) for item in slots.get("accounts") or ()],
+                scope=existing_scope,
+                authorization_text=str(slots.get("original_authorization_text") or text),
+                action_request_id=str(slots.get("idempotency_key") or request_id or uuid.uuid4()),
+                prompt=str(
+                    dialogue_state.prompt or "Which messages should I include in that cleanup?"
+                ),
+            )
+        scope = _merge_cleanup_intent(existing_scope, update)
+        available_cleanup_accounts = await connected_accounts()
+        allowed = {
+            (str(item.get("provider") or ""), str(item.get("account_id") or ""))
+            for item in slots.get("accounts") or ()
+            if isinstance(item, Mapping)
+        }
+        available_cleanup_accounts = [
+            item
+            for item in available_cleanup_accounts
+            if (str(item.get("provider") or ""), str(item.get("account_id") or "")) in allowed
+        ]
+        selected_accounts_for_scope = accounts_for_cleanup_scope(available_cleanup_accounts, scope)
+        if not selected_accounts_for_scope:
+            return await begin_compound_cleanup_clarification(
+                available_cleanup_accounts,
+                scope=scope,
+                authorization_text=str(slots.get("original_authorization_text") or text),
+                action_request_id=str(slots.get("idempotency_key") or request_id or uuid.uuid4()),
+                prompt="That mailbox isn't connected and healthy. Do you mean Gmail or Outlook?",
+            )
+        if scope.operation is None:
+            return await begin_compound_cleanup_clarification(
+                available_cleanup_accounts,
+                scope=scope,
+                authorization_text=str(slots.get("original_authorization_text") or text),
+                action_request_id=str(slots.get("idempotency_key") or request_id or uuid.uuid4()),
+                prompt=(
+                    "Should I archive the matching messages, move them to the recoverable deleted "
+                    "folders, or only remove promotional and social mail?"
+                ),
+            )
+        if not scope.clauses:
+            return await begin_compound_cleanup_clarification(
+                available_cleanup_accounts,
+                scope=scope,
+                authorization_text=str(slots.get("original_authorization_text") or text),
+                action_request_id=str(slots.get("idempotency_key") or request_id or uuid.uuid4()),
+                prompt="Which messages should I include in that cleanup?",
+            )
+        if any(
+            item.type == "unread_age" and item.older_than_days is None for item in scope.clauses
+        ):
+            return await begin_compound_cleanup_clarification(
+                available_cleanup_accounts,
+                scope=scope,
+                authorization_text=str(slots.get("original_authorization_text") or text),
+                action_request_id=str(slots.get("idempotency_key") or request_id or uuid.uuid4()),
+                prompt="How old should unread messages be before I include them?",
+            )
+        return await snapshot_compound_and_confirm(
+            selected_accounts_for_scope,
+            scope=scope,
+            authorization_text=(
+                f"{str(slots.get('original_authorization_text') or '').strip()}\n"
+                f"Cleanup scope clarification: {str(text).strip()}"
+            ).strip(),
+            action_request_id=request_id or str(uuid.uuid4()),
+        )
 
     if (
         dialogue_state.active_goal == "email_bulk_account_selection"
@@ -1737,6 +2094,57 @@ async def _try_handle_email_assistant(
                 "response": "Okay, I haven't changed any email.",
                 "intent": "email_bulk_cancelled",
             }
+        structured_scope_value = slots.get("structured_scope")
+        structured_scope = (
+            EmailCleanupIntent.from_dict(structured_scope_value)
+            if isinstance(structured_scope_value, Mapping)
+            else None
+        )
+        structured_update = classify_email_cleanup(text) if structured_scope is not None else None
+        if (
+            structured_scope is not None
+            and structured_update is not None
+            and command not in _EMAIL_HISTORY_AFFIRMATIVES
+        ):
+            for action_id in action_ids:
+                await email_policies.cancel_bulk_action(
+                    principal_id=actor.user_key,
+                    conversation_id=conversation_id,
+                    bulk_action_id=action_id,
+                )
+            revised = _merge_cleanup_intent(structured_scope, structured_update)
+            accounts = [
+                dict(item)
+                for item in slots.get("provider_accounts") or ()
+                if isinstance(item, Mapping)
+            ]
+            accounts = accounts_for_cleanup_scope(accounts, revised)
+            if not accounts:
+                return await begin_compound_cleanup_clarification(
+                    [
+                        dict(item)
+                        for item in slots.get("provider_accounts") or ()
+                        if isinstance(item, Mapping)
+                    ],
+                    scope=revised,
+                    authorization_text=str(text),
+                    action_request_id=request_id or str(uuid.uuid4()),
+                    prompt="That mailbox isn't available. Do you mean Gmail, Outlook, or both?",
+                )
+            if not revised.clauses:
+                return await begin_compound_cleanup_clarification(
+                    accounts,
+                    scope=revised,
+                    authorization_text=str(text),
+                    action_request_id=request_id or str(uuid.uuid4()),
+                    prompt="Which messages should I include in that cleanup?",
+                )
+            return await snapshot_compound_and_confirm(
+                accounts,
+                scope=revised,
+                authorization_text=str(text),
+                action_request_id=request_id or str(uuid.uuid4()),
+            )
         revised_scope = _bulk_email_scope(command)
         if revised_scope is not None and command not in _EMAIL_HISTORY_AFFIRMATIVES:
             for action_id in action_ids:
@@ -1754,12 +2162,34 @@ async def _try_handle_email_assistant(
             )
         if command in _EMAIL_HISTORY_AFFIRMATIVES:
             results = []
+            provider_by_action = {
+                str(item.get("bulk_action_id") or ""): dict(item)
+                for item in slots.get("bulk_action_context") or ()
+                if isinstance(item, Mapping) and str(item.get("bulk_action_id") or "")
+            }
             for action_id in action_ids:
-                result = await email_policies.execute_bulk_action(
-                    principal_id=actor.user_key,
-                    conversation_id=conversation_id,
-                    bulk_action_id=action_id,
-                )
+                try:
+                    result = await email_policies.execute_bulk_action(
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        bulk_action_id=action_id,
+                    )
+                except ValueError as exc:
+                    provider_result = provider_by_action.get(action_id, {})
+                    intended = int(provider_result.get("intended_count") or 0)
+                    result = {
+                        "success": False,
+                        "bulk_action_id": action_id,
+                        "provider": provider_result.get("provider"),
+                        "account_id": provider_result.get("account_id"),
+                        "operation": slots.get("operation"),
+                        "status": "provider_unavailable",
+                        "intended_count": intended,
+                        "succeeded_count": 0,
+                        "failed_count": intended,
+                        "remaining_count": 0,
+                        "halt_reason": str(exc),
+                    }
                 results.append(result)
                 if result.get("bulk_action_id"):
                     await dialogue.record_email_bulk_focus(conversation_id, result)
@@ -1775,8 +2205,23 @@ async def _try_handle_email_assistant(
                 response = _bulk_execution_response(results[0])
             else:
                 response = " ".join(_bulk_execution_response(item) for item in results)
+            succeeded_results = [
+                item
+                for item in results
+                if item.get("success") or int(item.get("succeeded_count") or 0) > 0
+            ]
+            failed_results = [item for item in results if not item.get("success")]
             return {
                 "success": bool(results) and all(item.get("success") for item in results),
+                "turn_handled": True,
+                "action_outcome": (
+                    "succeeded"
+                    if results and not failed_results
+                    else "partial"
+                    if succeeded_results
+                    else "failed"
+                ),
+                "provider_results": results,
                 "response": response,
                 "intent": "email_bulk_executed",
             }
@@ -2163,6 +2608,58 @@ async def _try_handle_email_assistant(
                 "don't contain a verified reason for the stop."
             )
         return {"success": True, "response": response, "intent": "email_bulk_explanation"}
+
+    compound_cleanup = classify_email_cleanup(text)
+    if (
+        compound_cleanup is not None
+        and (
+            compound_cleanup.provider_scope == "all"
+            or len(compound_cleanup.clauses) > 1
+            or any(item.type in {"unread_age", "all_inbox"} for item in compound_cleanup.clauses)
+        )
+        and not (
+            isinstance(bulk_focus, Mapping)
+            and any(phrase in command for phrase in ("do all emails", "do all messages"))
+        )
+    ):
+        accounts = await connected_accounts()
+        selected_accounts_for_scope = accounts_for_cleanup_scope(accounts, compound_cleanup)
+        if not accounts:
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "not_started",
+                "response": "I don't have a connected healthy email account to clean up.",
+                "intent": "email_compound_cleanup_provider_unavailable",
+            }
+        if compound_cleanup.provider_scope is None and len(accounts) > 1:
+            return await begin_compound_cleanup_clarification(
+                accounts,
+                scope=compound_cleanup,
+                authorization_text=str(text),
+                action_request_id=request_id or str(uuid.uuid4()),
+                prompt="Do you mean Gmail, Outlook, or both?",
+            )
+        if compound_cleanup.operation is None or not compound_cleanup.clauses:
+            prompt = (
+                "Should I archive everything, move everything to the recoverable deleted "
+                "folders, or only remove promotional and social emails?"
+                if not compound_cleanup.clauses
+                else "Should I archive those messages or move them to the recoverable deleted folders?"
+            )
+            return await begin_compound_cleanup_clarification(
+                accounts,
+                scope=compound_cleanup,
+                authorization_text=str(text),
+                action_request_id=request_id or str(uuid.uuid4()),
+                prompt=prompt,
+            )
+        return await snapshot_compound_and_confirm(
+            selected_accounts_for_scope,
+            scope=compound_cleanup,
+            authorization_text=str(text),
+            action_request_id=request_id or str(uuid.uuid4()),
+        )
 
     bulk_scope = _bulk_email_scope(command)
     if (
@@ -5162,6 +5659,11 @@ async def _execute_ai_request(
                 "calls": [],
                 "memory_used": False,
             }
+        )
+        personal_result.setdefault("turn_handled", True)
+        personal_result.setdefault(
+            "action_outcome",
+            "not_applicable" if personal_result.get("success") else "failed",
         )
         result = personal_result
         result["conversation_id"] = external_conversation_id

@@ -265,6 +265,54 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class BrainTurnTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handled_action_failure_has_structured_outcome_not_transport_failure(
+        self,
+    ) -> None:
+        proxy = module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="key",
+                mobile_token="token",
+                voice_pe_token="voice-pe-test-token",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="Aaron",
+            )
+        )
+        client = FakeClient()
+        upstream = FakeUpstream()
+
+        async def brain(command: str, metadata: dict, on_delta):
+            del command, metadata, on_delta
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "partial",
+                "response": "Gmail completed, but Outlook couldn't complete its part.",
+                "conversation_id": "mobile-chat-handled-failure",
+            }
+
+        await proxy._run_brain_turn(
+            1,
+            "Clean both inboxes",
+            False,
+            client,
+            upstream,
+            brain,
+            {"conversation_id": "mobile-chat-handled-failure"},
+            "realtime",
+            "marin",
+            {"generation": 1, "suppress_audio": False},
+        )
+
+        response = next(item for item in client.messages if item["type"] == "brain.response")
+        assert response["success"] is False
+        assert response["turn_handled"] is True
+        assert response["action_outcome"] == "partial"
+
     async def test_text_only_turn_streams_and_does_not_speak(self) -> None:
         proxy = module.RealtimeVoiceProxy(
             module.RealtimeVoiceConfig(

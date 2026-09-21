@@ -35,6 +35,16 @@ public final class JarvisRealtimeClient {
             String conversationId
         );
 
+        default void onBrainResponseOutcome(
+            String text,
+            boolean success,
+            boolean turnHandled,
+            String actionOutcome,
+            String conversationId
+        ) {
+            onBrainResponse(text, success, conversationId);
+        }
+
         default boolean onBrainResponseDurably(
             long clientTurnId,
             String text,
@@ -48,6 +58,17 @@ public final class JarvisRealtimeClient {
             );
 
             return true;
+        }
+
+        default boolean onBrainResponseDurablyOutcome(
+            long clientTurnId,
+            String text,
+            boolean success,
+            boolean turnHandled,
+            String actionOutcome,
+            String conversationId
+        ) {
+            return onBrainResponseDurably(clientTurnId, text, success, conversationId);
         }
         void onOriginalTts(String text);
         void onTurnDone();
@@ -871,10 +892,12 @@ public final class JarvisRealtimeClient {
                         try {
                             persisted =
                                 listener
-                                    .onBrainResponseDurably(
+                                    .onBrainResponseDurablyOutcome(
                                         clientTurnId,
                                         event.text,
                                         event.success,
+                                        event.turnHandled,
+                                        event.actionOutcome,
                                         event.conversationId
                                     );
 
@@ -942,9 +965,11 @@ public final class JarvisRealtimeClient {
 
                 } else {
                     post(() ->
-                        listener.onBrainResponse(
+                        listener.onBrainResponseOutcome(
                             event.text,
                             event.success,
+                            event.turnHandled,
+                            event.actionOutcome,
                             event.conversationId
                         )
                     );
@@ -1494,10 +1519,12 @@ public final class JarvisRealtimeClient {
             try {
                 persisted =
                     listener
-                        .onBrainResponseDurably(
+                        .onBrainResponseDurablyOutcome(
                             clientTurnId,
                             event.recoveryText,
                             event.recoverySuccess,
+                            event.recoveryTurnHandled,
+                            event.recoveryActionOutcome,
                             event.recoveryConversationId
                         );
 

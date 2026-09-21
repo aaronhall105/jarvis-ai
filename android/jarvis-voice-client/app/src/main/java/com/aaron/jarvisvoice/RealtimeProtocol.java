@@ -27,6 +27,8 @@ public final class RealtimeProtocol {
         public final int generation;
         public final long clientTurnId;
         public final boolean success;
+        public final boolean turnHandled;
+        public final String actionOutcome;
         public final boolean unifiedBrain;
         public final boolean memoryUsed;
         public final boolean toolCalled;
@@ -34,6 +36,8 @@ public final class RealtimeProtocol {
         public final String turnStatus;
         public final String recoveryText;
         public final boolean recoverySuccess;
+        public final boolean recoveryTurnHandled;
+        public final String recoveryActionOutcome;
         public final String recoveryConversationId;
 
         private Event(
@@ -55,6 +59,8 @@ public final class RealtimeProtocol {
             int generation,
             long clientTurnId,
             boolean success,
+            boolean turnHandled,
+            String actionOutcome,
             boolean unifiedBrain,
             boolean memoryUsed,
             boolean toolCalled,
@@ -62,6 +68,8 @@ public final class RealtimeProtocol {
             String turnStatus,
             String recoveryText,
             boolean recoverySuccess,
+            boolean recoveryTurnHandled,
+            String recoveryActionOutcome,
             String recoveryConversationId
         ) {
             this.type = type;
@@ -82,6 +90,8 @@ public final class RealtimeProtocol {
             this.generation = generation;
             this.clientTurnId = clientTurnId;
             this.success = success;
+            this.turnHandled = turnHandled;
+            this.actionOutcome = actionOutcome;
             this.unifiedBrain = unifiedBrain;
             this.memoryUsed = memoryUsed;
             this.toolCalled = toolCalled;
@@ -89,6 +99,8 @@ public final class RealtimeProtocol {
             this.turnStatus = turnStatus;
             this.recoveryText = recoveryText;
             this.recoverySuccess = recoverySuccess;
+            this.recoveryTurnHandled = recoveryTurnHandled;
+            this.recoveryActionOutcome = recoveryActionOutcome;
             this.recoveryConversationId =
                 recoveryConversationId;
         }
@@ -261,6 +273,8 @@ public final class RealtimeProtocol {
             root.optInt("generation", 0),
             root.optLong("client_turn_id", 0L),
             root.optBoolean("success", true),
+            root.optBoolean("turn_handled", false),
+            root.optString("action_outcome", ""),
             root.optBoolean("unified_brain", false),
             root.optBoolean("memory_used", false),
             root.optBoolean("tool_called", false),
@@ -268,6 +282,8 @@ public final class RealtimeProtocol {
             root.optString("status", ""),
             recoveryText,
             recoverySuccess,
+            recovery != null && recovery.optBoolean("turn_handled", false),
+            recovery == null ? "" : recovery.optString("action_outcome", ""),
             recoveryConversationId
         );
     }

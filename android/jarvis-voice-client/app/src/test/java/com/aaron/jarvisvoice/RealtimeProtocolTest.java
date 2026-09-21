@@ -54,6 +54,42 @@ public final class RealtimeProtocolTest {
         assertTrue(response.success);
     }
 
+    @Test public void handledActionFailureIsDistinctFromCoreFailure() throws Exception {
+        RealtimeProtocol.Event response = RealtimeProtocol.parse(
+            "{\"type\":\"brain.response\",\"text\":\"Outlook could not complete that action.\","
+                + "\"success\":false,\"turn_handled\":true,\"action_outcome\":\"failed\"}"
+        );
+
+        assertFalse(response.success);
+        assertTrue(response.turnHandled);
+        assertEquals("failed", response.actionOutcome);
+        assertEquals(
+            "Jarvis couldn't complete that action",
+            VoiceService.responseStatus(
+                response.success,
+                response.turnHandled,
+                response.actionOutcome,
+                false
+            )
+        );
+        assertEquals(
+            "Jarvis Core returned an error",
+            VoiceService.responseStatus(false, false, "", false)
+        );
+        assertEquals(
+            "Jarvis partially completed that action",
+            VoiceService.responseStatus(false, true, "partial", false)
+        );
+        assertEquals(
+            "Jarvis partial response restored",
+            VoiceService.responseStatus(false, true, "partial", true)
+        );
+        assertEquals(
+            "Jarvis answered",
+            VoiceService.responseStatus(true, true, "succeeded", false)
+        );
+    }
+
     @Test public void readyReportsConversationMode() throws Exception {
         RealtimeProtocol.Event event = RealtimeProtocol.parse(
             "{\"type\":\"ready\",\"model\":\"gpt-realtime\",\"voice\":\"marin\",\"voice_mode\":\"realtime\",\"conversation_mode\":\"standard\",\"unified_brain\":true}"
@@ -99,6 +135,8 @@ public final class RealtimeProtocolTest {
                     + "\"response\":{"
                     + "\"text\":\"Done.\","
                     + "\"success\":true,"
+                    + "\"turn_handled\":true,"
+                    + "\"action_outcome\":\"succeeded\","
                     + "\"conversation_id\":\"chat-1\""
                     + "}"
                     + "}"
@@ -129,6 +167,9 @@ public final class RealtimeProtocolTest {
         assertTrue(
             event.recoverySuccess
         );
+
+        assertTrue(event.recoveryTurnHandled);
+        assertEquals("succeeded", event.recoveryActionOutcome);
 
         assertEquals(
             "chat-1",
