@@ -858,6 +858,8 @@ def verified_monitor_creation_reply(
 
 def verified_plan_creation_reply(
     completed_calls: Sequence[dict[str, Any]],
+    *,
+    model_reply: str = "",
 ) -> str | None:
     """Describe durable plan state without turning plan creation into completion."""
 
@@ -875,6 +877,12 @@ def verified_plan_creation_reply(
         status = str(plan.get("status") or "unknown").strip().casefold()
         identifier = f" {plan_id}" if plan_id else ""
         if status == "completed":
+            # The continuation received the completed plan, including provider
+            # results, as a function result. Preserve that useful synthesis;
+            # downstream receipt and claim guards still reject unsupported
+            # external-write claims.
+            if str(model_reply or "").strip():
+                return None
             return (
                 f"Durable plan{identifier} completed with the required structured "
                 "execution evidence for every step."
@@ -7442,6 +7450,7 @@ class AIEngine:
                     raise AIEngineError("OpenAI returned a tool call without a call ID.")
 
                 executive_generation = 0
+                executive_plan_id = ""
                 if executive_task_id is not None:
                     if executive_store is None:  # pragma: no cover - construction invariant
                         raise AIEngineError("Executive task storage is unavailable.")
@@ -7466,6 +7475,7 @@ class AIEngine:
                         )
                         continue
                     executive_generation = int(current_task.get("generation") or 0)
+                    executive_plan_id = str(current_task.get("plan_id") or "").strip()
                     await executive_store.register_call(
                         call_id=call_id,
                         task_id=executive_task_id,
@@ -7510,6 +7520,16 @@ class AIEngine:
                         arguments={},
                         code="duplicate_tool_call",
                         message="The same tool call was already attempted.",
+                    )
+                elif name == "create_personal_plan" and executive_plan_id:
+                    completed = self._tool_failure(
+                        name=name,
+                        arguments={},
+                        code="executive_plan_already_created",
+                        message=(
+                            "This executive task is already bound to its durable plan; "
+                            "a second plan cannot replace it."
+                        ),
                     )
                 else:
                     seen_call_signatures.add(signature)
@@ -7589,6 +7609,16 @@ class AIEngine:
                             task_id=executive_task_id,
                             plan_id=plan_id,
                         )
+                        # An executive task owns exactly one durable plan. Once
+                        # linked, stop advertising plan creation to later model
+                        # rounds so Astra synthesizes the verified result instead
+                        # of starting another disconnected plan.
+                        tool_definitions = [
+                            definition
+                            for definition in tool_definitions
+                            if str(definition.get("name") or "") != "create_personal_plan"
+                        ]
+                        authorised_tools.discard("create_personal_plan")
                     receipt = result_mapping.get("receipt")
                     receipt_id = (
                         str(receipt.get("action_id") or "")
@@ -7796,7 +7826,10 @@ class AIEngine:
         if monitor_reply is not None and not live_answer_succeeded:
             final_reply = monitor_reply
 
-        plan_reply = verified_plan_creation_reply(completed_calls)
+        plan_reply = verified_plan_creation_reply(
+            completed_calls,
+            model_reply=final_reply,
+        )
         if plan_reply is not None:
             final_reply = plan_reply
 

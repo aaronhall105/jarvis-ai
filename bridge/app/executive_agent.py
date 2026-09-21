@@ -609,6 +609,10 @@ class ExecutiveTaskStore:
         current = self._get_task_sync(task_id)
         if current is None:
             return None
+        current_plan_id = str(current.get("plan_id") or "").strip()
+        requested_plan_id = str(updates.get("plan_id") or "").strip()
+        if current_plan_id and requested_plan_id and requested_plan_id != current_plan_id:
+            raise ValueError("An executive task is already bound to a different durable plan")
         current_status = str(current.get("status") or "")
         requested_status = str(updates.get("status") or current_status)
         transitions = {
@@ -878,8 +882,8 @@ class ExecutiveTaskStore:
             with self._database() as connection:
                 cursor = connection.execute(
                     """UPDATE executive_async_calls SET plan_id=?,step_id=?,updated_at=?
-                    WHERE call_id=? AND task_id=?""",
-                    (plan_id, step_id, _utc_now(), call_id, task_id),
+                    WHERE call_id=? AND task_id=? AND (plan_id IS NULL OR plan_id=?)""",
+                    (plan_id, step_id, _utc_now(), call_id, task_id, plan_id),
                 )
                 return int(cursor.rowcount) == 1
 

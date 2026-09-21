@@ -2390,6 +2390,35 @@ class ExternalAgentRuntime:
         if len(executable) < 2:
             return []
         planner = self._planner_tool()
+        executable_ids = tuple(
+            sorted(
+                str(item.capability_id)
+                for item in executable
+                if str(getattr(item, "capability_id", "")).strip()
+            )
+        )
+        argument_contracts: list[str] = []
+        for provider_tool in (
+            google_model_tool(executable_ids),
+            microsoft_model_tool(executable_ids),
+        ):
+            if provider_tool is not None:
+                argument_contracts.append(str(provider_tool.get("description") or ""))
+        described_prefixes = ("gmail.", "calendar.", "contacts.", "outlook.")
+        for capability_id in executable_ids:
+            if capability_id.startswith(described_prefixes):
+                continue
+            metadata = self.registry.capability_definition(capability_id)
+            if metadata is None:
+                continue
+            description = str(metadata.description or metadata.name).strip()
+            argument_contracts.append(f"{capability_id}: {description}")
+        if argument_contracts:
+            planner["description"] = (
+                str(planner["description"])
+                + " Use these live capability argument contracts exactly: "
+                + " | ".join(argument_contracts)
+            )
         planner["async"] = True
         return [planner]
 
