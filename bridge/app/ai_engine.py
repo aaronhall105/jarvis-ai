@@ -4701,6 +4701,34 @@ class AIEngine:
             "usage": diagnostics,
         }
 
+    def executive_preflight_decision(
+        self,
+        text: str,
+        *,
+        voice_mode: bool = False,
+        history: Sequence[dict[str, str]] = (),
+    ) -> ExecutiveRoutingDecision:
+        """Classify task shape before broad deterministic follow-up parsing.
+
+        The outer request pipeline uses this only to prevent a genuine
+        multi-domain objective such as an inbox-and-calendar briefing from being
+        mistaken for a scheduled reminder merely because it contains temporal
+        wording.  It does not execute a model or capability and it does not grant
+        authority.
+        """
+
+        base = self.router.classify(text, history)
+        return self.executive_router.classify(
+            text,
+            base_intent=base.intent.value,
+            voice_mode=voice_mode,
+            # This is task-shape classification only.  Even when Astra is
+            # unavailable, a complex objective must bypass broad reminder
+            # parsing and reach ``ask()``, where the safe standard-model
+            # fallback is selected without changing the user's intent.
+            astra_available=True,
+        )
+
     async def recover_executive_tasks(self) -> dict[str, int]:
         """Resume only persisted plans; never replay a model call after restart."""
 

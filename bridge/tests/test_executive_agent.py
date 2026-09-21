@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.ai_engine import AIEngine
+from app.ai_engine import AIEngine, RequestRouter
 from app.executive_agent import (
     AsyncCallStatus,
     EXECUTIVE_INSTRUCTIONS,
@@ -83,6 +83,30 @@ def test_astra_unavailable_falls_back_without_affecting_fast_path() -> None:
     assert decision.route is ExecutiveRoute.FAST
     assert decision.reason_code is ExecutiveReason.ASTRA_UNAVAILABLE
     assert decision.model == "gpt-5-mini"
+
+
+def test_preflight_keeps_multi_domain_briefing_out_of_reminder_parser() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.router = RequestRouter()
+    engine.executive_config = ExecutiveConfig()
+    engine.executive_router = router()
+    engine._astra_available = True
+
+    briefing = engine.executive_preflight_decision(
+        "Check Outlook and my calendar and tell me whether anything needs my attention tomorrow."
+    )
+    reminder = engine.executive_preflight_decision("Remind me tomorrow to put the bins out")
+
+    assert briefing.route is ExecutiveRoute.EXECUTIVE
+    assert briefing.reason_code is ExecutiveReason.MULTI_DOMAIN_REQUEST
+    assert reminder.route is ExecutiveRoute.FAST
+    assert reminder.reason_code is ExecutiveReason.DETERMINISTIC_COMMAND
+
+    engine._astra_available = False
+    unavailable_briefing = engine.executive_preflight_decision(
+        "Check Outlook and my calendar and tell me whether anything needs my attention tomorrow."
+    )
+    assert unavailable_briefing.route is ExecutiveRoute.EXECUTIVE
 
 
 def test_reasoning_is_capped() -> None:

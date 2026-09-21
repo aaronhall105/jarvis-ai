@@ -1227,6 +1227,68 @@ async def test_full_request_pipeline_short_circuits_before_ai_and_web(
 
 
 @pytest.mark.asyncio
+async def test_multi_domain_briefing_bypasses_scheduled_reminder_parser(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        main, "conversations", ConversationEngine(str(tmp_path / "conversations.db"))
+    )
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(tmp_path / "dialogue.db")))
+    monkeypatch.setattr(main, "_try_handle_email_assistant", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_explicit_memory", AsyncMock(return_value=None))
+    personal = AsyncMock(side_effect=AssertionError("briefing must not become a reminder"))
+    monkeypatch.setattr(main, "_try_handle_personal_task", personal)
+    monkeypatch.setattr(main.proactive_engine, "handle_reply", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        main.improvement,
+        "handle_command",
+        AsyncMock(return_value=SimpleNamespace(handled=False)),
+    )
+    monkeypatch.setattr(
+        main.improvement,
+        "capture_feedback_before_request",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        main.improvement,
+        "observe_interaction",
+        AsyncMock(return_value=None),
+    )
+    ask = AsyncMock(
+        return_value={
+            "success": True,
+            "response": "Your read-only briefing is ready.",
+            "model": "gpt-6-astra",
+            "intent": "general",
+            "deterministic": False,
+            "tool_called": True,
+            "tool_rounds": 1,
+            "calls": [],
+            "memory_used": False,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "cached_tokens": 0},
+        }
+    )
+    monkeypatch.setattr(main.ai, "ask", ask)
+
+    result = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text=(
+                "Check Outlook and my calendar and tell me whether anything "
+                "needs my attention tomorrow."
+            ),
+            conversation_id="executive-briefing",
+            request_id="executive-briefing-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    personal.assert_not_awaited()
+    ask.assert_awaited_once()
+    assert result["model"] == "gpt-6-astra"
+
+
+@pytest.mark.asyncio
 async def test_latest_gmail_and_provider_focus_follow_up_are_grounded(monkeypatch) -> None:
     accounts = [
         {"provider": "google_gmail", "account_id": "gmail-1"},
