@@ -4282,6 +4282,8 @@ class RealtimeVoiceProxy:
             )
             result: dict[str, Any] = {
                 "success": bool(raw_result.get("success", True)),
+                "turn_handled": bool(raw_result.get("turn_handled", False)),
+                "action_outcome": str(raw_result.get("action_outcome") or ""),
                 "response": response,
                 "intent": raw_result.get("intent"),
                 "conversation_id": metadata.get("conversation_id"),
@@ -4379,6 +4381,8 @@ class RealtimeVoiceProxy:
             {
                 "text": str(result.get("response") or ""),
                 "success": bool(result.get("success")),
+                "turn_handled": bool(result.get("turn_handled")),
+                "action_outcome": str(result.get("action_outcome") or ""),
                 "conversation_id": str(result.get("conversation_id") or ""),
             },
         )
@@ -4437,6 +4441,8 @@ class RealtimeVoiceProxy:
                 "generation": generation,
                 **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                 "success": result["success"],
+                "turn_handled": bool(result.get("turn_handled")),
+                "action_outcome": str(result.get("action_outcome") or ""),
                 "tool_called": bool(result.get("tool_called")),
                 "memory_used": bool(result.get("memory_used")),
                 "message_count": _safe_int(
@@ -4456,6 +4462,8 @@ class RealtimeVoiceProxy:
                 **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
                 "text": result["response"],
                 "success": result["success"],
+                "turn_handled": bool(result.get("turn_handled")),
+                "action_outcome": str(result.get("action_outcome") or ""),
                 "intent": result["intent"],
                 "conversation_id": result["conversation_id"],
                 "model": result["model"],

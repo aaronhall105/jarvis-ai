@@ -877,10 +877,30 @@ def bulk_engine(*, accounts=None, count: int = 38, execution=None):
         "intended_count": count,
         "status": "awaiting_confirmation",
     }
+
+    async def compound_snapshot(**kwargs):
+        selected_provider = kwargs["provider"]
+        selected_account = kwargs["account_id"]
+        suffix = "outlook" if selected_provider == "microsoft_outlook" else "gmail"
+        unsupported = (
+            [{"type": "category", "values": ["promotional", "social"]}]
+            if selected_provider == "microsoft_outlook"
+            else []
+        )
+        return {
+            **snapshot,
+            "bulk_action_id": f"bulk-{suffix}",
+            "provider": selected_provider,
+            "account_id": selected_account,
+            "filter_kind": "compound",
+            "unsupported_clauses": unsupported,
+        }
+
     return SimpleNamespace(
         assistant_status=AsyncMock(return_value={"accounts": accounts}),
         snapshot_bulk_action=AsyncMock(return_value=snapshot),
         snapshot_safe_cleanup_action=AsyncMock(return_value=snapshot),
+        snapshot_compound_bulk_action=AsyncMock(side_effect=compound_snapshot),
         execute_bulk_action=AsyncMock(
             return_value=execution
             or {
@@ -1037,6 +1057,408 @@ async def test_scope_expansion_during_repeat_confirmation_refreezes_without_one_
     assert "86 unread messages" in expanded["response"]
     engine.run_cleanup_now.assert_not_awaited()
     engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_compound_cleanup_conversation_freezes_both_providers_before_yes(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=11)
+
+    async def execute(**kwargs):
+        outlook = str(kwargs["bulk_action_id"]).endswith("outlook")
+        return {
+            "success": True,
+            "bulk_action_id": kwargs["bulk_action_id"],
+            "provider": "microsoft_outlook" if outlook else "google_gmail",
+            "account_id": "outlook-1" if outlook else "gmail-1",
+            "operation": "trash",
+            "status": "completed",
+            "intended_count": 11,
+            "succeeded_count": 11,
+            "failed_count": 0,
+            "remaining_count": 0,
+        }
+
+    engine.execute_bulk_action.side_effect = execute
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:live-compound-cleanup"
+
+    important = await main._try_handle_email_assistant(
+        "Have I got any important emails",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-live-1",
+    )
+    assert important is None
+
+    clarification = await main._try_handle_email_assistant(
+        "Can you clean up all my inboxes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-live-2",
+    )
+    assert clarification is not None
+    assert clarification["intent"] == "email_compound_cleanup_needs_scope"
+    assert (await main.dialogue.get(conversation)).active_goal == "email_compound_cleanup_scope"
+    engine.snapshot_compound_bulk_action.assert_not_awaited()
+
+    preview = await main._try_handle_email_assistant(
+        "Remove promotional and social emails and anything unread for over 3 days",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-live-3",
+    )
+    assert preview is not None
+    assert preview["intent"] == "email_compound_cleanup_awaiting_confirmation"
+    assert "11 Gmail messages" in str(preview["response"])
+    assert "11 Outlook messages" in str(preview["response"])
+    assert "personal or important" in str(preview["response"])
+    assert "Gmail Bin" in str(preview["response"])
+    assert "Outlook Deleted Items" in str(preview["response"])
+    assert "doesn't expose Gmail-style" in str(preview["response"])
+    assert engine.snapshot_compound_bulk_action.await_count == 2
+    snapshot_calls = engine.snapshot_compound_bulk_action.await_args_list
+    assert {call.kwargs["provider"] for call in snapshot_calls} == {
+        "google_gmail",
+        "microsoft_outlook",
+    }
+    assert all(call.kwargs["combination"] == "OR" for call in snapshot_calls)
+    assert all(
+        {clause["type"] for clause in call.kwargs["clauses"]} == {"category", "unread_age"}
+        for call in snapshot_calls
+    )
+    engine.execute_bulk_action.assert_not_awaited()
+
+    confirmed = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-live-4",
+    )
+    assert confirmed is not None
+    assert confirmed["action_outcome"] == "succeeded"
+    assert "Gmail Bin" in str(confirmed["response"])
+    assert "Outlook Deleted Items" in str(confirmed["response"])
+    assert engine.execute_bulk_action.await_count == 2
+    assert {
+        call.kwargs["bulk_action_id"] for call in engine.execute_bulk_action.await_args_list
+    } == {
+        "bulk-gmail",
+        "bulk-outlook",
+    }
+
+    replay = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="compound-live-5",
+    )
+    assert replay is None
+    assert engine.execute_bulk_action.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_compound_cleanup_partial_execution_reports_every_provider(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=4)
+
+    async def execute(**kwargs):
+        outlook = str(kwargs["bulk_action_id"]).endswith("outlook")
+        return {
+            "success": not outlook,
+            "bulk_action_id": kwargs["bulk_action_id"],
+            "provider": "microsoft_outlook" if outlook else "google_gmail",
+            "account_id": "outlook-1" if outlook else "gmail-1",
+            "operation": "trash",
+            "status": "failed" if outlook else "completed",
+            "intended_count": 4,
+            "succeeded_count": 0 if outlook else 4,
+            "failed_count": 4 if outlook else 0,
+            "remaining_count": 0,
+        }
+
+    engine.execute_bulk_action.side_effect = execute
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:compound-partial"
+    await main._try_handle_email_assistant(
+        "Clear out both my inboxes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="partial-1",
+    )
+    result = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="partial-2",
+    )
+    assert result is not None
+    assert result["success"] is False
+    assert result["turn_handled"] is True
+    assert result["action_outcome"] == "partial"
+    assert "moved 4 emails to your Gmail Bin" in str(result["response"])
+    assert "moved 0 emails to your Outlook Deleted Items" in str(result["response"])
+    assert "4 couldn't be changed" in str(result["response"])
+
+
+@pytest.mark.asyncio
+async def test_compound_snapshot_failure_cancels_other_provider_and_changes_nothing(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=9)
+
+    async def snapshot(**kwargs):
+        if kwargs["provider"] == "microsoft_outlook":
+            return {
+                "success": False,
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-1",
+                "status": "provider_failed",
+                "error": "Graph unavailable",
+            }
+        return {
+            "success": True,
+            "bulk_action_id": "gmail-frozen",
+            "provider": "google_gmail",
+            "account_id": "gmail-1",
+            "operation": "trash",
+            "filter_kind": "compound",
+            "intended_count": 9,
+            "status": "awaiting_confirmation",
+            "unsupported_clauses": [],
+        }
+
+    engine.snapshot_compound_bulk_action.side_effect = snapshot
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Clean both inboxes of promotions and unread mail older than 3 days",
+        actor=actor(),
+        conversation_id="usr:aaron:compound-snapshot-failure",
+        request_id="snapshot-failure-1",
+    )
+
+    assert result is not None
+    assert result["success"] is False
+    assert result["turn_handled"] is True
+    assert result["action_outcome"] == "not_started"
+    assert "nothing was changed" in str(result["response"])
+    engine.cancel_bulk_action.assert_awaited_once_with(
+        principal_id="aaron",
+        conversation_id="usr:aaron:compound-snapshot-failure",
+        bulk_action_id="gmail-frozen",
+    )
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_outlook_unsupported_categories_do_not_masquerade_as_provider_failure(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=7)
+
+    async def snapshot(**kwargs):
+        if kwargs["provider"] == "microsoft_outlook":
+            return {
+                "success": False,
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-1",
+                "status": "unsupported_scope",
+                "intended_count": 0,
+                "unsupported_clauses": [{"type": "category", "values": ["promotional", "social"]}],
+            }
+        return {
+            "success": True,
+            "bulk_action_id": "gmail-categories",
+            "provider": "google_gmail",
+            "account_id": "gmail-1",
+            "operation": "trash",
+            "filter_kind": "compound",
+            "intended_count": 7,
+            "status": "awaiting_confirmation",
+            "unsupported_clauses": [],
+        }
+
+    engine.snapshot_compound_bulk_action.side_effect = snapshot
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Remove promotional and social email from both inboxes",
+        actor=actor(),
+        conversation_id="usr:aaron:provider-category-boundary",
+        request_id="provider-category-boundary-1",
+    )
+
+    assert result is not None
+    assert result["success"] is True
+    assert result["action_outcome"] == "awaiting_confirmation"
+    assert "7 Gmail messages" in str(result["response"])
+    assert "0 Outlook messages" in str(result["response"])
+    assert "doesn't expose Gmail-style" in str(result["response"])
+    assert "Gmail Bin" in str(result["response"])
+    assert "Outlook Deleted Items" not in str(result["response"])
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compound_scope_change_invalidates_old_sets_and_refreezes_only_gmail(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=6)
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:compound-revise"
+    await main._try_handle_email_assistant(
+        "Clean both inboxes of promotions and unread mail older than 3 days",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="revise-1",
+    )
+    assert engine.snapshot_compound_bulk_action.await_count == 2
+
+    revised = await main._try_handle_email_assistant(
+        "Actually only Gmail",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="revise-2",
+    )
+
+    assert revised is not None
+    assert "Gmail messages" in str(revised["response"])
+    assert "Outlook messages" not in str(revised["response"])
+    assert engine.cancel_bulk_action.await_count == 2
+    assert engine.snapshot_compound_bulk_action.await_count == 3
+    assert engine.snapshot_compound_bulk_action.await_args.kwargs["provider"] == "google_gmail"
+    engine.execute_bulk_action.assert_not_awaited()
+
+    archived = await main._try_handle_email_assistant(
+        "Archive them instead",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="revise-3",
+    )
+    assert archived is not None
+    assert "archive this exact frozen set" in str(archived["response"])
+    assert engine.snapshot_compound_bulk_action.await_args.kwargs["operation"] == "archive"
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compound_cleanup_pipeline_never_reaches_generic_ai_before_confirmation(
+    monkeypatch, tmp_path
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=3)
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(
+        main, "conversations", ConversationEngine(str(tmp_path / "compound-conversations.db"))
+    )
+    monkeypatch.setattr(main, "dialogue", DialogueManager(str(tmp_path / "compound-dialogue.db")))
+    ask = AsyncMock(side_effect=AssertionError("generic AI/tool routing must not run"))
+    monkeypatch.setattr(main.ai, "ask", ask)
+    conversation = "compound-pipeline"
+
+    first = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Can you clean up all my inboxes",
+            conversation_id=conversation,
+            request_id="pipeline-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+    second = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Remove promotional and social emails and anything unread for over 3 days",
+            conversation_id=conversation,
+            request_id="pipeline-2",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert first["model"] == "email-assistant"
+    assert second["model"] == "email-assistant"
+    assert second["deterministic"] is True
+    assert second["turn_handled"] is True
+    assert second["action_outcome"] == "awaiting_confirmation"
+    assert second["success"] is True
+    ask.assert_not_awaited()
+    engine.execute_bulk_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_disconnect_after_snapshot_is_handled_partial_failure(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1"},
+        {"provider": "microsoft_outlook", "account_id": "outlook-1"},
+    ]
+    engine = bulk_engine(accounts=accounts, count=5)
+
+    async def execute(**kwargs):
+        if str(kwargs["bulk_action_id"]).endswith("outlook"):
+            raise ValueError("The selected Outlook account is no longer connected")
+        return {
+            "success": True,
+            "bulk_action_id": kwargs["bulk_action_id"],
+            "provider": "google_gmail",
+            "account_id": "gmail-1",
+            "operation": "trash",
+            "status": "completed",
+            "intended_count": 5,
+            "succeeded_count": 5,
+            "failed_count": 0,
+            "remaining_count": 0,
+        }
+
+    engine.execute_bulk_action.side_effect = execute
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:compound-disconnect"
+    await main._try_handle_email_assistant(
+        "Clean both inboxes of promotions and unread mail older than 3 days",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="disconnect-1",
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Yes",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="disconnect-2",
+    )
+
+    assert result is not None
+    assert result["success"] is False
+    assert result["turn_handled"] is True
+    assert result["action_outcome"] == "partial"
+    assert "Gmail Bin" in str(result["response"])
+    assert "Outlook Deleted Items" in str(result["response"])
+    assert engine.execute_bulk_action.await_count == 2
 
 
 @pytest.mark.asyncio

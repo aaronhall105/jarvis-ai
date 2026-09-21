@@ -1048,6 +1048,24 @@ class MicrosoftConnector(Connector):
             if query or sender:
                 raise ValueError("Outlook unread filtering cannot be combined with another filter")
             initial_params["$filter"] = "isRead eq false"
+        received_before = str(payload.get("received_before") or "").strip()
+        if received_before:
+            if query or sender:
+                raise ValueError("Outlook age filtering cannot be combined with search or sender")
+            try:
+                parsed_before = datetime.fromisoformat(received_before.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("received_before is invalid") from exc
+            if parsed_before.tzinfo is None:
+                raise ValueError("received_before must include a timezone")
+            normalised_before = (
+                parsed_before.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            )
+            existing_filter = str(initial_params.get("$filter") or "").strip()
+            age_filter = f"receivedDateTime lt {normalised_before}"
+            initial_params["$filter"] = (
+                f"{age_filter} and {existing_filter}" if existing_filter else age_filter
+            )
         params: Mapping[str, Any] | None = initial_params
         messages: list[dict[str, Any]] = []
         url = GRAPH_API + path

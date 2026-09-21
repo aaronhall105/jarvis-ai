@@ -2,6 +2,20 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha29 — Safe multi-inbox cleanup
+
+Alpha29 adds compound Gmail and Outlook cleanup requests with durable provider
+scope, exact frozen candidate sets, explicit confirmation, recoverable-only
+destinations, truthful partial-provider results, and structured handled-action
+outcomes for Android. It preserves Email Assistant v3, Smart Important Only,
+and the optional Astra Executive Agent architecture already deployed in Core.
+
+See [the complete alpha29 release notes](docs/releases/CHANGES_V19_0_0_ALPHA29.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
+## Historical releases
+
 ### v19.0.0-alpha28 — Email Assistant v3 and Outlook
 
 Alpha28 packages the already-merged Email Assistant v3 and its unified Gmail
@@ -15,8 +29,6 @@ application configuration and Aaron's browser consent are complete. See
 [the complete alpha28 release notes](docs/releases/CHANGES_V19_0_0_ALPHA28.md).
 
 Core application version remains `3.7.0`; realtime protocol remains `2`.
-
-## Historical releases
 
 ### v19.0.0-alpha27 — Google Personal Integrations v1
 

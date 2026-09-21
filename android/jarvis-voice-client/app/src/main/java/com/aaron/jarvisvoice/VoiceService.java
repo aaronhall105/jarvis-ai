@@ -1557,6 +1557,26 @@ public final class VoiceService extends Service implements
             0L,
             text,
             success,
+            false,
+            "",
+            conversationId,
+            false
+        );
+    }
+
+    @Override public void onBrainResponseOutcome(
+        String text,
+        boolean success,
+        boolean turnHandled,
+        String actionOutcome,
+        String conversationId
+    ) {
+        handleBrainResponse(
+            0L,
+            text,
+            success,
+            turnHandled,
+            actionOutcome,
             conversationId,
             false
         );
@@ -1572,6 +1592,27 @@ public final class VoiceService extends Service implements
             clientTurnId,
             text,
             success,
+            false,
+            "",
+            conversationId,
+            true
+        );
+    }
+
+    @Override public boolean onBrainResponseDurablyOutcome(
+        long clientTurnId,
+        String text,
+        boolean success,
+        boolean turnHandled,
+        String actionOutcome,
+        String conversationId
+    ) {
+        return handleBrainResponse(
+            clientTurnId,
+            text,
+            success,
+            turnHandled,
+            actionOutcome,
             conversationId,
             true
         );
@@ -1581,6 +1622,8 @@ public final class VoiceService extends Service implements
         long clientTurnId,
         String text,
         boolean success,
+        boolean turnHandled,
+        String actionOutcome,
         String conversationId,
         boolean durable
     ) {
@@ -1652,25 +1695,31 @@ public final class VoiceService extends Service implements
          */
         if (alreadyPresent) {
             status(
-                success
-                    ? "Jarvis response restored"
-                    : "Jarvis response restored with an error"
+                responseStatus(
+                    success,
+                    turnHandled,
+                    actionOutcome,
+                    true
+                )
             );
 
             return true;
         }
 
         status(
-            success
-                ? "Jarvis answered"
-                : "Jarvis Core returned an error"
+            responseStatus(
+                success,
+                turnHandled,
+                actionOutcome,
+                false
+            )
         );
 
         boolean useFallback =
             SpeechFallbackPolicy.shouldUseFallback(
                 turnShouldSpeak,
                 turnReceivedRealtimeAudio,
-                success,
+                success || turnHandled,
                 response,
                 VoiceCatalog.isOriginal(
                     store.voiceId()
@@ -1745,6 +1794,32 @@ public final class VoiceService extends Service implements
         }
 
         return true;
+    }
+
+    static String responseStatus(
+        boolean success,
+        boolean turnHandled,
+        String actionOutcome,
+        boolean restored
+    ) {
+        if (success) {
+            return restored
+                ? "Jarvis response restored"
+                : "Jarvis answered";
+        }
+        if (turnHandled) {
+            if ("partial".equals(actionOutcome)) {
+                return restored
+                    ? "Jarvis partial response restored"
+                    : "Jarvis partially completed that action";
+            }
+            return restored
+                ? "Jarvis response restored — action not completed"
+                : "Jarvis couldn't complete that action";
+        }
+        return restored
+            ? "Jarvis response restored with an error"
+            : "Jarvis Core returned an error";
     }
 
     @Override public void onOriginalTts(String text) {

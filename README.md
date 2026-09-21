@@ -3,13 +3,13 @@
 [![Jarvis CI](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml/badge.svg?branch=jarvis%2Funified-production)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/jarvis-ci.yml)
 [![CodeQL](https://github.com/aaronhall105/jarvis-ai/actions/workflows/codeql.yml/badge.svg?branch=jarvis%2Funified-production)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/codeql.yml)
 [![Android OTA release](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml/badge.svg)](https://github.com/aaronhall105/jarvis-ai/actions/workflows/android-ota-release.yml)
-[![Release](https://img.shields.io/badge/release-v19.0.0--alpha28-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha28)
+[![Release](https://img.shields.io/badge/release-v19.0.0--alpha29-orange)](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha29)
 
 Jarvis is a self-hosted unified AI assistant with one authoritative Brain/Core,
 an Android Phone client, a Wear OS client, Home Assistant capabilities,
 realtime voice, durable work, integrations, and controlled developer tooling.
 
-> **Current product:** `v19.0.0-alpha28` on the sole long-lived and default
+> **Current product:** `v19.0.0-alpha29` on the sole long-lived and default
 > branch, `jarvis/unified-production`. Core application version is `3.7.0`
 > and realtime protocol version is `2`.
 
@@ -103,7 +103,7 @@ the public internet.
 
 The production-signed Phone and Watch APKs, checksums, public signing reports,
 inspection reports, product manifest, and OTA manifest are attached to the
-[v19.0.0-alpha28 prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha28).
+[v19.0.0-alpha29 prerelease](https://github.com/aaronhall105/jarvis-ai/releases/tag/v19.0.0-alpha29).
 Install updates in place; do not uninstall or clear application data as an
 upgrade workaround.
 

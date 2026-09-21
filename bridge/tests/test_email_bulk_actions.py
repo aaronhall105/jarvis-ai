@@ -25,7 +25,9 @@ class BulkRegistry:
             for index in range(count)
         }
         self.writes: list[tuple[str, str]] = []
+        self.requests: list[tuple[str, dict[str, Any]]] = []
         self.fail_once: set[str] = set()
+        self.unknown_once: set[str] = set()
 
     @staticmethod
     def result(
@@ -50,6 +52,7 @@ class BulkRegistry:
     async def execute(self, request, *, refresh_health=False):
         del refresh_health
         capability = request.capability_id
+        self.requests.append((capability, dict(request.payload)))
         if capability in {"gmail.search", "outlook.search"}:
             values = [dict(item) for item in self.messages.values()]
             if request.payload.get("unread") is True or "is:unread" in str(
@@ -108,6 +111,13 @@ class BulkRegistry:
                 message["parent_folder_id"] = "deleted-id"
             else:
                 message["parent_folder_id"] = "archive-id"
+            if message_id in self.unknown_once:
+                self.unknown_once.remove(message_id)
+                return self.result(
+                    {},
+                    status=ExecutionStatus.OUTCOME_UNKNOWN,
+                    error="provider timed out after accepting the request",
+                )
             return self.result({"message_id": message_id}, reference=message_id)
         raise AssertionError(f"Unexpected capability: {capability}")
 
@@ -296,6 +306,54 @@ async def test_restart_reconciles_executing_item_without_duplicate_move(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_unknown_bulk_write_outcome_reconciles_without_duplicate_move(tmp_path: Path) -> None:
+    registry = BulkRegistry(2)
+    registry.unknown_once = {"message-0"}
+    path = tmp_path / "bulk-unknown.db"
+    first_service = engine(path, registry)
+    action = await snapshot(first_service, request_id="bulk-unknown")
+
+    first = await first_service.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=action["bulk_action_id"],
+    )
+    assert first["status"] == "partial"
+    assert first["succeeded_count"] == 1
+
+    restarted = engine(path, registry)
+    final = await restarted.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=action["bulk_action_id"],
+    )
+    assert final["status"] == "completed"
+    writes = [message_id for _, message_id in registry.writes]
+    assert writes.count("message-0") == 1
+    assert writes.count("message-1") == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_bulk_confirmation_expires_without_any_write(tmp_path: Path) -> None:
+    registry = BulkRegistry(3)
+    service = engine(tmp_path / "bulk-expired.db", registry)
+    action = await snapshot(service, request_id="bulk-expired")
+    with service._db() as connection:
+        connection.execute(
+            "UPDATE email_bulk_actions SET expires_at=? WHERE bulk_action_id=?",
+            ("2000-01-01T00:00:00+00:00", action["bulk_action_id"]),
+        )
+
+    result = await service.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=action["bulk_action_id"],
+    )
+    assert result["status"] == "expired"
+    assert registry.writes == []
+
+
+@pytest.mark.asyncio
 async def test_bulk_cancellation_and_scope_isolation_cause_zero_writes(tmp_path: Path) -> None:
     registry = BulkRegistry(8)
     service = engine(tmp_path / "bulk.db", registry)
@@ -328,7 +386,96 @@ async def test_bulk_cancellation_and_scope_isolation_cause_zero_writes(tmp_path:
         bulk_action_id=action["bulk_action_id"],
     )
     assert result["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["google_gmail", "microsoft_outlook"])
+async def test_compound_snapshot_freezes_before_write_with_provider_grounded_filters(
+    tmp_path: Path, provider: str
+) -> None:
+    registry = BulkRegistry(17, provider=provider)
+    service = engine(tmp_path / f"compound-{provider}.db", registry)
+
+    action = await service.snapshot_compound_bulk_action(
+        principal_id="aaron",
+        conversation_id=f"usr:aaron:compound-{provider}",
+        provider=provider,
+        account_id=f"{provider}-account",
+        operation="trash",
+        clauses=[
+            {"type": "category", "values": ["promotional", "social"]},
+            {"type": "unread_age", "unread": True, "older_than_days": 3},
+        ],
+        combination="OR",
+        original_authorization_text="Remove promotions and unread mail older than three days",
+        request_id=f"compound-{provider}-1",
+    )
+
+    assert action["success"] is True
+    assert action["intended_count"] == 17
     assert registry.writes == []
+    searches = [
+        payload for capability, payload in registry.requests if capability.endswith("search")
+    ]
+    if provider == "google_gmail":
+        assert len(searches) == 2
+        assert any("category:promotions" in str(item.get("query")) for item in searches)
+        assert any("older_than:3d" in str(item.get("query")) for item in searches)
+        assert action["unsupported_clauses"] == []
+    else:
+        assert len(searches) == 1
+        assert searches[0]["folder"] == "inbox"
+        assert searches[0]["unread"] is True
+        assert searches[0]["received_before"]
+        assert action["unsupported_clauses"] == [
+            {"type": "category", "values": ["promotional", "social"]}
+        ]
+
+
+@pytest.mark.asyncio
+async def test_compound_snapshot_restart_executes_only_frozen_ids_once(tmp_path: Path) -> None:
+    registry = BulkRegistry(51)
+    path = tmp_path / "compound-restart.db"
+    first_service = engine(path, registry)
+    action = await first_service.snapshot_compound_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:compound-restart",
+        provider="google_gmail",
+        account_id="google_gmail-account",
+        operation="trash",
+        clauses=[{"type": "unread_age", "unread": True, "older_than_days": 3}],
+        combination="OR",
+        original_authorization_text="Remove unread email older than three days",
+        request_id="compound-restart-1",
+    )
+    partial = await first_service.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:compound-restart",
+        bulk_action_id=action["bulk_action_id"],
+        max_items=25,
+    )
+    assert partial["succeeded_count"] == 25
+    registry.messages["arrived-after-confirmation"] = {
+        "message_id": "arrived-after-confirmation",
+        "thread_id": "later",
+        "from": "later@example.test",
+        "subject": "Later",
+        "label_ids": ["INBOX", "UNREAD"],
+        "parent_folder_id": "inbox-id",
+    }
+
+    restarted = engine(path, registry)
+    completed = await restarted.execute_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:compound-restart",
+        bulk_action_id=action["bulk_action_id"],
+    )
+    assert completed["status"] == "completed"
+    assert completed["succeeded_count"] == 51
+    written_ids = [message_id for _, message_id in registry.writes]
+    assert len(written_ids) == 51
+    assert len(set(written_ids)) == 51
+    assert "arrived-after-confirmation" not in written_ids
 
 
 @pytest.mark.asyncio

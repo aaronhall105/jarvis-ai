@@ -405,6 +405,26 @@ async def test_outlook_folder_count_rejects_malformed_provider_evidence(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_outlook_search_combines_unread_and_grounded_age_filter(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    await connector._search(
+        "aaron",
+        {
+            "folder": "inbox",
+            "unread": True,
+            "received_before": "2026-09-18T12:00:00Z",
+            "all_pages": True,
+        },
+    )
+
+    assert fixture.last_request_params["$filter"] == (
+        "receivedDateTime lt 2026-09-18T12:00:00Z and isRead eq false"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_outlook_latest_rejects_malformed_message_list(tmp_path: Path) -> None:
     _, _, connector, fixture, client = await connected_graph(tmp_path)
     fixture.search_pages = {"first": {"value": "not-a-message-list"}}

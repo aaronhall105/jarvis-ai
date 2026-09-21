@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import hashlib
 import json
 import logging
@@ -1448,6 +1449,259 @@ class EmailAssistantPolicyEngine:
         if row is None:
             raise RuntimeError("Bulk email action was not persisted")
         return {"success": True, **self._bulk_row(row)}
+
+    def _compound_cleanup_payloads(
+        self,
+        provider: str,
+        clauses: Sequence[Mapping[str, Any]],
+    ) -> tuple[builtins.list[tuple[str, dict[str, Any]]], builtins.list[dict[str, Any]]]:
+        """Translate semantic clauses into provider-grounded read queries.
+
+        Gmail categories are deliberately not projected onto Outlook.  Any
+        unsupported clause is returned as evidence for the user-facing preview
+        instead of being guessed from subject/body text.
+        """
+
+        payloads: builtins.list[tuple[str, dict[str, Any]]] = []
+        unsupported: builtins.list[dict[str, Any]] = []
+        for raw_clause in clauses:
+            clause = dict(raw_clause)
+            clause_type = str(clause.get("type") or "")
+            if clause_type == "category":
+                values = {str(item) for item in clause.get("values") or ()}
+                if provider != "google_gmail":
+                    unsupported.append(clause)
+                    continue
+                gmail_categories = [
+                    value
+                    for value in ("promotions", "social")
+                    if (
+                        value == "social"
+                        and "social" in values
+                        or value == "promotions"
+                        and "promotional" in values
+                    )
+                ]
+                if not gmail_categories:
+                    unsupported.append(clause)
+                    continue
+                category_terms = " ".join(f"category:{category}" for category in gmail_categories)
+                payloads.append(
+                    (
+                        clause_type,
+                        {
+                            "query": f"in:inbox {{{category_terms}}}",
+                            "limit": 100,
+                            "all_pages": True,
+                            "max_messages": 10_000,
+                        },
+                    )
+                )
+                if "newsletter" in values:
+                    unsupported.append({"type": "category", "values": ["newsletter"]})
+                continue
+            if clause_type in {"unread", "unread_age"}:
+                payload = self._bulk_search_payload(provider, "unread_inbox")
+                days = clause.get("older_than_days")
+                if isinstance(days, int) and not isinstance(days, bool) and days > 0:
+                    if provider == "google_gmail":
+                        payload["query"] = f"in:inbox is:unread older_than:{days}d"
+                    else:
+                        payload["received_before"] = self._iso(self._now() - timedelta(days=days))
+                payloads.append((clause_type, payload))
+                continue
+            if clause_type == "all_inbox":
+                payloads.append((clause_type, self._bulk_search_payload(provider, "all_inbox")))
+                continue
+            unsupported.append(clause)
+        return payloads, unsupported
+
+    async def snapshot_compound_bulk_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        operation: str,
+        clauses: Sequence[Mapping[str, Any]],
+        combination: str,
+        original_authorization_text: str,
+        request_id: str,
+        ttl_seconds: int = 600,
+        batch_size: int = 25,
+    ) -> dict[str, Any]:
+        """Freeze the union of exact IDs selected by compound read-only clauses."""
+
+        if operation not in {"trash", "archive"}:
+            raise ValueError("Bulk email operation must be trash or archive")
+        if str(combination).upper() != "OR":
+            raise ValueError("Only OR cleanup clause combinations are supported")
+        if not original_authorization_text.strip():
+            raise ValueError("Original bulk email authority is required")
+        await self._require_email_account(
+            principal_id=principal_id, provider=provider, account_id=account_id
+        )
+        normalised_clauses = [dict(item) for item in clauses if isinstance(item, Mapping)]
+        if not normalised_clauses:
+            raise ValueError("At least one cleanup clause is required")
+        scoped_request_id = f"{request_id}:{provider}:{account_id}:{operation}:compound"
+        action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"email-bulk:{scoped_request_id}"))
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if existing is not None:
+            return {"success": True, **self._bulk_row(existing)}
+
+        payloads, unsupported = self._compound_cleanup_payloads(provider, normalised_clauses)
+        if not payloads:
+            return {
+                "success": False,
+                "status": "unsupported_scope",
+                "provider": provider,
+                "account_id": account_id,
+                "unsupported_clauses": unsupported,
+                "intended_count": 0,
+                "error": "That provider cannot ground the requested cleanup filters",
+            }
+
+        capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
+        ids: builtins.list[str] = []
+        metadata: dict[str, dict[str, Any]] = {}
+        query_evidence: builtins.list[dict[str, Any]] = []
+        for ordinal, (clause_type, payload) in enumerate(payloads):
+            search = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id=capability,
+                    payload=payload,
+                    request_id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{scoped_request_id}:snapshot:{ordinal}:{clause_type}",
+                        )
+                    ),
+                    conversation_id=conversation_id,
+                    principal_id=principal_id,
+                    operation="email_compound_bulk_snapshot",
+                ),
+                refresh_health=True,
+            )
+            if not search.success:
+                return {
+                    "success": False,
+                    "status": "provider_failed",
+                    "provider": provider,
+                    "account_id": account_id,
+                    "unsupported_clauses": unsupported,
+                    "error": search.error,
+                    "intended_count": 0,
+                }
+            if search.data.get("truncated"):
+                return {
+                    "success": False,
+                    "status": "candidate_limit_exceeded",
+                    "provider": provider,
+                    "account_id": account_id,
+                    "unsupported_clauses": unsupported,
+                    "error": "The exact candidate set is too large to confirm safely",
+                    "intended_count": len(search.data.get("message_ids") or ()),
+                }
+            raw_messages = [
+                dict(item)
+                for item in search.data.get("messages") or ()
+                if isinstance(item, Mapping)
+            ]
+            metadata.update(
+                {
+                    str(item.get("message_id")): item
+                    for item in raw_messages
+                    if item.get("message_id")
+                }
+            )
+            clause_ids = [
+                str(item) for item in search.data.get("message_ids") or () if str(item).strip()
+            ]
+            if not clause_ids:
+                clause_ids = [str(item["message_id"]) for item in raw_messages]
+            ids.extend(clause_ids)
+            query_evidence.append(
+                {
+                    "clause_type": clause_type,
+                    "provider_query": payload.get("query"),
+                    "provider_folder": payload.get("folder"),
+                    "unread": payload.get("unread") is True,
+                    "received_before": payload.get("received_before"),
+                    "candidate_count": len(clause_ids),
+                }
+            )
+        ids = list(dict.fromkeys(ids))
+        now = self._now()
+        expires = now + timedelta(seconds=max(60, min(int(ttl_seconds), 3600)))
+        filter_evidence = {
+            "kind": "compound",
+            "clauses": normalised_clauses,
+            "combination": "OR",
+            "queries": query_evidence,
+            "unsupported_clauses": unsupported,
+            "frozen": True,
+            "permanent_delete": False,
+        }
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO email_bulk_actions "
+                "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
+                "filter_kind,filter_json,original_authorization_text,idempotency_key,status,"
+                "intended_count,batch_size,created_at,expires_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    action_id,
+                    principal_id,
+                    conversation_id,
+                    provider,
+                    account_id,
+                    operation,
+                    "compound",
+                    json.dumps(filter_evidence, sort_keys=True, separators=(",", ":")),
+                    original_authorization_text,
+                    scoped_request_id,
+                    "awaiting_confirmation",
+                    len(ids),
+                    max(1, min(int(batch_size), 100)),
+                    self._iso(now),
+                    self._iso(expires),
+                    self._iso(now),
+                ),
+            )
+            for ordinal, message_id in enumerate(ids):
+                message = metadata.get(message_id, {})
+                sender = str(message.get("sender_name") or message.get("from") or "")[:500]
+                connection.execute(
+                    "INSERT INTO email_bulk_action_items "
+                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
+                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        message_id,
+                        str(message.get("thread_id") or "") or None,
+                        sender or None,
+                        str(message.get("subject") or "")[:998] or None,
+                        ordinal,
+                        "pending",
+                        self._iso(now),
+                        self._iso(now),
+                    ),
+                )
+            persisted = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if persisted is None:
+            raise RuntimeError("Compound bulk email action was not persisted")
+        return {
+            "success": True,
+            **self._bulk_row(persisted),
+            "unsupported_clauses": unsupported,
+        }
 
     async def snapshot_safe_cleanup_action(
         self,
