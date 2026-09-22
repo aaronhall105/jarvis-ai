@@ -145,6 +145,8 @@ def verify_release_workflows(manifest: dict[str, Any] | None = None) -> list[str
         errors.append("OTA publishing must be tag-only, not manually dispatched from a branch")
     elif ota.is_file() and "ota-feeds" in ota_content:
         errors.append("OTA publishing still depends on the obsolete ota-feeds branch")
+    if ota.is_file() and "packages: platform-tools" not in ota_content:
+        errors.append("OTA workflow must avoid the removed Android SDK tools package")
     if (
         ota.is_file()
         and str(manifest["current_release"]["production_signer_sha256"]) not in ota_content

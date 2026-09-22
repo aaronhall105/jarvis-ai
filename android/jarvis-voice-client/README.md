@@ -1,8 +1,8 @@
 # Jarvis Android Phone and Wear OS clients
 
-This Gradle project builds the current `v19.0.0-alpha29` Phone and Watch
+This Gradle project builds the current `v19.0.0-alpha30` Phone and Watch
 clients for the unified Jarvis Brain/Core. Both clients use package
-`com.aaron.jarvisvoice`, versionCode `190310`, realtime protocol `2`, and one
+`com.aaron.jarvisvoice`, versionCode `190320`, realtime protocol `2`, and one
 approved product source revision.
 
 ## Modules

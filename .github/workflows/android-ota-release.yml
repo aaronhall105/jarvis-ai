@@ -21,6 +21,11 @@ jobs:
       - uses: actions/setup-java@v5
         with: {distribution: temurin, java-version: '17'}
       - uses: android-actions/setup-android@v3
+        with:
+          # The action's legacy default includes the removed SDK package
+          # "tools". Install only the still-supported bootstrap package here;
+          # the next step pins the platform and build-tools used for release.
+          packages: platform-tools
       - run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
