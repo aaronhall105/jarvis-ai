@@ -15,8 +15,8 @@ def test_manifest_identifies_single_authoritative_branch() -> None:
     manifest = verify_product_baseline.load_manifest()
     assert manifest["authoritative_branch"] == "jarvis/unified-production"
     assert manifest["current_release"] == {
-        "version_name": "19.0.0-alpha29",
-        "version_code": 190310,
+        "version_name": "19.0.0-alpha30",
+        "version_code": 190320,
         "core_application_version": "3.7.0",
         "realtime_protocol": 2,
         "phone_package": "com.aaron.jarvisvoice",
@@ -25,6 +25,15 @@ def test_manifest_identifies_single_authoritative_branch() -> None:
         ),
     }
     assert Path(verify_product_baseline.MANIFEST).is_file()
+
+
+def test_ota_android_setup_avoids_removed_legacy_tools_package() -> None:
+    workflow = (
+        verify_product_baseline.ROOT / ".github/workflows/android-ota-release.yml"
+    ).read_text(encoding="utf-8")
+    assert "uses: android-actions/setup-android@v3" in workflow
+    assert "packages: platform-tools" in workflow
+    assert "packages: tools" not in workflow
 
 
 def test_deployment_has_no_retired_checkout_fallback() -> None:

@@ -2,6 +2,19 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha30 — OTA recovery and safe multi-inbox cleanup
+
+Alpha30 contains the approved compound Gmail and Outlook cleanup work prepared
+for alpha29, plus a release-pipeline repair that avoids requesting the removed
+legacy Android SDK `tools` package. Alpha29's immutable tag was consumed by the
+failed setup run and did not publish APKs or update the OTA channel.
+
+See [the complete alpha30 release notes](docs/releases/CHANGES_V19_0_0_ALPHA30.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
+## Historical releases
+
 ### v19.0.0-alpha29 — Safe multi-inbox cleanup
 
 Alpha29 adds compound Gmail and Outlook cleanup requests with durable provider
@@ -13,8 +26,6 @@ and the optional Astra Executive Agent architecture already deployed in Core.
 See [the complete alpha29 release notes](docs/releases/CHANGES_V19_0_0_ALPHA29.md).
 
 Core application version remains `3.7.0`; realtime protocol remains `2`.
-
-## Historical releases
 
 ### v19.0.0-alpha28 — Email Assistant v3 and Outlook
 

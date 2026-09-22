@@ -6,13 +6,13 @@ device evidence.
 
 ## Validated source and release
 
-- Current release candidate: `v19.0.0-alpha29`
+- Current release candidate: `v19.0.0-alpha30`
 - Release source: the immutable tag, product manifest, and OTA manifest must
   record the exact approved `jarvis/unified-production` revision
 - Authoritative branch: `jarvis/unified-production`
 - Core application version: `3.7.0`
 - Realtime protocol: `2`
-- Android Phone and Wear versionCode: `190310`
+- Android Phone and Wear versionCode: `190320`
 
 The tag-triggered workflow fails closed unless the tag equals the current
 authoritative branch head. It builds Phone and Watch from that one revision,
@@ -22,7 +22,7 @@ from the exact published bytes.
 
 ## Core and repository checks
 
-The alpha29 release candidate adds compound multi-inbox cleanup, exact frozen
+The alpha30 release candidate adds compound multi-inbox cleanup, exact frozen
 candidate sets, provider-isolated execution, and handled action-outcome status
 for Android while preserving the already-shipped Email Assistant v3,
 Outlook/Microsoft Graph, dialogue safety, and Gmail history resilience work.
