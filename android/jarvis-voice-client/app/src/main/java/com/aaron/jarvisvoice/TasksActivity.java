@@ -214,17 +214,30 @@ public final class TasksActivity extends Activity {
         TextView activity = text(item.activityText(), 14, MID);
         activity.setPadding(0, dp(8), 0, 0);
         card.addView(activity, matchWrap());
-        if ("email_cleanup".equals(item.taskType) && !item.plannedSteps.isEmpty()) {
-            for (JSONObject provider : item.plannedSteps) {
-                String name = provider.optString("title", "Provider");
-                String providerState = provider.optString("status", "pending")
+        if (!item.plannedSteps.isEmpty()) {
+            int visibleSteps = Math.min(item.plannedSteps.size(), 4);
+            for (int index = 0; index < visibleSteps; index++) {
+                JSONObject step = item.plannedSteps.get(index);
+                String name = step.optString("title", "Task step");
+                String stepState = step.optString("status", "pending")
                     .replace('_', ' ');
-                String result = provider.optString("result_summary", "");
-                String line = name + ": " + providerState;
+                String result = step.optString("result_summary", "");
+                String failure = step.optString("failure", "");
+                String line = name + ": " + stepState;
                 if (!result.isBlank()) line += " — " + result;
-                TextView providerView = text(line, 13, BLACK);
-                providerView.setPadding(0, dp(6), 0, 0);
-                card.addView(providerView, matchWrap());
+                else if (!failure.isBlank()) line += " — " + failure;
+                TextView stepView = text(line, 13, BLACK);
+                stepView.setPadding(0, dp(6), 0, 0);
+                card.addView(stepView, matchWrap());
+            }
+            if (item.plannedSteps.size() > visibleSteps) {
+                TextView more = text(
+                    "+ " + (item.plannedSteps.size() - visibleSteps) + " more steps",
+                    12,
+                    MID
+                );
+                more.setPadding(0, dp(5), 0, 0);
+                card.addView(more, matchWrap());
             }
         }
         if (!item.progressText().isBlank()) {

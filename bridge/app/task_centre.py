@@ -55,6 +55,9 @@ TERMINAL_STATUSES = {
 }
 
 Notifier = Callable[..., Awaitable[Mapping[str, Any]]]
+# Stable provider-neutral mobile/API projection.  Execution engines keep their
+# own authoritative models; every adapter emits this same redacted contract.
+WorkItem = dict[str, Any]
 
 
 def _now() -> datetime:
@@ -257,9 +260,9 @@ class TaskCentre:
         principal_id: str,
         filter_name: str = "ACTIVE",
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> list[WorkItem]:
         maximum = max(1, min(int(limit), 250))
-        tasks: list[dict[str, Any]] = []
+        tasks: list[WorkItem] = []
         tasks.extend(await self._executive_tasks(principal_id, maximum))
         tasks.extend(await self._followup_tasks(principal_id, maximum))
         tasks.extend(await self._email_bulk_tasks(principal_id, maximum))
@@ -368,12 +371,40 @@ class TaskCentre:
         steps = self._safe_plan_steps(plan)
         completed = sum(1 for item in steps if item["status"] == "succeeded")
         current = next(
-            (item for item in steps if item["status"] in {"running", "awaiting_approval"}),
+            (
+                item
+                for item in steps
+                if item["status"] in {"running", "awaiting_approval", "blocked", "outcome_unknown"}
+            ),
             None,
         )
         pending = next((item for item in steps if item["status"] == "pending"), None)
-        waiting = _safe_text(row.get("waiting_reason"))
+        approval_steps = [item for item in steps if item["status"] == "awaiting_approval"]
+        blocked_step = next(
+            (item for item in steps if item["status"] in {"blocked", "outcome_unknown"}),
+            None,
+        )
+        waiting = _safe_text(row.get("waiting_reason")) or (blocked_step or {}).get("failure")
+        if (
+            status is TaskCentreStatus.WAITING_FOR_JARVIS
+            and blocked_step is not None
+            and (
+                not bool(blocked_step.get("retryable"))
+                or blocked_step.get("failure_code")
+                in {
+                    "capability_missing",
+                    "capability_access_denied",
+                    "verification_unsupported",
+                }
+            )
+        ):
+            status = TaskCentreStatus.WAITING_FOR_YOU
         requires_user = status is TaskCentreStatus.WAITING_FOR_YOU
+        retryable_failure = any(
+            bool(item.get("retryable"))
+            for item in steps
+            if item.get("status") in {"blocked", "failed"}
+        )
         return self._task(
             task_id=f"executive:{row['task_id']}",
             task_type="executive",
@@ -398,12 +429,34 @@ class TaskCentre:
             providers=self._providers_from_steps(steps),
             capabilities=[item["capability"] for item in steps if item.get("capability")],
             requires_user_action=requires_user,
-            user_action_type="confirmation" if requires_user else None,
+            user_action_type=(
+                "confirmation"
+                if requires_user and len(approval_steps) == 1
+                else "choose_confirmation"
+                if requires_user and approval_steps
+                else "capability_setup_or_intervention"
+                if requires_user
+                else None
+            ),
+            can_confirm=requires_user and len(approval_steps) == 1,
+            can_decline=requires_user and len(approval_steps) == 1,
             can_cancel=status.value in ACTIVE_STATUSES,
+            can_retry=(
+                status
+                in {
+                    TaskCentreStatus.WAITING_FOR_JARVIS,
+                    TaskCentreStatus.PARTIAL,
+                    TaskCentreStatus.FAILED,
+                }
+                and retryable_failure
+            ),
             can_steer=status.value in ACTIVE_STATUSES,
             result_summary=_safe_text(row.get("last_verified_result"), limit=500),
             planned_steps=steps,
-            metadata={"plan_id": row.get("plan_id")},
+            metadata={
+                "plan_id": row.get("plan_id"),
+                "confirmation_step_ids": [item["step_id"] for item in approval_steps],
+            },
         )
 
     async def _followup_tasks(self, principal_id: str, limit: int) -> list[dict[str, Any]]:
@@ -581,6 +634,8 @@ class TaskCentre:
                 if reconnect
                 else None
             ),
+            can_confirm=raw_status == "awaiting_confirmation",
+            can_decline=raw_status == "awaiting_confirmation",
             can_cancel=raw_status
             in {"previewing", "awaiting_confirmation", "interrupted", "partial"},
             can_retry=raw_status in {"interrupted", "partial", "expired"} and not reconnect,
@@ -603,6 +658,9 @@ class TaskCentre:
     ) -> dict[str, Any]:
         raw_statuses = {str(row.get("status") or "") for row in rows}
         reconnect_rows = [row for row in rows if self._requires_provider_reconnect(row)]
+        confirmation_rows = [
+            row for row in rows if str(row.get("status") or "") == "awaiting_confirmation"
+        ]
         if raw_statuses & {"previewing", "running"}:
             status = TaskCentreStatus.RUNNING
         elif reconnect_rows:
@@ -725,6 +783,8 @@ class TaskCentre:
                 if status is TaskCentreStatus.WAITING_FOR_YOU
                 else None
             ),
+            can_confirm=bool(confirmation_rows) and not bool(reconnect_rows),
+            can_decline=bool(confirmation_rows) and not bool(reconnect_rows),
             can_cancel=bool(
                 raw_statuses & {"awaiting_confirmation", "interrupted", "partial", "previewing"}
             ),
@@ -793,6 +853,26 @@ class TaskCentre:
             None,
         )
         pending = next((item for item in steps if item["status"] == "pending"), None)
+        approval_steps = [item for item in steps if item["status"] == "awaiting_approval"]
+        if status is TaskCentreStatus.WAITING_FOR_JARVIS and waiting is not None:
+            failure_code = str(waiting.get("failure_code") or "")
+            retryable = bool(waiting.get("retryable"))
+            if not retryable or failure_code in {
+                "capability_missing",
+                "capability_access_denied",
+                "verification_unsupported",
+            }:
+                status = TaskCentreStatus.WAITING_FOR_YOU
+        requires_user = status is TaskCentreStatus.WAITING_FOR_YOU
+        waiting_reason = (waiting or {}).get("failure")
+        if approval_steps and not waiting_reason:
+            waiting_reason = "Confirmation required before Jarvis can continue"
+        retryable_failure = any(
+            bool(item.get("retryable"))
+            for item in steps
+            if item.get("status") in {"blocked", "failed"}
+        )
+        selected_current = current or waiting
         return self._task(
             task_id=f"agent_plan:{plan.plan_id}",
             task_type="multi_tool_plan",
@@ -804,27 +884,48 @@ class TaskCentre:
             created_at=plan.created_at,
             updated_at=plan.updated_at,
             completed_at=(plan.updated_at if status.value in TERMINAL_STATUSES else None),
-            current_step=(current or waiting or {}).get("title"),
-            current_step_index=(steps.index(current) + 1 if current in steps else None),
+            current_step=(selected_current or {}).get("title"),
+            current_step_index=(
+                steps.index(selected_current) + 1 if selected_current in steps else None
+            ),
             step_count=len(steps),
             progress_current=completed,
             progress_total=len(steps),
             progress_unit="steps",
             next_step=(pending or {}).get("title"),
-            waiting_reason=(waiting or {}).get("failure"),
+            waiting_reason=waiting_reason,
             error_summary=(waiting or {}).get("failure")
             if status is TaskCentreStatus.FAILED
             else None,
             providers=self._providers_from_steps(steps),
             capabilities=[item["capability"] for item in steps if item.get("capability")],
-            requires_user_action=status is TaskCentreStatus.WAITING_FOR_YOU,
+            requires_user_action=requires_user,
             user_action_type=(
-                "confirmation" if status is TaskCentreStatus.WAITING_FOR_YOU else None
+                "confirmation"
+                if len(approval_steps) == 1
+                else "choose_confirmation"
+                if approval_steps
+                else "capability_setup_or_intervention"
+                if requires_user
+                else None
             ),
+            can_confirm=len(approval_steps) == 1,
+            can_decline=len(approval_steps) == 1,
             can_cancel=status.value in ACTIVE_STATUSES,
-            can_retry=status in {TaskCentreStatus.PARTIAL, TaskCentreStatus.FAILED},
+            can_retry=(
+                status
+                in {
+                    TaskCentreStatus.WAITING_FOR_JARVIS,
+                    TaskCentreStatus.PARTIAL,
+                    TaskCentreStatus.FAILED,
+                }
+                and retryable_failure
+            ),
             planned_steps=steps,
-            metadata={"plan_id": plan.plan_id},
+            metadata={
+                "plan_id": plan.plan_id,
+                "confirmation_step_ids": [item["step_id"] for item in approval_steps],
+            },
         )
 
     @staticmethod
@@ -848,11 +949,24 @@ class TaskCentre:
                     "title": _safe_text(step.title, limit=160) or "Task step",
                     "status": step.status.value,
                     "capability": step.capability.capability_id,
+                    "capability_access": step.capability.access.value,
+                    "evidence_requirement": step.capability.evidence.value,
+                    "depends_on": list(step.depends_on),
+                    "attempts": step.attempts,
+                    "max_attempts": step.max_attempts,
                     "started_at": step.started_at,
                     "completed_at": step.completed_at,
                     "failure": _safe_text(failure, limit=300),
+                    "failure_code": (
+                        _safe_text(step.failure.code, limit=100)
+                        if step.failure is not None
+                        else None
+                    ),
+                    "retryable": bool(step.failure.retryable) if step.failure else False,
                     "result_summary": result_summary,
                     "requires_confirmation": step.required_confirmation,
+                    "confirmation_status": step.confirmation_status.value,
+                    "verified_receipt": bool(step.action_receipt),
                 }
             )
         return output
@@ -969,7 +1083,7 @@ class TaskCentre:
             "completion": "Completion follow-up",
         }.get(kind, "Jarvis task")
 
-    def _task(self, **values: Any) -> dict[str, Any]:
+    def _task(self, **values: Any) -> WorkItem:
         conversation_id = str(values.pop("conversation_id", "") or "")
         task = {
             "task_id": str(values.pop("task_id")),
@@ -1005,6 +1119,8 @@ class TaskCentre:
             "can_retry": bool(values.pop("can_retry", False)),
             "can_steer": bool(values.pop("can_steer", False)),
             "can_reschedule": bool(values.pop("can_reschedule", False)),
+            "can_confirm": bool(values.pop("can_confirm", False)),
+            "can_decline": bool(values.pop("can_decline", False)),
             "result_summary": values.pop("result_summary", None),
             "planned_steps": values.pop("planned_steps", []),
             "scheduled_at": values.pop("scheduled_at", None),
@@ -1022,7 +1138,7 @@ class TaskCentre:
         safe = redact_secrets(task)
         return dict(safe) if isinstance(safe, Mapping) else task
 
-    async def get_task(self, *, principal_id: str, task_id: str) -> dict[str, Any] | None:
+    async def get_task(self, *, principal_id: str, task_id: str) -> WorkItem | None:
         tasks = await self.list_tasks(principal_id=principal_id, filter_name="ALL", limit=250)
         task = next((item for item in tasks if item["task_id"] == task_id), None)
         if task is None:
@@ -1414,9 +1530,7 @@ class TaskCentre:
                     message=message,
                 )
                 accepted = bool(result.get("success") or result.get("command_accepted"))
-                outcome_unknown = bool(
-                    result.get("outcome_unknown") or result.get("command_sent")
-                )
+                outcome_unknown = bool(result.get("outcome_unknown") or result.get("command_sent"))
                 # Home Assistant accepting a notify service call is durable
                 # evidence that Jarvis submitted the request, not evidence that
                 # Android displayed it.  Keep the same truthful state vocabulary
@@ -1553,29 +1667,157 @@ class TaskCentre:
         )
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
-    async def confirm_email_cleanup(
-        self, *, principal_id: str, task_id: str
-    ) -> dict[str, Any] | None:
+    async def confirm(self, *, principal_id: str, task_id: str) -> dict[str, Any] | None:
+        """Confirm exactly one current durable authority gate.
+
+        The Task Centre never invents approval semantics.  It delegates an
+        email frozen-set confirmation to the email engine and a generic plan
+        step approval to the existing planner.  Any future registered
+        capability therefore uses this same control without Android knowing
+        its domain.
+        """
+
         task = await self.get_task(principal_id=principal_id, task_id=task_id)
-        if (
-            task is None
-            or task.get("user_action_type") != "confirmation"
-            or not task_id.startswith(("email_bulk:", "email_group:"))
-        ):
+        if task is None or not task.get("can_confirm"):
             return None
         source, identity = task_id.split(":", 1)
-        action_ids = (
-            [identity]
-            if source == "email_bulk"
-            else [str(item) for item in task.get("metadata", {}).get("bulk_action_ids") or ()]
-        )
-        for action_id in action_ids:
-            await self.email_policies.execute_bulk_action(
-                principal_id=principal_id,
-                conversation_id=str(task.get("conversation_id") or ""),
-                bulk_action_id=action_id,
+        if source in {"email_bulk", "email_group"}:
+            action_ids = (
+                [identity]
+                if source == "email_bulk"
+                else [str(item) for item in task.get("metadata", {}).get("bulk_action_ids") or ()]
             )
+            for action_id in action_ids:
+                await self.email_policies.execute_bulk_action(
+                    principal_id=principal_id,
+                    conversation_id=str(task.get("conversation_id") or ""),
+                    bulk_action_id=action_id,
+                )
+        elif source in {"agent_plan", "executive"}:
+            metadata: Mapping[str, Any] = (
+                task["metadata"] if isinstance(task.get("metadata"), Mapping) else {}
+            )
+            plan_id = identity if source == "agent_plan" else str(metadata.get("plan_id") or "")
+            step_ids = [str(item) for item in metadata.get("confirmation_step_ids") or ()]
+            if not plan_id or len(step_ids) != 1:
+                return None
+            await self.planner.approve(plan_id, step_ids[0], approved=True)
+            plan = await self.planner.resume(plan_id)
+            if source == "executive":
+                await self._sync_executive_task(identity, plan)
+        else:
+            return None
+        self._record_event(
+            principal_id=principal_id,
+            task_id=task_id,
+            event_type="confirmed",
+            summary="Confirmed by Aaron",
+        )
         return await self.get_task(principal_id=principal_id, task_id=task_id)
+
+    async def decline(
+        self,
+        *,
+        principal_id: str,
+        task_id: str,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        """Decline one authority gate without cancelling unrelated plan work."""
+
+        task = await self.get_task(principal_id=principal_id, task_id=task_id)
+        if task is None or not task.get("can_decline"):
+            return None
+        source, identity = task_id.split(":", 1)
+        if source in {"email_bulk", "email_group"}:
+            return await self.cancel(
+                principal_id=principal_id,
+                task_id=task_id,
+                request_id=request_id,
+            )
+        if source not in {"agent_plan", "executive"}:
+            return None
+        metadata: Mapping[str, Any] = (
+            task["metadata"] if isinstance(task.get("metadata"), Mapping) else {}
+        )
+        plan_id = identity if source == "agent_plan" else str(metadata.get("plan_id") or "")
+        step_ids = [str(item) for item in metadata.get("confirmation_step_ids") or ()]
+        if not plan_id or len(step_ids) != 1:
+            return None
+        await self.planner.approve(plan_id, step_ids[0], approved=False)
+        plan = await self.planner.resume(plan_id)
+        if source == "executive":
+            await self._sync_executive_task(identity, plan)
+        self._record_event(
+            principal_id=principal_id,
+            task_id=task_id,
+            event_type="declined",
+            summary="Confirmation declined by Aaron",
+            evidence={"request_id": request_id},
+        )
+        return await self.get_task(principal_id=principal_id, task_id=task_id)
+
+    # Compatibility for internal callers while the mobile API is generic.
+    confirm_email_cleanup = confirm
+
+    async def _sync_executive_task(self, task_id: str, plan: AgentPlan) -> None:
+        """Project authoritative plan state back to its executive task index."""
+
+        status = {
+            PlanStatus.PENDING: "running",
+            PlanStatus.RUNNING: "running",
+            PlanStatus.AWAITING_APPROVAL: "waiting_user",
+            PlanStatus.BLOCKED: "waiting_tool",
+            PlanStatus.PARTIAL: "partial",
+            PlanStatus.FAILED: "failed",
+            PlanStatus.COMPLETED: "completed",
+            PlanStatus.CANCELLED: "cancelled",
+        }[plan.status]
+        current = next(
+            (
+                step
+                for step in plan.steps
+                if step.status
+                in {
+                    StepStatus.RUNNING,
+                    StepStatus.AWAITING_APPROVAL,
+                    StepStatus.BLOCKED,
+                    StepStatus.OUTCOME_UNKNOWN,
+                }
+            ),
+            None,
+        )
+        verified: list[str] = []
+        for step in plan.steps:
+            if step.status is not StepStatus.SUCCEEDED or not isinstance(step.result, Mapping):
+                continue
+            summary = _safe_text(
+                (step.result or {}).get("summary")
+                or (step.result or {}).get("response_message")
+                or (step.result or {}).get("message"),
+                limit=180,
+            )
+            if summary:
+                verified.append(summary)
+        await self.executive_store.update_task(
+            task_id,
+            status=status,
+            current_step=current.title if current is not None else None,
+            waiting_reason=(
+                current.failure.message
+                if current is not None and current.failure is not None
+                else "Confirmation required before Jarvis can continue"
+                if current is not None and current.status is StepStatus.AWAITING_APPROVAL
+                else None
+            ),
+            last_verified_result="; ".join(verified[-3:]) or None,
+            error_summary=(
+                current.failure.message
+                if plan.status in {PlanStatus.FAILED, PlanStatus.PARTIAL}
+                and current is not None
+                and current.failure is not None
+                else None
+            ),
+        )
 
     async def retry(self, *, principal_id: str, task_id: str) -> dict[str, Any] | None:
         task = await self.get_task(principal_id=principal_id, task_id=task_id)
@@ -1614,7 +1856,9 @@ class TaskCentre:
                 else str(task.get("metadata", {}).get("plan_id") or "")
             )
             if plan_id:
-                await self.planner.resume(plan_id)
+                plan = await self.planner.resume(plan_id)
+                if source == "executive":
+                    await self._sync_executive_task(identity, plan)
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
     async def health(self) -> dict[str, Any]:

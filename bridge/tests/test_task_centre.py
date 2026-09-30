@@ -93,6 +93,17 @@ class FakePlanner:
         self.calls.append(("resume", plan_id))
         return self.plans[plan_id]
 
+    async def approve(self, plan_id: str, step_id: str, *, approved: bool = True):
+        self.calls.append(("approve" if approved else "decline", step_id))
+        plan_value = self.plans[plan_id]
+        step = plan_value.step(step_id)
+        step.confirmation_status = (
+            ConfirmationStatus.APPROVED if approved else ConfirmationStatus.DENIED
+        )
+        step.status = StepStatus.PENDING if approved else StepStatus.CANCELLED
+        plan_value.status = PlanStatus.RUNNING if approved else PlanStatus.PARTIAL
+        return plan_value
+
 
 class FakeEmailPolicies:
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
@@ -520,9 +531,7 @@ async def test_disable_task_notifications_preserves_task_and_sends_nothing(tmp_p
     row.update(status="completed", succeeded_count=row["intended_count"], completed_at=NOW)
     assert await centre.process_notifications_once() == 0
     assert notifier.messages == []
-    task = await centre.get_task(
-        principal_id="aaron", task_id="email_bulk:disabled-cleanup"
-    )
+    task = await centre.get_task(principal_id="aaron", task_id="email_bulk:disabled-cleanup")
     assert task is not None
     assert task["notification_on_completion"] is False
     assert task["notification_on_failure"] is False
@@ -553,9 +562,7 @@ async def test_partial_mobile_notification_submission_is_unknown_and_never_retri
     restarted = service(path, bulks=[row], notifier=notifier)
     assert await restarted.process_notifications_once() == 0
     assert len(notifier.messages) == 1
-    task = await restarted.get_task(
-        principal_id="aaron", task_id="email_bulk:partial-notification"
-    )
+    task = await restarted.get_task(principal_id="aaron", task_id="email_bulk:partial-notification")
     assert task is not None
     assert task["completion_notification_state"] == "outcome_unknown"
 
@@ -764,9 +771,7 @@ async def test_provider_reauthentication_is_waiting_for_you_not_fake_progress(
     row["halt_reason"] = "Gmail needs reconnecting before Jarvis can continue"
     centre = service(tmp_path / "tasks.db", bulks=[row])
 
-    task = await centre.get_task(
-        principal_id="aaron", task_id="email_bulk:gmail-reconnect"
-    )
+    task = await centre.get_task(principal_id="aaron", task_id="email_bulk:gmail-reconnect")
 
     assert task is not None
     assert task["status"] == "WAITING_FOR_YOU"
@@ -827,3 +832,186 @@ async def test_successful_provider_step_remains_completed_in_partial_plan(tmp_pa
     assert outlook["status"] == "succeeded"
     assert gmail["status"] == "blocked"
     assert task["waiting_reason"] == "Gmail unavailable"
+
+
+def appointment_plan(*, missing_capability: bool = False) -> AgentPlan:
+    find = PlanStep(
+        step_id="find-slot",
+        title="Find an available appointment",
+        capability=CapabilityRequirement(
+            "appointments.search", CapabilityAccess.READ, EvidenceRequirement.ACCEPTED
+        ),
+        arguments={},
+        depends_on=(),
+        risk=RiskLevel.LOW,
+        required_confirmation=False,
+        confirmation_status=ConfirmationStatus.NOT_REQUIRED,
+        max_attempts=2,
+        continuation=None,
+        action_id="appointment-read",
+        status=StepStatus.SUCCEEDED if not missing_capability else StepStatus.BLOCKED,
+        result=None if missing_capability else {"summary": "One suitable slot found"},
+        failure=(
+            StepFailure(
+                "capability_missing",
+                "No supported booking capability for this provider",
+                retryable=False,
+            )
+            if missing_capability
+            else None
+        ),
+        completed_at=None if missing_capability else NOW,
+    )
+    steps = [find]
+    status = PlanStatus.BLOCKED if missing_capability else PlanStatus.AWAITING_APPROVAL
+    if not missing_capability:
+        steps.append(
+            PlanStep(
+                step_id="book-slot",
+                title="Book the selected appointment",
+                capability=CapabilityRequirement(
+                    "appointments.book",
+                    CapabilityAccess.WRITE,
+                    EvidenceRequirement.VERIFIED,
+                ),
+                arguments={"slot": {"$from_step": "find-slot", "path": "slot_id"}},
+                depends_on=("find-slot",),
+                risk=RiskLevel.HIGH,
+                required_confirmation=True,
+                confirmation_status=ConfirmationStatus.PENDING,
+                max_attempts=1,
+                continuation=None,
+                action_id="appointment-write",
+                status=StepStatus.AWAITING_APPROVAL,
+            )
+        )
+    return AgentPlan(
+        plan_id="appointment-plan",
+        conversation_id="usr:aaron:appointment-chat",
+        goal="Book the appointment",
+        status=status,
+        steps=steps,
+        continuation=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unseen_capability_domain_projects_and_uses_generic_confirmation_control(
+    tmp_path: Path,
+) -> None:
+    value = appointment_plan()
+    centre = service(tmp_path / "tasks.db", plans=[value])
+
+    task = await centre.get_task(principal_id="aaron", task_id="agent_plan:appointment-plan")
+
+    assert task is not None
+    assert task["title"] == "Book the appointment"
+    assert task["status"] == "WAITING_FOR_YOU"
+    assert task["providers"] == ["appointments"]
+    assert task["capabilities"] == ["appointments.search", "appointments.book"]
+    assert task["progress_current"] == 1
+    assert task["progress_total"] == 2
+    assert task["current_step"] == "Book the selected appointment"
+    assert task["can_confirm"] is True
+    assert task["can_decline"] is True
+    assert task["metadata"]["confirmation_step_ids"] == ["book-slot"]
+    assert task["planned_steps"][0]["result_summary"] == "One suitable slot found"
+
+    confirmed = await centre.confirm(principal_id="aaron", task_id="agent_plan:appointment-plan")
+    assert confirmed is not None
+    assert centre.planner.calls == [
+        ("approve", "book-slot"),
+        ("resume", "appointment-plan"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unseen_domain_uses_generic_decline_and_task_notification_lifecycle(
+    tmp_path: Path,
+) -> None:
+    value = appointment_plan()
+    notifier = FakeNotifier()
+    centre = service(tmp_path / "tasks.db", plans=[value], notifier=notifier)
+    bound = await centre.bind_notification_from_conversation(
+        principal_id="aaron",
+        conversation_id="usr:aaron:appointment-chat",
+        notify_on_completion=True,
+        notify_on_failure=False,
+    )
+    assert bound["bound"] is True
+
+    declined = await centre.decline(
+        principal_id="aaron",
+        task_id="agent_plan:appointment-plan",
+        request_id="decline-appointment",
+    )
+
+    assert declined is not None
+    assert centre.planner.calls == [
+        ("decline", "book-slot"),
+        ("resume", "appointment-plan"),
+    ]
+    assert await centre.process_notifications_once() == 1
+    assert "partially completed" in notifier.messages[0]["message"]
+
+    # A separate generic plan that reaches verified completion uses the same
+    # source-neutral, exactly-once notification ledger.
+    completed = appointment_plan()
+    completed.plan_id = "appointment-complete"
+    completed.status = PlanStatus.COMPLETED
+    completed.step("book-slot").status = StepStatus.SUCCEEDED
+    completed.step("book-slot").confirmation_status = ConfirmationStatus.APPROVED
+    completed.step("book-slot").result = {"summary": "Appointment booked and verified"}
+    completed.step("book-slot").action_receipt = {"receipt_id": "verified-booking"}
+    completed.step("book-slot").completed_at = NOW
+    centre.planner.plans[completed.plan_id] = completed
+    await centre.set_notification_preference(
+        principal_id="aaron",
+        task_id="agent_plan:appointment-complete",
+        notify_on_completion=True,
+        notify_on_failure=False,
+    )
+    assert await centre.process_notifications_once() == 1
+    assert await centre.process_notifications_once() == 0
+    assert len(notifier.messages) == 2
+    assert "finished" in notifier.messages[1]["message"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_new_domain_is_truthfully_waiting_for_intervention(
+    tmp_path: Path,
+) -> None:
+    centre = service(tmp_path / "tasks.db", plans=[appointment_plan(missing_capability=True)])
+
+    task = await centre.get_task(principal_id="aaron", task_id="agent_plan:appointment-plan")
+
+    assert task is not None
+    assert task["status"] == "WAITING_FOR_YOU"
+    assert task["user_action_type"] == "capability_setup_or_intervention"
+    assert task["waiting_reason"] == "No supported booking capability for this provider"
+    assert task["can_retry"] is False
+    assert task["can_confirm"] is False
+    assert task["result_summary"] is None
+
+    executive_row = executive("appointment-exec")
+    executive_row.update(
+        objective="Book the appointment",
+        conversation_id="usr:aaron:appointment-chat",
+        plan_id="appointment-plan",
+        current_step="Book the appointment",
+        waiting_reason="No supported booking capability for this provider",
+    )
+    linked = service(
+        tmp_path / "linked-tasks.db",
+        executives=[executive_row],
+        plans=[appointment_plan(missing_capability=True)],
+    )
+    executive_task = await linked.get_task(
+        principal_id="aaron", task_id="executive:appointment-exec"
+    )
+    assert executive_task is not None
+    assert executive_task["status"] == "WAITING_FOR_YOU"
+    assert executive_task["user_action_type"] == "capability_setup_or_intervention"
+    assert executive_task["can_retry"] is False

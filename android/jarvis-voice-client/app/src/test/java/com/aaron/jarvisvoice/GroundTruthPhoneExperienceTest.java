@@ -25,10 +25,7 @@ import org.robolectric.shadows.ShadowDialog;
 @Config(sdk = 35)
 public final class GroundTruthPhoneExperienceTest {
     @Test public void mainScreenRendersTheForensicGroundTruthExperienceAndNavigation() {
-        WorkManager.initialize(
-            RuntimeEnvironment.getApplication(),
-            new Configuration.Builder().build()
-        );
+        ensureWorkManager();
         MainActivity activity = Robolectric.buildActivity(MainActivity.class).create().get();
         View root = activity.findViewById(android.R.id.content);
 
@@ -54,6 +51,17 @@ public final class GroundTruthPhoneExperienceTest {
         View actionRoot = actions.findViewById(android.R.id.content);
         assertNotNull(findText(actionRoot, "Chat history"));
         assertNotNull(findText(actionRoot, "Improvements"));
+    }
+
+    private static void ensureWorkManager() {
+        try {
+            WorkManager.getInstance(RuntimeEnvironment.getApplication());
+        } catch (IllegalStateException notInitialized) {
+            WorkManager.initialize(
+                RuntimeEnvironment.getApplication(),
+                new Configuration.Builder().build()
+            );
+        }
     }
 
     private static TextView findText(View root, String expected) {

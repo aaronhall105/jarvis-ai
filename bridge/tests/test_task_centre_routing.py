@@ -154,9 +154,7 @@ async def test_screenshot_retry_then_notify_binds_the_same_durable_cleanup(
     assert "starting" not in str(retry["response"]).casefold()
     assert notification is not None
     assert notification["intent"] == "task_notification_bound"
-    assert notification["response"] == (
-        "Yes — I’ll let you know when the inbox cleanup finishes."
-    )
+    assert notification["response"] == ("Yes — I’ll let you know when the inbox cleanup finishes.")
     assert "what should the notification say" not in str(notification["response"]).casefold()
     centre.bind_notification_from_conversation.assert_awaited_once_with(
         principal_id="aaron",

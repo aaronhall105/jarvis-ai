@@ -65,11 +65,79 @@ public final class TaskCentreUiTest {
         assertFalse(task.notificationOnCompletion);
     }
 
-    @Test public void mainScreenExposesFirstClassChatAndTasksNavigation() {
-        WorkManager.initialize(
-            RuntimeEnvironment.getApplication(),
-            new Configuration.Builder().build()
+    @Test public void unseenCapabilityDomainNeedsNoDomainSpecificAndroidCode() throws Exception {
+        JSONObject value = new JSONObject()
+            .put("task_id", "agent_plan:appointment-plan")
+            .put("source", "agent_plan")
+            .put("source_task_id", "appointment-plan")
+            .put("task_type", "multi_tool_plan")
+            .put("title", "Book the appointment")
+            .put("status", "WAITING_FOR_YOU")
+            .put("current_step", "Book the selected appointment")
+            .put("current_step_index", 2)
+            .put("step_count", 2)
+            .put("progress_current", 1)
+            .put("progress_total", 2)
+            .put("progress_unit", "steps")
+            .put("requires_user_action", true)
+            .put("user_action_type", "confirmation")
+            .put("can_confirm", true)
+            .put("can_decline", true)
+            .put("providers", new JSONArray().put("appointments"))
+            .put("capabilities", new JSONArray()
+                .put("appointments.search")
+                .put("appointments.book"))
+            .put("planned_steps", new JSONArray()
+                .put(new JSONObject()
+                    .put("step_id", "find-slot")
+                    .put("title", "Find an available appointment")
+                    .put("status", "succeeded"))
+                .put(new JSONObject()
+                    .put("step_id", "book-slot")
+                    .put("title", "Book the selected appointment")
+                    .put("status", "awaiting_approval")))
+            .put("timeline", new JSONArray());
+
+        TaskItem task = TaskItem.fromJson(value);
+
+        assertEquals("agent_plan", task.source);
+        assertEquals("Waiting for you", task.statusLabel());
+        assertEquals("1 / 2 steps", task.progressText());
+        assertEquals("appointments", task.providers.get(0));
+        assertEquals("appointments.book", task.capabilities.get(1));
+        assertTrue(task.canConfirm);
+        assertTrue(task.canDecline);
+        assertEquals(2, task.plannedSteps.size());
+
+        TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
+        java.lang.reflect.Method renderer = TasksActivity.class.getDeclaredMethod(
+            "card", TaskItem.class
         );
+        renderer.setAccessible(true);
+        View card = (View) renderer.invoke(activity, task);
+        assertNotNull(findText(card, "Book the selected appointment: awaiting approval"));
+        activity.onDestroy();
+
+        Intent detailIntent = new Intent(
+            RuntimeEnvironment.getApplication(), TaskDetailActivity.class
+        ).putExtra(TaskDetailActivity.EXTRA_TASK_ID, task.taskId);
+        org.robolectric.android.controller.ActivityController<TaskDetailActivity> controller =
+            Robolectric.buildActivity(TaskDetailActivity.class, detailIntent).create();
+        TaskDetailActivity detail = controller.get();
+        java.lang.reflect.Method detailRenderer = TaskDetailActivity.class.getDeclaredMethod(
+            "render", TaskItem.class
+        );
+        detailRenderer.setAccessible(true);
+        detailRenderer.invoke(detail, task);
+        View detailRoot = detail.findViewById(android.R.id.content);
+        assertNotNull(findText(detailRoot, "appointments.search, appointments.book"));
+        assertNotNull(findText(detailRoot, "Confirm exact task"));
+        assertNotNull(findText(detailRoot, "Decline"));
+        controller.destroy();
+    }
+
+    @Test public void mainScreenExposesFirstClassChatAndTasksNavigation() {
+        ensureWorkManager();
         MainActivity activity = Robolectric.buildActivity(MainActivity.class).create().get();
         View root = activity.findViewById(android.R.id.content);
 
@@ -80,6 +148,17 @@ public final class TaskCentreUiTest {
         Intent launched = shadowOf(activity).getNextStartedActivity();
         assertNotNull(launched);
         assertEquals(TasksActivity.class.getName(), launched.getComponent().getClassName());
+    }
+
+    private static void ensureWorkManager() {
+        try {
+            WorkManager.getInstance(RuntimeEnvironment.getApplication());
+        } catch (IllegalStateException notInitialized) {
+            WorkManager.initialize(
+                RuntimeEnvironment.getApplication(),
+                new Configuration.Builder().build()
+            );
+        }
     }
 
     @Test public void taskActivitiesArePrivateAndDeclared() throws Exception {

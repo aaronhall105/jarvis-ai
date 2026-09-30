@@ -106,6 +106,7 @@ public final class TaskDetailActivity extends Activity {
         addFact("Result", task.resultSummary);
         addFact("Problem", task.errorSummary);
         addFact("Providers", String.join(", ", task.providers));
+        addFact("Capabilities", String.join(", ", task.capabilities));
         addFact("Created", displayTime(task.createdAt));
         addFact("Started", displayTime(task.startedAt));
         addFact("Last updated", TasksActivity.relativeTime(task.updatedAt));
@@ -121,11 +122,20 @@ public final class TaskDetailActivity extends Activity {
         addFact("Notification delivered", displayTime(task.notificationDeliveredAt));
 
         if (!task.plannedSteps.isEmpty()) {
-            section("Plan");
+            boolean hasCompleted = false;
+            boolean hasRemaining = false;
             for (JSONObject step : task.plannedSteps) {
-                String name = step.optString("title", "Task step");
                 String status = step.optString("status", "pending").replace('_', ' ');
-                addTimelineRow(name, status);
+                if ("succeeded".equals(status)) hasCompleted = true;
+                else hasRemaining = true;
+            }
+            if (hasCompleted) {
+                section("Completed steps");
+                renderPlanSteps(task, true);
+            }
+            if (hasRemaining) {
+                section("Planned remaining steps");
+                renderPlanSteps(task, false);
             }
         }
         if (!task.timeline.isEmpty()) {
@@ -163,8 +173,10 @@ public final class TaskDetailActivity extends Activity {
 
         if (hasControls(task)) {
             section("Actions");
-            if (task.requiresUserAction && "confirmation".equals(task.userActionType)) {
+            if (task.canConfirm) {
                 addAction("Confirm exact task", "confirm", true);
+            }
+            if (task.canDecline) {
                 addAction("Decline", "decline", false);
             }
             if (task.canRetry) addAction("Retry safely", "retry", true);
@@ -190,7 +202,7 @@ public final class TaskDetailActivity extends Activity {
     }
 
     private boolean hasControls(TaskItem task) {
-        return task.requiresUserAction || task.canRetry || task.canPause || task.canResume
+        return task.canConfirm || task.canDecline || task.canRetry || task.canPause || task.canResume
             || task.canCancel || task.canSteer || task.canReschedule
             || !task.openChatConversationId.isBlank();
     }
@@ -244,6 +256,19 @@ public final class TaskDetailActivity extends Activity {
             row.addView(state, matchWrap());
         }
         content.addView(row, matchWrap());
+    }
+
+    private void renderPlanSteps(TaskItem task, boolean completed) {
+        for (JSONObject step : task.plannedSteps) {
+            String rawStatus = step.optString("status", "pending");
+            if (("succeeded".equals(rawStatus)) != completed) continue;
+            String detail = rawStatus.replace('_', ' ');
+            String result = step.optString("result_summary", "");
+            String failure = step.optString("failure", "");
+            if (!result.isBlank()) detail += " · " + result;
+            else if (!failure.isBlank()) detail += " · " + failure;
+            addTimelineRow(step.optString("title", "Task step"), detail);
+        }
     }
 
     private void addAction(String label, String action, boolean primary) {

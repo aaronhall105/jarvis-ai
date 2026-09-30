@@ -1553,8 +1553,7 @@ class EmailAssistantPolicyEngine:
         )
         if not proceed:
             return {
-                "success": prepared["status"]
-                not in {"failed", "interrupted", "previewing"},
+                "success": prepared["status"] not in {"failed", "interrupted", "previewing"},
                 **prepared,
                 **(
                     {
@@ -1774,8 +1773,7 @@ class EmailAssistantPolicyEngine:
         )
         if not proceed:
             return {
-                "success": prepared["status"]
-                not in {"failed", "interrupted", "previewing"},
+                "success": prepared["status"] not in {"failed", "interrupted", "previewing"},
                 **prepared,
                 **(
                     {

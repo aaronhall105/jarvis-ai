@@ -9,6 +9,8 @@ import java.util.List;
 /** Redacted mobile projection of one durable Jarvis task. */
 public final class TaskItem {
     public final String taskId;
+    public final String source;
+    public final String sourceTaskId;
     public final String taskType;
     public final String title;
     public final String summary;
@@ -45,12 +47,17 @@ public final class TaskItem {
     public final boolean canRetry;
     public final boolean canSteer;
     public final boolean canReschedule;
+    public final boolean canConfirm;
+    public final boolean canDecline;
     public final List<JSONObject> plannedSteps;
     public final List<JSONObject> timeline;
     public final List<String> providers;
+    public final List<String> capabilities;
 
     private TaskItem(JSONObject value) {
         taskId = value.optString("task_id", "");
+        source = value.optString("source", "");
+        sourceTaskId = value.optString("source_task_id", "");
         taskType = value.optString("task_type", "");
         title = value.optString("title", "Jarvis task");
         summary = value.optString("summary", "");
@@ -91,9 +98,16 @@ public final class TaskItem {
         canRetry = value.optBoolean("can_retry", false);
         canSteer = value.optBoolean("can_steer", false);
         canReschedule = value.optBoolean("can_reschedule", false);
+        canConfirm = value.has("can_confirm")
+            ? value.optBoolean("can_confirm", false)
+            : requiresUserAction && "confirmation".equals(userActionType);
+        canDecline = value.has("can_decline")
+            ? value.optBoolean("can_decline", false)
+            : requiresUserAction && "confirmation".equals(userActionType);
         plannedSteps = objects(value.optJSONArray("planned_steps"));
         timeline = objects(value.optJSONArray("timeline"));
         providers = strings(value.optJSONArray("providers"));
+        capabilities = strings(value.optJSONArray("capabilities"));
     }
 
     public static TaskItem fromJson(JSONObject value) {
@@ -111,7 +125,8 @@ public final class TaskItem {
             case "CANCELLED" -> "Cancelled";
             case "PLANNING" -> "Planning";
             case "PAUSED" -> "Paused";
-            default -> "Running";
+            case "RUNNING" -> "Running";
+            default -> "Waiting for Jarvis";
         };
     }
 

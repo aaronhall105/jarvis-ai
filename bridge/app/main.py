@@ -4784,7 +4784,7 @@ async def confirm_task_centre_item(
 ) -> dict[str, object]:
     principal_id = _require_mobile_integration_principal(authorization)
     return await _task_mutation_result(
-        await task_centre.confirm_email_cleanup(
+        await task_centre.confirm(
             principal_id=principal_id,
             task_id=task_id,
         ),
@@ -4800,7 +4800,7 @@ async def decline_task_centre_item(
 ) -> dict[str, object]:
     principal_id = _require_mobile_integration_principal(authorization)
     return await _task_mutation_result(
-        await task_centre.cancel(
+        await task_centre.decline(
             principal_id=principal_id,
             task_id=task_id,
             request_id=request.request_id or str(uuid.uuid4()),
