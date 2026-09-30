@@ -269,6 +269,7 @@ class EmailAssistantPolicyEngine:
                   filter_json TEXT NOT NULL,
                   original_authorization_text TEXT NOT NULL,
                   idempotency_key TEXT NOT NULL UNIQUE,
+                  task_group_id TEXT,
                   status TEXT NOT NULL,
                   intended_count INTEGER NOT NULL,
                   attempted_count INTEGER NOT NULL DEFAULT 0,
@@ -362,6 +363,16 @@ class EmailAssistantPolicyEngine:
                 for column, definition in additions.items():
                     if column not in columns:
                         connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            bulk_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(email_bulk_actions)").fetchall()
+            }
+            if "task_group_id" not in bulk_columns:
+                connection.execute("ALTER TABLE email_bulk_actions ADD COLUMN task_group_id TEXT")
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_email_bulk_task_group ON "
+                "email_bulk_actions(principal_id,task_group_id,updated_at DESC)"
+            )
             connection.execute(
                 "UPDATE email_assistant_events SET provider_message_id=message_id,"
                 "provider_thread_id=thread_id WHERE provider_message_id IS NULL"
@@ -415,6 +426,12 @@ class EmailAssistantPolicyEngine:
                 "UPDATE email_bulk_actions SET status='interrupted',"
                 "halt_reason='Core restarted during bulk execution',updated_at=? "
                 "WHERE status='running'",
+                (self._iso(self._now()),),
+            )
+            connection.execute(
+                "UPDATE email_bulk_actions SET status='interrupted',"
+                "halt_reason='Core restarted during candidate discovery',updated_at=? "
+                "WHERE status='previewing'",
                 (self._iso(self._now()),),
             )
 
@@ -1009,6 +1026,175 @@ class EmailAssistantPolicyEngine:
             value[key] = int(value.get(key) or 0)
         return value
 
+    def _begin_bulk_snapshot(
+        self,
+        *,
+        action_id: str,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        account_id: str,
+        operation: str,
+        filter_kind: str,
+        filter_evidence: Mapping[str, Any],
+        original_authorization_text: str,
+        idempotency_key: str,
+        task_group_id: str | None,
+        ttl_seconds: int,
+        batch_size: int,
+    ) -> tuple[dict[str, Any], bool]:
+        """Persist task truth before provider I/O and prepare a safe retry.
+
+        A failed preview is still durable work.  Only an unconfirmed preview
+        with no frozen items can be re-entered; confirmed or executing work is
+        never reset by this path.
+        """
+
+        now = self._now()
+        expires = now + timedelta(seconds=max(60, min(int(ttl_seconds), 3600)))
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?",
+                (action_id,),
+            ).fetchone()
+            if existing is not None:
+                value = self._bulk_row(existing)
+                retryable_preview = (
+                    value["status"] in {"interrupted", "failed"}
+                    and value.get("confirmed_at") is None
+                    and int(value.get("intended_count") or 0) == 0
+                )
+                if not retryable_preview:
+                    return value, False
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='previewing',halt_reason=NULL,"
+                    "filter_json=?,task_group_id=COALESCE(?,task_group_id),expires_at=?,updated_at=? "
+                    "WHERE bulk_action_id=?",
+                    (
+                        json.dumps(
+                            dict(filter_evidence),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        task_group_id,
+                        self._iso(expires),
+                        self._iso(now),
+                        action_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "INSERT INTO email_bulk_actions "
+                    "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
+                    "filter_kind,filter_json,original_authorization_text,idempotency_key,"
+                    "task_group_id,status,intended_count,batch_size,created_at,expires_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        principal_id,
+                        conversation_id,
+                        provider,
+                        account_id,
+                        operation,
+                        filter_kind,
+                        json.dumps(
+                            dict(filter_evidence),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        original_authorization_text,
+                        idempotency_key,
+                        task_group_id,
+                        "previewing",
+                        0,
+                        max(1, min(int(batch_size), 100)),
+                        self._iso(now),
+                        self._iso(expires),
+                        self._iso(now),
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bulk email preview was not persisted")
+        return self._bulk_row(row), True
+
+    def _fail_bulk_snapshot(
+        self,
+        *,
+        action_id: str,
+        reason: str,
+        status: str = "interrupted",
+    ) -> dict[str, Any]:
+        safe_status = status if status in {"interrupted", "failed"} else "interrupted"
+        with self._db() as connection:
+            connection.execute(
+                "UPDATE email_bulk_actions SET status=?,halt_reason=?,updated_at=? "
+                "WHERE bulk_action_id=? AND status='previewing'",
+                (safe_status, reason[:1000], self._iso(self._now()), action_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bulk email preview disappeared")
+        return self._bulk_row(row)
+
+    def _complete_bulk_snapshot(
+        self,
+        *,
+        action_id: str,
+        filter_evidence: Mapping[str, Any],
+        ids: Sequence[str],
+        metadata: Mapping[str, Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Atomically freeze provider IDs after all read-only discovery ends."""
+
+        now = self._now()
+        with self._db() as connection:
+            connection.execute(
+                "DELETE FROM email_bulk_action_items WHERE bulk_action_id=?",
+                (action_id,),
+            )
+            for ordinal, message_id in enumerate(ids):
+                message = dict(metadata.get(message_id) or {})
+                sender = str(message.get("sender_name") or message.get("from") or "")[:500]
+                connection.execute(
+                    "INSERT INTO email_bulk_action_items "
+                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
+                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        action_id,
+                        message_id,
+                        str(message.get("thread_id") or "") or None,
+                        sender or None,
+                        str(message.get("subject") or "")[:998] or None,
+                        ordinal,
+                        "pending",
+                        self._iso(now),
+                        self._iso(now),
+                    ),
+                )
+            connection.execute(
+                "UPDATE email_bulk_actions SET filter_json=?,status='awaiting_confirmation',"
+                "intended_count=?,attempted_count=0,succeeded_count=0,failed_count=0,"
+                "skipped_count=0,halt_reason=NULL,updated_at=? WHERE bulk_action_id=? "
+                "AND status='previewing'",
+                (
+                    json.dumps(dict(filter_evidence), sort_keys=True, separators=(",", ":")),
+                    len(ids),
+                    self._iso(now),
+                    action_id,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Bulk email preview disappeared")
+        return self._bulk_row(row)
+
     async def _require_email_account(
         self, *, principal_id: str, provider: str, account_id: str
     ) -> dict[str, Any]:
@@ -1324,6 +1510,7 @@ class EmailAssistantPolicyEngine:
         filter_kind: str,
         original_authorization_text: str,
         request_id: str,
+        task_group_id: str | None = None,
         ttl_seconds: int = 600,
         batch_size: int = 25,
     ) -> dict[str, Any]:
@@ -1338,45 +1525,96 @@ class EmailAssistantPolicyEngine:
             raise ValueError("Bulk email operation must be trash or archive")
         if not original_authorization_text.strip():
             raise ValueError("Original bulk email authority is required")
-        await self._require_email_account(
-            principal_id=principal_id, provider=provider, account_id=account_id
-        )
         scoped_request_id = f"{request_id}:{provider}:{account_id}:{operation}:{filter_kind}"
         action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"email-bulk:{scoped_request_id}"))
-        with self._db() as connection:
-            existing = connection.execute(
-                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?",
-                (action_id,),
-            ).fetchone()
-        if existing is not None:
-            return self._bulk_row(existing)
+        search_payload = self._bulk_search_payload(provider, filter_kind)
+        initial_evidence = {
+            "kind": filter_kind,
+            "provider_query": search_payload.get("query"),
+            "provider_folder": search_payload.get("folder"),
+            "unread": search_payload.get("unread") is True,
+            "frozen": False,
+            "permanent_delete": False,
+        }
+        prepared, proceed = self._begin_bulk_snapshot(
+            action_id=action_id,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            provider=provider,
+            account_id=account_id,
+            operation=operation,
+            filter_kind=filter_kind,
+            filter_evidence=initial_evidence,
+            original_authorization_text=original_authorization_text,
+            idempotency_key=scoped_request_id,
+            task_group_id=task_group_id,
+            ttl_seconds=ttl_seconds,
+            batch_size=batch_size,
+        )
+        if not proceed:
+            return {
+                "success": prepared["status"]
+                not in {"failed", "interrupted", "previewing"},
+                **prepared,
+                **(
+                    {
+                        "failure_kind": "preview_in_progress",
+                        "error": "Candidate discovery is already in progress",
+                    }
+                    if prepared["status"] == "previewing"
+                    else {}
+                ),
+            }
+        try:
+            await self._require_email_account(
+                principal_id=principal_id, provider=provider, account_id=account_id
+            )
+        except ValueError as exc:
+            failed = self._fail_bulk_snapshot(action_id=action_id, reason=str(exc))
+            return {
+                "success": False,
+                **failed,
+                "failure_kind": "provider_failed",
+                "error": str(exc),
+            }
 
         capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
-        search_payload = self._bulk_search_payload(provider, filter_kind)
-        search = await self.registry.execute(
-            CapabilityRequest(
-                capability_id=capability,
-                payload=search_payload,
-                request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:snapshot")),
-                conversation_id=conversation_id,
-                principal_id=principal_id,
-                operation="email_bulk_snapshot",
-            ),
-            refresh_health=True,
-        )
+        try:
+            search = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id=capability,
+                    payload=search_payload,
+                    request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{request_id}:snapshot")),
+                    conversation_id=conversation_id,
+                    principal_id=principal_id,
+                    operation="email_bulk_snapshot",
+                ),
+                refresh_health=True,
+            )
+        except Exception as exc:
+            self._fail_bulk_snapshot(
+                action_id=action_id,
+                reason=f"Candidate discovery failed: {type(exc).__name__}",
+            )
+            raise
         if not search.success:
+            reason = str(search.error or "The email provider is unavailable")
+            failed = self._fail_bulk_snapshot(action_id=action_id, reason=reason)
             return {
                 "success": False,
-                "status": "provider_failed",
-                "error": search.error,
-                "intended_count": 0,
+                **failed,
+                "failure_kind": "provider_failed",
+                "error": reason,
             }
         if search.data.get("truncated"):
+            reason = "The exact candidate set is too large to confirm safely"
+            failed = self._fail_bulk_snapshot(action_id=action_id, reason=reason, status="failed")
             return {
                 "success": False,
-                "status": "candidate_limit_exceeded",
-                "error": "The exact candidate set is too large to confirm safely",
-                "intended_count": len(search.data.get("message_ids") or ()),
+                **failed,
+                "failure_kind": "candidate_limit_exceeded",
+                "error": reason,
+                "observed_count": len(search.data.get("message_ids") or ()),
             }
         raw_messages = [
             dict(item) for item in search.data.get("messages") or () if isinstance(item, Mapping)
@@ -1388,8 +1626,6 @@ class EmailAssistantPolicyEngine:
         if not ids:
             ids = list(metadata)
         ids = list(dict.fromkeys(ids))
-        now = self._now()
-        expires = now + timedelta(seconds=max(60, min(int(ttl_seconds), 3600)))
         filter_evidence = {
             "kind": filter_kind,
             "provider_query": search_payload.get("query"),
@@ -1398,57 +1634,13 @@ class EmailAssistantPolicyEngine:
             "frozen": True,
             "permanent_delete": False,
         }
-        with self._db() as connection:
-            connection.execute(
-                "INSERT INTO email_bulk_actions "
-                "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
-                "filter_kind,filter_json,original_authorization_text,idempotency_key,status,"
-                "intended_count,batch_size,created_at,expires_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    action_id,
-                    principal_id,
-                    conversation_id,
-                    provider,
-                    account_id,
-                    operation,
-                    filter_kind,
-                    json.dumps(filter_evidence, sort_keys=True, separators=(",", ":")),
-                    original_authorization_text,
-                    scoped_request_id,
-                    "awaiting_confirmation",
-                    len(ids),
-                    max(1, min(int(batch_size), 100)),
-                    self._iso(now),
-                    self._iso(expires),
-                    self._iso(now),
-                ),
-            )
-            for ordinal, message_id in enumerate(ids):
-                message = metadata.get(message_id, {})
-                sender = str(message.get("sender_name") or message.get("from") or "")[:500]
-                connection.execute(
-                    "INSERT INTO email_bulk_action_items "
-                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
-                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        action_id,
-                        message_id,
-                        str(message.get("thread_id") or "") or None,
-                        sender or None,
-                        str(message.get("subject") or "")[:998] or None,
-                        ordinal,
-                        "pending",
-                        self._iso(now),
-                        self._iso(now),
-                    ),
-                )
-            row = connection.execute(
-                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("Bulk email action was not persisted")
-        return {"success": True, **self._bulk_row(row)}
+        frozen = self._complete_bulk_snapshot(
+            action_id=action_id,
+            filter_evidence=filter_evidence,
+            ids=ids,
+            metadata=metadata,
+        )
+        return {"success": True, **frozen}
 
     def _compound_cleanup_payloads(
         self,
@@ -1538,6 +1730,7 @@ class EmailAssistantPolicyEngine:
         combination: str,
         original_authorization_text: str,
         request_id: str,
+        task_group_id: str | None = None,
         ttl_seconds: int = 600,
         batch_size: int = 25,
     ) -> dict[str, Any]:
@@ -1549,31 +1742,75 @@ class EmailAssistantPolicyEngine:
             raise ValueError("Only OR cleanup clause combinations are supported")
         if not original_authorization_text.strip():
             raise ValueError("Original bulk email authority is required")
-        await self._require_email_account(
-            principal_id=principal_id, provider=provider, account_id=account_id
-        )
         normalised_clauses = [dict(item) for item in clauses if isinstance(item, Mapping)]
         if not normalised_clauses:
             raise ValueError("At least one cleanup clause is required")
         scoped_request_id = f"{request_id}:{provider}:{account_id}:{operation}:compound"
         action_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"email-bulk:{scoped_request_id}"))
-        with self._db() as connection:
-            existing = connection.execute(
-                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
-            ).fetchone()
-        if existing is not None:
-            return {"success": True, **self._bulk_row(existing)}
-
         payloads, unsupported = self._compound_cleanup_payloads(provider, normalised_clauses)
+        initial_evidence = {
+            "kind": "compound",
+            "clauses": normalised_clauses,
+            "combination": "OR",
+            "queries": [],
+            "unsupported_clauses": unsupported,
+            "frozen": False,
+            "permanent_delete": False,
+        }
+        prepared, proceed = self._begin_bulk_snapshot(
+            action_id=action_id,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            provider=provider,
+            account_id=account_id,
+            operation=operation,
+            filter_kind="compound",
+            filter_evidence=initial_evidence,
+            original_authorization_text=original_authorization_text,
+            idempotency_key=scoped_request_id,
+            task_group_id=task_group_id,
+            ttl_seconds=ttl_seconds,
+            batch_size=batch_size,
+        )
+        if not proceed:
+            return {
+                "success": prepared["status"]
+                not in {"failed", "interrupted", "previewing"},
+                **prepared,
+                **(
+                    {
+                        "failure_kind": "preview_in_progress",
+                        "error": "Candidate discovery is already in progress",
+                    }
+                    if prepared["status"] == "previewing"
+                    else {}
+                ),
+                "unsupported_clauses": list(
+                    (prepared.get("filter") or {}).get("unsupported_clauses") or ()
+                ),
+            }
         if not payloads:
+            reason = "That provider cannot ground the requested cleanup filters"
+            failed = self._fail_bulk_snapshot(action_id=action_id, reason=reason, status="failed")
             return {
                 "success": False,
-                "status": "unsupported_scope",
-                "provider": provider,
-                "account_id": account_id,
+                **failed,
+                "failure_kind": "unsupported_scope",
                 "unsupported_clauses": unsupported,
-                "intended_count": 0,
-                "error": "That provider cannot ground the requested cleanup filters",
+                "error": reason,
+            }
+        try:
+            await self._require_email_account(
+                principal_id=principal_id, provider=provider, account_id=account_id
+            )
+        except ValueError as exc:
+            failed = self._fail_bulk_snapshot(action_id=action_id, reason=str(exc))
+            return {
+                "success": False,
+                **failed,
+                "failure_kind": "provider_failed",
+                "unsupported_clauses": unsupported,
+                "error": str(exc),
             }
 
         capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
@@ -1581,42 +1818,52 @@ class EmailAssistantPolicyEngine:
         metadata: dict[str, dict[str, Any]] = {}
         query_evidence: builtins.list[dict[str, Any]] = []
         for ordinal, (clause_type, payload) in enumerate(payloads):
-            search = await self.registry.execute(
-                CapabilityRequest(
-                    capability_id=capability,
-                    payload=payload,
-                    request_id=str(
-                        uuid.uuid5(
-                            uuid.NAMESPACE_URL,
-                            f"{scoped_request_id}:snapshot:{ordinal}:{clause_type}",
-                        )
+            try:
+                search = await self.registry.execute(
+                    CapabilityRequest(
+                        capability_id=capability,
+                        payload=payload,
+                        request_id=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"{scoped_request_id}:snapshot:{ordinal}:{clause_type}",
+                            )
+                        ),
+                        conversation_id=conversation_id,
+                        principal_id=principal_id,
+                        operation="email_compound_bulk_snapshot",
                     ),
-                    conversation_id=conversation_id,
-                    principal_id=principal_id,
-                    operation="email_compound_bulk_snapshot",
-                ),
-                refresh_health=True,
-                result_item_limit=50_000,
-            )
+                    refresh_health=True,
+                    result_item_limit=50_000,
+                )
+            except Exception as exc:
+                self._fail_bulk_snapshot(
+                    action_id=action_id,
+                    reason=f"Candidate discovery failed: {type(exc).__name__}",
+                )
+                raise
             if not search.success:
+                reason = str(search.error or "The email provider is unavailable")
+                failed = self._fail_bulk_snapshot(action_id=action_id, reason=reason)
                 return {
                     "success": False,
-                    "status": "provider_failed",
-                    "provider": provider,
-                    "account_id": account_id,
+                    **failed,
+                    "failure_kind": "provider_failed",
                     "unsupported_clauses": unsupported,
-                    "error": search.error,
-                    "intended_count": 0,
+                    "error": reason,
                 }
             if search.data.get("truncated"):
+                reason = "The exact candidate set is too large to confirm safely"
+                failed = self._fail_bulk_snapshot(
+                    action_id=action_id, reason=reason, status="failed"
+                )
                 return {
                     "success": False,
-                    "status": "candidate_limit_exceeded",
-                    "provider": provider,
-                    "account_id": account_id,
+                    **failed,
+                    "failure_kind": "candidate_limit_exceeded",
                     "unsupported_clauses": unsupported,
-                    "error": "The exact candidate set is too large to confirm safely",
-                    "intended_count": len(search.data.get("message_ids") or ()),
+                    "error": reason,
+                    "observed_count": len(search.data.get("message_ids") or ()),
                 }
             raw_messages = [
                 dict(item)
@@ -1647,8 +1894,6 @@ class EmailAssistantPolicyEngine:
                 }
             )
         ids = list(dict.fromkeys(ids))
-        now = self._now()
-        expires = now + timedelta(seconds=max(60, min(int(ttl_seconds), 3600)))
         filter_evidence = {
             "kind": "compound",
             "clauses": normalised_clauses,
@@ -1658,59 +1903,15 @@ class EmailAssistantPolicyEngine:
             "frozen": True,
             "permanent_delete": False,
         }
-        with self._db() as connection:
-            connection.execute(
-                "INSERT INTO email_bulk_actions "
-                "(bulk_action_id,principal_id,conversation_id,provider,account_id,operation,"
-                "filter_kind,filter_json,original_authorization_text,idempotency_key,status,"
-                "intended_count,batch_size,created_at,expires_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    action_id,
-                    principal_id,
-                    conversation_id,
-                    provider,
-                    account_id,
-                    operation,
-                    "compound",
-                    json.dumps(filter_evidence, sort_keys=True, separators=(",", ":")),
-                    original_authorization_text,
-                    scoped_request_id,
-                    "awaiting_confirmation",
-                    len(ids),
-                    max(1, min(int(batch_size), 100)),
-                    self._iso(now),
-                    self._iso(expires),
-                    self._iso(now),
-                ),
-            )
-            for ordinal, message_id in enumerate(ids):
-                message = metadata.get(message_id, {})
-                sender = str(message.get("sender_name") or message.get("from") or "")[:500]
-                connection.execute(
-                    "INSERT INTO email_bulk_action_items "
-                    "(bulk_action_id,provider_message_id,provider_thread_id,sender,subject,"
-                    "ordinal,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                    (
-                        action_id,
-                        message_id,
-                        str(message.get("thread_id") or "") or None,
-                        sender or None,
-                        str(message.get("subject") or "")[:998] or None,
-                        ordinal,
-                        "pending",
-                        self._iso(now),
-                        self._iso(now),
-                    ),
-                )
-            persisted = connection.execute(
-                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?", (action_id,)
-            ).fetchone()
-        if persisted is None:
-            raise RuntimeError("Compound bulk email action was not persisted")
+        persisted = self._complete_bulk_snapshot(
+            action_id=action_id,
+            filter_evidence=filter_evidence,
+            ids=ids,
+            metadata=metadata,
+        )
         return {
             "success": True,
-            **self._bulk_row(persisted),
+            **persisted,
             "unsupported_clauses": unsupported,
         }
 
@@ -1842,6 +2043,19 @@ class EmailAssistantPolicyEngine:
             ).fetchone()
         return self._bulk_row(row) if row is not None else None
 
+    async def list_bulk_actions(
+        self, *, principal_id: str, limit: int = 100
+    ) -> builtins.list[dict[str, Any]]:
+        """List principal-owned frozen cleanup operations without message content."""
+
+        with self._db() as connection:
+            rows = connection.execute(
+                """SELECT * FROM email_bulk_actions WHERE principal_id=?
+                ORDER BY updated_at DESC LIMIT ?""",
+                (principal_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [self._bulk_row(row) for row in rows]
+
     async def cancel_bulk_action(
         self, *, principal_id: str, conversation_id: str, bulk_action_id: str
     ) -> bool:
@@ -1849,10 +2063,128 @@ class EmailAssistantPolicyEngine:
             changed = connection.execute(
                 "UPDATE email_bulk_actions SET status='cancelled',halt_reason='Cancelled by user',"
                 "updated_at=? WHERE bulk_action_id=? AND principal_id=? AND conversation_id=? "
-                "AND status IN ('awaiting_confirmation','interrupted','partial')",
+                "AND status IN ('previewing','awaiting_confirmation','interrupted','partial')",
                 (self._iso(self._now()), bulk_action_id, principal_id, conversation_id),
             ).rowcount
         return bool(changed)
+
+    async def retry_bulk_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        bulk_action_id: str,
+    ) -> dict[str, Any]:
+        """Retry the safe phase indicated by durable bulk-action evidence.
+
+        Candidate discovery is rerun only before confirmation and reconstructs
+        the same deterministic action ID.  Confirmed work stays on the existing
+        receipt/reconciliation execution path.
+        """
+
+        action = await self.bulk_action(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            bulk_action_id=bulk_action_id,
+        )
+        if action is None:
+            return {"success": False, "status": "not_found"}
+        if action["status"] == "completed":
+            return {"success": True, **action}
+        if action["status"] in {"cancelled", "expired"} and action.get("confirmed_at") is None:
+            expires = datetime.fromisoformat(str(action["expires_at"]))
+            reusable = (
+                action["status"] == "cancelled"
+                and int(action.get("intended_count") or 0) > 0
+                and expires > self._now()
+            )
+            with self._db() as connection:
+                if reusable:
+                    connection.execute(
+                        "UPDATE email_bulk_actions SET status='awaiting_confirmation',"
+                        "halt_reason=NULL,updated_at=? WHERE bulk_action_id=?",
+                        (self._iso(self._now()), bulk_action_id),
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM email_bulk_action_items WHERE bulk_action_id=?",
+                        (bulk_action_id,),
+                    )
+                    connection.execute(
+                        "UPDATE email_bulk_actions SET status='interrupted',intended_count=0,"
+                        "attempted_count=0,succeeded_count=0,failed_count=0,skipped_count=0,"
+                        "halt_reason='The previous frozen set expired and must be previewed again',"
+                        "updated_at=? WHERE bulk_action_id=?",
+                        (self._iso(self._now()), bulk_action_id),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?",
+                    (bulk_action_id,),
+                ).fetchone()
+            if row is None:
+                raise RuntimeError("Bulk email action disappeared")
+            action = self._bulk_row(row)
+            if reusable:
+                return {"success": True, **action}
+        before_confirmation = (
+            action.get("confirmed_at") is None
+            and int(action.get("intended_count") or 0) == 0
+            and action["status"] in {"interrupted", "failed", "previewing"}
+        )
+        if not before_confirmation:
+            return await self.execute_bulk_action(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                bulk_action_id=bulk_action_id,
+            )
+
+        provider = str(action["provider"])
+        account_id = str(action["account_id"])
+        operation = str(action["operation"])
+        filter_kind = str(action["filter_kind"])
+        suffix = f":{provider}:{account_id}:{operation}:{filter_kind}"
+        idempotency_key = str(action["idempotency_key"])
+        if not idempotency_key.endswith(suffix):
+            failed = self._fail_bulk_snapshot(
+                action_id=bulk_action_id,
+                reason="The saved preview identity could not be reconciled safely",
+                status="failed",
+            )
+            return {"success": False, **failed}
+        request_base = idempotency_key[: -len(suffix)]
+        if filter_kind == "compound":
+            evidence = action.get("filter") or {}
+            return await self.snapshot_compound_bulk_action(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                provider=provider,
+                account_id=account_id,
+                operation=operation,
+                original_authorization_text=str(action["original_authorization_text"]),
+                request_id=request_base,
+                task_group_id=(
+                    str(action["task_group_id"])
+                    if action.get("task_group_id") is not None
+                    else None
+                ),
+                batch_size=int(action.get("batch_size") or 25),
+                clauses=list(evidence.get("clauses") or ()),
+                combination=str(evidence.get("combination") or "OR"),
+            )
+        return await self.snapshot_bulk_action(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            provider=provider,
+            account_id=account_id,
+            operation=operation,
+            original_authorization_text=str(action["original_authorization_text"]),
+            request_id=request_base,
+            task_group_id=(
+                str(action["task_group_id"]) if action.get("task_group_id") is not None else None
+            ),
+            batch_size=int(action.get("batch_size") or 25),
+            filter_kind=filter_kind,
+        )
 
     async def _bulk_item_already_applied(
         self,
