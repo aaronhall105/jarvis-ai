@@ -70,6 +70,7 @@ from app.realtime_voice import RealtimeVoiceProxy
 from app.realtime_turn_ledger import RealtimeTurnLedger
 from app.response_presentation import present_user_response
 from app.tool_engine import ToolEngine
+from app.task_centre import TaskCentre
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext, scope_conversation_id
 from app.speech_corrections import SpeechCorrectionEngine
@@ -259,6 +260,16 @@ ai = AIEngine(
         websocket_enabled=settings.jarvis_executive_websocket_enabled,
     ),
     executive_store=executive_store,
+)
+task_centre = TaskCentre(
+    database_path=data_directory / "jarvis_task_centre.db",
+    followups=followups,
+    executive_store=executive_store,
+    planner=external_agent.planner,
+    email_policies=email_policies,
+    notifier=tools.send_mobile_notification,
+    legacy_task_path=data_directory / "jarvis_tasks.db",
+    legacy_recurring_path=data_directory / "jarvis_recurring_schedules.db",
 )
 
 _external_agent_state: dict[str, object] = {
@@ -516,6 +527,15 @@ class PersonalTaskRescheduleRequest(PersonalTaskMutationRequest):
     timezone: str = Field(min_length=1, max_length=100)
 
 
+class TaskNotificationPreferenceRequest(BaseModel):
+    notify_on_completion: bool = False
+    notify_on_failure: bool = False
+
+
+class TaskSteerRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=2000)
+
+
 class EmailRetentionCreateRequest(BaseModel):
     conversation_id: str = Field(min_length=1, max_length=300)
     retention_days: int = Field(default=30, ge=1, le=3650)
@@ -571,6 +591,127 @@ async def _try_handle_personal_task(
     if command.details is not None:
         result.update(command.details)
     return result
+
+
+_TASK_COMPLETION_NOTIFICATION_PATTERN = re.compile(
+    r"\b(?:notify me|let me know|tell me)\b.*\b(?:when|once)\b.*"
+    r"\b(?:you(?:'re| are|r)?\s+done|it(?:'s| is)?\s+(?:done|finished|complete)|"
+    r"done|finished|completes?)\b",
+    re.I,
+)
+_TASK_FAILURE_NOTIFICATION_PATTERN = re.compile(
+    r"\b(?:notify me|let me know|tell me)\b.*\bif\b.*\b(?:it\s+)?fails?\b",
+    re.I,
+)
+_TASK_NOTIFICATION_DISABLE_PATTERN = re.compile(
+    r"\b(?:do not|don't|dont|stop)\s+notify(?:ing)?\s+me\b.*\b(?:this|that|task)\b",
+    re.I,
+)
+_TASK_RETRY_PATTERN = re.compile(
+    r"^\s*(?:please\s+)?(?:try|retry)(?:\s+(?:it|that|again))?(?:\s+please)?[.!?]*\s*$",
+    re.I,
+)
+
+
+async def _try_handle_task_notification(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+) -> dict[str, object] | None:
+    """Bind deictic completion requests to durable work, never generic prose."""
+
+    notify_completion = bool(_TASK_COMPLETION_NOTIFICATION_PATTERN.search(text))
+    notify_failure = bool(_TASK_FAILURE_NOTIFICATION_PATTERN.search(text))
+    disable = bool(_TASK_NOTIFICATION_DISABLE_PATTERN.search(text))
+    if not notify_completion and not notify_failure and not disable:
+        return None
+    binding = await task_centre.bind_notification_from_conversation(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        notify_on_completion=False if disable else notify_completion,
+        notify_on_failure=False if disable else notify_failure,
+    )
+    return {
+        "success": True,
+        "response": str(binding["response"]),
+        "intent": (
+            "task_notification_bound" if binding.get("bound") else "task_notification_needs_task"
+        ),
+        "task_notification": binding,
+    }
+
+
+async def _try_handle_task_retry(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+) -> dict[str, object] | None:
+    if _TASK_RETRY_PATTERN.fullmatch(text) is None:
+        return None
+    result = await task_centre.retry_from_conversation(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+    )
+    if not result.get("handled"):
+        return None
+    task = result.get("task") if isinstance(result.get("task"), Mapping) else None
+    if (
+        task is not None
+        and task.get("task_type") == "email_cleanup"
+        and task.get("status") == "WAITING_FOR_YOU"
+    ):
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+        action_context = [
+            dict(item)
+            for item in metadata.get("bulk_action_context") or ()
+            if isinstance(item, Mapping) and item.get("bulk_action_id")
+        ]
+        if action_context:
+            await dialogue.begin_goal(
+                conversation_id,
+                "email_bulk_confirmation",
+                status="awaiting_confirmation",
+                slots={
+                    "principal_id": actor.user_key,
+                    "conversation_id": conversation_id,
+                    "bulk_action_ids": [str(item["bulk_action_id"]) for item in action_context],
+                    "provider_accounts": [
+                        {
+                            "provider": item.get("provider"),
+                            "account_id": item.get("account_id"),
+                        }
+                        for item in action_context
+                    ],
+                    "bulk_action_context": action_context,
+                    "operation": metadata.get("operation") or "trash",
+                    "candidate_counts": [
+                        int(item.get("intended_count") or 0) for item in action_context
+                    ],
+                    "original_authorization_text": "Retry the saved cleanup preview",
+                    "idempotency_key": str(task.get("task_id") or ""),
+                },
+                prompt=str(result["response"]),
+                ttl_seconds=600,
+            )
+    task_status = str((task or {}).get("status") or "")
+    outcome = {
+        "RUNNING": "retry_started",
+        "WAITING_FOR_JARVIS": "blocked",
+        "WAITING_FOR_YOU": "awaiting_confirmation",
+        "COMPLETED": "succeeded",
+        "PARTIAL": "partial",
+        "FAILED": "failed",
+    }.get(task_status, "awaiting_clarification")
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": outcome if result.get("retried") else "awaiting_clarification",
+        "response": str(result["response"]),
+        "intent": "task_retry" if result.get("retried") else "task_retry_needs_task",
+        "task_retry": result,
+    }
 
 
 _EMAIL_HISTORY_AFFIRMATIVES = frozenset(
@@ -1563,6 +1704,7 @@ async def _try_handle_email_assistant(
                 filter_kind=filter_kind,
                 original_authorization_text=authorization_text,
                 request_id=scoped_request_id,
+                task_group_id=action_request_id,
             )
             if not snapshot.get("success"):
                 return {
@@ -1700,6 +1842,7 @@ async def _try_handle_email_assistant(
                 combination=scope.combination,
                 original_authorization_text=authorization_text,
                 request_id=f"{action_request_id}:{provider}:{account_id}:compound",
+                task_group_id=action_request_id,
             )
             provider_results.append(
                 {
@@ -1708,6 +1851,7 @@ async def _try_handle_email_assistant(
                     "success": bool(snapshot.get("success")),
                     "intended_count": int(snapshot.get("intended_count") or 0),
                     "status": snapshot.get("status"),
+                    "failure_kind": snapshot.get("failure_kind"),
                     "error": snapshot.get("error"),
                     "unsupported_clauses": list(snapshot.get("unsupported_clauses") or ()),
                 }
@@ -1718,7 +1862,8 @@ async def _try_handle_email_assistant(
         failures = [
             item
             for item in provider_results
-            if not item["success"] and item.get("status") != "unsupported_scope"
+            if not item["success"]
+            and (item.get("failure_kind") or item.get("status")) != "unsupported_scope"
         ]
         if failures:
             for snapshot in snapshots:
@@ -3969,10 +4114,12 @@ async def lifespan(_: FastAPI):
     try:
         await followups.start()
         await email_policies.start()
+        await task_centre.start()
         await proactive_engine.start()
         await vision_engine.start()
         yield
     finally:
+        await task_centre.stop()
         await email_policies.stop()
         await followups.stop()
         await vision_engine.stop()
@@ -4020,6 +4167,7 @@ async def health_ready() -> JSONResponse:
     email_policy_health = await email_policies.health_snapshot()
     conversation_health = await conversations.health_snapshot()
     executive_health = await ai.executive_status()
+    task_centre_health = await task_centre.health()
     external_database = external_health.get("database") or {}
     database_healthy = (
         bool(external_database.get("healthy"))
@@ -4027,6 +4175,7 @@ async def health_ready() -> JSONResponse:
         and bool(email_policy_health.get("database_healthy"))
         and bool(conversation_health.get("healthy"))
         and bool((executive_health.get("database") or {}).get("healthy"))
+        and bool(task_centre_health.get("database_healthy"))
     )
     ready = bool(
         ha_status.connected
@@ -4035,6 +4184,7 @@ async def health_ready() -> JSONResponse:
         and external_health.get("healthy")
         and followup_health.get("healthy")
         and email_policy_health.get("healthy")
+        and task_centre_health.get("healthy")
         and database_healthy
     )
     payload = {
@@ -4062,6 +4212,7 @@ async def health_ready() -> JSONResponse:
             "email_policies": email_policy_health.get("database"),
             "conversations": conversation_health,
             "executive": executive_health.get("database"),
+            "task_centre": task_centre_health,
         },
         "realtime_voice": {
             "enabled": realtime.get("enabled"),
@@ -4070,6 +4221,7 @@ async def health_ready() -> JSONResponse:
             "last_error": realtime.get("last_error"),
         },
         "executive_agent": executive_health,
+        "task_centre": task_centre_health,
     }
     return JSONResponse(payload, status_code=200 if ready else 503)
 
@@ -4123,6 +4275,16 @@ async def system_status() -> dict[str, object]:
             "healthy": False,
             "reason": "conversation database status unavailable",
         }
+    try:
+        task_centre_status: dict[str, object] = await task_centre.health()
+    except Exception:
+        logger.exception("Task Centre status failed")
+        runtime_metrics.record_error("task_centre", "Task Centre status unavailable")
+        task_centre_status = {
+            "healthy": False,
+            "database_healthy": False,
+            "reason": "Task Centre status unavailable",
+        }
     external_database = external_status.get("database")
     if not isinstance(external_database, dict):
         external_database = {"healthy": False}
@@ -4132,6 +4294,7 @@ async def system_status() -> dict[str, object]:
         and bool(email_policy_status.get("database_healthy"))
         and bool(conversation_status.get("healthy"))
         and bool((executive_status.get("database") or {}).get("healthy"))
+        and bool(task_centre_status.get("database_healthy"))
     )
     return {
         "release": JARVIS_RELEASE,
@@ -4148,6 +4311,7 @@ async def system_status() -> dict[str, object]:
         "executive_agent": executive_status,
         "followup_worker": followup_status,
         "email_policy_worker": email_policy_status,
+        "task_centre": task_centre_status,
         "database": {
             "healthy": database_healthy,
             "external_agent": external_database,
@@ -4155,6 +4319,7 @@ async def system_status() -> dict[str, object]:
             "email_policies": email_policy_status.get("database"),
             "conversations": conversation_status,
             "executive": executive_status.get("database"),
+            "task_centre": task_centre_status,
         },
         "realtime_voice": realtime,
         "configuration": configuration_report(settings, realtime),
@@ -4475,6 +4640,219 @@ async def reschedule_personal_task(
     if job is None:
         raise HTTPException(status_code=404, detail="Personal task not found")
     return job
+
+
+@app.get("/api/tasks")
+async def list_task_centre(
+    authorization: str | None = Header(default=None),
+    filter: str = Query(default="ACTIVE"),
+    limit: int = Query(default=100, ge=1, le=250),
+) -> dict[str, object]:
+    """Return the redacted, principal-owned projection used by mobile clients."""
+
+    principal_id = _require_mobile_integration_principal(authorization)
+    try:
+        all_tasks = await task_centre.list_tasks(
+            principal_id=principal_id,
+            filter_name="ALL",
+            limit=250,
+        )
+        tasks = [item for item in all_tasks if task_centre.matches_filter(item, filter)][:limit]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    counts = {
+        name: sum(1 for item in all_tasks if task_centre.matches_filter(item, name))
+        for name in ("ACTIVE", "WAITING_FOR_YOU", "SCHEDULED", "COMPLETED", "PROBLEMS")
+    }
+    return {
+        "principal_id": principal_id,
+        "filter": filter.upper(),
+        "count": len(tasks),
+        "counts": counts,
+        "tasks": tasks,
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/tasks/{task_id}")
+async def get_task_centre_item(
+    task_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    task = await task_centre.get_task(principal_id=principal_id, task_id=task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@app.post("/api/tasks/{task_id}/notifications")
+async def update_task_notifications(
+    task_id: str,
+    request: TaskNotificationPreferenceRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    task = await task_centre.set_notification_preference(
+        principal_id=principal_id,
+        task_id=task_id,
+        notify_on_completion=request.notify_on_completion,
+        notify_on_failure=request.notify_on_failure,
+    )
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+async def _task_mutation_result(
+    task: dict[str, Any] | None,
+    *,
+    unavailable: str,
+) -> dict[str, object]:
+    if task is None:
+        raise HTTPException(status_code=409, detail=unavailable)
+    return task
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def cancel_task_centre_item(
+    task_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.cancel(
+            principal_id=principal_id,
+            task_id=task_id,
+            request_id=request.request_id or str(uuid.uuid4()),
+        ),
+        unavailable="This task cannot be cancelled in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/pause")
+async def pause_task_centre_item(
+    task_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.pause(
+            principal_id=principal_id,
+            task_id=task_id,
+            request_id=request.request_id or str(uuid.uuid4()),
+        ),
+        unavailable="This task cannot be paused in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/resume")
+async def resume_task_centre_item(
+    task_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.resume(
+            principal_id=principal_id,
+            task_id=task_id,
+            request_id=request.request_id or str(uuid.uuid4()),
+        ),
+        unavailable="This task cannot be resumed in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/retry")
+async def retry_task_centre_item(
+    task_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.retry(principal_id=principal_id, task_id=task_id),
+        unavailable="This task cannot be retried safely in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/confirm")
+async def confirm_task_centre_item(
+    task_id: str,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.confirm(
+            principal_id=principal_id,
+            task_id=task_id,
+        ),
+        unavailable="This task is not waiting for a supported confirmation.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/decline")
+async def decline_task_centre_item(
+    task_id: str,
+    request: PersonalTaskMutationRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await _task_mutation_result(
+        await task_centre.decline(
+            principal_id=principal_id,
+            task_id=task_id,
+            request_id=request.request_id or str(uuid.uuid4()),
+        ),
+        unavailable="This task cannot be declined in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/reschedule")
+async def reschedule_task_centre_item(
+    task_id: str,
+    request: PersonalTaskRescheduleRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    if request.due_at.tzinfo is None:
+        raise HTTPException(status_code=400, detail="due_at must include a timezone")
+    return await _task_mutation_result(
+        await task_centre.reschedule(
+            principal_id=principal_id,
+            task_id=task_id,
+            request_id=request.request_id or str(uuid.uuid4()),
+            due_at=request.due_at.astimezone(timezone.utc),
+            timezone_name=request.timezone,
+        ),
+        unavailable="This task cannot be rescheduled in its current state.",
+    )
+
+
+@app.post("/api/tasks/{task_id}/steer")
+async def steer_task_centre_item(
+    task_id: str,
+    request: TaskSteerRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    task = await task_centre.get_task(principal_id=principal_id, task_id=task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not task.get("can_steer") or not task_id.startswith("executive:"):
+        raise HTTPException(status_code=409, detail="This task is not currently steerable.")
+    executive_id = task_id.split(":", 1)[1]
+    steered = bool(
+        ai.executive_transport is not None
+        and await ai.executive_transport.steer(executive_id, request.instruction)
+    )
+    if not steered:
+        raise HTTPException(status_code=409, detail="Task is not at a steerable model point.")
+    return await _task_mutation_result(
+        await task_centre.get_task(principal_id=principal_id, task_id=task_id),
+        unavailable="Task is no longer available.",
+    )
 
 
 @app.post("/api/email-assistant/retention")
@@ -5579,12 +5957,24 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
-    memory_result = await _try_handle_email_assistant(
+    memory_result = await _try_handle_task_notification(
         request.text,
         actor=actor,
         conversation_id=storage_conversation_id,
-        request_id=request.request_id,
     )
+    if memory_result is None:
+        memory_result = await _try_handle_task_retry(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+        )
+    if memory_result is None:
+        memory_result = await _try_handle_email_assistant(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+            request_id=request.request_id,
+        )
     confirmation = bare_confirmation(request.text)
     pending_state = await dialogue.get(storage_conversation_id) if confirmation else None
     if (

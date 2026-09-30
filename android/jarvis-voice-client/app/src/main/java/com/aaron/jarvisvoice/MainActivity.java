@@ -90,6 +90,8 @@ public final class MainActivity extends Activity {
     private boolean generating;
     private AssistantMode assistantMode;
     private DeveloperClient developerClient;
+    private TaskCentreClient taskCentreClient;
+    private TextView tasksTab;
     private final Map<String, TextView> developerActivityStatuses = new HashMap<>();
     private JSONArray pendingDeveloperAttachments = new JSONArray();
 
@@ -172,6 +174,7 @@ public final class MainActivity extends Activity {
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         store = new SecureStore(this);
+        taskCentreClient = new TaskCentreClient(this);
         assistantMode = store.assistantMode();
         developerClient = new DeveloperClient(this, new DeveloperClient.Listener() {
             @Override public void onState(String state) { statusText.setText(state); }
@@ -204,6 +207,7 @@ public final class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         updateMicButton();
+        refreshTaskCount();
         JarvisVoiceInteractionService.ensureWakeIfActive(this);
     }
 
@@ -215,6 +219,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         if (developerClient != null) developerClient.destroy();
+        if (taskCentreClient != null) taskCentreClient.close();
         super.onDestroy();
     }
 
@@ -255,6 +260,7 @@ public final class MainActivity extends Activity {
 
         topBar = buildTopBar();
         root.addView(topBar, matchWrap());
+        root.addView(buildPrimaryNavigation(), matchWrap(0, dp(8)));
         developerChrome = buildDeveloperChrome();
         root.addView(developerChrome, matchWrap());
 
@@ -304,6 +310,56 @@ public final class MainActivity extends Activity {
         composerShell = buildComposer();
         root.addView(composerShell, matchWrap());
         return root;
+    }
+
+    private LinearLayout buildPrimaryNavigation() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(16), 0, dp(16), 0);
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setBackground(rounded(SOFT, 22, 0, Color.TRANSPARENT));
+        TextView chat = primaryTab("Chat", true);
+        tabs.addView(chat, new LinearLayout.LayoutParams(0, dp(42), 1f));
+        tasksTab = primaryTab("Tasks", false);
+        tasksTab.setOnClickListener(view ->
+            startActivity(new Intent(this, TasksActivity.class))
+        );
+        tabs.addView(tasksTab, new LinearLayout.LayoutParams(0, dp(42), 1f));
+        row.addView(tabs, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        return row;
+    }
+
+    private TextView primaryTab(String label, boolean selected) {
+        TextView tab = text(label, 14, selected ? WHITE : BLACK);
+        tab.setGravity(Gravity.CENTER);
+        tab.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tab.setBackground(rounded(
+            selected ? BLACK : Color.TRANSPARENT,
+            20,
+            0,
+            Color.TRANSPARENT
+        ));
+        tab.setContentDescription(label + (selected ? ", selected" : ""));
+        return tab;
+    }
+
+    private void refreshTaskCount() {
+        if (taskCentreClient == null || tasksTab == null) return;
+        taskCentreClient.list("ACTIVE", new TaskCentreClient.ListCallback() {
+            @Override public void onSuccess(List<TaskItem> tasks, JSONObject counts) {
+                int active = counts.optInt("ACTIVE", tasks.size());
+                tasksTab.setText(active > 0 ? "Tasks • " + active : "Tasks");
+                tasksTab.setContentDescription(
+                    active > 0 ? "Tasks, " + active + " active" : "Tasks"
+                );
+            }
+            @Override public void onError(String message) {
+                tasksTab.setText("Tasks");
+            }
+        });
     }
 
     private LinearLayout buildTopBar() {

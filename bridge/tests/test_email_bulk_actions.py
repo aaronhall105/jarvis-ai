@@ -28,6 +28,7 @@ class BulkRegistry:
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.fail_once: set[str] = set()
         self.unknown_once: set[str] = set()
+        self.search_error: str | None = None
 
     @staticmethod
     def result(
@@ -54,6 +55,8 @@ class BulkRegistry:
         capability = request.capability_id
         self.requests.append((capability, dict(request.payload)))
         if capability in {"gmail.search", "outlook.search"}:
+            if self.search_error is not None:
+                return self.result({}, status=ExecutionStatus.FAILED, error=self.search_error)
             values = [dict(item) for item in self.messages.values()]
             if request.payload.get("unread") is True or "is:unread" in str(
                 request.payload.get("query") or ""
@@ -210,6 +213,45 @@ async def test_bulk_action_freezes_and_processes_every_candidate(
 
 
 @pytest.mark.asyncio
+async def test_failed_preview_is_durable_waiting_work_and_retry_freezes_without_writes(
+    tmp_path: Path,
+) -> None:
+    registry = BulkRegistry(7)
+    registry.search_error = "Gmail unavailable"
+    path = tmp_path / "bulk-preview-retry.db"
+    first = engine(path, registry)
+
+    failed = await snapshot(first, request_id="preview-retry")
+
+    assert failed["success"] is False
+    assert failed["status"] == "interrupted"
+    assert failed["halt_reason"] == "Gmail unavailable"
+    assert failed["intended_count"] == 0
+    assert registry.writes == []
+
+    restarted = engine(path, registry)
+    durable = await restarted.bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=failed["bulk_action_id"],
+    )
+    assert durable is not None and durable["status"] == "interrupted"
+
+    registry.search_error = None
+    retried = await restarted.retry_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=failed["bulk_action_id"],
+    )
+
+    assert retried["success"] is True
+    assert retried["status"] == "awaiting_confirmation"
+    assert retried["intended_count"] == 7
+    assert retried["bulk_action_id"] == failed["bulk_action_id"]
+    assert registry.writes == []
+
+
+@pytest.mark.asyncio
 async def test_bulk_action_partial_failure_is_truthful_and_retry_is_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -350,6 +392,15 @@ async def test_stale_bulk_confirmation_expires_without_any_write(tmp_path: Path)
         bulk_action_id=action["bulk_action_id"],
     )
     assert result["status"] == "expired"
+    assert registry.writes == []
+
+    refreshed = await service.retry_bulk_action(
+        principal_id="aaron",
+        conversation_id="usr:aaron:bulk",
+        bulk_action_id=action["bulk_action_id"],
+    )
+    assert refreshed["status"] == "awaiting_confirmation"
+    assert refreshed["intended_count"] == 3
     assert registry.writes == []
 
 

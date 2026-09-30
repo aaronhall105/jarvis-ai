@@ -494,6 +494,20 @@ class ExecutiveTaskStore:
     async def get_task(self, task_id: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._get_task_sync, task_id)
 
+    def _list_tasks_sync(self, principal_id: str, limit: int) -> list[dict[str, Any]]:
+        with self._database() as connection:
+            rows = connection.execute(
+                """SELECT * FROM executive_tasks WHERE principal_id=?
+                ORDER BY updated_at DESC LIMIT ?""",
+                (principal_id, max(1, min(int(limit), 500))),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    async def list_tasks(self, *, principal_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the principal-owned durable task index for safe projections."""
+
+        return await asyncio.to_thread(self._list_tasks_sync, principal_id, limit)
+
     def _active_task_sync(self, principal_id: str, conversation_id: str) -> dict[str, Any] | None:
         terminal = tuple(
             value.value

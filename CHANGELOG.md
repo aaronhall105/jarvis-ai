@@ -2,6 +2,17 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha31 — Unified Task Centre
+
+Alpha31 adds a first-class Android Tasks experience and one principal-scoped,
+provider-neutral projection over Jarvis's existing durable work engines. It
+includes evidence-backed task details, safe generic controls, truthful waiting
+states, and restart-safe completion/failure notification subscriptions.
+
+See [the complete alpha31 release notes](docs/releases/CHANGES_V19_0_0_ALPHA31.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha30 — OTA recovery and safe multi-inbox cleanup
 
 Alpha30 contains the approved compound Gmail and Outlook cleanup work prepared

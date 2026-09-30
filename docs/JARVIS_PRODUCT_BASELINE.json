@@ -3,8 +3,8 @@
   "authoritative_branch": "jarvis/unified-production",
   "audited_at_utc": "2026-09-22",
   "current_release": {
-    "version_name": "19.0.0-alpha30",
-    "version_code": 190320,
+    "version_name": "19.0.0-alpha31",
+    "version_code": 190330,
     "core_application_version": "3.7.0",
     "realtime_protocol": 2,
     "phone_package": "com.aaron.jarvisvoice",
@@ -366,6 +366,7 @@
       "bridge/app/followup_engine.py",
       "bridge/app/followup_schedule.py",
       "bridge/app/memory_engine.py",
+      "bridge/app/task_centre.py",
       "bridge/app/external_agent_runtime.py",
       "bridge/app/google_integration.py",
       "bridge/app/integration_accounts.py",
@@ -380,13 +381,19 @@
       "android/jarvis-voice-client/wear/build.gradle.kts",
       "android/jarvis-voice-client/wearprotocol/build.gradle.kts",
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/IntegrationsActivity.java",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TaskCentreClient.java",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TaskItem.java",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TasksActivity.java",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TaskDetailActivity.java",
       "docs/JARVIS_CONSOLIDATION_LINEAGE.json",
       "docs/PERSONAL_ASSISTANT_V1.md",
+      "docs/UNIFIED_TASK_CENTRE.md",
       "android/jarvis-voice-client/app/src/main/res/drawable-xxxhdpi/control_delete_red.png"
     ],
     "markers": {
       "bridge/app/realtime_voice.py": ["turn.status", "turn.accepted", "turn.interrupted"],
-      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime", "JARVIS_SOURCE_SHA", "/api/personal-assistant/jobs"],
+      "bridge/app/main.py": ["RealtimeTurnLedger", "ExternalAgentRuntime", "JARVIS_SOURCE_SHA", "/api/personal-assistant/jobs", "/api/tasks"],
+      "bridge/app/task_centre.py": ["class TaskCentre", "WorkItem", "process_notifications_once", "confirmation_step_ids"],
       "bridge/app/followup_engine.py": ["personal.tasks.manage", "occurrence_index", "delivery_key=", "handle_command"],
       "bridge/app/followup_schedule.py": ["resolve_recurrence", "next_recurrence"],
       "bridge/app/memory_engine.py": ["handle_explicit_command"],
@@ -394,7 +401,9 @@
       "developer_gateway/install.sh": ["jarvis/unified-production", "origin/$authoritative_branch", "SOURCE_COMMIT", "systemctl --user restart"],
       "developer_gateway/jarvis-developer.service": ["WorkingDirectory=%h/.local/share/jarvis-developer/current", "JARVIS_AUTHORITATIVE_WORKSPACE=__JARVIS_ROOT__"],
       "android/jarvis-voice-client/app/src/main/AndroidManifest.xml": [".IntegrationsActivity", "android:host=\"integrations\"", ".WearChannelListenerService", ".JarvisVoiceInteractionService"],
-      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.control_delete_red", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": ["R.drawable.control_delete_red", "VoiceService.ACTION_DELETE_CHAT", "DeveloperRoutingPolicy", "TasksActivity.class"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TasksActivity.java": ["WAITING_FOR_YOU", "plannedSteps", "TaskDetailActivity.class"],
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/TaskDetailActivity.java": ["Completed steps", "Planned remaining steps", "Notify me when done"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java": ["Voice and conversation", "Connections", "Integrations", "Developer", "Open integrations & accounts"],
       "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/JarvisRealtimeClient.java": ["TurnRecoveryJournal", "TurnDeliveryFence", "turn.status"],
       "bridge/app/static/chat.html": ["jarvis-chat-tabs-v1", "chat-tab"],
@@ -410,12 +419,12 @@
     "sha256": {
       "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/ic_launcher_foreground.png": "48f71005d585a8494463cf3b8c4db8ca1b8e82a7b4fb4942db67c0c1dcbe74af",
       "android/jarvis-voice-client/app/src/main/res/drawable-nodpi/jarvis_wordmark_master.png": "da33a713573cc452e9de9868053ae095eba241b8f5d5ed72ad8f939eb8b3c5fa",
-      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml": "b252ac194a15bd535680f3831b318ddef7db50bc695c59b0a563919c57cbcbf9"
+      "android/jarvis-voice-client/app/src/main/res/drawable/ic_jarvis.xml": "b252ac194a15bd535680f3831b318ddef7db50bc695c59b0a563919c57cbcbf9",
+      "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java": "4e79068288e6af2eb7c32d618a4d11c982de494b618fc49c6f9a38094fffd961"
     },
     "exact_source": {
       "commit": "1eb4c5913a3e69213ec45ad726bebb45779e3c01",
       "files": [
-        "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/MainActivity.java",
         "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/SettingsActivity.java",
         "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ChatHistoryActivity.java",
         "android/jarvis-voice-client/app/src/main/java/com/aaron/jarvisvoice/ImprovementsActivity.java",

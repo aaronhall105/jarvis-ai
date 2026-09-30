@@ -48,6 +48,17 @@ MOBILE_ACCOUNT_ROUTES = {
     ("post", "/api/email-assistant/cleanup/preview"),
     ("get", "/api/email-assistant/cleanup/history"),
     ("get", "/api/email-assistant/reply-watches"),
+    ("get", "/api/tasks"),
+    ("get", "/api/tasks/{task_id}"),
+    ("post", "/api/tasks/{task_id}/notifications"),
+    ("post", "/api/tasks/{task_id}/cancel"),
+    ("post", "/api/tasks/{task_id}/pause"),
+    ("post", "/api/tasks/{task_id}/resume"),
+    ("post", "/api/tasks/{task_id}/retry"),
+    ("post", "/api/tasks/{task_id}/confirm"),
+    ("post", "/api/tasks/{task_id}/decline"),
+    ("post", "/api/tasks/{task_id}/reschedule"),
+    ("post", "/api/tasks/{task_id}/steer"),
 }
 
 
