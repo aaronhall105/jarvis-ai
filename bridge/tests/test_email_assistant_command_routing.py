@@ -13,6 +13,7 @@ from app import main
 from app.action_proposals import ProposalResolution
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
+from app.pending_interactions import PendingInteractionService
 from app.user_context import UserContext
 
 
@@ -1803,7 +1804,8 @@ async def test_cross_mailbox_topic_read_continues_with_healthy_provider_without_
     assert "if you'd like" not in str(result["response"])
     engine.search_mailbox.assert_awaited_once()
     assert engine.search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
-    assert engine.search_mailbox.await_args.kwargs["literal_query"] == "wageslip"
+    assert engine.search_mailbox.await_args.kwargs["topic_query"] == "wageslip"
+    assert engine.search_mailbox.await_args.kwargs["literal_query"] is None
 
 
 @pytest.mark.asyncio
@@ -1852,6 +1854,119 @@ async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(m
     assert "Gmail" in str(result["response"])
     generic_model.assert_not_awaited()
     engine.search_mailbox.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_wageslip_sender_clarification_yes_continues_durable_search(
+    monkeypatch, tmp_path
+) -> None:
+    accounts = [
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        }
+    ]
+    engine = bulk_engine(accounts=accounts)
+    joseph_message = {
+        "message_id": "outlook-wage-slip",
+        "thread_id": "outlook-wage-slip-thread",
+        "from": "joseph.scott@example.test",
+        "sender_name": "Joseph Scott",
+        "subject": "WAGE SLIP",
+        "snippet": "September payroll document",
+        "received_at": "2026-09-24T14:11:47Z",
+    }
+
+    async def search(**kwargs):
+        assert kwargs["provider"] == "microsoft_outlook"
+        assert kwargs["account_id"] == "outlook-1"
+        assert kwargs["topic_query"] == "wageslip"
+        if kwargs.get("sender_address") is not None:
+            assert kwargs["sender_address"] == "joseph.scott@example.test"
+        return {
+            "success": True,
+            "provider": kwargs["provider"],
+            "account_id": kwargs["account_id"],
+            "messages": [joseph_message],
+            "count": 1,
+            "exact": False,
+            "query_kind": "topic_search",
+            "topic_query": "wageslip",
+        }
+
+    engine.search_mailbox.side_effect = search
+    dialogue = DialogueManager(str(tmp_path / "wageslip-dialogue.db"))
+    pending = PendingInteractionService(
+        dialogue=dialogue,
+        action_proposals=SimpleNamespace(resolve=AsyncMock(return_value=None)),
+    )
+    pending.register_handler(
+        "email_topic_sender_search", main._continue_email_topic_sender_interaction
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(main, "dialogue", dialogue)
+    monkeypatch.setattr(main, "pending_interactions", pending)
+    monkeypatch.setattr(
+        main, "conversations", ConversationEngine(str(tmp_path / "wageslip-conversations.db"))
+    )
+    generic_model = AsyncMock(side_effect=AssertionError("generic model must not run"))
+    monkeypatch.setattr(main.ai, "ask", generic_model)
+    monkeypatch.setattr(main, "_try_handle_task_notification", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_task_retry", AsyncMock(return_value=None))
+
+    first = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Check my emails and see if I have got my wageslip",
+            conversation_id="wageslip-sender",
+            request_id="wageslip-sender-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+    second = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="From jo",
+            conversation_id="wageslip-sender",
+            request_id="wageslip-sender-2",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+    waiting = await pending.current(
+        principal_id="aaron", conversation_id="usr:aaron:wageslip-sender"
+    )
+    third = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Yes",
+            conversation_id="wageslip-sender",
+            request_id="wageslip-sender-3",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert first["intent"] == "email_topic_search"
+    assert "WAGE SLIP" in str(first["response"])
+    assert second["intent"] == "email_topic_sender_clarification"
+    assert second["response"] == "Do you mean Joseph Scott?"
+    assert waiting is not None
+    assert waiting["context"] == {
+        "provider": "microsoft_outlook",
+        "account_id": "outlook-1",
+        "topic_query": "wageslip",
+        "sender_query": "jo",
+        "display_name": "Joseph Scott",
+    }
+    assert third["intent"] == "email_topic_sender_search"
+    assert "WAGE SLIP" in str(third["response"])
+    assert "Yes to what" not in str(third["response"])
+    assert (
+        await pending.current(principal_id="aaron", conversation_id="usr:aaron:wageslip-sender")
+        is None
+    )
+    assert engine.search_mailbox.await_count == 2
+    generic_model.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1978,7 +2093,7 @@ async def test_topic_mailbox_read_searches_each_healthy_account_independently(mo
         "outlook-1",
     }
     assert all(
-        call.kwargs["literal_query"] == "pension statement"
+        call.kwargs["topic_query"] == "pension statement" and call.kwargs["literal_query"] is None
         for call in engine.search_mailbox.await_args_list
     )
 

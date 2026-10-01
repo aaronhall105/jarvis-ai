@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import sqlite3
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -124,12 +125,18 @@ class TaskCentre:
         self.planner = planner
         self.email_policies = email_policies
         self.notifier = notifier
+        self.pending_interactions: Any | None = None
         self.legacy_task_path = Path(legacy_task_path) if legacy_task_path else None
         self.legacy_recurring_path = Path(legacy_recurring_path) if legacy_recurring_path else None
         self.poll_seconds = max(2, min(int(poll_seconds), 60))
         self._stop = asyncio.Event()
         self._worker: asyncio.Task[None] | None = None
         self._init()
+
+    def set_pending_interaction_service(self, service: Any) -> None:
+        """Project the shared durable dialogue interaction boundary."""
+
+        self.pending_interactions = service
 
     @contextmanager
     def _db(self):
@@ -281,6 +288,7 @@ class TaskCentre:
         tasks.extend(await self._followup_tasks(principal_id, maximum))
         tasks.extend(await self._email_bulk_tasks(principal_id, maximum))
         tasks.extend(await self._orphan_plan_tasks(principal_id, tasks, maximum))
+        tasks.extend(await self._pending_interaction_tasks(principal_id, maximum))
         tasks.extend(self._legacy_scheduled_tasks(principal_id, maximum))
         tasks.extend(self._legacy_recurring_tasks(principal_id, maximum))
         subscriptions = self._subscriptions(principal_id)
@@ -326,6 +334,65 @@ class TaskCentre:
         filtered = [task for task in tasks if self.matches_filter(task, filter_name)]
         filtered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return filtered[:maximum]
+
+    async def _pending_interaction_tasks(
+        self, principal_id: str, limit: int
+    ) -> list[dict[str, Any]]:
+        if self.pending_interactions is None:
+            return []
+        records = await self.pending_interactions.list_for_principal(
+            principal_id=principal_id,
+            limit=limit,
+        )
+        output: list[dict[str, Any]] = []
+        for record in records:
+            interaction_id = str(record.get("interaction_id") or "").strip()
+            if not interaction_id:
+                continue
+            kind = str(record.get("kind") or "clarification")
+            raw_status = str(record.get("status") or "pending")
+            awaiting_answer = raw_status == "pending"
+            proposed = record.get("proposed_value") is not None
+            options = [
+                str(item.get("label") or "").strip()
+                for item in record.get("options") or ()
+                if isinstance(item, Mapping) and str(item.get("label") or "").strip()
+            ]
+            output.append(
+                self._task(
+                    task_id=f"interaction:{interaction_id}",
+                    task_type="pending_interaction",
+                    title=_safe_text(record.get("goal"), limit=120) or "Jarvis clarification",
+                    summary=_safe_text(record.get("prompt"), limit=280),
+                    status=(
+                        TaskCentreStatus.WAITING_FOR_YOU
+                        if awaiting_answer
+                        else TaskCentreStatus.WAITING_FOR_JARVIS
+                    ),
+                    underlying_status=raw_status,
+                    conversation_id=str(record.get("conversation_id") or ""),
+                    created_at=record.get("created_at"),
+                    updated_at=record.get("updated_at"),
+                    current_step=_safe_text(record.get("prompt"), limit=280),
+                    waiting_reason=(
+                        "Jarvis needs your answer before it can continue"
+                        if awaiting_answer
+                        else "Jarvis is applying your answer"
+                    ),
+                    requires_user_action=awaiting_answer,
+                    user_action_type=kind if awaiting_answer else None,
+                    can_confirm=awaiting_answer and proposed,
+                    can_decline=awaiting_answer,
+                    can_cancel=awaiting_answer,
+                    metadata={
+                        "interaction_id": interaction_id,
+                        "kind": kind,
+                        "unresolved_slot": record.get("unresolved_slot"),
+                        "options": options,
+                    },
+                )
+            )
+        return output
 
     @staticmethod
     def matches_filter(task: Mapping[str, Any], filter_name: str) -> bool:
@@ -1614,6 +1681,7 @@ class TaskCentre:
         if task is None or not task.get("can_cancel"):
             return None
         source, identity = task_id.split(":", 1)
+        cancelled_interaction: dict[str, Any] | None = None
         if source == "followup":
             await self.followups.cancel(identity, principal_id=principal_id, request_id=request_id)
         elif source in {"email_bulk", "email_group"}:
@@ -1638,6 +1706,29 @@ class TaskCentre:
                 await self.planner.cancel(plan_id)
             if source == "executive":
                 await self.executive_store.update_task(identity, status="cancelled")
+        elif source == "interaction" and self.pending_interactions is not None:
+            resolved = await self.pending_interactions.resolve(
+                principal_id=principal_id,
+                conversation_id=str(task.get("conversation_id") or ""),
+                answer="no",
+                request_id=request_id,
+            )
+            if resolved is None or not resolved.handled:
+                return None
+            cancelled_interaction = dict(task)
+            cancelled_interaction.update(
+                status=TaskCentreStatus.CANCELLED.value,
+                underlying_status="declined",
+                requires_user_action=False,
+                can_confirm=False,
+                can_decline=False,
+                can_cancel=False,
+                result_summary=resolved.response,
+                updated_at=_iso(),
+                completed_at=_iso(),
+            )
+        else:
+            return None
         self._record_event(
             principal_id=principal_id,
             task_id=task_id,
@@ -1645,6 +1736,8 @@ class TaskCentre:
             summary="Cancelled by Aaron",
             evidence={"request_id": request_id},
         )
+        if cancelled_interaction is not None:
+            return cancelled_interaction
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
     async def pause(
@@ -1704,6 +1797,7 @@ class TaskCentre:
         if task is None or not task.get("can_confirm"):
             return None
         source, identity = task_id.split(":", 1)
+        interaction_result: dict[str, Any] | None = None
         if source in {"email_bulk", "email_group"}:
             action_ids = (
                 [identity]
@@ -1729,6 +1823,26 @@ class TaskCentre:
                 plan = await self.planner.resume(plan_id)
             if source == "executive":
                 await self._sync_executive_task(identity, plan)
+        elif source == "interaction" and self.pending_interactions is not None:
+            resolved = await self.pending_interactions.resolve(
+                principal_id=principal_id,
+                conversation_id=str(task.get("conversation_id") or ""),
+                answer="yes",
+                request_id=str(uuid.uuid4()),
+            )
+            if resolved is None or not resolved.handled:
+                return None
+            interaction_result = dict(task)
+            interaction_result.update(
+                status=TaskCentreStatus.COMPLETED.value,
+                underlying_status="resolved",
+                requires_user_action=False,
+                can_confirm=False,
+                can_decline=False,
+                result_summary=resolved.response,
+                updated_at=_iso(),
+                completed_at=_iso(),
+            )
         else:
             return None
         self._record_event(
@@ -1737,6 +1851,8 @@ class TaskCentre:
             event_type="confirmed",
             summary="Confirmed by Aaron",
         )
+        if interaction_result is not None:
+            return interaction_result
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
     async def decline(
@@ -1758,6 +1874,27 @@ class TaskCentre:
                 task_id=task_id,
                 request_id=request_id,
             )
+        if source == "interaction" and self.pending_interactions is not None:
+            resolved = await self.pending_interactions.resolve(
+                principal_id=principal_id,
+                conversation_id=str(task.get("conversation_id") or ""),
+                answer="no",
+                request_id=request_id,
+            )
+            if resolved is None or not resolved.handled:
+                return None
+            declined = dict(task)
+            declined.update(
+                status=TaskCentreStatus.CANCELLED.value,
+                underlying_status="declined",
+                requires_user_action=False,
+                can_confirm=False,
+                can_decline=False,
+                result_summary=resolved.response,
+                updated_at=_iso(),
+                completed_at=_iso(),
+            )
+            return declined
         if source not in {"agent_plan", "executive"}:
             return None
         metadata: Mapping[str, Any] = (

@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 from app.connectors import CapabilityRequest, ConnectorRegistry, ExecutionStatus, ReceiptStatus
 from app.connectors.credentials import redact_text
+from app.email_semantic_routing import rank_email_topic_messages
 from app.response_presentation import clean_email_reply_body, present_user_response
 
 
@@ -1329,6 +1330,7 @@ class EmailAssistantPolicyEngine:
         request_id: str,
         sender_address: str | None = None,
         literal_query: str | None = None,
+        topic_query: str | None = None,
         filter_kind: str | None = None,
         limit: int = 10,
     ) -> dict[str, Any]:
@@ -1338,14 +1340,16 @@ class EmailAssistantPolicyEngine:
             principal_id=principal_id, provider=provider, account_id=account_id
         )
         capability = "gmail.search" if provider == "google_gmail" else "outlook.search"
-        if sum(bool(item) for item in (sender_address, literal_query, filter_kind)) > 1:
+        if literal_query and topic_query:
+            raise ValueError("Literal and semantic mailbox queries cannot be combined")
+        if filter_kind and any((sender_address, literal_query, topic_query)):
             raise ValueError("Mailbox read filters cannot be combined")
         requested = max(1, min(int(limit), 25))
         if provider == "google_gmail":
             if sender_address:
                 query = f"from:({sender_address}) -in:spam -in:trash"
-            elif literal_query:
-                query = literal_query
+            elif literal_query or topic_query:
+                query = str(literal_query or topic_query)
             elif filter_kind:
                 query = str(self._bulk_search_payload(provider, filter_kind)["query"])
             else:
@@ -1355,9 +1359,9 @@ class EmailAssistantPolicyEngine:
             payload = {"folder": "inbox", "limit": requested}
             if sender_address:
                 payload["sender"] = sender_address
-            elif literal_query:
+            elif literal_query or topic_query:
                 payload.pop("folder", None)
-                payload["query"] = literal_query
+                payload["query"] = str(literal_query or topic_query)
             elif filter_kind:
                 base = self._bulk_search_payload(provider, filter_kind)
                 payload["folder"] = base["folder"]
@@ -1371,7 +1375,7 @@ class EmailAssistantPolicyEngine:
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
                         f"mail-read:{request_id}:{provider}:{account_id}:"
-                        f"{sender_address or literal_query or filter_kind or 'latest'}",
+                        f"{sender_address or literal_query or topic_query or filter_kind or 'latest'}",
                     )
                 ),
                 conversation_id=conversation_id,
@@ -1393,6 +1397,71 @@ class EmailAssistantPolicyEngine:
             for item in execution.data.get("messages") or ()
             if isinstance(item, Mapping) and str(item.get("message_id") or "").strip()
         ]
+        search_strategy = "provider_native"
+        searched_metadata_count: int | None = None
+        if topic_query:
+            messages = rank_email_topic_messages(
+                topic_query,
+                messages,
+                sender_address=sender_address,
+                limit=requested,
+            )
+            if not messages:
+                fallback_payload: dict[str, Any] = {
+                    "folder": "inbox",
+                    "limit": 100,
+                    "metadata_only": True,
+                    "all_pages": True,
+                    "max_messages": 200,
+                }
+                if provider == "google_gmail":
+                    fallback_payload.pop("folder", None)
+                    # Gmail's connector deliberately expands at most 25 IDs to
+                    # metadata. Keep the semantic window aligned with that
+                    # enforced detail bound instead of walking unused pages.
+                    fallback_payload.update(
+                        query="in:inbox",
+                        limit=25,
+                        max_messages=25,
+                    )
+                fallback = await self.registry.execute(
+                    CapabilityRequest(
+                        capability_id=capability,
+                        payload=fallback_payload,
+                        request_id=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"mail-semantic-fallback:{request_id}:{provider}:{account_id}:"
+                                f"{topic_query}:{sender_address or ''}",
+                            )
+                        ),
+                        conversation_id=conversation_id,
+                        principal_id=principal_id,
+                        operation="email_mailbox_semantic_fallback",
+                    ),
+                    refresh_health=True,
+                )
+                if not fallback.success:
+                    return {
+                        "success": False,
+                        "provider": provider,
+                        "account_id": account_id,
+                        "error": fallback.error,
+                        "messages": [],
+                    }
+                bounded_messages = [
+                    dict(item)
+                    for item in fallback.data.get("messages") or ()
+                    if isinstance(item, Mapping) and str(item.get("message_id") or "").strip()
+                ]
+                searched_metadata_count = len(bounded_messages)
+                messages = rank_email_topic_messages(
+                    topic_query,
+                    bounded_messages,
+                    sender_address=sender_address,
+                    limit=requested,
+                )
+                search_strategy = "bounded_metadata_fallback"
 
         def timestamp(item: Mapping[str, Any]) -> float:
             value = item.get("internal_date_ms")
@@ -1410,11 +1479,18 @@ class EmailAssistantPolicyEngine:
             "provider": provider,
             "account_id": account_id,
             "messages": messages[:requested],
-            "count": int(execution.data.get("count") or len(messages)),
-            "exact": not bool(execution.data.get("truncated")),
+            "count": (
+                len(messages) if topic_query else int(execution.data.get("count") or len(messages))
+            ),
+            "exact": False if topic_query else not bool(execution.data.get("truncated")),
+            "topic_query": topic_query,
+            "search_strategy": search_strategy,
+            "searched_metadata_count": searched_metadata_count,
             "query_kind": (
                 "sender_search"
                 if sender_address
+                else "topic_search"
+                if topic_query
                 else "literal_search"
                 if literal_query
                 else "list_filter"
