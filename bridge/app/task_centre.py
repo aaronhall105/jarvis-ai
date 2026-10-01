@@ -143,6 +143,20 @@ class TaskCentre:
         finally:
             connection.close()
 
+    @contextmanager
+    def _planner_principal_scope(self, principal_id: str):
+        """Preserve principal-scoped capability checks for mobile/chat controls."""
+
+        executor = getattr(self.planner, "executor", None)
+        setter = getattr(executor, "set_principal", None)
+        resetter = getattr(executor, "reset_principal", None)
+        token = setter(principal_id) if callable(setter) else None
+        try:
+            yield
+        finally:
+            if token is not None and callable(resetter):
+                resetter(token)
+
     def _init(self) -> None:
         with self._db() as connection:
             connection.executescript(
@@ -873,6 +887,14 @@ class TaskCentre:
             if item.get("status") in {"blocked", "failed"}
         )
         selected_current = current or waiting
+        verified_result = next(
+            (
+                str(item.get("result_summary") or "").strip()
+                for item in reversed(steps)
+                if item.get("status") == "succeeded" and item.get("result_summary")
+            ),
+            None,
+        )
         return self._task(
             task_id=f"agent_plan:{plan.plan_id}",
             task_type="multi_tool_plan",
@@ -921,6 +943,7 @@ class TaskCentre:
                 }
                 and retryable_failure
             ),
+            result_summary=verified_result,
             planned_steps=steps,
             metadata={
                 "plan_id": plan.plan_id,
@@ -1701,8 +1724,9 @@ class TaskCentre:
             step_ids = [str(item) for item in metadata.get("confirmation_step_ids") or ()]
             if not plan_id or len(step_ids) != 1:
                 return None
-            await self.planner.approve(plan_id, step_ids[0], approved=True)
-            plan = await self.planner.resume(plan_id)
+            with self._planner_principal_scope(principal_id):
+                await self.planner.approve(plan_id, step_ids[0], approved=True)
+                plan = await self.planner.resume(plan_id)
             if source == "executive":
                 await self._sync_executive_task(identity, plan)
         else:
@@ -1743,8 +1767,9 @@ class TaskCentre:
         step_ids = [str(item) for item in metadata.get("confirmation_step_ids") or ()]
         if not plan_id or len(step_ids) != 1:
             return None
-        await self.planner.approve(plan_id, step_ids[0], approved=False)
-        plan = await self.planner.resume(plan_id)
+        with self._planner_principal_scope(principal_id):
+            await self.planner.approve(plan_id, step_ids[0], approved=False)
+            plan = await self.planner.resume(plan_id)
         if source == "executive":
             await self._sync_executive_task(identity, plan)
         self._record_event(
@@ -1856,7 +1881,8 @@ class TaskCentre:
                 else str(task.get("metadata", {}).get("plan_id") or "")
             )
             if plan_id:
-                plan = await self.planner.resume(plan_id)
+                with self._planner_principal_scope(principal_id):
+                    plan = await self.planner.resume(plan_id)
                 if source == "executive":
                     await self._sync_executive_task(identity, plan)
         return await self.get_task(principal_id=principal_id, task_id=task_id)

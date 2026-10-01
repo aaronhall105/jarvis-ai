@@ -832,7 +832,12 @@ class PersonalAgentPlanner:
     @staticmethod
     def _requires_confirmation(proposed: ProposedStep, state: CapabilityState | None) -> bool:
         if proposed.capability.access is CapabilityAccess.READ:
-            return False
+            # Read-only work normally proceeds immediately.  A caller may,
+            # however, deliberately stage a grounded read as an explicit
+            # conversational proposal (for example, after offering an optional
+            # follow-up).  Keeping that user-choice gate in the same durable
+            # planner lets chat and Task Centre approve the exact same step.
+            return bool(proposed.requires_confirmation)
         return bool(
             proposed.requires_confirmation
             or proposed.risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}

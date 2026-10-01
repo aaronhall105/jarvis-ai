@@ -640,6 +640,70 @@ async def test_executive_surface_is_only_async_durable_planner(runtime):
 
 
 @pytest.mark.asyncio
+async def test_optional_model_offer_is_persisted_before_prose_and_is_read_only(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    staged: list[dict[str, object]] = []
+
+    async def create_proposal(**kwargs):
+        staged.append(dict(kwargs))
+        return {
+            "proposal_id": "proposal-1",
+            "task_id": "agent_plan:proposal-1",
+            "prompt": kwargs["prompt"],
+            "status": "pending",
+        }
+
+    value.set_action_proposal_creator(create_proposal)
+    tools = await value.openai_tools(
+        "Research current amplifier options",
+        principal_id="aaron",
+    )
+    proposal_tool = next(item for item in tools if item["name"] == "propose_capability_action")
+    capabilities = proposal_tool["parameters"]["properties"]["capability_id"]["enum"]
+    assert "web.search" in capabilities
+    assert all(
+        value.registry.capability_definition(item).access.value == "read" for item in capabilities
+    )
+
+    result = await value.execute_model_tool(
+        "propose_capability_action",
+        {
+            "capability_id": "web.search",
+            "arguments": {"query": "amplifier options"},
+            "title": "Check current amplifier options",
+        },
+        conversation_id="usr:aaron:proposal-test",
+        principal_id="aaron",
+    )
+
+    assert result["proposal_created"] is True
+    assert staged[0]["capability_id"] == "web.search"
+    assert staged[0]["conversation_id"] == "usr:aaron:proposal-test"
+    assert staged[0]["arguments"] == {"query": "amplifier options"}
+    assert staged[0]["prompt"] == "Shall I check current amplifier options?"
+
+
+@pytest.mark.asyncio
+async def test_model_cannot_stage_an_unregistered_or_write_capability_offer(runtime):
+    value, _, _, _ = runtime
+    await value.initialize()
+    value.set_action_proposal_creator(AsyncMock())
+
+    with pytest.raises(ValueError, match="registered read capability"):
+        await value.execute_model_tool(
+            "propose_capability_action",
+            {
+                "capability_id": "invented.unlock",
+                "arguments": {},
+                "title": "Unlock",
+            },
+            conversation_id="usr:aaron:proposal-test",
+            principal_id="aaron",
+        )
+
+
+@pytest.mark.asyncio
 async def test_executive_plan_is_linked_durably_before_execution(runtime):
     value, _, _, _ = runtime
     await value.initialize()

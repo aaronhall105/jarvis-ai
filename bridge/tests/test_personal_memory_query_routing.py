@@ -8,6 +8,7 @@ from app.ai_engine import (
     unbacked_future_promise_reply,
     unsupported_external_capability_reply,
     verified_gmail_reply_status_reply,
+    verified_action_proposal_reply,
     verified_monitor_creation_reply,
     verified_plan_creation_reply,
     unbacked_external_write_claim_reply,
@@ -17,6 +18,42 @@ from app.tool_outcomes import request_tool_success
 
 def classify(text: str):
     return RequestRouter.classify(text, [])
+
+
+def test_action_proposal_reply_uses_only_the_persisted_structured_prompt() -> None:
+    calls = [
+        {
+            "tool": "propose_capability_action",
+            "result": {
+                "success": True,
+                "proposal_created": True,
+                "proposal_id": "proposal-1",
+                "task_id": "agent_plan:proposal-1",
+                "prompt": "Shall I check the calendar?",
+            },
+        }
+    ]
+
+    assert verified_action_proposal_reply(calls) == "Shall I check the calendar?"
+
+
+def test_action_proposal_reply_rejects_unpersisted_model_prose() -> None:
+    assert verified_action_proposal_reply([]) is None
+    assert (
+        verified_action_proposal_reply(
+            [
+                {
+                    "tool": "propose_capability_action",
+                    "result": {
+                        "success": True,
+                        "proposal_created": True,
+                        "prompt": "Shall I unlock the door?",
+                    },
+                }
+            ]
+        )
+        is None
+    )
 
 
 def test_named_person_health_question_uses_memory() -> None:
@@ -300,6 +337,24 @@ def test_executable_offer_requires_structured_follow_up_state() -> None:
             structured_follow_up=False,
         )
         == "Would you like me to explain the cleanup rule?"
+    )
+    live_regression = (
+        "Google says Gmail is unavailable at the moment, Aaron, so I can't read your "
+        "Gmail right now. I can check Outlook for a payslip if you'd like — shall I do that?"
+    )
+    assert remove_unbacked_executable_offer(
+        live_regression,
+        structured_follow_up=False,
+    ) == (
+        "Google says Gmail is unavailable at the moment, Aaron, so I can't read your Gmail "
+        "right now."
+    )
+    assert (
+        remove_unbacked_executable_offer(
+            live_regression,
+            structured_follow_up=True,
+        )
+        == live_regression
     )
 
 

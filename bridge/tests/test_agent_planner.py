@@ -527,6 +527,65 @@ class AgentPlannerTests(unittest.IsolatedAsyncioTestCase):
             [call.capability_id for call in self.executor.calls],
         )
 
+    async def test_explicit_optional_read_offer_uses_durable_approval_and_runs_once(self):
+        self.executor.states["web.search"] = capability("web.search")
+        self.executor.results["web.search"].append(accepted_result(summary="Grounded result"))
+        plan = await self.create(
+            [
+                ProposedStep(
+                    step_id="optional_read",
+                    title="Check the grounded source",
+                    capability=CapabilityRequirement("web.search"),
+                    arguments={"query": "current evidence"},
+                    requires_confirmation=True,
+                )
+            ]
+        )
+
+        paused = await self.planner.resume(plan.plan_id)
+        self.assertEqual(PlanStatus.AWAITING_APPROVAL, paused.status)
+        self.assertEqual(StepStatus.AWAITING_APPROVAL, paused.step("optional_read").status)
+        self.assertEqual([], self.executor.calls)
+
+        restarted = PersonalAgentPlanner(
+            SQLitePlanStore(self.database_path),
+            self.executor,
+        )
+        await restarted.approve(plan.plan_id, "optional_read", approved=True)
+        completed = await restarted.resume(plan.plan_id)
+        replayed = await restarted.resume(plan.plan_id)
+
+        self.assertEqual(PlanStatus.COMPLETED, completed.status)
+        self.assertEqual(PlanStatus.COMPLETED, replayed.status)
+        self.assertEqual(1, len(self.executor.calls))
+
+    async def test_proposal_acceptance_rechecks_live_capability_before_execution(self):
+        self.executor.states["calendar.read"] = capability("calendar.read")
+        plan = await self.create(
+            [
+                ProposedStep(
+                    step_id="optional_calendar",
+                    title="Check the calendar",
+                    capability=CapabilityRequirement("calendar.read"),
+                    requires_confirmation=True,
+                )
+            ]
+        )
+        paused = await self.planner.resume(plan.plan_id)
+        self.assertEqual(PlanStatus.AWAITING_APPROVAL, paused.status)
+
+        self.executor.states["calendar.read"] = capability(
+            "calendar.read",
+            available=False,
+            healthy=False,
+        )
+        await self.planner.approve(plan.plan_id, "optional_calendar", approved=True)
+        blocked = await self.planner.resume(plan.plan_id)
+
+        self.assertEqual(PlanStatus.BLOCKED, blocked.status)
+        self.assertEqual("capability_unavailable", blocked.step("optional_calendar").failure.code)
+        self.assertEqual([], self.executor.calls)
+
     async def test_provider_confirmation_policy_cannot_be_lowered_by_proposed_step(self):
         self.executor.states["social.publish"] = capability(
             "social.publish", write=True, verify=True, confirmation=True

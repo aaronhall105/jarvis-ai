@@ -50,6 +50,7 @@ _NEGATIVE_COMMANDS = frozenset(
         "no",
         "nope",
         "no thanks",
+        "leave it",
         "cancel",
         "cancel it",
         "don't",
