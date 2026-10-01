@@ -30,6 +30,7 @@ from fastapi.responses import (
 from pydantic import BaseModel, Field
 
 from app.admin_engine import AdminEngine
+from app.action_proposals import ActionProposalService
 from app.agent_planner import PlanStatus
 from app.ai_engine import AIEngine, AIEngineError
 from app.code_awareness import CodeAwarenessEngine
@@ -271,6 +272,12 @@ task_centre = TaskCentre(
     legacy_task_path=data_directory / "jarvis_tasks.db",
     legacy_recurring_path=data_directory / "jarvis_recurring_schedules.db",
 )
+action_proposals = ActionProposalService(
+    runtime=external_agent,
+    task_centre=task_centre,
+    ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
+)
+external_agent.set_action_proposal_creator(action_proposals.propose_capability)
 
 _external_agent_state: dict[str, object] = {
     "initialized": False,
@@ -1311,14 +1318,13 @@ async def _try_handle_email_assistant(
     status = await email_policies.assistant_status(principal_id=actor.user_key)
     dialogue_state = await dialogue.get(conversation_id)
 
-    async def connected_accounts() -> list[dict[str, Any]]:
+    async def known_accounts() -> list[dict[str, Any]]:
         values = [
             dict(item)
             for item in (status or {}).get("accounts") or ()
             if isinstance(item, Mapping)
             and item.get("provider") in {"google_gmail", "microsoft_outlook"}
             and str(item.get("account_id") or "").strip()
-            and item.get("healthy") is not False
         ]
         if values:
             return values
@@ -1331,8 +1337,10 @@ async def _try_handle_email_assistant(
             if isinstance(item, Mapping)
             and item.get("provider") in {"google_gmail", "microsoft_outlook"}
             and str(item.get("account_id") or "").strip()
-            and item.get("healthy") is not False
         ]
+
+    async def connected_accounts() -> list[dict[str, Any]]:
+        return [item for item in await known_accounts() if item.get("healthy") is not False]
 
     def scoped_accounts(accounts: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
         return [
@@ -2994,6 +3002,121 @@ async def _try_handle_email_assistant(
             "intent": "email_mailbox_count",
         }
 
+    if read_intent is not None and read_intent.kind == "topic_search":
+        query = str(read_intent.topic_query or "").strip()
+        accounts = await known_accounts()
+        if read_intent.provider:
+            accounts = [item for item in accounts if item.get("provider") == read_intent.provider]
+        healthy_accounts = [item for item in accounts if item.get("healthy") is not False]
+        unavailable_accounts = [item for item in accounts if item.get("healthy") is False]
+        if not healthy_accounts:
+            provider_name = (
+                "Outlook"
+                if read_intent.provider == "microsoft_outlook"
+                else "Gmail"
+                if read_intent.provider == "google_gmail"
+                else "your connected email providers"
+            )
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "not_started",
+                "response": f"I can't search {provider_name} because it isn't healthy right now.",
+                "intent": "email_topic_search_provider_unavailable",
+            }
+
+        provider_results: list[dict[str, Any]] = []
+        for index, account in enumerate(healthy_accounts):
+            result = await email_policies.search_mailbox(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                provider=str(account["provider"]),
+                account_id=str(account["account_id"]),
+                request_id=f"{request_id or uuid.uuid4()}:{index}",
+                sender_address=None,
+                literal_query=query,
+                filter_kind=None,
+                limit=10,
+            )
+            provider_results.append(
+                {
+                    **dict(result),
+                    "provider": str(account["provider"]),
+                    "account_id": str(account["account_id"]),
+                }
+            )
+
+        successful = [item for item in provider_results if item.get("success")]
+        failed = [item for item in provider_results if not item.get("success")]
+        if not successful:
+            names = [
+                "Outlook" if item["provider"] == "microsoft_outlook" else "Gmail" for item in failed
+            ]
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "failed",
+                "response": f"I couldn't safely search {' and '.join(names)} just now.",
+                "intent": "email_topic_search_failed",
+            }
+
+        topic_parts: list[str] = []
+        for item in successful:
+            provider = str(item["provider"])
+            provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+            messages = [
+                dict(message)
+                for message in item.get("messages") or ()
+                if isinstance(message, Mapping)
+            ]
+            for message in messages:
+                message["provider"] = provider
+                message["account_id"] = item["account_id"]
+            if messages:
+                sender, _ = _mail_sender(messages[0])
+                subject = _safe_mail_text(messages[0].get("subject"), limit=160) or "No subject"
+                count = int(item.get("count") or len(messages))
+                qualifier = "at least " if not item.get("exact") else ""
+                topic_parts.append(
+                    f"{provider_name} has {qualifier}{count} matching "
+                    f"message{'s' if count != 1 else ''}; the newest is from {sender}, "
+                    f"‘{subject}’"
+                )
+            else:
+                topic_parts.append(f"I didn't find a matching message in {provider_name}")
+            await dialogue.record_email_read_focus(
+                conversation_id,
+                {
+                    "principal_id": actor.user_key,
+                    "provider": provider,
+                    "account_id": item["account_id"],
+                    "query_kind": "topic_search",
+                    "literal_query": query,
+                    "messages": messages,
+                    "selected_index": 0,
+                    "observed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        unavailable_names = [
+            "Outlook" if item.get("provider") == "microsoft_outlook" else "Gmail"
+            for item in unavailable_accounts
+        ]
+        failed_names = [
+            "Outlook" if item["provider"] == "microsoft_outlook" else "Gmail" for item in failed
+        ]
+        response = ". ".join(topic_parts) + "."
+        unavailable_or_failed = list(dict.fromkeys([*unavailable_names, *failed_names]))
+        if unavailable_or_failed:
+            response += f" I couldn't search {' and '.join(unavailable_or_failed)} right now."
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "partial" if unavailable_or_failed else "completed",
+            "response": response,
+            "intent": "email_topic_search",
+        }
+
     if read_intent is not None and read_intent.kind in {
         "latest",
         "sender_search",
@@ -3211,12 +3334,6 @@ async def _try_handle_email_assistant(
             )
         return {"success": True, "response": response, "intent": "email_mailbox_read"}
 
-    if command in {"do that", "do that then", "go ahead", "do it", "all of them"}:
-        return {
-            "success": True,
-            "response": "What exactly would you like me to do?",
-            "intent": "email_no_pending_action",
-        }
     cleanup_focus = (
         dialogue_state.focus.get("email_cleanup_history")
         if isinstance(dialogue_state.focus, dict)
@@ -5977,6 +6094,20 @@ async def _execute_ai_request(
         )
     confirmation = bare_confirmation(request.text)
     pending_state = await dialogue.get(storage_conversation_id) if confirmation else None
+    if (
+        memory_result is None
+        and confirmation
+        and pending_state is not None
+        and not pending_state.active_goal
+    ):
+        proposal_resolution = await action_proposals.resolve(
+            principal_id=actor.user_key,
+            conversation_id=storage_conversation_id,
+            confirmation=confirmation,
+            request_id=request.request_id or str(uuid.uuid4()),
+        )
+        if proposal_resolution is not None and proposal_resolution.handled:
+            memory_result = proposal_resolution.as_result()
     if (
         memory_result is None
         and confirmation

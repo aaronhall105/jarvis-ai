@@ -19,6 +19,7 @@ class EmailReadIntent:
     filter_kind: str | None = None
     person: str | None = None
     literal_query: str | None = None
+    topic_query: str | None = None
 
 
 @dataclass(frozen=True)
@@ -475,6 +476,37 @@ def classify_email_read(
     if literal_query and email_domain:
         return EmailReadIntent(
             kind="literal_search", provider=provider, literal_query=literal_query
+        )
+
+    # A user asking Jarvis to check whether their mail contains a subject/topic
+    # is a provider read, not a generic web question.  Extract only the user's
+    # stated search term; provider query syntax is added by the connector.
+    topic_query = ""
+    if email_domain:
+        topic_patterns = (
+            r"\b(?:see|check|find out)\s+(?:if|whether)\s+(?:i|we)\s+"
+            r"(?:have got|have|got|received)\s+(?P<query>.+)$",
+            r"\b(?:search|look through|check|find)\s+(?:my\s+)?"
+            r"(?:emails?|mail|mailbox|inbox)(?:\s+for)?\s+(?P<query>.+)$",
+            r"\b(?:any|find|show me)\s+(?:emails?|messages?)\s+"
+            r"(?:about|containing|with)\s+(?P<query>.+)$",
+        )
+        for pattern in topic_patterns:
+            match = re.search(pattern, command, re.I)
+            if match is not None:
+                topic_query = match.group("query").strip(" .?!'\"")
+                break
+    topic_query = re.sub(
+        r"^(?:an?|any|the|my)\s+",
+        "",
+        topic_query,
+        flags=re.I,
+    ).strip()
+    if topic_query and len(topic_query) <= 500:
+        return EmailReadIntent(
+            kind="topic_search",
+            provider=provider,
+            topic_query=topic_query,
         )
 
     if email_domain and "how many" in command:

@@ -684,7 +684,18 @@ _UNBACKED_EXECUTABLE_OFFER_PATTERN = re.compile(
 )
 
 _UNBACKED_BINARY_OFFER_PATTERN = re.compile(
-    r"(?:^|(?<=[.!]))\s*(?:proceed|shall i continue|do you want me to continue)\?\s*$",
+    r"(?:^|(?<=[.!]))\s*(?:proceed|shall i (?:continue|do (?:it|that))|"
+    r"do you want me to continue)\?\s*$",
+    re.I,
+)
+
+_UNBACKED_CAPABILITY_OFFER_PATTERN = re.compile(
+    r"\bi\s+can\s+(?:check|search|read|send|notify|email|message|forward|reply|"
+    r"delete|trash|archive|restore|move|turn|switch|run|book|order|purchase|post|"
+    r"publish|create|change|update|add|remove|save|list|show|open|close|start|stop|"
+    r"restart|sync|refresh|force|enable|disable|clean|apply|confirm)\b"
+    r"[^.!?\n]{0,240}\b(?:if you(?:'d| would)? like|if you want|shall i|want me to)\b"
+    r"[^.!?\n]{0,100}[.!?]*",
     re.I,
 )
 
@@ -908,6 +919,25 @@ def verified_plan_creation_reply(
     return None
 
 
+def verified_action_proposal_reply(
+    completed_calls: Sequence[dict[str, Any]],
+) -> str | None:
+    """Render only the exact prompt stored with a durable action proposal."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "propose_capability_action":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping) or result.get("proposal_created") is not True:
+            continue
+        proposal_id = str(result.get("proposal_id") or "").strip()
+        task_id = str(result.get("task_id") or "").strip()
+        prompt = " ".join(str(result.get("prompt") or "").split()).strip()
+        if proposal_id and task_id and prompt:
+            return prompt
+    return None
+
+
 def unbacked_external_write_claim_reply(
     reply: str,
     completed_calls: Sequence[dict[str, Any]],
@@ -939,7 +969,11 @@ def remove_unbacked_executable_offer(reply: str, *, structured_follow_up: bool) 
         return value
     matches = [
         match
-        for pattern in (_UNBACKED_EXECUTABLE_OFFER_PATTERN, _UNBACKED_BINARY_OFFER_PATTERN)
+        for pattern in (
+            _UNBACKED_EXECUTABLE_OFFER_PATTERN,
+            _UNBACKED_BINARY_OFFER_PATTERN,
+            _UNBACKED_CAPABILITY_OFFER_PATTERN,
+        )
         if (match := pattern.search(value)) is not None
     ]
     match = min(matches, key=lambda item: item.start()) if matches else None
@@ -7717,7 +7751,13 @@ class AIEngine:
         staged_admin_change = any(
             call.get("tool") == "propose_admin_change" for call in completed_calls
         )
-        structured_follow_up = staged_admin_change
+        staged_action_proposal = any(
+            call.get("tool") == "propose_capability_action"
+            and isinstance(call.get("result"), Mapping)
+            and call["result"].get("proposal_created") is True
+            for call in completed_calls
+        )
+        structured_follow_up = staged_admin_change or staged_action_proposal
         if decision.intent == RequestIntent.ADMIN_CHANGE and not staged_admin_change:
             final_reply = (
                 "I couldn’t safely stage that Home Assistant change, so nothing was saved."
@@ -7832,6 +7872,10 @@ class AIEngine:
         )
         if plan_reply is not None:
             final_reply = plan_reply
+
+        proposal_reply = verified_action_proposal_reply(completed_calls)
+        if proposal_reply is not None:
+            final_reply = proposal_reply
 
         unbacked_read_reply = unbacked_synchronous_read_promise_reply(
             final_reply,

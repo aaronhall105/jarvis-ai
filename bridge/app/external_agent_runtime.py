@@ -159,6 +159,7 @@ MonitorCanceller = Callable[
     [str, str],
     Awaitable[Mapping[str, Any] | None],
 ]
+ActionProposalCreator = Callable[..., Awaitable[Mapping[str, Any]]]
 
 
 class ConnectorPlannerExecutor:
@@ -380,6 +381,7 @@ class ExternalAgentRuntime:
         self._monitor_lookup = monitor_lookup
         self._monitor_lister = monitor_lister
         self._monitor_canceller = monitor_canceller
+        self._action_proposal_creator: ActionProposalCreator | None = None
         self._email_policies: Any | None = None
         self._monitor_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
@@ -504,6 +506,11 @@ class ExternalAgentRuntime:
         """Attach the durable email-policy service after composition."""
 
         self._email_policies = engine
+
+    def set_action_proposal_creator(self, creator: ActionProposalCreator) -> None:
+        """Attach Core's durable conversational-offer boundary."""
+
+        self._action_proposal_creator = creator
 
     async def email_accounts(self, principal_id: str) -> list[dict[str, Any]]:
         """Return principal-owned mailbox identities without credential material."""
@@ -2255,6 +2262,53 @@ class ExternalAgentRuntime:
                     "strict": True,
                 }
             )
+        proposal_capabilities = sorted(
+            capability_id
+            for capability_id in executable
+            if (
+                (metadata := self.registry.capability_definition(capability_id)) is not None
+                and metadata.access is CapabilityAccess.READ
+            )
+        )
+        if self._action_proposal_creator is not None and proposal_capabilities:
+            definitions.append(
+                {
+                    "type": "function",
+                    "name": "propose_capability_action",
+                    "description": (
+                        "Stage one optional registered READ as a durable user-confirmable "
+                        "proposal. Use only when the user has not already requested the read "
+                        "and an optional follow-up genuinely needs their choice. Never use "
+                        "this instead of executing a safe read already implied by the current "
+                        "goal. The server persists the exact capability and arguments before "
+                        "any 'shall I' wording is allowed."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "capability_id": {
+                                "type": "string",
+                                "enum": proposal_capabilities,
+                            },
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
+                            "title": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200,
+                                "description": (
+                                    "Short imperative action label such as 'check the calendar'."
+                                ),
+                            },
+                        },
+                        "required": ["capability_id", "arguments", "title"],
+                        "additionalProperties": False,
+                    },
+                    "strict": False,
+                }
+            )
         if (
             not retention_intent
             and gmail_message_operation is None
@@ -2464,6 +2518,33 @@ class ExternalAgentRuntime:
                 history=history,
                 dialogue_focus=dialogue_focus,
             )
+        if name == "propose_capability_action":
+            if self._action_proposal_creator is None:
+                raise ValueError("Durable action proposals are unavailable")
+            capability_id = str(arguments.get("capability_id") or "").strip()
+            metadata = self.registry.capability_definition(capability_id)
+            if metadata is None or metadata.access is not CapabilityAccess.READ:
+                raise ValueError("Only a registered read capability may be proposed here")
+            payload = arguments.get("arguments")
+            if not isinstance(payload, Mapping):
+                raise ValueError("Proposal arguments must be an object")
+            title = " ".join(str(arguments.get("title") or "").split()).strip(" .?!")
+            if not title:
+                raise ValueError("A proposal requires an action title")
+            prompt_action = title[0].lower() + title[1:] if title else title
+            proposal = await self._action_proposal_creator(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                capability_id=capability_id,
+                arguments=dict(payload),
+                title=title,
+                prompt=f"Shall I {prompt_action}?",
+            )
+            return {
+                "success": True,
+                "proposal_created": True,
+                **dict(proposal),
+            }
         if name == "web_search":
             return await self.search(
                 str(arguments.get("query") or ""),

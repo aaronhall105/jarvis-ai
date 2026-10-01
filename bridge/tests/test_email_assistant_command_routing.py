@@ -10,6 +10,7 @@ os.environ.setdefault("JARVIS_DATA_DIR", "/tmp/jarvis-email-assistant-command-te
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 from app import main
+from app.action_proposals import ProposalResolution
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager
 from app.user_context import UserContext
@@ -58,6 +59,7 @@ def test_message_level_and_preview_requests_are_not_bulk_policy_intent(text: str
         ("Go on", "affirmative"),
         ("No", "negative"),
         ("Nope", "negative"),
+        ("Leave it", "negative"),
         ("Cancel", "negative"),
         ("Don't", "negative"),
     ),
@@ -1746,6 +1748,239 @@ async def test_latest_gmail_and_provider_focus_follow_up_are_grounded(monkeypatc
         "microsoft_outlook",
         "google_gmail",
     ]
+
+
+@pytest.mark.asyncio
+async def test_cross_mailbox_topic_read_continues_with_healthy_provider_without_offer(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {
+            "provider": "google_gmail",
+            "account_id": "gmail-1",
+            "healthy": False,
+        },
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        },
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        value = dict(engine.search_mailbox.return_value)
+        value.update(provider=kwargs["provider"], account_id=kwargs["account_id"])
+        value["messages"] = [
+            {
+                "message_id": "outlook-wageslip",
+                "thread_id": "outlook-thread",
+                "from": "Payroll <payroll@example.test>",
+                "sender_name": "Payroll",
+                "subject": "September wageslip",
+                "received_at": "2026-09-30T08:30:00Z",
+            }
+        ]
+        value["count"] = 1
+        return value
+
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Check my emails and see if I have got my wageslip",
+        actor=actor(),
+        conversation_id="usr:aaron:wageslip-regression",
+        request_id="wageslip-regression-1",
+    )
+
+    assert result is not None and result["success"] is True
+    assert result["intent"] == "email_topic_search"
+    assert "Outlook has 1 matching message" in str(result["response"])
+    assert "September wageslip" in str(result["response"])
+    assert "Gmail" in str(result["response"])
+    assert "shall I" not in str(result["response"])
+    assert "if you'd like" not in str(result["response"])
+    engine.search_mailbox.assert_awaited_once()
+    assert engine.search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
+    assert engine.search_mailbox.await_args.kwargs["literal_query"] == "wageslip"
+
+
+@pytest.mark.asyncio
+async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": False},
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        },
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        return {
+            "success": True,
+            "provider": kwargs["provider"],
+            "account_id": kwargs["account_id"],
+            "messages": [],
+            "count": 0,
+            "exact": True,
+        }
+
+    engine.search_mailbox.side_effect = search
+    generic_model = AsyncMock(side_effect=AssertionError("generic model must not run"))
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(main.ai, "ask", generic_model)
+    monkeypatch.setattr(main, "_try_handle_task_notification", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_task_retry", AsyncMock(return_value=None))
+
+    result = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Check my emails and see if I have got my wageslip",
+            conversation_id="physical-wageslip-regression",
+            request_id="physical-wageslip-regression-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert result["intent"] == "email_topic_search"
+    assert result["tool_called"] is False
+    assert result["action_outcome"] == "partial"
+    assert "Outlook" in str(result["response"])
+    assert "Gmail" in str(result["response"])
+    generic_model.assert_not_awaited()
+    engine.search_mailbox.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "confirmation", "intent"),
+    (
+        ("Yes", "affirmative", "action_proposal_accepted"),
+        ("Go ahead", "affirmative", "action_proposal_accepted"),
+        ("Leave it", "negative", "action_proposal_declined"),
+    ),
+)
+async def test_bare_confirmation_resolves_structured_proposal_before_model_or_home(
+    monkeypatch,
+    answer,
+    confirmation,
+    intent,
+) -> None:
+    engine = bulk_engine()
+    resolver = AsyncMock(
+        return_value=ProposalResolution(
+            handled=True,
+            response="Grounded proposal handled.",
+            intent=intent,
+            task_id="agent_plan:proposal-1",
+            proposal_id="proposal-1",
+            action_outcome="completed" if confirmation == "affirmative" else "cancelled",
+        )
+    )
+    generic_model = AsyncMock(side_effect=AssertionError("model must not run"))
+    personal_task = AsyncMock(side_effect=AssertionError("task parser must not run"))
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(main.action_proposals, "resolve", resolver)
+    monkeypatch.setattr(main.ai, "ask", generic_model)
+    monkeypatch.setattr(main, "_try_handle_task_notification", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_task_retry", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_personal_task", personal_task)
+
+    result = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text=answer,
+            conversation_id=f"proposal-{confirmation}",
+            request_id=f"proposal-{confirmation}-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert result["intent"] == intent
+    resolver.assert_awaited_once()
+    assert resolver.await_args.kwargs["confirmation"] == confirmation
+    generic_model.assert_not_awaited()
+    personal_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_without_dialogue_or_proposal_runs_zero_downstream_tools(
+    monkeypatch,
+) -> None:
+    engine = bulk_engine()
+    generic_model = AsyncMock(side_effect=AssertionError("model must not run"))
+    personal_task = AsyncMock(side_effect=AssertionError("task parser must not run"))
+    monkeypatch.setattr(main, "email_policies", engine)
+    monkeypatch.setattr(main.action_proposals, "resolve", AsyncMock(return_value=None))
+    monkeypatch.setattr(main.ai, "ask", generic_model)
+    monkeypatch.setattr(main, "_try_handle_task_notification", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_task_retry", AsyncMock(return_value=None))
+    monkeypatch.setattr(main, "_try_handle_personal_task", personal_task)
+
+    result = await main._execute_ai_request(
+        main.TextCommandRequest(
+            text="Yes",
+            conversation_id="no-proposal",
+            request_id="no-proposal-1",
+            user_id="aaron",
+            user_name="Aaron",
+        )
+    )
+
+    assert result["intent"] == "dialogue_confirmation_without_context"
+    assert result["response"] == "Yes to what, Aaron?"
+    generic_model.assert_not_awaited()
+    personal_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_topic_mailbox_read_searches_each_healthy_account_independently(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": True},
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        },
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        return {
+            "success": True,
+            "provider": kwargs["provider"],
+            "account_id": kwargs["account_id"],
+            "messages": [],
+            "count": 0,
+            "exact": True,
+        }
+
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Look through my email for the pension statement",
+        actor=actor(),
+        conversation_id="usr:aaron:topic-all-providers",
+        request_id="topic-all-providers-1",
+    )
+
+    assert result is not None and result["success"] is True
+    assert [call.kwargs["provider"] for call in engine.search_mailbox.await_args_list] == [
+        "google_gmail",
+        "microsoft_outlook",
+    ]
+    assert {call.kwargs["account_id"] for call in engine.search_mailbox.await_args_list} == {
+        "gmail-1",
+        "outlook-1",
+    }
+    assert all(
+        call.kwargs["literal_query"] == "pension statement"
+        for call in engine.search_mailbox.await_args_list
+    )
 
 
 @pytest.mark.asyncio
