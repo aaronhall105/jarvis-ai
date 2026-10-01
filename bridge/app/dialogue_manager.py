@@ -234,6 +234,46 @@ class DialogueManager:
     async def get(self, conversation_id: str) -> DialogueState:
         return await asyncio.to_thread(self._get_sync, conversation_id)
 
+    def _list_active_goals_sync(
+        self,
+        *,
+        goal: str,
+        principal_id: str,
+        limit: int,
+    ) -> list[DialogueState]:
+        prefix = f"usr:{principal_id}:"
+        escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT conversation_id,state_json FROM dialogue_states "
+                "WHERE conversation_id LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?",
+                (f"{escaped_prefix}%", max(1, min(int(limit), 250))),
+            ).fetchall()
+        output: list[DialogueState] = []
+        for row in rows:
+            state = self._normalise_state(
+                self._state_from_json(str(row["conversation_id"]), str(row["state_json"]))
+            )
+            if state.active_goal == goal:
+                output.append(state)
+        return output
+
+    async def list_active_goals(
+        self,
+        *,
+        goal: str,
+        principal_id: str,
+        limit: int = 250,
+    ) -> list[DialogueState]:
+        """Return bounded, principal-scoped durable interactions for projection."""
+
+        return await asyncio.to_thread(
+            self._list_active_goals_sync,
+            goal=str(goal or "").strip(),
+            principal_id=str(principal_id or "").strip(),
+            limit=limit,
+        )
+
     def _save_sync(
         self, state: DialogueState, event_type: str | None, payload: dict[str, Any]
     ) -> None:
@@ -477,6 +517,7 @@ class DialogueManager:
             "filter_kind": evidence.get("filter_kind"),
             "contact": evidence.get("contact"),
             "literal_query": evidence.get("literal_query"),
+            "topic_query": evidence.get("topic_query"),
             "messages": messages,
             "selected_index": selected_index,
             "observed_at": observed_at,

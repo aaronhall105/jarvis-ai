@@ -1,5 +1,6 @@
 from app.ai_engine import (
     complete_or_reject_dangling_response,
+    remove_unbacked_interaction_question,
     gmail_message_action_reply,
     RequestIntent,
     RequestRouter,
@@ -362,6 +363,22 @@ def test_dangling_assistant_question_is_never_exposed_as_a_continuation() -> Non
     assert complete_or_reject_dangling_response("I can move those. Do you") == ("I can move those")
     assert complete_or_reject_dangling_response("Shall I") == (
         "I didn't finish that thought. What would you like me to do?"
+    )
+
+
+def test_model_clarification_requires_a_durable_pending_interaction() -> None:
+    unbacked = "Do you mean the hallway camera?"
+    assert remove_unbacked_interaction_question(unbacked, structured_follow_up=False) == (
+        "I need one more detail, but I couldn't persist that clarification safely. "
+        "Please restate the request with the exact option."
+    )
+    assert remove_unbacked_interaction_question(unbacked, structured_follow_up=True) == unbacked
+    assert (
+        remove_unbacked_interaction_question(
+            "The current temperature is 18°C. Would you like the forecast too?",
+            structured_follow_up=False,
+        )
+        == "The current temperature is 18°C. Would you like the forecast too?"
     )
     assert complete_or_reject_dangling_response("That action is ready.") == (
         "That action is ready."

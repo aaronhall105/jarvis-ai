@@ -8,8 +8,11 @@ those decisions remain at the capability and policy boundaries.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
+from email.utils import parseaddr
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
+import unicodedata
 
 
 @dataclass(frozen=True)
@@ -380,6 +383,124 @@ def _person_reference(text: str) -> str | None:
     return None
 
 
+def _search_words(value: object) -> tuple[str, ...]:
+    normalised = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    ascii_value = "".join(
+        character for character in normalised if not unicodedata.combining(character)
+    )
+    return tuple(re.findall(r"[a-z0-9]+", ascii_value))
+
+
+def email_topic_match_score(query: str, message: Mapping[str, Any]) -> float:
+    """Rank bounded provider metadata without treating message content as authority."""
+
+    query_words = _search_words(query)
+    if not query_words:
+        return 0.0
+    query_phrase = " ".join(query_words)
+    query_compact = "".join(query_words)
+    best = 0.0
+    for field, weight in (("subject", 1.0), ("snippet", 0.82)):
+        value_words = _search_words(message.get(field))
+        if not value_words:
+            continue
+        value_phrase = " ".join(value_words)
+        value_compact = "".join(value_words)
+        score = 0.0
+        if query_phrase in value_phrase or value_phrase in query_phrase:
+            score = 1.0
+        elif query_compact in value_compact or value_compact in query_compact:
+            score = 0.96
+        else:
+            query_set = set(query_words)
+            value_set = set(value_words)
+            overlap = len(query_set & value_set) / max(1, len(query_set))
+            if overlap:
+                score = 0.72 + (0.18 * overlap)
+            elif min(len(query_compact), len(value_compact)) >= 6:
+                matcher = SequenceMatcher(None, query_compact, value_compact)
+                ratio = matcher.ratio()
+                common = matcher.find_longest_match().size
+                coverage = common / max(1, min(len(query_compact), len(value_compact)))
+                if ratio >= 0.64 and common >= 4 and coverage >= 0.5:
+                    score = 0.66 + min(0.18, (ratio - 0.64) * 0.5)
+        best = max(best, score * weight)
+    return round(best, 6)
+
+
+def rank_email_topic_messages(
+    query: str,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    sender_address: str | None = None,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Return only grounded topic matches from a bounded metadata window."""
+
+    sender = str(sender_address or "").strip().casefold()
+    ranked: list[tuple[float, str, dict[str, Any]]] = []
+    for raw in messages:
+        message = dict(raw)
+        message_sender = parseaddr(str(message.get("from") or ""))[1].strip().casefold()
+        if (
+            sender
+            and (message_sender or str(message.get("from") or "").strip().casefold()) != sender
+        ):
+            continue
+        score = email_topic_match_score(query, message)
+        if score < 0.64:
+            continue
+        received = str(message.get("received_at") or message.get("internal_date_ms") or "")
+        message["topic_match_score"] = score
+        ranked.append((score, received, message))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in ranked[: max(1, min(int(limit), 25))]]
+
+
+def grounded_sender_candidates(
+    messages: Sequence[Mapping[str, Any]], query: str
+) -> list[dict[str, Any]]:
+    """Resolve a partial sender only from provider-returned message metadata."""
+
+    query_words = _search_words(query)
+    if not query_words:
+        return []
+    needle = " ".join(query_words)
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for message in messages:
+        display_name = " ".join(str(message.get("sender_name") or "").split()).strip()
+        raw_sender = str(message.get("from") or "").strip()
+        parsed_name, parsed_address = parseaddr(raw_sender)
+        address = (parsed_address or raw_sender).strip().casefold()
+        display_name = display_name or " ".join(parsed_name.split()).strip()
+        name_words = _search_words(display_name)
+        local_words = _search_words(address.partition("@")[0])
+        full_name = " ".join(name_words)
+        matches = full_name.startswith(needle) or any(
+            word.startswith(needle) for word in (*name_words, *local_words)
+        )
+        if not matches or not address:
+            continue
+        key = (full_name, address)
+        candidate = candidates.setdefault(
+            key,
+            {
+                "option_id": f"sender-{len(candidates) + 1}",
+                "label": display_name or address,
+                "value": address,
+                "display_name": display_name or address,
+                "address": address,
+                "message_count": 0,
+                "evidence": "provider_message_metadata",
+            },
+        )
+        candidate["message_count"] = int(candidate["message_count"]) + 1
+    return sorted(
+        candidates.values(),
+        key=lambda item: (-int(item["message_count"]), str(item["label"]).casefold()),
+    )
+
+
 def classify_email_read(
     text: str,
     *,
@@ -440,6 +561,15 @@ def classify_email_read(
         if focused_kind == "sender_search":
             return EmailReadIntent(kind="sender_search", provider=focused_provider)
         return None
+
+    if focused_kind == "topic_search" and command.startswith("from "):
+        person = raw[len("from ") :].strip(" .?!'\"")
+        if person:
+            return EmailReadIntent(
+                kind="topic_sender_narrowing",
+                provider=provider or focused_provider,
+                person=person,
+            )
 
     if command in {
         "one before that",
@@ -520,14 +650,14 @@ def classify_email_read(
         return EmailReadIntent(kind="count", provider=provider, filter_kind=filter_kind)
 
     latest_markers = ("latest", "newest", "most recent", "last email", "last message")
-    person = _person_reference(raw) if email_domain else None
-    if person and any(marker in command for marker in latest_markers):
-        return EmailReadIntent(kind="sender_search", provider=provider, person=person)
+    person_reference = _person_reference(raw) if email_domain else None
+    if person_reference and any(marker in command for marker in latest_markers):
+        return EmailReadIntent(kind="sender_search", provider=provider, person=person_reference)
     if email_domain and any(marker in command for marker in latest_markers):
         return EmailReadIntent(kind="latest", provider=provider)
 
     if (
-        person
+        person_reference
         and email_domain
         and (
             any(
@@ -537,7 +667,7 @@ def classify_email_read(
             or command.startswith("any ")
         )
     ):
-        return EmailReadIntent(kind="sender_search", provider=provider, person=person)
+        return EmailReadIntent(kind="sender_search", provider=provider, person=person_reference)
 
     if command in {"show me the latest one", "show the latest one"} and focused_kind:
         return EmailReadIntent(kind=focused_kind, provider=focused_provider)

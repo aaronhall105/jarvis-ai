@@ -44,6 +44,7 @@ from app.email_semantic_routing import (
     EmailCleanupIntent,
     classify_email_cleanup,
     classify_email_read,
+    grounded_sender_candidates,
     provider_from_text,
 )
 from app.executive_agent import ExecutiveConfig, ExecutiveRoute, ExecutiveTaskStore
@@ -61,6 +62,7 @@ from app.person_room_context import (
     resolve_person_room,
     room_followup_person,
 )
+from app.pending_interactions import PendingInteractionKind, PendingInteractionService
 from app.self_improvement import SelfImprovementEngine
 from app.memory_models import (
     SaveMemoryRequest,
@@ -278,6 +280,12 @@ action_proposals = ActionProposalService(
     ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
 )
 external_agent.set_action_proposal_creator(action_proposals.propose_capability)
+pending_interactions = PendingInteractionService(
+    dialogue=dialogue,
+    action_proposals=action_proposals,
+    ttl_seconds=settings.jarvis_admin_confirmation_ttl_seconds,
+)
+task_centre.set_pending_interaction_service(pending_interactions)
 
 _external_agent_state: dict[str, object] = {
     "initialized": False,
@@ -1303,6 +1311,136 @@ def _explicit_cleanup_restore_request(command: str) -> bool:
         "undo last email cleanup",
         "restore the last email you deleted",
     }
+
+
+async def _continue_email_topic_sender_interaction(
+    interaction: Mapping[str, Any],
+    sender_address: str,
+    request_id: str,
+) -> Mapping[str, Any]:
+    """Continue one provider-grounded topic search after sender clarification."""
+
+    context = interaction.get("context")
+    if not isinstance(context, Mapping):
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "I can't safely recover that mailbox clarification.",
+            "intent": "email_topic_sender_invalid",
+        }
+    principal_id = str(interaction.get("principal_id") or "").strip()
+    conversation_id = str(interaction.get("conversation_id") or "").strip()
+    provider = str(context.get("provider") or "").strip()
+    account_id = str(context.get("account_id") or "").strip()
+    topic_query = str(context.get("topic_query") or "").strip()
+    display_name = str(context.get("display_name") or "").strip()
+    for option in interaction.get("options") or ():
+        if (
+            isinstance(option, Mapping)
+            and str(option.get("value") or "").casefold() == sender_address.casefold()
+        ):
+            display_name = str(option.get("label") or display_name).strip()
+            break
+    explicit_sender = _explicit_read_sender_address(sender_address)
+    if explicit_sender is not None:
+        explicit_name, sender_address = explicit_sender
+        display_name = display_name or explicit_name
+    elif "@" not in sender_address:
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "interaction_pending": True,
+            "response": "Which exact sender email address do you mean?",
+            "intent": "email_topic_sender_needs_address",
+        }
+    display_name = display_name or sender_address
+    if (
+        not principal_id
+        or not conversation_id.startswith(f"usr:{principal_id}:")
+        or provider not in {"google_gmail", "microsoft_outlook"}
+        or not account_id
+        or not topic_query
+        or not sender_address
+    ):
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "I can't safely recover that mailbox clarification.",
+            "intent": "email_topic_sender_invalid",
+        }
+    result = await email_policies.search_mailbox(
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        provider=provider,
+        account_id=account_id,
+        request_id=request_id,
+        sender_address=sender_address,
+        topic_query=topic_query,
+        literal_query=None,
+        filter_kind=None,
+        limit=10,
+    )
+    if not result.get("success"):
+        provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": f"I couldn't search {provider_name} safely just now.",
+            "intent": "email_topic_sender_failed",
+        }
+    messages = [dict(item) for item in result.get("messages") or () if isinstance(item, Mapping)]
+    for message in messages:
+        message["provider"] = provider
+        message["account_id"] = account_id
+    await dialogue.record_email_read_focus(
+        conversation_id,
+        {
+            **dict(result),
+            "principal_id": principal_id,
+            "provider": provider,
+            "account_id": account_id,
+            "query_kind": "topic_search",
+            "topic_query": topic_query,
+            "messages": messages,
+            "contact": {
+                "display_name": display_name,
+                "email_addresses": [sender_address],
+                "source": "provider_message_metadata",
+            },
+            "selected_index": 0,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
+    if not messages:
+        response = (
+            f"I didn't find a {provider_name} message from {display_name} matching "
+            f"‘{_safe_mail_text(topic_query, limit=120)}’."
+        )
+    else:
+        sender, _ = _mail_sender(messages[0])
+        subject = _safe_mail_text(messages[0].get("subject"), limit=160) or "No subject"
+        response = (
+            f"I found {len(messages)} matching {provider_name} message"
+            f"{'s' if len(messages) != 1 else ''} from {sender}; the newest is ‘{subject}’."
+        )
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": "completed",
+        "response": response,
+        "intent": "email_topic_sender_search",
+    }
+
+
+pending_interactions.register_handler(
+    "email_topic_sender_search",
+    _continue_email_topic_sender_interaction,
+)
 
 
 async def _try_handle_email_assistant(
@@ -2922,6 +3060,83 @@ async def _try_handle_email_assistant(
             "intent": "email_previous_message",
         }
 
+    if read_intent is not None and read_intent.kind == "topic_sender_narrowing":
+        provider = str((read_focus or {}).get("provider") or "")
+        account_id = str((read_focus or {}).get("account_id") or "")
+        topic_query = str((read_focus or {}).get("topic_query") or "").strip()
+        messages = [
+            dict(item)
+            for item in (read_focus or {}).get("messages") or ()
+            if isinstance(item, Mapping)
+        ]
+        person_query = str(read_intent.person or "").strip()
+        if (
+            provider not in {"google_gmail", "microsoft_outlook"}
+            or not account_id
+            or not topic_query
+        ):
+            return {
+                "success": True,
+                "response": "Which email search do you want to narrow by sender?",
+                "intent": "email_topic_sender_needs_context",
+            }
+        candidates = grounded_sender_candidates(messages, person_query)
+        context = {
+            "provider": provider,
+            "account_id": account_id,
+            "topic_query": topic_query,
+            "sender_query": person_query,
+        }
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            prompt = f"Do you mean {candidate['display_name']}?"
+            interaction = await pending_interactions.begin(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                kind=PendingInteractionKind.CLARIFICATION,
+                goal=f"Find ‘{_safe_mail_text(topic_query, limit=120)}’ emails from a sender",
+                prompt=prompt,
+                unresolved_slot="sender_identity",
+                handler_id="email_topic_sender_search",
+                context={**context, "display_name": candidate["display_name"]},
+                options=(candidate,),
+                proposed_value=candidate["address"],
+            )
+        elif candidates:
+            labels = " or ".join(str(item["label"]) for item in candidates[:5])
+            prompt = f"Which sender do you mean — {labels}?"
+            interaction = await pending_interactions.begin(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                kind=PendingInteractionKind.SELECTION,
+                goal=f"Find ‘{_safe_mail_text(topic_query, limit=120)}’ emails from a sender",
+                prompt=prompt,
+                unresolved_slot="sender_identity",
+                handler_id="email_topic_sender_search",
+                context=context,
+                options=candidates,
+            )
+        else:
+            prompt = "Which exact sender email address do you mean?"
+            interaction = await pending_interactions.begin(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                kind=PendingInteractionKind.MISSING_INFORMATION,
+                goal=f"Find ‘{_safe_mail_text(topic_query, limit=120)}’ emails from a sender",
+                prompt=prompt,
+                unresolved_slot="sender_identity",
+                handler_id="email_topic_sender_search",
+                context=context,
+            )
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "response": str(interaction["prompt"]),
+            "intent": "email_topic_sender_clarification",
+            "task_id": str(interaction["task_id"]),
+        }
+
     if read_intent is not None and read_intent.kind == "count":
         count_filter = read_intent.filter_kind or str((read_focus or {}).get("filter_kind") or "")
         if not count_filter:
@@ -3034,7 +3249,8 @@ async def _try_handle_email_assistant(
                 account_id=str(account["account_id"]),
                 request_id=f"{request_id or uuid.uuid4()}:{index}",
                 sender_address=None,
-                literal_query=query,
+                literal_query=None,
+                topic_query=query,
                 filter_kind=None,
                 limit=10,
             )
@@ -3083,7 +3299,16 @@ async def _try_handle_email_assistant(
                     f"‘{subject}’"
                 )
             else:
-                topic_parts.append(f"I didn't find a matching message in {provider_name}")
+                if item.get("search_strategy") == "bounded_metadata_fallback":
+                    checked = int(item.get("searched_metadata_count") or 0)
+                    result_scope = (
+                        f"the {checked} recent {provider_name} Inbox messages I checked"
+                        if checked
+                        else f"the recent {provider_name} Inbox messages I checked"
+                    )
+                    topic_parts.append(f"I didn't find a matching message in {result_scope}")
+                else:
+                    topic_parts.append(f"I didn't find a matching message in {provider_name}")
             await dialogue.record_email_read_focus(
                 conversation_id,
                 {
@@ -3091,7 +3316,7 @@ async def _try_handle_email_assistant(
                     "provider": provider,
                     "account_id": item["account_id"],
                     "query_kind": "topic_search",
-                    "literal_query": query,
+                    "topic_query": query,
                     "messages": messages,
                     "selected_index": 0,
                     "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -3314,15 +3539,15 @@ async def _try_handle_email_assistant(
             if not messages:
                 response = f"There aren't any matching messages in your {provider_name} mailbox."
             else:
-                labels = []
+                message_labels: list[str] = []
                 for item in messages[:5]:
                     sender, _ = _mail_sender(item)
                     subject = _safe_mail_text(item.get("subject"), limit=160) or "No subject"
-                    labels.append(f"{sender} — ‘{subject}’")
+                    message_labels.append(f"{sender} — ‘{subject}’")
                 qualifier = "latest " if not result.get("exact") else ""
                 response = (
-                    f"Here are the {qualifier}{len(labels)} matching {provider_name} emails: "
-                    + "; ".join(labels)
+                    f"Here are the {qualifier}{len(message_labels)} matching {provider_name} emails: "
+                    + "; ".join(message_labels)
                     + "."
                 )
         else:
@@ -6074,11 +6299,31 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
-    memory_result = await _try_handle_task_notification(
-        request.text,
-        actor=actor,
+    interaction_resolution = await pending_interactions.resolve(
+        principal_id=actor.user_key,
         conversation_id=storage_conversation_id,
+        answer=request.text,
+        request_id=request.request_id or str(uuid.uuid4()),
     )
+    memory_result: dict[str, object] | None = None
+    if interaction_resolution is not None and interaction_resolution.handled:
+        if interaction_resolution.result is not None:
+            memory_result = dict(interaction_resolution.result)
+        else:
+            memory_result = {
+                "success": True,
+                "turn_handled": True,
+                "action_outcome": "not_applicable",
+                "response": interaction_resolution.response or "That answer was handled.",
+                "intent": f"pending_interaction_{interaction_resolution.kind}",
+                "interaction_id": interaction_resolution.interaction_id,
+            }
+    if memory_result is None:
+        memory_result = await _try_handle_task_notification(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+        )
     if memory_result is None:
         memory_result = await _try_handle_task_retry(
             request.text,
@@ -6094,20 +6339,6 @@ async def _execute_ai_request(
         )
     confirmation = bare_confirmation(request.text)
     pending_state = await dialogue.get(storage_conversation_id) if confirmation else None
-    if (
-        memory_result is None
-        and confirmation
-        and pending_state is not None
-        and not pending_state.active_goal
-    ):
-        proposal_resolution = await action_proposals.resolve(
-            principal_id=actor.user_key,
-            conversation_id=storage_conversation_id,
-            confirmation=confirmation,
-            request_id=request.request_id or str(uuid.uuid4()),
-        )
-        if proposal_resolution is not None and proposal_resolution.handled:
-            memory_result = proposal_resolution.as_result()
     if (
         memory_result is None
         and confirmation

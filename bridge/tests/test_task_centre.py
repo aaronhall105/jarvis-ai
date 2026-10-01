@@ -19,6 +19,8 @@ from app.agent_planner import (
     StepFailure,
     StepStatus,
 )
+from app.dialogue_manager import DialogueManager
+from app.pending_interactions import PendingInteractionKind, PendingInteractionService
 from app.task_centre import TaskCentre
 
 
@@ -320,6 +322,44 @@ async def test_unified_projection_contains_active_scheduled_executive_email_and_
     assert waiting["progress_total"] == 46_502
     assert waiting["requires_user_action"] is True
     assert waiting["result_summary"] == "No email has been changed yet"
+
+
+@pytest.mark.asyncio
+async def test_pending_interaction_is_waiting_for_you_and_task_confirm_uses_same_path(tmp_path):
+    dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
+    proposals = type("Proposals", (), {"resolve": lambda *args, **kwargs: None})()
+    pending = PendingInteractionService(dialogue=dialogue, action_proposals=proposals)
+    calls: list[tuple[str, str]] = []
+
+    async def continue_selection(record, answer, request_id):
+        calls.append((answer, request_id))
+        return {"success": True, "response": "Outlook selected.", "intent": "selected"}
+
+    pending.register_handler("select_mailbox", continue_selection)
+    created = await pending.begin(
+        principal_id="aaron",
+        conversation_id="usr:aaron:mailbox-choice",
+        kind=PendingInteractionKind.CLARIFICATION,
+        goal="Choose the mailbox for this search",
+        prompt="Do you mean Outlook?",
+        unresolved_slot="provider",
+        handler_id="select_mailbox",
+        proposed_value="microsoft_outlook",
+    )
+    centre = service(tmp_path / "tasks.db")
+    centre.set_pending_interaction_service(pending)
+
+    tasks = await centre.list_tasks(principal_id="aaron", filter_name="WAITING_FOR_YOU")
+    task = next(item for item in tasks if item["task_id"] == created["task_id"])
+    resolved = await centre.confirm(principal_id="aaron", task_id=task["task_id"])
+
+    assert task["status"] == "WAITING_FOR_YOU"
+    assert task["user_action_type"] == "clarification"
+    assert task["can_confirm"] is True
+    assert resolved is not None and resolved["status"] == "COMPLETED"
+    assert resolved["result_summary"] == "Outlook selected."
+    assert calls and calls[0][0] == "microsoft_outlook"
+    assert await centre.get_task(principal_id="aaron", task_id=task["task_id"]) is None
 
 
 @pytest.mark.asyncio

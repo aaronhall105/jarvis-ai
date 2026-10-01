@@ -714,6 +714,13 @@ _UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN = re.compile(
     re.I,
 )
 
+_UNBACKED_INTERACTION_QUESTION_PATTERN = re.compile(
+    r"(?:^|(?<=[.!]))\s*(?:do you mean\b|which\b[^?\n]{0,180}\bdo you mean\b|"
+    r"which (?:account|calendar|contact|device|camera|person|provider|option|one)\b|"
+    r"should i use\b)[^?\n]{0,240}\?\s*$",
+    re.I,
+)
+
 
 def _verified_external_write_evidence(
     completed_calls: Sequence[dict[str, Any]],
@@ -1004,6 +1011,27 @@ def complete_or_reject_dangling_response(reply: str) -> str:
         ).strip()
         return prefix or "I didn't finish that thought. What would you like me to do?"
     return value
+
+
+def remove_unbacked_interaction_question(reply: str, *, structured_follow_up: bool) -> str:
+    """Never emit a clarification whose answer has no durable referent.
+
+    Deterministic routes persist a PendingInteraction before returning their
+    prompt. Model prose has no such authority, so a fluent question cannot
+    create conversational state by itself.
+    """
+
+    value = str(reply or "").strip()
+    if structured_follow_up or not value:
+        return value
+    match = _UNBACKED_INTERACTION_QUESTION_PATTERN.search(value)
+    if match is None:
+        return value
+    prefix = value[: match.start()].rstrip(" \t\r\n—–-,:;")
+    return prefix or (
+        "I need one more detail, but I couldn't persist that clarification safely. "
+        "Please restate the request with the exact option."
+    )
 
 
 def verified_gmail_reply_status_reply(
@@ -7899,6 +7927,10 @@ class AIEngine:
             final_reply = unbacked_write_reply
 
         final_reply = remove_unbacked_executable_offer(
+            final_reply,
+            structured_follow_up=structured_follow_up,
+        )
+        final_reply = remove_unbacked_interaction_question(
             final_reply,
             structured_follow_up=structured_follow_up,
         )
