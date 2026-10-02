@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from app.connectors.credentials import redact_secrets, redact_text
 from app.dialogue_manager import DialogueManager, bare_confirmation, normalized_command
+from app.working_context import merge_projection
 
 
 _PENDING_GOAL = "pending_interaction"
@@ -157,6 +158,19 @@ class PendingInteractionService:
             ttl_seconds=ttl_seconds or self.ttl_seconds,
         )
         state = await self.dialogue.get(conversation)
+        state.working_context = merge_projection(
+            state.working_context,
+            principal_id=principal,
+            conversation_id=conversation,
+            objects=(),
+            goal=record["goal"],
+            active_interaction_id=interaction_id,
+        )
+        await self.dialogue.save(
+            state,
+            "pending_interaction_context_linked",
+            {"interaction_id": interaction_id},
+        )
         return {
             **record,
             "created_at": state.updated_at,
@@ -266,6 +280,18 @@ class PendingInteractionService:
         state = await self.dialogue.get(conversation_id)
         record = self._record_from_state(state)
         if record is not None and str(record.get("interaction_id") or "") == interaction_id:
+            state.working_context = merge_projection(
+                state.working_context,
+                principal_id=str(record.get("principal_id") or ""),
+                conversation_id=conversation_id,
+                objects=(),
+                active_interaction_id="",
+            )
+            await self.dialogue.save(
+                state,
+                "pending_interaction_context_cleared",
+                {"interaction_id": interaction_id, "outcome": outcome},
+            )
             await self.dialogue.clear_goal(conversation_id, outcome=outcome)
 
     async def resolve(

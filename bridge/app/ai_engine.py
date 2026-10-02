@@ -61,6 +61,11 @@ from app.tool_outcomes import request_tool_success
 from app.tone_engine import ToneEngine, ToneProfile
 from app.understanding_engine import UnderstandingEngine
 from app.user_context import UserContext
+from app.working_context import (
+    ReferenceStatus,
+    WorkingContextService,
+    reference_query,
+)
 
 if TYPE_CHECKING:
     from app.external_agent_runtime import ExternalAgentRuntime
@@ -5036,6 +5041,54 @@ class AIEngine:
         resolved = f"Turn {action} the {' and '.join(selected)}"
         return resolved, None
 
+    async def _resolve_working_context_control_reference(
+        self,
+        text: str,
+        *,
+        conversation_id: str,
+        actor: UserContext,
+    ) -> str | None:
+        """Ground a referential target, leaving execution to the existing control path."""
+
+        parsed = self._parse_simple_power_command(text)
+        if parsed is None:
+            return None
+        turn_on, target = parsed
+        words = set(re.findall(r"[a-z0-9]+", target.casefold()))
+        if not words & {
+            "it",
+            "that",
+            "this",
+            "them",
+            "those",
+            "these",
+            "one",
+            "ones",
+            "first",
+            "second",
+            "third",
+            "fourth",
+            "fifth",
+        }:
+            return None
+        query = reference_query(target, object_types=("device",))
+        resolution = await WorkingContextService(self.dialogue).resolve(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            query=query,
+        )
+        if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+            return None
+        entity_ids = [
+            str(item.canonical_id)
+            for item in resolution.objects
+            if item.provider == "home_assistant" and item.canonical_id
+        ]
+        if len(entity_ids) != len(resolution.objects):
+            return None
+        action = "on" if turn_on else "off"
+        return f"Turn {action} {' and '.join(entity_ids)}"
+
     @staticmethod
     def _notification_recipient_from_text(
         text: str,
@@ -5169,6 +5222,18 @@ class AIEngine:
         query = cls._normalise_device_phrase(target)
         if not query:
             return None
+
+        exact_entity = next(
+            (
+                device
+                for device in devices
+                if str(device.get("entity_id") or "").casefold()
+                == str(target or "").strip().casefold()
+            ),
+            None,
+        )
+        if exact_entity is not None:
+            return exact_entity
 
         # Never fuzzy-match a bare pronoun to an arbitrary entity. Pronouns are
         # resolved from the previous verified control result before this matcher.
@@ -6010,6 +6075,18 @@ class AIEngine:
                 clarified_control,
             )
             user_text = clarified_control
+
+        grounded_control = await self._resolve_working_context_control_reference(
+            user_text,
+            conversation_id=resolved_conversation_id,
+            actor=actor,
+        )
+        if grounded_control is not None:
+            logger.info(
+                "Resolved control reference from grounded working context conversation=%s",
+                resolved_conversation_id[-12:],
+            )
+            user_text = grounded_control
 
         dialogue_pronoun = await self.dialogue.resolve_control_pronoun(
             resolved_conversation_id,
@@ -8035,6 +8112,12 @@ class AIEngine:
             response=final_reply,
             calls=completed_calls,
         )
+        if created_executive_task_id:
+            await self.dialogue.record_task_context(
+                resolved_conversation_id,
+                task_id=created_executive_task_id,
+                intent=decision.intent.value,
+            )
         if staged_admin_change:
             await self.dialogue.begin_goal(
                 resolved_conversation_id,
