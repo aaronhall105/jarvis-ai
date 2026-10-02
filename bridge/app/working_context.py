@@ -376,6 +376,10 @@ def classify_context_followup(text: str) -> ContextFollowUp | None:
     if not has_reference:
         if "how" in word_set and "much" in word_set and len(words) <= 10:
             return ContextFollowUp(kind="attribute", query=query, attribute="value")
+        if re.match(r"^\s*what\s+(?:was|were)\s+my\b", str(text or ""), re.I) and len(words) <= 14:
+            # Generic possessive-field follow-up. If no grounded document
+            # exists, structured resolution misses and ordinary routing proceeds.
+            return ContextFollowUp(kind="document_question", query=query)
         return None
     if (
         word_set & {"notify", "alert", "tell", "know", "let"}
@@ -404,6 +408,8 @@ def classify_context_followup(text: str) -> ContextFollowUp | None:
         return ContextFollowUp(kind="select", query=query)
     if word_set & {"open", "read"}:
         return ContextFollowUp(kind="open", query=query)
+    if word_set & {"say", "says", "contain", "contains", "show", "shows"}:
+        return ContextFollowUp(kind="document_question", query=query)
     return None
 
 
@@ -675,6 +681,7 @@ def email_read_projection(
         else EvidenceStatus.VERIFIED
     )
     objects: list[ContextObject] = []
+    attachment_objects: list[ContextObject] = []
     for raw in evidence.get("messages") or ():
         if not isinstance(raw, Mapping):
             continue
@@ -710,9 +717,38 @@ def email_read_projection(
             aliases=(subject, sender),
         )
         objects.append(item)
+        for attachment in attachments:
+            if not isinstance(attachment, Mapping):
+                continue
+            attachment_id = _normalise_text(attachment.get("attachment_id"), limit=500)
+            filename = _normalise_text(attachment.get("filename"), limit=240)
+            if not attachment_id or not filename:
+                continue
+            attachment_objects.append(
+                make_context_object(
+                    object_type="attachment",
+                    display_name=filename,
+                    source="provider_attachment_metadata",
+                    canonical_id=attachment_id,
+                    provider=provider,
+                    capability="document.metadata",
+                    observed_at=observed_at,
+                    immutable=True,
+                    metadata={
+                        **dict(attachment),
+                        "account_id": account_id,
+                        "message_id": message_id,
+                    },
+                    relations={"email_message": item.reference_id},
+                    aliases=(filename, str(attachment.get("mime_type") or "")),
+                )
+            )
+    objects.extend(attachment_objects)
     result_set = {
         "result_set_id": "email:" + str(uuid.uuid4()),
-        "object_refs": [item.reference_id for item in objects],
+        "object_refs": [
+            item.reference_id for item in objects if item.object_type == "email_message"
+        ],
         "ordering": "newest_first",
         "filters": {
             "query_kind": evidence.get("query_kind"),

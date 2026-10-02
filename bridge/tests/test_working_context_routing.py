@@ -38,6 +38,9 @@ def context_runtime(tmp_path, monkeypatch):
     interactions.register_handler(
         "working_context_selection", main._continue_working_context_selection
     )
+    interactions.register_handler(
+        "document_attachment_selection", main._continue_document_attachment_selection
+    )
     monkeypatch.setattr(main, "dialogue", dialogue)
     monkeypatch.setattr(main, "working_context", service)
     monkeypatch.setattr(main, "pending_interactions", interactions)
@@ -400,6 +403,51 @@ async def test_current_value_and_temporal_comparison_use_grounded_measurements(
 
 
 @pytest.mark.asyncio
+async def test_temporal_comparison_uses_verified_document_metrics(
+    context_runtime,
+) -> None:
+    _dialogue, service, _interactions = context_runtime
+    conversation = "usr:aaron:document-comparison"
+    current = make_context_object(
+        object_type="document",
+        display_name="Current statement",
+        source="verified_document_extraction",
+        canonical_id="current-document",
+        metadata={
+            "net_pay": 2400,
+            "primary_metric": "net_pay",
+            "currency": "GBP",
+        },
+        immutable=True,
+    )
+    previous = make_context_object(
+        object_type="document",
+        display_name="Previous statement",
+        source="verified_document_extraction",
+        canonical_id="previous-document",
+        metadata={
+            "net_pay": 2250,
+            "primary_metric": "net_pay",
+            "currency": "GBP",
+        },
+        immutable=True,
+    )
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=[current, previous],
+        result_set={"object_refs": [current.reference_id, previous.reference_id]},
+        focus_refs=[current.reference_id],
+    )
+
+    comparison = await main._try_handle_working_context_followup(
+        "Is that more than last time?", actor=_actor(), conversation_id=conversation
+    )
+
+    assert comparison and "150 GBP more" in str(comparison["response"])
+
+
+@pytest.mark.asyncio
 async def test_unverified_document_amount_waits_for_real_capability(
     context_runtime,
 ) -> None:
@@ -426,7 +474,199 @@ async def test_unverified_document_amount_waits_for_real_capability(
         "How much did I get?", actor=_actor(), conversation_id=conversation
     )
 
-    assert result and result["action_outcome"] == "waiting_capability"
-    assert "can read and verify the amount" in str(result["response"])
-    state = await service.get(principal_id="aaron", conversation_id=conversation)
-    assert state["waiting_state"]["capability"] == "document.read"
+    assert result and result["action_outcome"] == "failed"
+    assert "couldn’t read that attachment safely" in str(result["response"])
+
+
+def _read_result(*, selection_required: bool = False) -> dict:
+    if selection_required:
+        return {
+            "success": True,
+            "data": {
+                "selection_required": True,
+                "attachments": [
+                    {
+                        "attachment_id": "attachment-a",
+                        "filename": "document-a.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                    {
+                        "attachment_id": "attachment-b",
+                        "filename": "document-b.pdf",
+                        "mime_type": "application/pdf",
+                    },
+                ],
+            },
+        }
+    text = "Gross Pay: £3000\nTax: £400\nNet Pay: £2400"
+    return {
+        "success": True,
+        "data": {
+            "provider": "microsoft_outlook",
+            "attachment": {
+                "attachment_id": "attachment-a",
+                "filename": "pay.pdf",
+                "mime_type": "application/pdf",
+            },
+            "document": {
+                "filename": "pay.pdf",
+                "mime_type": "application/pdf",
+                "fingerprint_sha256": "f" * 64,
+                "size_bytes": 123,
+                "page_count": 1,
+                "text_content": text,
+                "text_chunks": [{"page": 1, "text": text}],
+                "truncated": False,
+                "evidence_status": "verified",
+                "warnings": [],
+            },
+            "cache_hit": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_grounded_email_attachment_answers_generic_document_questions(
+    context_runtime, monkeypatch
+) -> None:
+    dialogue, service, _ = context_runtime
+    conversation = "usr:aaron:generic-document-reading"
+    await dialogue.record_email_read_focus(
+        conversation,
+        {
+            "principal_id": "aaron",
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-account",
+            "messages": [
+                {
+                    "message_id": "message-a",
+                    "subject": "Payroll document",
+                    "sender_name": "Payroll",
+                    "attachments": [{"present": True}],
+                }
+            ],
+        },
+    )
+    execute = AsyncMock(return_value=_read_result())
+    monkeypatch.setattr(main.external_agent, "execute", execute)
+    monkeypatch.setattr(
+        main.ai,
+        "select_document_evidence",
+        AsyncMock(
+            side_effect=[
+                {
+                    "found": True,
+                    "label": "Net Pay",
+                    "value": "£2400",
+                    "evidence_quote": "Net Pay: £2400",
+                },
+                {
+                    "found": True,
+                    "label": "Tax",
+                    "value": "£400",
+                    "evidence_quote": "Tax: £400",
+                },
+                {
+                    "found": True,
+                    "label": "Gross Pay",
+                    "value": "£3000",
+                    "evidence_quote": "Gross Pay: £3000",
+                },
+            ]
+        ),
+    )
+
+    net = await main._try_handle_working_context_followup(
+        "How much did I get?", actor=_actor(), conversation_id=conversation
+    )
+    tax = await main._try_handle_working_context_followup(
+        "How much tax did I pay?", actor=_actor(), conversation_id=conversation
+    )
+    gross = await main._try_handle_working_context_followup(
+        "What was my gross pay?", actor=_actor(), conversation_id=conversation
+    )
+
+    assert net and net["response"] == "Net Pay was £2400."
+    assert tax and tax["response"] == "Tax was £400."
+    assert gross and gross["response"] == "Gross Pay was £3000."
+    assert all(call.args[0] == "document.read" for call in execute.await_args_list)
+    context = await service.get(principal_id="aaron", conversation_id=conversation)
+    documents = [item for item in context["objects"] if item["object_type"] == "document"]
+    assert documents and documents[0]["metadata"]["gross_pay"] == 3000
+    assert "text_content" not in documents[0]["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_multiple_attachments_use_pending_interaction_without_guessing(
+    context_runtime, monkeypatch
+) -> None:
+    dialogue, _service, interactions = context_runtime
+    conversation = "usr:aaron:multiple-document-attachments"
+    await dialogue.record_email_read_focus(
+        conversation,
+        {
+            "principal_id": "aaron",
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-account",
+            "messages": [{"message_id": "message-a", "subject": "Documents"}],
+        },
+    )
+    execute = AsyncMock(return_value=_read_result(selection_required=True))
+    monkeypatch.setattr(main.external_agent, "execute", execute)
+
+    result = await main._try_handle_working_context_followup(
+        "Read it", actor=_actor(), conversation_id=conversation
+    )
+
+    assert result and result["action_outcome"] == "waiting_user"
+    assert "document-a.pdf or document-b.pdf" in str(result["response"])
+    pending = await interactions.current(principal_id="aaron", conversation_id=conversation)
+    assert pending and pending["unresolved_slot"] == "attachment_identity"
+    assert execute.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_document_context_survives_restart_and_never_grants_delete_authority(
+    context_runtime, monkeypatch, tmp_path
+) -> None:
+    dialogue, _service, _ = context_runtime
+    conversation = "usr:aaron:document-restart"
+    await dialogue.record_email_read_focus(
+        conversation,
+        {
+            "principal_id": "aaron",
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-account",
+            "messages": [{"message_id": "message-a", "subject": "Statement"}],
+        },
+    )
+    monkeypatch.setattr(main.external_agent, "execute", AsyncMock(return_value=_read_result()))
+    monkeypatch.setattr(
+        main.ai,
+        "select_document_evidence",
+        AsyncMock(
+            return_value={
+                "found": True,
+                "label": "Net Pay",
+                "value": "£2400",
+                "evidence_quote": "Net Pay: £2400",
+            }
+        ),
+    )
+    await main._try_handle_working_context_followup(
+        "How much did I get?", actor=_actor(), conversation_id=conversation
+    )
+
+    restarted_dialogue = DialogueManager(str(dialogue.database_path))
+    restarted_context = WorkingContextService(restarted_dialogue)
+    monkeypatch.setattr(main, "dialogue", restarted_dialogue)
+    monkeypatch.setattr(main, "working_context", restarted_context)
+    after_restart = await main._try_handle_working_context_followup(
+        "How much did I get?", actor=_actor(), conversation_id=conversation
+    )
+    delete = await main._try_handle_working_context_followup(
+        "Delete it", actor=_actor(), conversation_id=conversation
+    )
+
+    assert after_restart and after_restart["response"] == "Net Pay was £2400."
+    assert delete is None

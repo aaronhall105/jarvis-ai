@@ -34,6 +34,7 @@ from app.connectors import (
     VerificationResult,
 )
 from app.connectors.credentials import redact_text
+from app.document_reader import DocumentReadError, extract_document
 from app.integration_accounts import (
     CredentialCipher,
     CredentialEncryptionUnavailable,
@@ -70,6 +71,8 @@ _ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "outlook.search": "query and optional limit/folder",
     "outlook.changes": "optional delta_link and limit",
     "outlook.read": "message_id",
+    "outlook.attachments": "exact message_id",
+    "outlook.attachment.read": "exact message_id and attachment_id from Outlook evidence",
     "outlook.thread": "conversation_id and optional limit",
     "outlook.draft": "to, subject and body",
     "outlook.reply": "message_id and body; creates a reply draft",
@@ -508,6 +511,8 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
         read("outlook.search", "Search Outlook messages", repeatable=True),
         read("outlook.changes", "Read incremental Outlook Inbox changes", repeatable=True),
         read("outlook.read", "Read an Outlook message"),
+        read("outlook.attachments", "List Outlook message attachments"),
+        read("outlook.attachment.read", "Read an Outlook attachment"),
         read("outlook.thread", "Read an Outlook conversation", repeatable=True),
         write("outlook.draft", "Create Outlook draft"),
         write("outlook.reply", "Create Outlook reply draft"),
@@ -724,6 +729,8 @@ class MicrosoftConnector(Connector):
             "outlook.search": self._search,
             "outlook.changes": self._changes,
             "outlook.read": self._read,
+            "outlook.attachments": self._attachments,
+            "outlook.attachment.read": self._attachment_read,
             "outlook.thread": self._thread,
             "outlook.draft": self._draft,
             "outlook.reply": self._reply,
@@ -740,6 +747,8 @@ class MicrosoftConnector(Connector):
         try:
             data, reference = await handler(principal, dict(request.payload))
             return ConnectorResult.succeeded(data, provider_reference=reference)
+        except DocumentReadError as exc:
+            return ConnectorResult.failed(f"{exc.code}: {redact_text(exc, max_length=800)}")
         except MicrosoftProviderError as exc:
             safe = redact_text(exc, max_length=800)
             if capability.access is CapabilityAccess.WRITE and exc.outcome_unknown:
@@ -1183,6 +1192,80 @@ class MicrosoftConnector(Connector):
             params={"$select": self._select()},
         )
         return {"message": self._message(value)}, message_id
+
+    @staticmethod
+    def _attachment_metadata(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "attachment_id": str(item.get("id") or "") or None,
+            "filename": str(item.get("name") or "") or None,
+            "mime_type": str(item.get("contentType") or "") or None,
+            "size": max(0, int(item.get("size") or 0)),
+            "is_inline": bool(item.get("isInline")),
+            "attachment_type": str(item.get("@odata.type") or ""),
+        }
+
+    async def _attachments(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", limit=1000)
+        value = await self._request(
+            principal,
+            "GET",
+            f"{GRAPH_API}/me/messages/{self._segment(message_id)}/attachments",
+            params={"$select": "id,name,contentType,size,isInline", "$top": 100},
+        )
+        attachments = [
+            self._attachment_metadata(item)
+            for item in value.get("value") or ()
+            if isinstance(item, Mapping)
+        ][:100]
+        return {"attachments": attachments, "count": len(attachments)}, message_id
+
+    async def _attachment_read(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        message_id = self._required(payload, "message_id", limit=1000)
+        attachment_id = self._required(payload, "attachment_id", limit=2000)
+        metadata_result, _ = await self._attachments(principal, {"message_id": message_id})
+        metadata = next(
+            (
+                item
+                for item in metadata_result.get("attachments") or ()
+                if str(item.get("attachment_id") or "") == attachment_id
+            ),
+            None,
+        )
+        if not isinstance(metadata, Mapping):
+            raise ValueError("The Outlook attachment is not present on that message")
+        attachment_type = str(metadata.get("attachment_type") or "")
+        if attachment_type and not attachment_type.endswith("fileAttachment"):
+            raise DocumentReadError(
+                "unsupported_document_type",
+                "Only ordinary Outlook file attachments can currently be read.",
+            )
+        if int(metadata.get("size") or 0) > 10 * 1024 * 1024:
+            raise DocumentReadError(
+                "document_too_large", "The attachment exceeds the 10485760-byte safety limit."
+            )
+        value = await self._request(
+            principal,
+            "GET",
+            f"{GRAPH_API}/me/messages/{self._segment(message_id)}/attachments/"
+            f"{self._segment(attachment_id)}",
+        )
+        encoded = str(value.get("contentBytes") or "")
+        if not encoded:
+            raise MicrosoftProviderError("Microsoft returned empty attachment content")
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, UnicodeError) as exc:
+            raise MicrosoftProviderError("Microsoft returned malformed attachment content") from exc
+        document = await extract_document(
+            content,
+            filename=str(metadata.get("filename") or "attachment"),
+            mime_type=str(metadata.get("mime_type") or ""),
+        )
+        return {"document": document.as_dict()}, attachment_id
 
     async def _thread(
         self, principal: str, payload: dict[str, Any]

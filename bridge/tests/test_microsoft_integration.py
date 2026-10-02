@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from app.connectors import CapabilityRequest, ProviderResultStatus, VerificationStatus
+from app.document_reader import DocumentReadError
 from app.integration_accounts import CredentialCipher, IntegrationAccountStore, OAuthSessionError
 from app.microsoft_integration import (
     DEFAULT_MICROSOFT_SCOPES,
@@ -47,6 +48,8 @@ class GraphFixture:
         self.inbox_status = 200
         self.inbox_malformed = False
         self.last_request_params: dict[str, str] = {}
+        self.attachment_bytes = b"Gross Pay: GBP 3000\nTax: GBP 400\nNet Pay: GBP 2400"
+        self.attachment_reported_size = len(self.attachment_bytes)
 
     @staticmethod
     def message(message_id: str = "message-1", *, subject: str = "Friday's start") -> dict:
@@ -161,6 +164,35 @@ class GraphFixture:
             return httpx.Response(200, json={"value": [self.message()]})
         if path == "/v1.0/me/messages" and request.method == "POST":
             return httpx.Response(201, json=self.message("draft-1", subject="Hello"))
+        if path == "/v1.0/me/messages/message-1/attachments":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [
+                        {
+                            "@odata.type": "#microsoft.graph.fileAttachment",
+                            "id": "attachment-1",
+                            "name": "pay.txt",
+                            "contentType": "text/plain",
+                            "size": self.attachment_reported_size,
+                            "isInline": False,
+                        }
+                    ]
+                },
+            )
+        if path == "/v1.0/me/messages/message-1/attachments/attachment-1":
+            return httpx.Response(
+                200,
+                json={
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "id": "attachment-1",
+                    "name": "pay.txt",
+                    "contentType": "text/plain",
+                    "size": len(self.attachment_bytes),
+                    "isInline": False,
+                    "contentBytes": base64.b64encode(self.attachment_bytes).decode("ascii"),
+                },
+            )
         if path == "/v1.0/me/mailFolders/sentitems/messages":
             return httpx.Response(200, json={"value": [self.message("sent-1", subject="Hello")]})
         if path.endswith("/createReply"):
@@ -281,6 +313,43 @@ async def test_oauth_is_one_time_principal_scoped_and_never_exposes_tokens(tmp_p
     with pytest.raises(OAuthSessionError, match="already been used"):
         await oauth.callback(state=state, code="replayed")
     assert await store.account(principal_id="amber", provider="microsoft") is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_attachment_metadata_and_read_are_bounded_and_read_only(
+    tmp_path: Path,
+) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+
+    metadata, _ = await connector._attachments("aaron", {"message_id": "message-1"})
+    result, reference = await connector._attachment_read(
+        "aaron", {"message_id": "message-1", "attachment_id": "attachment-1"}
+    )
+
+    assert metadata["attachments"][0]["filename"] == "pay.txt"
+    assert metadata["attachments"][0]["attachment_id"] == "attachment-1"
+    assert reference == "attachment-1"
+    assert result["document"]["text_content"].endswith("Net Pay: GBP 2400")
+    assert "contentBytes" not in json.dumps(result)
+    assert fixture.calls["GET /v1.0/me/messages/message-1/attachments"] == 2
+    assert fixture.calls["GET /v1.0/me/messages/message-1/attachments/attachment-1"] == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_outlook_attachment_size_is_checked_before_content_download(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+    fixture.attachment_reported_size = 10 * 1024 * 1024 + 1
+
+    with pytest.raises(DocumentReadError) as oversized:
+        await connector._attachment_read(
+            "aaron", {"message_id": "message-1", "attachment_id": "attachment-1"}
+        )
+
+    assert oversized.value.code == "document_too_large"
+    assert fixture.calls["GET /v1.0/me/messages/message-1/attachments"] == 1
+    assert fixture.calls["GET /v1.0/me/messages/message-1/attachments/attachment-1"] == 0
     await client.aclose()
 
 

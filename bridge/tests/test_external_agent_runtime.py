@@ -572,9 +572,12 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
     by_provider = {item["provider_id"]: item for item in providers}
 
     assert by_capability["web.search"]["available"] is True
+    assert by_capability["document.read"]["available"] is True
+    assert by_capability["document.read"]["access"] == "read"
     assert by_capability["calendar.create"]["available"] is False
     assert by_capability["calendar.create"].get("setup_only") is not True
     assert by_provider["openai_web_search"]["healthy"] is True
+    assert by_provider["jarvis_documents"]["healthy"] is True
     assert by_provider["google"]["configured"] is False
     assert by_provider["google"]["executable_capabilities"] == []
     assert by_provider["instagram"]["health_reason"] == (
@@ -587,6 +590,7 @@ async def test_runtime_exposes_only_live_capabilities_and_truthful_setup(runtime
         "action_receipts": {"healthy": True, "reason": None},
         "agent_plans": {"healthy": True, "reason": None},
         "integration_accounts": {"healthy": True, "reason": None},
+        "document_extractions": {"healthy": True, "reason": None},
     }
 
     assert await value.openai_tools("Turn the television off") == []
