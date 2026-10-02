@@ -1812,7 +1812,7 @@ async def test_cross_mailbox_topic_read_continues_with_healthy_provider_without_
 @pytest.mark.asyncio
 async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(monkeypatch) -> None:
     accounts = [
-        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": False},
+        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": True},
         {
             "provider": "microsoft_outlook",
             "account_id": "outlook-1",
@@ -1840,7 +1840,7 @@ async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(m
 
     result = await main._execute_ai_request(
         main.TextCommandRequest(
-            text="Check my emails and see if I have got my wageslip",
+            text="Check if I've got my wage slip in my emails.",
             conversation_id="physical-wageslip-regression",
             request_id="physical-wageslip-regression-1",
             user_id="aaron",
@@ -1850,11 +1850,106 @@ async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(m
 
     assert result["intent"] == "email_topic_search"
     assert result["tool_called"] is False
-    assert result["action_outcome"] == "partial"
+    assert result["action_outcome"] == "completed"
     assert "Outlook" in str(result["response"])
     assert "Gmail" in str(result["response"])
+    assert "shall I" not in str(result["response"])
     generic_model.assert_not_awaited()
-    engine.search_mailbox.assert_awaited_once()
+    assert [call.kwargs["provider"] for call in engine.search_mailbox.await_args_list] == [
+        "google_gmail",
+        "microsoft_outlook",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_topic_provider_switch_reuses_goal_and_executes_outlook(monkeypatch) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": True},
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        },
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        return {
+            "success": True,
+            "provider": kwargs["provider"],
+            "account_id": kwargs["account_id"],
+            "messages": [],
+            "count": 0,
+            "exact": True,
+            "query_kind": "topic_search",
+            "topic_query": kwargs["topic_query"],
+        }
+
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:topic-provider-continuation"
+
+    first = await main._try_handle_email_assistant(
+        "Look through my email for the pension statement",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-continuation-1",
+    )
+    second = await main._try_handle_email_assistant(
+        "Check Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="provider-continuation-2",
+    )
+
+    assert first and first["intent"] == "email_topic_search"
+    assert second and second["intent"] == "email_topic_search"
+    assert [call.kwargs["provider"] for call in engine.search_mailbox.await_args_list] == [
+        "google_gmail",
+        "microsoft_outlook",
+        "microsoft_outlook",
+    ]
+    final_call = engine.search_mailbox.await_args_list[-1]
+    assert final_call.kwargs["topic_query"] == "pension statement"
+
+
+@pytest.mark.asyncio
+async def test_topic_search_reports_outlook_unavailable_only_from_health(monkeypatch) -> None:
+    engine = bulk_engine(
+        accounts=[
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-1",
+                "healthy": False,
+            }
+        ]
+    )
+    monkeypatch.setattr(main, "email_policies", engine)
+    conversation = "usr:aaron:outlook-health-evidence"
+    await main.dialogue.record_email_read_focus(
+        conversation,
+        {
+            "principal_id": "aaron",
+            "provider": "google_gmail",
+            "account_id": "gmail-1",
+            "query_kind": "topic_search",
+            "topic_query": "pension statement",
+            "messages": [],
+        },
+    )
+
+    result = await main._try_handle_email_assistant(
+        "Check Outlook",
+        actor=actor(),
+        conversation_id=conversation,
+        request_id="outlook-health-evidence-1",
+    )
+
+    assert result is not None
+    assert result["success"] is False
+    assert result["intent"] == "email_topic_search_provider_unavailable"
+    assert result["response"] == "I can't search Outlook because it isn't healthy right now."
+    engine.search_mailbox.assert_not_awaited()
 
 
 @pytest.mark.asyncio

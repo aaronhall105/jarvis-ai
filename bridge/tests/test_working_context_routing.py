@@ -597,6 +597,90 @@ async def test_grounded_email_attachment_answers_generic_document_questions(
 
 
 @pytest.mark.asyncio
+async def test_document_question_resumes_durable_topic_search_then_reads_attachment(
+    context_runtime, monkeypatch
+) -> None:
+    dialogue, _service, _ = context_runtime
+    conversation = "usr:aaron:document-search-resumption"
+    await dialogue.record_email_read_focus(
+        conversation,
+        {
+            "principal_id": "aaron",
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-account",
+            "query_kind": "topic_search",
+            "topic_query": "pay statement",
+            "messages": [],
+        },
+    )
+    search_mailbox = AsyncMock(
+        return_value={
+            "success": True,
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-account",
+            "messages": [
+                {
+                    "message_id": "message-a",
+                    "subject": "Payroll document",
+                    "sender_name": "Payroll",
+                    "attachments": [{"present": True}],
+                }
+            ],
+            "count": 1,
+            "exact": True,
+            "query_kind": "topic_search",
+            "topic_query": "pay statement",
+        }
+    )
+    monkeypatch.setattr(
+        main,
+        "email_policies",
+        SimpleNamespace(
+            assistant_status=AsyncMock(
+                return_value={
+                    "accounts": [
+                        {
+                            "provider": "microsoft_outlook",
+                            "account_id": "outlook-account",
+                            "healthy": True,
+                        }
+                    ]
+                }
+            ),
+            search_mailbox=search_mailbox,
+        ),
+    )
+    document_read = AsyncMock(return_value=_read_result())
+    monkeypatch.setattr(main.external_agent, "execute", document_read)
+    monkeypatch.setattr(
+        main.ai,
+        "select_document_evidence",
+        AsyncMock(
+            return_value={
+                "found": True,
+                "label": "Net Pay",
+                "value": "£2400",
+                "evidence_quote": "Net Pay: £2400",
+            }
+        ),
+    )
+
+    result = await main._try_handle_email_assistant(
+        "How much did I get?",
+        actor=_actor(),
+        conversation_id=conversation,
+        request_id="document-search-resumption-1",
+    )
+
+    assert result and result["response"] == "Net Pay was £2400."
+    search_mailbox.assert_awaited_once()
+    assert search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
+    assert search_mailbox.await_args.kwargs["topic_query"] == "pay statement"
+    document_read.assert_awaited_once()
+    assert document_read.await_args.args[0] == "document.read"
+
+
+@pytest.mark.asyncio
 async def test_multiple_attachments_use_pending_interaction_without_guessing(
     context_runtime, monkeypatch
 ) -> None:
