@@ -675,13 +675,25 @@ def classify_email_read(
             if match is not None:
                 topic_query = match.group("query").strip(" .?!'\"")
                 break
-    topic_query = re.sub(
-        r"\s+(?:in|from|across)\s+(?:(?:all|both)\s+)?"
-        r"(?:(?:my|our|the)\s+)?(?:emails?|mail|mailboxes?|inboxes?)$",
-        "",
-        topic_query,
-        flags=re.I,
-    ).strip()
+    # Remove a trailing mailbox location with bounded token parsing. Avoid a
+    # nested-whitespace regex here because this value originates with the user.
+    topic_words = topic_query.split()
+    if topic_words and topic_words[-1].casefold() in {
+        "email",
+        "emails",
+        "mail",
+        "mailbox",
+        "mailboxes",
+        "inbox",
+        "inboxes",
+    }:
+        scope_index = len(topic_words) - 2
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"my", "our", "the"}:
+            scope_index -= 1
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"all", "both"}:
+            scope_index -= 1
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"in", "from", "across"}:
+            topic_query = " ".join(topic_words[:scope_index])
     topic_query = re.sub(
         r"^(?:an?|any|the|my)\s+",
         "",
