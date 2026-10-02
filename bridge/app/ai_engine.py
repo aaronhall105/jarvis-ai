@@ -4827,10 +4827,10 @@ class AIEngine:
             "unambiguous, return found=false. When found, copy label, value, and evidence_quote "
             "verbatim from one supplied chunk."
         )
-        response = await self.client.responses.create(
-            model=self.model,
-            instructions=instructions,
-            input=json.dumps(
+        request: dict[str, Any] = {
+            "model": self.model,
+            "instructions": instructions,
+            "input": json.dumps(
                 {
                     "question": str(question)[:1_000],
                     "filename": str(filename)[:240],
@@ -4839,7 +4839,7 @@ class AIEngine:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            text={
+            "text": {
                 "format": {
                     "type": "json_schema",
                     "name": "document_evidence_selection",
@@ -4857,9 +4857,19 @@ class AIEngine:
                     },
                 }
             },
-            max_output_tokens=300,
-            store=False,
-        )
+            "max_output_tokens": 300,
+            "store": False,
+        }
+        response = await self.client.responses.create(**request)
+        incomplete = getattr(response, "incomplete_details", None)
+        if (
+            str(getattr(response, "status", "") or "") == "incomplete"
+            and str(getattr(incomplete, "reason", "") or "") == "max_output_tokens"
+        ):
+            # Some reasoning models can consume the small structured-output
+            # budget before emitting any JSON. Retry once with a bounded budget;
+            # this remains a read-only, tool-free evidence selection call.
+            response = await self.client.responses.create(**{**request, "max_output_tokens": 800})
         try:
             payload = json.loads(str(getattr(response, "output_text", "") or ""))
         except (json.JSONDecodeError, TypeError, ValueError):
