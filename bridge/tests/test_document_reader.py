@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.ai_engine import AIEngine
 from app.connectors.base import (
     CapabilityExecution,
     CapabilityRequest,
@@ -274,3 +277,60 @@ def test_document_prompt_injection_is_data_and_model_output_needs_exact_evidence
         "evidence_quote": "Net Pay: GBP 2400",
     }
     assert invented is None
+
+
+@pytest.mark.asyncio
+async def test_document_evidence_selector_retries_one_exhausted_reasoning_budget() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.model = "synthetic-model"
+    selected = {
+        "found": True,
+        "label": "Amount",
+        "value": "GBP 24.00",
+        "evidence_quote": "Amount GBP 24.00",
+    }
+    create = AsyncMock(
+        side_effect=[
+            SimpleNamespace(
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+                output_text="",
+            ),
+            SimpleNamespace(status="completed", output_text=json.dumps(selected)),
+        ]
+    )
+    engine.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    result = await engine.select_document_evidence(
+        question="What is the amount?",
+        filename="statement.pdf",
+        text_chunks=[{"page": 1, "chunk_index": 1, "text": "Amount GBP 24.00"}],
+    )
+
+    assert result == selected
+    assert create.await_count == 2
+    assert create.await_args_list[0].kwargs["max_output_tokens"] == 300
+    assert create.await_args_list[1].kwargs["max_output_tokens"] == 800
+
+
+@pytest.mark.asyncio
+async def test_document_evidence_selector_does_not_retry_other_incomplete_results() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.model = "synthetic-model"
+    create = AsyncMock(
+        return_value=SimpleNamespace(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason="content_filter"),
+            output_text="",
+        )
+    )
+    engine.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    result = await engine.select_document_evidence(
+        question="What is the amount?",
+        filename="statement.pdf",
+        text_chunks=[{"page": 1, "chunk_index": 1, "text": "Amount GBP 24.00"}],
+    )
+
+    assert result is None
+    create.assert_awaited_once()
