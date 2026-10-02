@@ -29,6 +29,7 @@ from app.connectors.base import (
     VerificationResult,
 )
 from app.connectors.credentials import redact_text
+from app.document_reader import DocumentReadError, extract_document
 from app.integration_accounts import (
     CredentialEncryptionUnavailable,
     CredentialCipher,
@@ -76,6 +77,7 @@ _GOOGLE_ARGUMENT_GUIDANCE: Mapping[str, str] = {
     "gmail.search": "query (Gmail search syntax), optional limit",
     "gmail.changes": "optional history_id and limit; returns only newly added Gmail messages",
     "gmail.read": "message_id",
+    "gmail.attachment.read": "exact message_id and attachment_id from Gmail evidence",
     "gmail.thread": "thread_id, or query and optional limit",
     "gmail.reply_status": "exact thread_id and sent_message_id; checks only later inbound replies",
     "gmail.prioritize": "optional query and limit; returns bounded evidence-backed priorities",
@@ -569,6 +571,7 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
             (SCOPE_GMAIL_READ,),
         ),
         read("gmail.read", "Read Gmail message", (SCOPE_GMAIL_READ,)),
+        read("gmail.attachment.read", "Read a Gmail attachment", (SCOPE_GMAIL_READ,)),
         read(
             "gmail.thread",
             "Read or search Gmail threads",
@@ -1156,6 +1159,7 @@ class GoogleConnector(Connector):
             "gmail.search": self._gmail_search,
             "gmail.changes": self._gmail_changes,
             "gmail.read": self._gmail_read,
+            "gmail.attachment.read": self._gmail_attachment_read,
             "gmail.thread": self._gmail_thread,
             "gmail.reply_status": self._gmail_reply_status,
             "gmail.prioritize": self._gmail_prioritize,
@@ -1195,6 +1199,8 @@ class GoogleConnector(Connector):
             payload["_jarvis_idempotency_key"] = request.idempotency_key or request.request_id
             data, reference = await handler(principal, payload)
             return ConnectorResult.succeeded(data, provider_reference=reference)
+        except DocumentReadError as exc:
+            return ConnectorResult.failed(f"{exc.code}: {redact_text(exc, max_length=800)}")
         except GoogleProviderError as exc:
             safe = redact_text(exc, max_length=800)
             if capability.access is CapabilityAccess.WRITE and exc.outcome_unknown:
@@ -1919,6 +1925,53 @@ class GoogleConnector(Connector):
         raw_payload = message.get("payload")
         summary["body"] = self._body_text(raw_payload) if isinstance(raw_payload, Mapping) else ""
         return summary, message_id
+
+    async def _gmail_attachment_read(
+        self, principal: str, payload: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        """Fetch and parse one exact immutable Gmail attachment, read-only."""
+
+        message_id = self._required(payload, "message_id", max_length=300)
+        attachment_id = self._required(payload, "attachment_id", max_length=2_000)
+        message = await self._request(
+            principal,
+            "GET",
+            f"{GMAIL_API}/messages/{self._segment(message_id)}",
+            params={"format": "full"},
+        )
+        raw_payload = message.get("payload")
+        metadata = (
+            self._attachment_metadata(raw_payload) if isinstance(raw_payload, Mapping) else []
+        )
+        selected = next(
+            (item for item in metadata if str(item.get("attachment_id") or "") == attachment_id),
+            None,
+        )
+        if selected is None:
+            raise ValueError("The Gmail attachment is not present on that message")
+        if int(selected.get("size") or 0) > 10 * 1024 * 1024:
+            raise DocumentReadError(
+                "document_too_large", "The attachment exceeds the 10485760-byte safety limit."
+            )
+        value = await self._request(
+            principal,
+            "GET",
+            f"{GMAIL_API}/messages/{self._segment(message_id)}/attachments/"
+            f"{self._segment(attachment_id)}",
+        )
+        encoded = str(value.get("data") or "")
+        if not encoded:
+            raise GoogleProviderError("Google returned empty attachment content")
+        try:
+            content = _decode_b64url(encoded)
+        except (ValueError, UnicodeError) as exc:
+            raise GoogleProviderError("Google returned malformed attachment content") from exc
+        document = await extract_document(
+            content,
+            filename=str(selected.get("filename") or "attachment"),
+            mime_type=str(selected.get("mime_type") or ""),
+        )
+        return {"document": document.as_dict()}, attachment_id
 
     async def _gmail_thread(
         self, principal: str, payload: dict[str, Any]

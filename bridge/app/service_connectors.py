@@ -641,6 +641,7 @@ UNAVAILABLE_CONNECTOR_CATALOG: Mapping[str, SetupCatalogEntry] = {
                 [
                     "gmail.search",
                     "gmail.read",
+                    "gmail.attachment.read",
                     "gmail.thread",
                     "gmail.labels",
                 ],

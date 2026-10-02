@@ -38,6 +38,7 @@ from app.config import get_settings
 from app.connectors.credentials import redact_request_target
 from app.conversation_engine import ConversationEngine
 from app.dialogue_manager import DialogueManager, bare_confirmation
+from app.document_reader import exact_evidence_answer, validate_model_evidence
 from app.email_assistant import EmailAssistantPolicyEngine
 from app.email_semantic_routing import (
     EmailCleanupClause,
@@ -1453,6 +1454,350 @@ pending_interactions.register_handler(
 )
 
 
+def _document_metric_metadata(label: str, value: str) -> dict[str, object]:
+    """Project a verified exact document value into generic comparison metadata."""
+
+    metric = re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_")[:80]
+    if not metric:
+        return {}
+    match = re.search(r"(?P<currency>£|\$|€)?\s*(-?\d[\d,]*(?:\.\d+)?)", value)
+    if not match:
+        return {"facts": {metric: value}}
+    number = float(match.group(2).replace(",", ""))
+    rendered: int | float = int(number) if number.is_integer() else number
+    unit = {"£": "GBP", "$": "USD", "€": "EUR"}.get(match.group("currency") or "")
+    output: dict[str, object] = {
+        metric: rendered,
+        "primary_metric": metric,
+        "facts": {metric: value},
+    }
+    if unit:
+        output["currency"] = unit
+        output[f"{metric}_unit"] = unit
+    return output
+
+
+async def _answer_from_document(
+    *, question: str, document: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    selection = exact_evidence_answer(question, document)
+    if selection is None:
+        try:
+            selected = await ai.select_document_evidence(
+                question=question,
+                filename=str(document.get("filename") or "document"),
+                text_chunks=tuple(
+                    item for item in document.get("text_chunks") or () if isinstance(item, Mapping)
+                ),
+            )
+        except Exception:
+            logger.exception("Document evidence selection failed")
+            selected = None
+        if selected is not None:
+            selection = validate_model_evidence(selected, document)
+    return selection
+
+
+async def _read_grounded_document(
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    source: Any,
+    question: str,
+    request_id: str | None,
+    attachment_id: str | None = None,
+) -> dict[str, object]:
+    """Execute one registered read from a grounded email/attachment referent."""
+
+    provider = str(source.provider or "")
+    message_id = ""
+    selected_attachment = attachment_id
+    if source.object_type == "email_message":
+        message_id = str(source.canonical_id or "")
+    elif source.object_type == "attachment":
+        message_id = str(source.metadata.get("message_id") or "")
+        selected_attachment = selected_attachment or str(source.canonical_id or "")
+    elif source.object_type == "document":
+        message_id = str(source.metadata.get("message_id") or "")
+        selected_attachment = selected_attachment or str(source.metadata.get("attachment_id") or "")
+    if not provider or not message_id:
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "response": "Which grounded email attachment should I read?",
+            "intent": "document_read_missing_source",
+        }
+    payload: dict[str, object] = {"provider": provider, "message_id": message_id}
+    if selected_attachment:
+        payload["attachment_id"] = selected_attachment
+    execution = await external_agent.execute(
+        "document.read",
+        payload,
+        operation="document_read",
+        conversation_id=conversation_id,
+        principal_id=actor.user_key,
+        request_id=request_id or str(uuid.uuid4()),
+        target=source.reference_id,
+    )
+    data = execution.get("data")
+    result = dict(data) if isinstance(data, Mapping) else {}
+    if result.get("selection_required") is True:
+        attachments = [
+            dict(item) for item in result.get("attachments") or () if isinstance(item, Mapping)
+        ]
+        attachment_objects = [
+            make_context_object(
+                object_type="attachment",
+                display_name=str(item.get("filename") or "Attachment"),
+                source="provider_attachment_metadata",
+                canonical_id=str(item.get("attachment_id") or "") or None,
+                provider=provider,
+                capability="document.metadata",
+                metadata={**item, "message_id": message_id},
+                relations={"email_message": source.reference_id},
+                immutable=True,
+            )
+            for item in attachments
+            if item.get("attachment_id")
+        ]
+        if not attachment_objects:
+            return {
+                "success": False,
+                "turn_handled": True,
+                "action_outcome": "failed",
+                "response": "I couldn’t obtain grounded attachment metadata for that email.",
+                "intent": "document_attachment_metadata_failed",
+            }
+        await working_context.project(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            objects=attachment_objects,
+            focus_refs=[item.reference_id for item in attachment_objects],
+        )
+        labels = [item.display_name for item in attachment_objects]
+        prompt = (
+            "That email has multiple readable attachments. Which one — " + " or ".join(labels) + "?"
+        )
+        interaction = await pending_interactions.begin(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            kind=PendingInteractionKind.SELECTION,
+            goal="select a grounded document attachment",
+            prompt=prompt,
+            unresolved_slot="attachment_identity",
+            handler_id="document_attachment_selection",
+            context={"question": question, "source_reference": source.reference_id},
+            options=[
+                {
+                    "option_id": item.reference_id,
+                    "label": item.display_name,
+                    "value": item.reference_id,
+                    "evidence": {
+                        "object_type": "attachment",
+                        "provider": item.provider,
+                        "source": item.source,
+                    },
+                }
+                for item in attachment_objects
+            ],
+        )
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "response": prompt,
+            "intent": "document_attachment_ambiguous",
+            "task_id": interaction.get("task_id"),
+        }
+    if not bool(execution.get("success")):
+        error = str(execution.get("error") or "The document could not be read.")
+        code = error.split(":", 1)[0]
+        if code == "image_only_document":
+            response = "The PDF appears image-based, and no registered OCR capability is available."
+            outcome = "waiting_capability"
+        elif code == "unsupported_document_type":
+            response = "That attachment type isn’t supported by the document reader."
+            outcome = "waiting_capability"
+        elif code == "encrypted_document":
+            response = "That document is encrypted, so I can’t read its contents."
+            outcome = "waiting_user"
+        else:
+            response = "I couldn’t read that attachment safely just now."
+            outcome = "failed"
+        if outcome == "waiting_capability":
+            await working_context.wait_for_capability(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                capability=("document.ocr" if code == "image_only_document" else "document.read"),
+                object_refs=[source.reference_id],
+                reason=error,
+            )
+        return {
+            "success": outcome != "failed",
+            "turn_handled": True,
+            "action_outcome": outcome,
+            "response": response,
+            "intent": f"document_read_{code}",
+        }
+    raw_document = result.get("document")
+    raw_attachment = result.get("attachment")
+    if not isinstance(raw_document, Mapping) or not isinstance(raw_attachment, Mapping):
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "The attachment reader returned malformed evidence.",
+            "intent": "document_read_malformed",
+        }
+    attachment_identity = str(raw_attachment.get("attachment_id") or selected_attachment or "")
+    attachment_object = make_context_object(
+        object_type="attachment",
+        display_name=str(
+            raw_attachment.get("filename") or raw_document.get("filename") or "Attachment"
+        ),
+        source="provider_attachment_read",
+        canonical_id=attachment_identity or None,
+        provider=provider,
+        capability="document.read",
+        metadata={**dict(raw_attachment), "message_id": message_id},
+        relations={"email_message": source.reference_id},
+        immutable=True,
+    )
+    selection = await _answer_from_document(question=question, document=raw_document)
+    fact_metadata: dict[str, object] = {}
+    if selection is not None:
+        fact_metadata = _document_metric_metadata(
+            str(selection.get("label") or "value"), str(selection.get("value") or "")
+        )
+    document_object = make_context_object(
+        object_type="document",
+        display_name=str(raw_document.get("filename") or attachment_object.display_name),
+        source="verified_document_extraction",
+        canonical_id=str(raw_document.get("fingerprint_sha256") or "") or None,
+        provider=provider,
+        capability="document.read",
+        metadata={
+            "message_id": message_id,
+            "attachment_id": attachment_identity,
+            "filename": raw_document.get("filename"),
+            "mime_type": raw_document.get("mime_type"),
+            "page_count": raw_document.get("page_count"),
+            "truncated": raw_document.get("truncated"),
+            "fingerprint_sha256": raw_document.get("fingerprint_sha256"),
+            **fact_metadata,
+        },
+        relations={
+            "email_message": source.reference_id,
+            "attachment": attachment_object.reference_id,
+        },
+        immutable=True,
+    )
+    derived: list[Mapping[str, Any]] = []
+    if selection is not None:
+        derived.append(
+            {
+                "result_id": "document_fact:" + str(uuid.uuid4()),
+                "type": "document_fact",
+                "grounded_inputs": [document_object.reference_id],
+                "label": selection.get("label"),
+                "value": selection.get("value"),
+                "evidence_quote": selection.get("evidence_quote"),
+                "evidence_status": "verified",
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    await working_context.project(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        objects=[attachment_object, document_object],
+        intent="document_read",
+        result_set={
+            "result_set_id": "document:" + str(uuid.uuid4()),
+            "object_refs": [document_object.reference_id],
+            "ordering": "current",
+            "provider": provider,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        focus_refs=[document_object.reference_id],
+        derived_results=derived,
+    )
+    if selection is not None:
+        label = str(selection.get("label") or "The value").strip().rstrip(":")
+        value = str(selection.get("value") or "").strip()
+        response = f"{label} was {value}."
+    elif {"open", "read"} & set(re.findall(r"[a-z0-9]+", question.casefold())):
+        pages = raw_document.get("page_count")
+        page_text = f" ({pages} page{'s' if pages != 1 else ''})" if pages else ""
+        response = f"I read {document_object.display_name}{page_text}."
+    else:
+        response = (
+            f"I can read {document_object.display_name}, but I couldn’t reliably identify "
+            "that value from the extracted text."
+        )
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": "completed",
+        "response": response,
+        "intent": "document_read",
+        "cache_hit": bool(result.get("cache_hit")),
+    }
+
+
+async def _continue_document_attachment_selection(
+    interaction: Mapping[str, Any], reference_id: str, request_id: str
+) -> Mapping[str, Any]:
+    context = interaction.get("context")
+    if not isinstance(context, Mapping):
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "I can’t safely recover that attachment selection.",
+        }
+    principal_id = str(interaction.get("principal_id") or "")
+    conversation_id = str(interaction.get("conversation_id") or "")
+    resolution = await working_context.resolve(
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        query=ReferenceQuery(
+            explicit_reference=reference_id,
+            object_types=("attachment",),
+        ),
+    )
+    if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "That grounded attachment is no longer available.",
+        }
+    actor = UserContext(
+        user_id=principal_id,
+        user_key=principal_id,
+        display_name=principal_id.replace("_", " ").title() or "User",
+        is_admin=False,
+        device_id=None,
+        voice_mode=False,
+        privilege_verified=False,
+        area_id=None,
+    )
+    return await _read_grounded_document(
+        actor=actor,
+        conversation_id=conversation_id,
+        source=resolution.objects[0],
+        question=str(context.get("question") or "read it"),
+        request_id=request_id,
+    )
+
+
+pending_interactions.register_handler(
+    "document_attachment_selection",
+    _continue_document_attachment_selection,
+)
+
+
 def _context_object_types(attribute: str | None, kind: str) -> tuple[str, ...]:
     if attribute == "sender":
         return ("email_message",)
@@ -1462,6 +1807,8 @@ def _context_object_types(attribute: str | None, kind: str) -> tuple[str, ...]:
         return ("measurement", "document", "attachment", "email_message", "search_result")
     if kind == "open":
         return ("attachment", "document", "email_message", "search_result")
+    if kind == "document_question":
+        return ("document", "attachment", "email_message")
     return ()
 
 
@@ -1692,6 +2039,22 @@ async def _try_handle_working_context_followup(
         conversation_id=conversation_id,
         query=query,
     )
+    if resolution.status is ReferenceStatus.AMBIGUOUS and (
+        followup.kind in {"open", "document_question"} or followup.attribute == "value"
+    ):
+        document_resolution = await working_context.resolve(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            query=ReferenceQuery(
+                relation=query.relation,
+                ordinal=query.ordinal,
+                object_types=("document",),
+                provider=query.provider,
+                explicit_reference=query.explicit_reference,
+            ),
+        )
+        if document_resolution.status is ReferenceStatus.RESOLVED:
+            resolution = document_resolution
     if resolution.status is ReferenceStatus.STALE:
         # Let the applicable domain route obtain fresh provider evidence.
         return None
@@ -1741,6 +2104,20 @@ async def _try_handle_working_context_followup(
         }
     if resolution.status is not ReferenceStatus.RESOLVED:
         return None
+    if (
+        followup.kind in {"open", "document_question"} or followup.attribute == "value"
+    ) and resolution.objects[0].object_type in {
+        "email_message",
+        "attachment",
+        "document",
+    }:
+        return await _read_grounded_document(
+            actor=actor,
+            conversation_id=conversation_id,
+            source=resolution.objects[0],
+            question=text,
+            request_id=request_id,
+        )
     if followup.kind == "monitor_next":
         return await _create_context_monitor(
             actor=actor,

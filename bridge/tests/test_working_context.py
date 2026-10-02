@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -572,7 +573,7 @@ def test_projection_redacts_secrets_and_model_view_omits_canonical_ids() -> None
     assert safe["objects"][0]["metadata"]["nested"]["safe"] == "yes"
 
 
-def test_attachment_metadata_is_context_not_fake_document_read_capability() -> None:
+def test_attachment_metadata_projects_grounded_attachment_without_exposing_ids() -> None:
     objects, _ = email_read_projection(
         {
             "provider": "google_gmail",
@@ -595,7 +596,22 @@ def test_attachment_metadata_is_context_not_fake_document_read_capability() -> N
     assert objects[0].metadata["attachments"][0]["filename"] == "statement.pdf"
     assert objects[0].capability == "email.read"
     assert objects[0].object_type == "email_message"
+    assert objects[1].object_type == "attachment"
+    assert objects[1].display_name == "statement.pdf"
+    assert objects[1].relations["email_message"] == objects[0].reference_id
     assert all(item.object_type != "document" for item in objects)
+    safe = model_safe_context(
+        {
+            "objects": [item.to_record() for item in objects],
+            "focused_object_refs": [objects[0].reference_id],
+            "result_sets": [],
+            "derived_results": [],
+            "temporal_context": {},
+        }
+    )
+    rendered = json.dumps(safe)
+    assert "provider-attachment" not in rendered
+    assert '"message_id"' not in rendered
 
 
 def test_future_capability_uses_generic_projection_without_core_domain_adapter() -> None:

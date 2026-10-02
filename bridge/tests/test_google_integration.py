@@ -95,6 +95,10 @@ class GoogleFixture:
                 "body": {"data": "RHJhZnQgb25seQ"},
             },
         }
+        self.attachment_filename = "appointment.pdf"
+        self.attachment_mime_type = "application/pdf"
+        self.attachment_bytes = b"synthetic attachment bytes"
+        self.attachment_size = 321
         self.event: dict[str, object] = {
             "id": "event-1",
             "status": "confirmed",
@@ -297,12 +301,25 @@ class GoogleFixture:
                         "body": {"data": "VGhlIGdhcmFnZSBjYW4gc2VlIHlvdSBGcmlkYXku"},
                         "parts": [
                             {
-                                "filename": "appointment.pdf",
-                                "mimeType": "application/pdf",
-                                "body": {"attachmentId": "attachment-1", "size": 321},
+                                "filename": self.attachment_filename,
+                                "mimeType": self.attachment_mime_type,
+                                "body": {
+                                    "attachmentId": "attachment-1",
+                                    "size": self.attachment_size,
+                                },
                             }
                         ],
                     },
+                },
+            )
+        if path == "/gmail/v1/users/me/messages/message-2/attachments/attachment-1":
+            return httpx.Response(
+                200,
+                json={
+                    "size": len(self.attachment_bytes),
+                    "data": base64.urlsafe_b64encode(self.attachment_bytes)
+                    .decode("ascii")
+                    .rstrip("="),
                 },
             )
         if path.startswith("/gmail/v1/users/me/messages/history-message-"):
@@ -694,6 +711,29 @@ async def test_oauth_callback_is_one_time_and_never_exposes_tokens(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_gmail_attachment_read_returns_bounded_document_not_raw_bytes(
+    tmp_path: Path,
+) -> None:
+    fixture = GoogleFixture()
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+    fixture.attachment_filename = "pay.txt"
+    fixture.attachment_mime_type = "text/plain"
+    fixture.attachment_bytes = b"Gross Pay: GBP 3000\nTax: GBP 400\nNet Pay: GBP 2400"
+    fixture.attachment_size = len(fixture.attachment_bytes)
+
+    result, reference = await connector._gmail_attachment_read(
+        "aaron", {"message_id": "message-2", "attachment_id": "attachment-1"}
+    )
+
+    assert reference == "attachment-1"
+    assert result["document"]["text_content"].endswith("Net Pay: GBP 2400")
+    assert result["document"]["mime_type"] == "text/plain"
+    assert "data" not in json.dumps(result)
+    assert fixture.calls["GET /gmail/v1/users/me/messages/message-2/attachments/attachment-1"] == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_partial_scopes_are_principal_isolated_and_capability_grounded(
     tmp_path: Path,
 ) -> None:
@@ -707,6 +747,7 @@ async def test_partial_scopes_are_principal_isolated_and_capability_grounded(
     assert set(own.executable_capabilities or ()) == {
         "gmail.search",
         "gmail.read",
+        "gmail.attachment.read",
         "gmail.thread",
         "gmail.reply_status",
         "gmail.labels",

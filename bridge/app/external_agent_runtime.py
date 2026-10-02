@@ -50,6 +50,7 @@ from app.connectors import (
     redact_secrets,
 )
 from app.home_assistant_connector import HomeAssistantConnector
+from app.document_reader import DocumentConnector, DocumentExtractionCache
 from app.google_integration import (
     GOOGLE_MODEL_TOOL,
     GoogleConnector,
@@ -455,6 +456,12 @@ class ExternalAgentRuntime:
             timeout_seconds=connector_timeout_seconds,
         )
         self.registry.register(self.microsoft_connector)
+        self.document_cache = DocumentExtractionCache(data_path / "jarvis_document_extractions.db")
+        self.document_connector = DocumentConnector(
+            registry=self.registry,
+            cache=self.document_cache,
+        )
+        self.registry.register(self.document_connector)
         self.planner_executor = ConnectorPlannerExecutor(self.registry)
         self.plans = SQLitePlanStore(data_path / "jarvis_agent_plans.db")
         self.planner = PersonalAgentPlanner(self.plans, self.planner_executor)
@@ -470,6 +477,7 @@ class ExternalAgentRuntime:
     async def initialize(self) -> dict[str, Any]:
         await self.integration_accounts.initialize()
         await self.receipts.initialize()
+        await self.document_cache.initialize()
         recovered = await self.receipts.recover_stale(older_than_seconds=300)
         health = await self.registry.health_snapshot(refresh=True)
         database = await self.database_health_snapshot()
@@ -832,7 +840,7 @@ class ExternalAgentRuntime:
         return schema is not None
 
     async def database_health_snapshot(self) -> dict[str, Any]:
-        """Probe only the two durable stores owned by this runtime."""
+        """Probe the durable stores owned by this runtime."""
 
         await self.receipts.initialize()
         stores = {
@@ -841,6 +849,10 @@ class ExternalAgentRuntime:
             "integration_accounts": (
                 self.integration_accounts.path,
                 "integration_accounts",
+            ),
+            "document_extractions": (
+                self.document_cache.path,
+                "document_extractions",
             ),
         }
 
