@@ -6083,9 +6083,8 @@ class AIEngine:
         )
         if grounded_control is not None:
             logger.info(
-                "Resolved control reference from grounded working context original=%r resolved=%r",
-                user_text,
-                grounded_control,
+                "Resolved control reference from grounded working context conversation=%s",
+                resolved_conversation_id[-12:],
             )
             user_text = grounded_control
 
