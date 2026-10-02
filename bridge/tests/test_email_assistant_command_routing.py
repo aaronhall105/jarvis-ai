@@ -1797,7 +1797,8 @@ async def test_cross_mailbox_topic_read_continues_with_healthy_provider_without_
 
     assert result is not None and result["success"] is True
     assert result["intent"] == "email_topic_search"
-    assert "Outlook has 1 matching message" in str(result["response"])
+    assert "Yes — I found ‘September wageslip’ in Outlook" in str(result["response"])
+    assert "It’s from Payroll" in str(result["response"])
     assert "September wageslip" in str(result["response"])
     assert "Gmail" in str(result["response"])
     assert "shall I" not in str(result["response"])

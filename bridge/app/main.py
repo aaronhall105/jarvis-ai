@@ -80,6 +80,15 @@ from app.speech_corrections import SpeechCorrectionEngine
 from app.runtime_observability import configuration_report, runtime_metrics
 from app.system_diagnostics import build_voice_reliability_report
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
+from app.working_context import (
+    ReferenceQuery,
+    ReferenceStatus,
+    ResultIntelligence,
+    WorkingContextService,
+    classify_context_followup,
+    common_numeric_metric,
+    make_context_object,
+)
 
 settings = get_settings()
 configure_logging(settings.jarvis_log_level)
@@ -121,6 +130,7 @@ conversations = ConversationEngine(
 dialogue = DialogueManager(
     database_path=str(data_directory / "jarvis_dialogue.db"),
 )
+working_context = WorkingContextService(dialogue)
 improvement = SelfImprovementEngine(
     database_path=str(data_directory / "jarvis_improvement.db"),
     enabled=settings.jarvis_self_improvement_enabled,
@@ -1441,6 +1451,534 @@ pending_interactions.register_handler(
     "email_topic_sender_search",
     _continue_email_topic_sender_interaction,
 )
+
+
+def _context_object_types(attribute: str | None, kind: str) -> tuple[str, ...]:
+    if attribute == "sender":
+        return ("email_message",)
+    if attribute == "room":
+        return ("device", "person", "room")
+    if attribute == "value":
+        return ("measurement", "document", "attachment", "email_message", "search_result")
+    if kind == "open":
+        return ("attachment", "document", "email_message", "search_result")
+    return ()
+
+
+def _context_answer(*, kind: str, attribute: str | None, resolution: Any) -> str | None:
+    if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+        return None
+    if kind == "attribute" and attribute:
+        return ResultIntelligence.answer_attribute(
+            attribute=attribute,
+            resolution=resolution,
+        )
+    if kind in {"select", "metric_select"}:
+        return ResultIntelligence.describe(resolution.objects[0])
+    if kind == "open":
+        item = resolution.objects[0]
+        if item.object_type == "email_message" and item.metadata.get("attachments"):
+            return (
+                f"I found the attachment on {item.display_name}, but I don’t currently have "
+                "a registered capability that can open and read it."
+            )
+        return (
+            f"I can identify {item.display_name}, but I don’t currently have a registered "
+            "capability that can open it."
+        )
+    return None
+
+
+async def _create_context_monitor(
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    resolution: Any,
+    request_id: str | None,
+) -> dict[str, object]:
+    item = resolution.objects[0]
+    if item.object_type != "email_message" or item.provider not in {
+        "google_gmail",
+        "microsoft_outlook",
+    }:
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "response": "Which grounded result should I monitor for the next one?",
+            "intent": "working_context_monitor_needs_target",
+        }
+    context = await working_context.get(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+    )
+    active_set_id = str((context.get("temporal_context") or {}).get("active_result_set_id") or "")
+    active_set = next(
+        (
+            row
+            for row in context.get("result_sets") or ()
+            if isinstance(row, Mapping) and str(row.get("result_set_id") or "") == active_set_id
+        ),
+        {},
+    )
+    filters = active_set.get("filters") if isinstance(active_set, Mapping) else {}
+    query = ""
+    if isinstance(filters, Mapping):
+        query = str(filters.get("topic_query") or filters.get("literal_query") or "").strip()
+    if not query:
+        query = str(context.get("current_goal") or item.display_name).strip()
+    provider = "google" if item.provider == "google_gmail" else "microsoft"
+    capability_id = "gmail.search" if provider == "google" else "outlook.search"
+    try:
+        monitor = await external_agent.create_external_monitor(
+            conversation_id=conversation_id,
+            principal_id=actor.user_key,
+            provider=provider,
+            capability_id=capability_id,
+            query=query,
+            value_path="message_ids",
+            comparison={"operator": "new_items"},
+            polling_interval_seconds=300,
+            label=f"Next {item.display_name}",
+            continuous=False,
+            notify=True,
+            request_id=request_id,
+        )
+    except Exception:
+        logger.exception("Could not create context-derived monitor")
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "I couldn’t create a durable monitor for that result safely.",
+            "intent": "working_context_monitor_failed",
+        }
+    task_id = str(monitor.get("job_id") or monitor.get("task_id") or "").strip()
+    if task_id:
+        await dialogue.record_task_context(
+            conversation_id,
+            task_id=f"followup:{task_id}" if ":" not in task_id else task_id,
+            intent="working_context_monitor_created",
+        )
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": "completed",
+        "response": f"Yes — I’ll let you know when the next {item.display_name} arrives.",
+        "intent": "working_context_monitor_created",
+        "task_id": task_id or None,
+    }
+
+
+async def _continue_working_context_selection(
+    interaction: Mapping[str, Any], reference_id: str, request_id: str
+) -> Mapping[str, Any]:
+    del request_id
+    context = interaction.get("context")
+    if not isinstance(context, Mapping):
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "I can’t safely recover that selection.",
+            "intent": "working_context_selection_invalid",
+        }
+    principal_id = str(interaction.get("principal_id") or "")
+    conversation_id = str(interaction.get("conversation_id") or "")
+    resolution = await working_context.resolve(
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        query=ReferenceQuery(
+            explicit_reference=reference_id,
+            object_types=tuple(str(item) for item in context.get("object_types") or ()),
+        ),
+    )
+    answer = _context_answer(
+        kind=str(context.get("followup_kind") or "select"),
+        attribute=str(context.get("attribute") or "") or None,
+        resolution=resolution,
+    )
+    if answer is None:
+        return {
+            "success": False,
+            "turn_handled": True,
+            "action_outcome": "failed",
+            "response": "That grounded result is no longer available.",
+            "intent": "working_context_selection_unavailable",
+        }
+    followup_kind = str(context.get("followup_kind") or "select")
+    if followup_kind == "open":
+        await working_context.wait_for_capability(
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            capability="document.read",
+            object_refs=[item.reference_id for item in resolution.objects],
+            reason="No registered attachment or document reader is available",
+        )
+    await working_context.focus_resolution(
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        resolution=resolution,
+    )
+    await working_context.project(
+        principal_id=principal_id,
+        conversation_id=conversation_id,
+        objects=(),
+        active_interaction_id="",
+    )
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": ("waiting_capability" if followup_kind == "open" else "completed"),
+        "response": answer,
+        "intent": "working_context_selection",
+    }
+
+
+pending_interactions.register_handler(
+    "working_context_selection",
+    _continue_working_context_selection,
+)
+
+
+async def _try_handle_working_context_followup(
+    text: str,
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    request_id: str | None = None,
+) -> dict[str, object] | None:
+    followup = classify_context_followup(text)
+    if followup is None:
+        return None
+    # Mutating verbs must continue through the normal capability and authority
+    # path. WorkingContext may ground their target later, but never executes them.
+    words = set(re.findall(r"[a-z0-9]+", text.casefold()))
+    task_action = next(
+        (action for action in ("pause", "resume", "cancel", "retry") if action in words),
+        None,
+    )
+    if task_action:
+        return await _control_context_task(
+            actor=actor,
+            conversation_id=conversation_id,
+            request_id=request_id,
+            action=task_action,
+            query=followup.query,
+        )
+    if words & {"turn", "switch", "send", "delete", "move", "archive"}:
+        return None
+    query = ReferenceQuery(
+        relation=(
+            "current"
+            if followup.kind in {"monitor_next", "temporal_compare"}
+            else followup.query.relation
+        ),
+        ordinal=followup.query.ordinal,
+        object_types=_context_object_types(followup.attribute, followup.kind),
+        provider=followup.query.provider,
+        plural=followup.query.plural or followup.kind == "compare",
+        explicit_reference=followup.query.explicit_reference,
+        require_current_state=(
+            followup.query.require_current_state or followup.attribute in {"room", "status"}
+        ),
+        relation_key=followup.query.relation_key,
+        metric=followup.query.metric,
+        metric_operator=followup.query.metric_operator,
+        metric_value=followup.query.metric_value,
+    )
+    resolution = await working_context.resolve(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        query=query,
+    )
+    if resolution.status is ReferenceStatus.STALE:
+        # Let the applicable domain route obtain fresh provider evidence.
+        return None
+    if resolution.status is ReferenceStatus.AMBIGUOUS:
+        labels = [item.display_name for item in resolution.objects]
+        prompt = "Which one do you mean — " + " or ".join(labels) + "?"
+        interaction = await pending_interactions.begin(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            kind=PendingInteractionKind.SELECTION,
+            goal="resolve grounded conversational reference",
+            prompt=prompt,
+            unresolved_slot="object_reference",
+            handler_id="working_context_selection",
+            context={
+                "followup_kind": followup.kind,
+                "attribute": followup.attribute,
+                "object_types": list(query.object_types),
+            },
+            options=[
+                {
+                    "option_id": item.reference_id,
+                    "label": item.display_name,
+                    "value": item.reference_id,
+                    "evidence": {
+                        "object_type": item.object_type,
+                        "provider": item.provider,
+                        "source": item.source,
+                    },
+                }
+                for item in resolution.objects
+            ],
+        )
+        await working_context.project(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            objects=(),
+            active_interaction_id=str(interaction.get("interaction_id") or ""),
+        )
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "waiting_user",
+            "response": prompt,
+            "intent": "working_context_ambiguous",
+            "task_id": interaction.get("task_id"),
+        }
+    if resolution.status is not ReferenceStatus.RESOLVED:
+        return None
+    if followup.kind == "monitor_next":
+        return await _create_context_monitor(
+            actor=actor,
+            conversation_id=conversation_id,
+            resolution=resolution,
+            request_id=request_id,
+        )
+    answer: str | None
+    if followup.kind == "compare":
+        if len(resolution.objects) < 2:
+            return None
+        metric = common_numeric_metric(resolution.objects)
+        derived = await working_context.compare(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            objects=resolution.objects,
+            metric=metric,
+        )
+        answer = ResultIntelligence.comparison(derived, resolution.objects)
+    elif followup.kind == "temporal_compare":
+        previous = await working_context.resolve(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            query=ReferenceQuery(
+                relation="previous",
+                object_types=query.object_types,
+                provider=query.provider,
+            ),
+        )
+        if previous.status is not ReferenceStatus.RESOLVED or not previous.objects:
+            return None
+        compared_objects = (resolution.objects[0], previous.objects[0])
+        metric = common_numeric_metric(compared_objects)
+        if metric is None:
+            return None
+        derived = await working_context.compare(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            objects=compared_objects,
+            metric=metric,
+        )
+        answer = ResultIntelligence.comparison(derived, compared_objects)
+    elif followup.kind == "explain":
+        context = await working_context.get(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+        )
+        derived_results = [
+            item for item in context.get("derived_results") or () if isinstance(item, Mapping)
+        ]
+        if not derived_results:
+            return None
+        answer = ResultIntelligence.explain(derived_results[0], resolution.objects)
+    else:
+        answer = _context_answer(
+            kind=followup.kind,
+            attribute=followup.attribute,
+            resolution=resolution,
+        )
+    if answer is None:
+        if followup.attribute == "value" and any(
+            item.object_type in {"email_message", "attachment", "document"}
+            for item in resolution.objects
+        ):
+            await working_context.wait_for_capability(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                capability="document.read",
+                object_refs=[item.reference_id for item in resolution.objects],
+                reason="No registered attachment or document reader is available",
+            )
+            return {
+                "success": True,
+                "turn_handled": True,
+                "action_outcome": "waiting_capability",
+                "response": (
+                    "I can identify the document, but I don’t currently have a registered "
+                    "capability that can read and verify the amount."
+                ),
+                "intent": "working_context_value_waiting_capability",
+            }
+        return None
+    if followup.kind == "open":
+        await working_context.wait_for_capability(
+            principal_id=actor.user_key,
+            conversation_id=conversation_id,
+            capability="document.read",
+            object_refs=[item.reference_id for item in resolution.objects],
+            reason="No registered attachment or document reader is available",
+        )
+    await working_context.focus_resolution(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        resolution=resolution,
+    )
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": ("waiting_capability" if followup.kind == "open" else "completed"),
+        "response": answer,
+        "intent": f"working_context_{followup.kind}",
+    }
+
+
+async def _project_task_result_context(
+    *, actor: UserContext, conversation_id: str, result: Mapping[str, Any]
+) -> None:
+    """Project authoritative task records without copying their state machines."""
+
+    candidates: list[Mapping[str, Any]] = []
+    for key in ("job", "task"):
+        value = result.get(key)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+    for parent_key in ("task_retry", "task_notification"):
+        parent = result.get(parent_key)
+        if isinstance(parent, Mapping) and isinstance(parent.get("task"), Mapping):
+            candidates.append(parent["task"])
+    if not candidates:
+        return
+    objects = []
+    for raw in candidates:
+        task_id = str(raw.get("task_id") or raw.get("job_id") or "").strip()
+        if not task_id:
+            continue
+        if ":" not in task_id and raw.get("job_id"):
+            task_id = f"followup:{task_id}"
+        title = str(
+            raw.get("title")
+            or raw.get("label")
+            or raw.get("objective")
+            or raw.get("kind")
+            or "Jarvis task"
+        )
+        objects.append(
+            make_context_object(
+                object_type="task",
+                display_name=title,
+                source="task_centre",
+                canonical_id=task_id,
+                capability="task.read",
+                task_id=task_id,
+                metadata={
+                    "status": raw.get("status"),
+                    "current_step": raw.get("current_step"),
+                    "next_step": raw.get("next_step"),
+                    "waiting_reason": raw.get("waiting_reason"),
+                    "result_summary": raw.get("result_summary"),
+                },
+                freshness_seconds=10,
+                immutable=False,
+            )
+        )
+    if not objects:
+        return
+    await working_context.project(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        objects=objects,
+        intent=str(result.get("intent") or "task_result"),
+        result_set={
+            "result_set_id": "tasks:" + str(uuid.uuid4()),
+            "object_refs": [item.reference_id for item in objects],
+            "ordering": "current_first",
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+        focus_refs=[item.reference_id for item in objects],
+        active_task_id=objects[0].task_id,
+    )
+
+
+async def _control_context_task(
+    *,
+    actor: UserContext,
+    conversation_id: str,
+    request_id: str | None,
+    action: str,
+    query: ReferenceQuery,
+) -> dict[str, object] | None:
+    resolution = await working_context.resolve(
+        principal_id=actor.user_key,
+        conversation_id=conversation_id,
+        query=ReferenceQuery(
+            relation=query.relation,
+            ordinal=query.ordinal,
+            object_types=("task",),
+            plural=False,
+            explicit_reference=query.explicit_reference,
+            relation_key=query.relation_key,
+        ),
+    )
+    if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+        return None
+    task_id = str(resolution.objects[0].canonical_id or "")
+    if not task_id:
+        return None
+    control = getattr(task_centre, action, None)
+    if not callable(control):
+        return None
+    task = await control(
+        principal_id=actor.user_key,
+        task_id=task_id,
+        request_id=request_id or str(uuid.uuid4()),
+    )
+    if task is None:
+        unavailable_wording = {
+            "pause": "paused",
+            "resume": "resumed",
+            "cancel": "cancelled",
+            "retry": "retried",
+        }[action]
+        return {
+            "success": True,
+            "turn_handled": True,
+            "action_outcome": "not_allowed",
+            "response": f"That task can’t be {unavailable_wording} in its current state.",
+            "intent": f"working_context_task_{action}_unavailable",
+        }
+    await _project_task_result_context(
+        actor=actor,
+        conversation_id=conversation_id,
+        result={"intent": f"task_{action}", "task": task},
+    )
+    title = str(task.get("title") or resolution.objects[0].display_name)
+    wording = {
+        "pause": f"{title} is paused.",
+        "resume": f"{title} has resumed.",
+        "cancel": f"{title} is cancelled.",
+        "retry": f"I retried {title}.",
+    }[action]
+    return {
+        "success": True,
+        "turn_handled": True,
+        "action_outcome": "completed",
+        "response": wording,
+        "intent": f"working_context_task_{action}",
+        "task_id": task_id,
+    }
 
 
 async def _try_handle_email_assistant(
@@ -3291,13 +3829,19 @@ async def _try_handle_email_assistant(
             if messages:
                 sender, _ = _mail_sender(messages[0])
                 subject = _safe_mail_text(messages[0].get("subject"), limit=160) or "No subject"
+                received = _mail_time(messages[0])
+                date_detail = f", dated {received.split(' at ', 1)[0]}" if received else ""
                 count = int(item.get("count") or len(messages))
-                qualifier = "at least " if not item.get("exact") else ""
-                topic_parts.append(
-                    f"{provider_name} has {qualifier}{count} matching "
-                    f"message{'s' if count != 1 else ''}; the newest is from {sender}, "
-                    f"‘{subject}’"
-                )
+                if count == 1:
+                    topic_parts.append(
+                        f"Yes — I found ‘{subject}’ in {provider_name}. "
+                        f"It’s from {sender}{date_detail}"
+                    )
+                else:
+                    topic_parts.append(
+                        f"Yes — I found {count} matching messages in {provider_name}. "
+                        f"The newest is ‘{subject}’ from {sender}{date_detail}"
+                    )
             else:
                 if item.get("search_strategy") == "bounded_metadata_fallback":
                     checked = int(item.get("searched_metadata_count") or 0)
@@ -3317,6 +3861,7 @@ async def _try_handle_email_assistant(
                     "account_id": item["account_id"],
                     "query_kind": "topic_search",
                     "topic_query": query,
+                    "semantic_match": item.get("search_strategy") == "bounded_metadata_fallback",
                     "messages": messages,
                     "selected_index": 0,
                     "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -6319,6 +6864,13 @@ async def _execute_ai_request(
                 "interaction_id": interaction_resolution.interaction_id,
             }
     if memory_result is None:
+        memory_result = await _try_handle_working_context_followup(
+            request.text,
+            actor=actor,
+            conversation_id=storage_conversation_id,
+            request_id=request.request_id,
+        )
+    if memory_result is None:
         memory_result = await _try_handle_task_notification(
             request.text,
             actor=actor,
@@ -6382,6 +6934,11 @@ async def _execute_ai_request(
             endpoint=request.voice_endpoint_kind,
         )
     if personal_result is not None:
+        await _project_task_result_context(
+            actor=actor,
+            conversation_id=storage_conversation_id,
+            result=personal_result,
+        )
         response = present_user_response(
             str(personal_result["response"]),
             request_text=request.text,

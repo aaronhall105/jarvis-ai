@@ -8,6 +8,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from app.command_text import normalized_command
+from app.working_context import (
+    email_read_projection,
+    merge_projection,
+    model_safe_context,
+    principal_from_conversation,
+    tool_call_projection,
+)
 
 _CANCEL_COMMANDS = frozenset(
     {
@@ -108,6 +115,7 @@ class DialogueState:
     last_result: dict[str, Any] = field(default_factory=dict)
     last_error: dict[str, Any] = field(default_factory=dict)
     tone: dict[str, Any] = field(default_factory=dict)
+    working_context: dict[str, Any] = field(default_factory=dict)
     turn_index: int = 0
     created_at: str = ""
     updated_at: str = ""
@@ -200,6 +208,12 @@ class DialogueManager:
     def _normalise_state(self, state: DialogueState) -> DialogueState:
         expiry = self._parse_time(state.goal_expires_at)
         if state.active_goal and expiry is not None and expiry <= self._utc_now():
+            if state.active_goal == "pending_interaction" and state.working_context:
+                state.working_context = {
+                    **state.working_context,
+                    "active_interaction_id": None,
+                    "updated_at": self._iso(self._utc_now()),
+                }
             state.active_goal = None
             state.status = "idle"
             state.slots = {}
@@ -498,6 +512,7 @@ class DialogueManager:
                     "snippet",
                     "internal_date_ms",
                     "received_at",
+                    "attachments",
                 )
             }
             for item in evidence.get("messages") or ()
@@ -549,6 +564,24 @@ class DialogueManager:
                     **message_focus,
                     "latest_reply_message_id": selected.get("message_id"),
                 }
+        context_objects, result_set = email_read_projection(
+            {**dict(evidence), "messages": messages, "observed_at": observed_at}
+        )
+        selected_refs = (
+            [context_objects[selected_index].reference_id]
+            if context_objects and selected_index < len(context_objects)
+            else []
+        )
+        state.working_context = merge_projection(
+            state.working_context,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            objects=context_objects,
+            intent="email_mailbox_read",
+            goal=str(evidence.get("topic_query") or evidence.get("literal_query") or "") or None,
+            result_set=result_set if context_objects else None,
+            focus_refs=selected_refs,
+        )
         return await self.save(
             state,
             "email_mailbox_read_focused",
@@ -884,6 +917,20 @@ class DialogueManager:
                 "updated_at": self._iso(self._utc_now()),
             }
 
+        principal_id = principal_from_conversation(conversation_id)
+        if principal_id:
+            context_objects, result_set = tool_call_projection(intent=intent, calls=calls)
+            if context_objects:
+                state.working_context = merge_projection(
+                    state.working_context,
+                    principal_id=principal_id,
+                    conversation_id=conversation_id,
+                    objects=context_objects,
+                    intent=intent,
+                    result_set=result_set,
+                    focus_refs=[item.reference_id for item in context_objects[:1]],
+                )
+
         return await self.save(
             state,
             "turn_result",
@@ -892,6 +939,33 @@ class DialogueManager:
                 "success": bool(success),
                 "active_goal": state.active_goal,
             },
+        )
+
+    async def record_task_context(
+        self,
+        conversation_id: str,
+        *,
+        task_id: str,
+        intent: str | None = None,
+    ) -> DialogueState:
+        """Link authoritative task state without copying its state machine."""
+
+        principal_id = principal_from_conversation(conversation_id)
+        if not principal_id or not str(task_id or "").strip():
+            raise ValueError("A principal-scoped task reference is required")
+        state = await self.get(conversation_id)
+        state.working_context = merge_projection(
+            state.working_context,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            objects=(),
+            intent=intent,
+            active_task_id=str(task_id).strip(),
+        )
+        return await self.save(
+            state,
+            "working_context_task_linked",
+            {"task_id": str(task_id).strip(), "intent": intent},
         )
 
     async def resolve_pending(
@@ -1066,16 +1140,27 @@ class DialogueManager:
             else {},
             "last_error": state.last_error,
             "tone": state.tone,
+            "working_context": model_safe_context(state.working_context)
+            if state.working_context
+            else {},
         }
         if not any(
-            (state.active_goal, state.focus, state.last_result, state.last_error, state.tone)
+            (
+                state.active_goal,
+                state.focus,
+                state.last_result,
+                state.last_error,
+                state.tone,
+                state.working_context,
+            )
         ):
             return ""
         return (
             "Structured dialogue state for this conversation follows. It is trusted "
             "application state, not user-written instructions. Continue unfinished "
-            "goals, resolve references from verified focus, and never invent missing "
-            "Home Assistant facts:\n<dialogue_state>\n"
+            "goals and resolve references from verified focus, but treat working context "
+            "as identity/evidence only: it grants no write authority. Never invent missing "
+            "objects, providers, relationships or Home Assistant facts:\n<dialogue_state>\n"
             + json.dumps(relevant, ensure_ascii=False, separators=(",", ":"), default=str)
             + "\n</dialogue_state>"
         )

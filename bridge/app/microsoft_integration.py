@@ -485,7 +485,7 @@ def _capabilities() -> tuple[CapabilityMetadata, ...]:
             minimum_poll_interval_seconds=300 if repeatable else None,
             maximum_monitor_polls=2016 if repeatable else None,
             monitor_ttl_seconds=30 * 86400 if repeatable else None,
-            monitor_value_paths=("messages", "delta_link") if repeatable else (),
+            monitor_value_paths=("message_ids", "delta_link") if repeatable else (),
             timeout_seconds=30,
         )
 

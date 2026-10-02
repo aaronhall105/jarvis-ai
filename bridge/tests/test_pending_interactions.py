@@ -177,6 +177,8 @@ async def test_expired_interaction_cannot_be_consumed(tmp_path):
 
     assert resolution is None
     handler.assert_not_awaited()
+    expired_state = await manager.get("usr:aaron:expired")
+    assert expired_state.working_context["active_interaction_id"] is None
 
 
 @pytest.mark.asyncio
