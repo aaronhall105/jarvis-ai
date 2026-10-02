@@ -1,5 +1,6 @@
 from app.ai_engine import (
     complete_or_reject_dangling_response,
+    execution_safe_stream_callback,
     remove_unbacked_interaction_question,
     gmail_message_action_reply,
     RequestIntent,
@@ -19,6 +20,35 @@ from app.tool_outcomes import request_tool_success
 
 def classify(text: str):
     return RequestRouter.classify(text, [])
+
+
+def test_execution_claim_stream_is_withheld_until_grounding_validation() -> None:
+    async def emit(_delta: str) -> None:
+        return None
+
+    class ExternalRuntime:
+        @staticmethod
+        def is_external_request(_text, _history) -> bool:
+            return False
+
+    assert (
+        execution_safe_stream_callback(
+            emit,
+            user_text="How much did I get?",
+            history=(),
+            external_runtime=ExternalRuntime(),
+        )
+        is None
+    )
+    assert (
+        execution_safe_stream_callback(
+            emit,
+            user_text="Tell me a short joke.",
+            history=(),
+            external_runtime=ExternalRuntime(),
+        )
+        is emit
+    )
 
 
 def test_action_proposal_reply_uses_only_the_persisted_structured_prompt() -> None:
@@ -278,6 +308,9 @@ def test_synchronous_provider_read_progress_claim_requires_completed_execution()
         "Looking that up now.",
         "Retrieving the message now.",
         "Searching Outlook now.",
+        "I’ll search Outlook for the statement and read it — starting now.",
+        "I'm starting now.",
+        "I'll read it.",
     ):
         replacement = unbacked_synchronous_read_promise_reply(reply, [])
         assert replacement is not None
@@ -316,6 +349,13 @@ def test_executable_offer_requires_structured_follow_up_state() -> None:
         "I moved 10 messages to Trash today."
     )
     assert remove_unbacked_executable_offer(reply, structured_follow_up=True) == reply
+    assert (
+        remove_unbacked_executable_offer(
+            "I can do that — shall I search Outlook now?",
+            structured_follow_up=False,
+        )
+        == "I can do that"
+    )
     assert remove_unbacked_executable_offer(
         "That was Gmail. Want me to force Outlook to sync?",
         structured_follow_up=False,

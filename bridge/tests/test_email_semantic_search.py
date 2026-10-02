@@ -6,10 +6,34 @@ import pytest
 
 from app.email_assistant import EmailAssistantPolicyEngine
 from app.email_semantic_routing import (
+    classify_email_read,
     email_topic_match_score,
     grounded_sender_candidates,
     rank_email_topic_messages,
 )
+
+
+def test_topic_search_normalises_contraction_and_trailing_mailbox_scope():
+    intent = classify_email_read("Check if I've got my wage slip in my emails.")
+
+    assert intent is not None
+    assert intent.kind == "topic_search"
+    assert intent.provider is None
+    assert intent.topic_query == "wage slip"
+
+
+def test_provider_continuation_preserves_durable_topic_goal():
+    intent = classify_email_read(
+        "Check Outlook",
+        focused_provider="google_gmail",
+        focused_kind="topic_search",
+        focused_topic="pension statement",
+    )
+
+    assert intent is not None
+    assert intent.kind == "topic_search"
+    assert intent.provider == "microsoft_outlook"
+    assert intent.topic_query == "pension statement"
 
 
 @pytest.mark.parametrize("query", ("wageslip", "wage slip", "payslip", "pay slip"))

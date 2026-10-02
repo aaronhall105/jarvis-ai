@@ -43,6 +43,7 @@ from app.email_assistant import EmailAssistantPolicyEngine
 from app.email_semantic_routing import (
     EmailCleanupClause,
     EmailCleanupIntent,
+    EmailReadIntent,
     classify_email_cleanup,
     classify_email_read,
     grounded_sender_candidates,
@@ -3935,7 +3936,26 @@ async def _try_handle_email_assistant(
         text,
         focused_provider=str((read_focus or {}).get("provider") or "") or None,
         focused_kind=str((read_focus or {}).get("query_kind") or "") or None,
+        focused_topic=str((read_focus or {}).get("topic_query") or "") or None,
     )
+    context_followup = classify_context_followup(text)
+    resume_topic_for_document = bool(
+        read_intent is None
+        and read_focus
+        and str(read_focus.get("query_kind") or "") == "topic_search"
+        and str(read_focus.get("topic_query") or "").strip()
+        and context_followup is not None
+        and (
+            context_followup.kind in {"open", "document_question"}
+            or context_followup.attribute == "value"
+        )
+    )
+    if resume_topic_for_document:
+        read_intent = EmailReadIntent(
+            kind="topic_document_followup",
+            provider=str((read_focus or {}).get("provider") or "") or None,
+            topic_query=str((read_focus or {}).get("topic_query") or "").strip(),
+        )
     if read_intent is not None and read_intent.kind in {"focused_sender", "previous"}:
         messages = [
             dict(item)
@@ -4132,11 +4152,20 @@ async def _try_handle_email_assistant(
             "intent": "email_mailbox_count",
         }
 
-    if read_intent is not None and read_intent.kind == "topic_search":
-        query = str(read_intent.topic_query or "").strip()
+    if read_intent is not None and read_intent.kind in {
+        "topic_search",
+        "topic_document_followup",
+    }:
+        query = str(read_intent.topic_query or (read_focus or {}).get("topic_query") or "").strip()
         accounts = await known_accounts()
         if read_intent.provider:
             accounts = [item for item in accounts if item.get("provider") == read_intent.provider]
+        if read_intent.kind == "topic_document_followup" and (read_focus or {}).get("account_id"):
+            accounts = [
+                item
+                for item in accounts
+                if item.get("account_id") == (read_focus or {}).get("account_id")
+            ]
         healthy_accounts = [item for item in accounts if item.get("healthy") is not False]
         unavailable_accounts = [item for item in accounts if item.get("healthy") is False]
         if not healthy_accounts:
@@ -4192,6 +4221,7 @@ async def _try_handle_email_assistant(
             }
 
         topic_parts: list[str] = []
+        document_source: tuple[str, str] | None = None
         for item in successful:
             provider = str(item["provider"])
             provider_name = "Outlook" if provider == "microsoft_outlook" else "Gmail"
@@ -4204,6 +4234,8 @@ async def _try_handle_email_assistant(
                 message["provider"] = provider
                 message["account_id"] = item["account_id"]
             if messages:
+                if document_source is None:
+                    document_source = (provider, str(messages[0].get("message_id") or ""))
                 sender, _ = _mail_sender(messages[0])
                 subject = _safe_mail_text(messages[0].get("subject"), limit=160) or "No subject"
                 received = _mail_time(messages[0])
@@ -4256,6 +4288,42 @@ async def _try_handle_email_assistant(
         unavailable_or_failed = list(dict.fromkeys([*unavailable_names, *failed_names]))
         if unavailable_or_failed:
             response += f" I couldn't search {' and '.join(unavailable_or_failed)} right now."
+        if read_intent.kind == "topic_document_followup":
+            if document_source is None or not document_source[1]:
+                return {
+                    "success": True,
+                    "turn_handled": True,
+                    "action_outcome": "not_found",
+                    "response": response,
+                    "intent": "email_topic_document_not_found",
+                }
+            source_resolution = await working_context.resolve(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                query=ReferenceQuery(
+                    object_types=("email_message",),
+                    provider=document_source[0],
+                    explicit_reference=document_source[1],
+                ),
+            )
+            if (
+                source_resolution.status is not ReferenceStatus.RESOLVED
+                or not source_resolution.objects
+            ):
+                return {
+                    "success": False,
+                    "turn_handled": True,
+                    "action_outcome": "failed",
+                    "response": "I found the mailbox result, but couldn't preserve its grounded reference.",
+                    "intent": "email_topic_document_grounding_failed",
+                }
+            return await _read_grounded_document(
+                actor=actor,
+                conversation_id=conversation_id,
+                source=source_resolution.objects[0],
+                question=text,
+                request_id=request_id,
+            )
         return {
             "success": True,
             "turn_handled": True,

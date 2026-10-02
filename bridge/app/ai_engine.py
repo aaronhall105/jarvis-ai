@@ -64,6 +64,7 @@ from app.user_context import UserContext
 from app.working_context import (
     ReferenceStatus,
     WorkingContextService,
+    classify_context_followup,
     reference_query,
 )
 
@@ -682,7 +683,8 @@ _UNBACKED_EXTERNAL_WRITE_CLAIM_PATTERN = re.compile(
 _UNBACKED_EXECUTABLE_OFFER_PATTERN = re.compile(
     r"\b(?:want me to|would you like me to|shall i)\b[^.!?\n]{0,160}"
     r"\b(?:send|notify|email|message|forward|reply|delete|trash|archive|restore|"
-    r"move|turn|switch|run|book|order|purchase|post|publish|create|change|update|"
+    r"move|turn|switch|run|search|read|fetch|retrieve|book|order|purchase|post|"
+    r"publish|create|change|update|"
     r"add|remove|save|check|list|show|open|close|start|stop|restart|sync|refresh|"
     r"force|enable|disable|clean|apply|confirm)\b",
     re.I,
@@ -714,8 +716,10 @@ _UNSUPPORTED_MAIL_APP_SYNC_PATTERN = re.compile(
 
 _UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN = re.compile(
     r"(?:^|[.!?]\s+)(?:i(?:'m| am|'ll| will)\s+)?"
-    r"(?:fetching|checking|retrieving|searching|looking\s+(?:it|that|this|them)\s+up)"
-    r"\b[^.!?\n]{0,180}(?:\bnow\b)?[.!?]*\s*$",
+    r"(?:(?:start(?:ing)?(?:\s+to)?\s+)?"
+    r"(?:fetch(?:ing)?|check(?:ing)?|retriev(?:e|ing)|search(?:ing)?|read(?:ing)?|"
+    r"look(?:ing)?\s+(?:it|that|this|them)\s+up)|start(?:ing)?)"
+    r"\b[^.!?\n]{0,240}(?:\b(?:now|starting)\b[^.!?\n]*)?[.!?]*\s*$",
     re.I,
 )
 
@@ -838,17 +842,54 @@ def unbacked_synchronous_read_promise_reply(
 ) -> str | None:
     """Reject progress prose when no synchronous provider read actually completed."""
 
-    if not _UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN.search(str(reply or "").strip()):
+    normalized_reply = str(reply or "").replace("’", "'").strip()
+    if not _UNBACKED_SYNCHRONOUS_READ_PROMISE_PATTERN.search(normalized_reply):
         return None
+    lowered = normalized_reply.casefold()
+    required_tools = (
+        {"microsoft_email_integration"}
+        if "outlook" in lowered or "microsoft" in lowered
+        else {"google_integration"}
+        if "gmail" in lowered or "google mail" in lowered
+        else {"google_integration", "microsoft_email_integration", "web_search", "web_fetch"}
+    )
     provider_read_completed = any(
-        call.get("tool") in {"google_integration", "microsoft_email_integration"}
+        call.get("tool") in required_tools
         and isinstance(call.get("result"), Mapping)
         and call["result"].get("success") is True
         for call in completed_calls
     )
-    if provider_read_completed:
+    durable_work_started = any(
+        isinstance(call.get("result"), Mapping)
+        and (
+            call["result"].get("plan_created") is True
+            or bool(call["result"].get("job_id"))
+            or bool(call["result"].get("task_id"))
+        )
+        for call in completed_calls
+    )
+    if provider_read_completed or durable_work_started:
         return None
     return "I haven't completed that provider lookup, so I can't give you a mailbox result yet."
+
+
+def execution_safe_stream_callback(
+    callback: Callable[[str], Awaitable[None]] | None,
+    *,
+    user_text: str,
+    history: Sequence[Mapping[str, str]],
+    external_runtime: Any | None,
+) -> Callable[[str], Awaitable[None]] | None:
+    """Withhold model prose until grounded read/external claims are validated."""
+
+    if callback is None:
+        return None
+    external_request = bool(
+        external_runtime is not None and external_runtime.is_external_request(user_text, history)
+    )
+    if external_request or classify_context_followup(user_text) is not None:
+        return None
+    return callback
 
 
 def verified_monitor_creation_reply(
@@ -7556,6 +7597,16 @@ class AIEngine:
         total_cached_tokens = 0
         final_reply = ""
         last_response: Any | None = None
+        streamed_live = False
+        # External/provider turns must be validated against actual tool or task
+        # evidence before any model prose reaches realtime clients. Otherwise a
+        # fluent future-tense promise can be spoken before the final guards run.
+        safe_text_delta = execution_safe_stream_callback(
+            on_text_delta,
+            user_text=user_text,
+            history=history,
+            external_runtime=external_runtime,
+        )
 
         for _ in range(request_max_tool_rounds + 1):
             try:
@@ -7569,13 +7620,16 @@ class AIEngine:
                             reasoning_configuration_item(executive_decision.reasoning_effort),
                             *working_input,
                         ]
+                round_text_delta = (
+                    safe_text_delta if not tool_definitions and tool_rounds == 0 else None
+                )
+                if round_text_delta is not None:
+                    streamed_live = True
                 response = await self._create_response(
                     input_items=response_input,
                     tool_definitions=tool_definitions,
                     actor=actor,
-                    on_text_delta=(
-                        on_text_delta if not tool_definitions and tool_rounds == 0 else None
-                    ),
+                    on_text_delta=round_text_delta,
                     model=(executive_decision.model if is_executive_round else self.model),
                     reasoning_effort=(response_reasoning),
                     instructions=(
@@ -8227,7 +8281,7 @@ class AIEngine:
             "model": returned_model,
             "intent": decision.intent.value,
             "deterministic": False,
-            "streamed": bool(on_text_delta is not None and not tool_definitions),
+            "streamed": streamed_live,
             "tool_called": bool(completed_calls),
             "tool_rounds": tool_rounds,
             "calls": completed_calls,

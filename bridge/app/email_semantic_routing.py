@@ -506,11 +506,17 @@ def classify_email_read(
     *,
     focused_provider: str | None = None,
     focused_kind: str | None = None,
+    focused_topic: str | None = None,
 ) -> EmailReadIntent | None:
     """Classify explicit mailbox reads and grounded conversational follow-ups."""
 
     raw = " ".join(str(text or "")[:4_096].strip().split())
     command = raw.casefold().strip(" .?!")
+    # Normalise ordinary English contractions before applying the provider-
+    # neutral intent grammar. This is linguistic normalisation, not a topic or
+    # provider special case.
+    semantic_command = re.sub(r"\b(i|we)[’']ve\b", r"\1 have", command)
+    semantic_command = re.sub(r"\b(i|we)[’']m\b", r"\1 am", semantic_command)
     provider = provider_from_text(command)
     email_domain = provider is not None or any(
         token in f" {command} "
@@ -535,7 +541,50 @@ def classify_email_read(
         for suffix in ("", " account", " one", " ones")
     }
     if command in provider_switches and focused_kind:
-        return EmailReadIntent(kind=focused_kind, provider=provider or focused_provider)
+        return EmailReadIntent(
+            kind=focused_kind,
+            provider=provider or focused_provider,
+            topic_query=focused_topic if focused_kind == "topic_search" else None,
+        )
+
+    # A provider-only continuation changes the provider constraint while
+    # preserving the structured read goal. Do not recover the goal from prior
+    # assistant prose.
+    provider_only_words = set(re.findall(r"[a-z0-9]+", semantic_command))
+    provider_constraint_words = {
+        "check",
+        "search",
+        "look",
+        "in",
+        "on",
+        "my",
+        "the",
+        "email",
+        "emails",
+        "mail",
+        "mailbox",
+        "inbox",
+        "outlook",
+        "microsoft",
+        "gmail",
+        "google",
+        "instead",
+        "too",
+        "also",
+        "now",
+    }
+    if (
+        provider is not None
+        and focused_kind == "topic_search"
+        and focused_topic
+        and provider_only_words
+        and provider_only_words <= provider_constraint_words
+    ):
+        return EmailReadIntent(
+            kind="topic_search",
+            provider=provider,
+            topic_query=focused_topic,
+        )
 
     provider_lists = {
         f"show me {article}{provider} {noun}"
@@ -622,10 +671,29 @@ def classify_email_read(
             r"(?:about|containing|with)\s+(?P<query>.+)$",
         )
         for pattern in topic_patterns:
-            match = re.search(pattern, command, re.I)
+            match = re.search(pattern, semantic_command, re.I)
             if match is not None:
                 topic_query = match.group("query").strip(" .?!'\"")
                 break
+    # Remove a trailing mailbox location with bounded token parsing. Avoid a
+    # nested-whitespace regex here because this value originates with the user.
+    topic_words = topic_query.split()
+    if topic_words and topic_words[-1].casefold() in {
+        "email",
+        "emails",
+        "mail",
+        "mailbox",
+        "mailboxes",
+        "inbox",
+        "inboxes",
+    }:
+        scope_index = len(topic_words) - 2
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"my", "our", "the"}:
+            scope_index -= 1
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"all", "both"}:
+            scope_index -= 1
+        if scope_index >= 0 and topic_words[scope_index].casefold() in {"in", "from", "across"}:
+            topic_query = " ".join(topic_words[:scope_index])
     topic_query = re.sub(
         r"^(?:an?|any|the|my)\s+",
         "",
