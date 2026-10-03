@@ -14,6 +14,7 @@ import re
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -84,6 +85,21 @@ _NUMBER_WORDS = {
     "eight": 8,
     "nine": 9,
     "ten": 10,
+}
+_CURRENCY_SYMBOLS = {"GBP": "£", "USD": "$", "EUR": "€"}
+_CURRENCY_MARKERS = {"£": "GBP", "$": "USD", "€": "EUR"}
+_MONEY_FIELDS = {"net_pay", "gross_pay", "income_tax", "monetary_amount"}
+_DOCUMENT_FIELDS = {*_MONEY_FIELDS, "measurement", "other"}
+_VALUE_KINDS = {"money", "number", "text"}
+_EVIDENCE_UNITS = {
+    "day": "days",
+    "days": "days",
+    "hour": "hours",
+    "hours": "hours",
+    "minute": "minutes",
+    "minutes": "minutes",
+    "page": "pages",
+    "pages": "pages",
 }
 
 
@@ -1324,6 +1340,8 @@ class WorkingContextService:
                             "unit": item.metadata.get(f"{metric_name}_unit")
                             or item.metadata.get("currency")
                             or item.metadata.get("unit"),
+                            "value_kind": item.metadata.get(f"{metric_name}_value_kind")
+                            or item.metadata.get("value_kind"),
                         }
                     )
         evidence_states = {item.evidence_status for item in objects}
@@ -1393,8 +1411,268 @@ class WorkingContextService:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MoneyValue:
+    """A grounded monetary amount with optional ISO currency evidence."""
+
+    amount: Decimal
+    currency: str | None = None
+
+    def as_dict(self) -> dict[str, str | None]:
+        return {"amount": format(self.amount, "f"), "currency": self.currency}
+
+
+def _decimal_value(value: Any) -> Decimal | None:
+    text = str(value or "").strip()
+    negative_parentheses = text.startswith("(") and text.endswith(")")
+    match = re.search(r"-?\d[\d,]*(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        amount = Decimal(match.group(0).replace(",", ""))
+    except InvalidOperation:
+        return None
+    return -amount if negative_parentheses and amount > 0 else amount
+
+
+def _currency_codes(text: str) -> set[str]:
+    codes = {code for marker, code in _CURRENCY_MARKERS.items() if marker in text}
+    for code in _CURRENCY_SYMBOLS:
+        if re.search(rf"(?i)\b{re.escape(code)}\b", text):
+            codes.add(code)
+    return codes
+
+
+def _grounded_currency(selection: Mapping[str, Any], document: Mapping[str, Any]) -> str | None:
+    local_evidence = " ".join(str(selection.get(key) or "") for key in ("value", "evidence_quote"))
+    local_codes = _currency_codes(local_evidence)
+    if local_codes:
+        return next(iter(local_codes)) if len(local_codes) == 1 else None
+
+    metadata_codes = {
+        str(document.get(key) or "").strip().upper()
+        for key in ("currency", "currency_code")
+        if str(document.get(key) or "").strip().upper() in _CURRENCY_SYMBOLS
+    }
+    if metadata_codes:
+        return next(iter(metadata_codes)) if len(metadata_codes) == 1 else None
+
+    chunks = "\n".join(
+        str(item.get("text") or "")
+        for item in document.get("text_chunks") or ()
+        if isinstance(item, Mapping)
+    )
+    document_codes = _currency_codes(chunks or str(document.get("text_content") or ""))
+    if len(document_codes) == 1:
+        return next(iter(document_codes))
+    return None
+
+
+def _semantic_document_field(selection: Mapping[str, Any], question: str) -> str:
+    supplied = re.sub(
+        r"[^a-z0-9]+", "_", str(selection.get("semantic_field") or "").casefold()
+    ).strip("_")
+    if supplied in _DOCUMENT_FIELDS:
+        return supplied
+
+    label_tokens = set(re.findall(r"[a-z0-9]+", str(selection.get("label") or "").casefold()))
+    question_tokens = set(re.findall(r"[a-z0-9]+", question.casefold()))
+    tokens = label_tokens | question_tokens
+    if "net" in tokens or {"take", "home"} <= tokens:
+        return "net_pay"
+    if "gross" in tokens:
+        return "gross_pay"
+    if "tax" in tokens or "paye" in tokens:
+        return "income_tax"
+    if tokens & set(_EVIDENCE_UNITS):
+        return "measurement"
+    return "other"
+
+
+def _format_decimal(value: Decimal) -> str:
+    rendered = format(value.normalize(), "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered
+
+
+def format_money(value: Decimal | int | float | str, currency: str | None) -> str:
+    """Format a monetary value without inventing a missing currency."""
+
+    amount = value if isinstance(value, Decimal) else Decimal(str(value))
+    quantized = amount.quantize(Decimal("0.01"))
+    absolute = f"{abs(quantized):,.2f}"
+    sign = "-" if quantized < 0 else ""
+    symbol = _CURRENCY_SYMBOLS.get(str(currency or "").upper(), "")
+    if symbol:
+        return f"{sign}{symbol}{absolute}"
+    return f"{sign}{absolute}"
+
+
+def _document_unit(selection: Mapping[str, Any]) -> str | None:
+    evidence = " ".join(
+        str(selection.get(key) or "") for key in ("label", "value", "evidence_quote")
+    ).casefold()
+    tokens = re.findall(r"[a-z]+", evidence)
+    for token in tokens:
+        if token in _EVIDENCE_UNITS:
+            return _EVIDENCE_UNITS[token]
+    return None
+
+
+def _human_label(label: str) -> str:
+    words = " ".join(label.replace("_", " ").split())
+    if not words:
+        return "The value"
+    return words if not words.isupper() else words.title()
+
+
+def _natural_topic_label(topic: str, subject: str) -> str:
+    """Prefer grounded human word boundaries when subject and query are equivalent."""
+
+    topic_text = " ".join(topic.split())
+    subject_text = " ".join(subject.split())
+    compact_topic = re.sub(r"[^a-z0-9]+", "", topic_text.casefold())
+    compact_subject = re.sub(r"[^a-z0-9]+", "", subject_text.casefold())
+    if compact_topic and compact_topic == compact_subject and " " in subject_text:
+        return subject_text.casefold()
+    return topic_text
+
+
 class ResultIntelligence:
     """Deterministic answer synthesis from grounded context evidence."""
+
+    @staticmethod
+    def document_fact(
+        *,
+        question: str,
+        selection: Mapping[str, Any],
+        document: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Project exact document evidence into a natural structured fact."""
+
+        label = " ".join(str(selection.get("label") or "The value").split()).rstrip(":")
+        raw_value = " ".join(str(selection.get("value") or "").split())
+        semantic_field = _semantic_document_field(selection, question)
+        currency = _grounded_currency(selection, document)
+        amount = _decimal_value(raw_value)
+        supplied_kind = str(selection.get("value_kind") or "").strip().casefold()
+        if supplied_kind not in _VALUE_KINDS:
+            supplied_kind = ""
+        value_kind = supplied_kind or (
+            "money"
+            if currency or semantic_field in _MONEY_FIELDS
+            else "number"
+            if amount is not None
+            else "text"
+        )
+        unit = None if value_kind == "money" else _document_unit(selection)
+        if amount is not None and value_kind == "money":
+            rendered_value = format_money(amount, currency)
+        elif amount is not None:
+            rendered_value = _format_decimal(amount)
+            if unit:
+                rendered_value += f" {unit}"
+        else:
+            rendered_value = raw_value
+
+        preserve_source_label = bool(
+            re.search(r"(?i)\b(?:what does|what did|read)\b.*\b(?:say|show)\b", question)
+        )
+        if preserve_source_label:
+            response = f"{label} is {rendered_value}."
+        elif semantic_field == "net_pay":
+            response = f"Your net pay was {rendered_value}."
+        elif semantic_field == "gross_pay":
+            response = f"Your gross pay was {rendered_value}."
+        elif semantic_field == "income_tax":
+            response = f"You paid {rendered_value} in Income Tax."
+        else:
+            response = f"{_human_label(label)} was {rendered_value}."
+
+        metric = semantic_field
+        if metric == "other":
+            metric = re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_")[:80] or "value"
+        result: dict[str, Any] = {
+            "response": response,
+            "semantic_field": semantic_field,
+            "source_label": label,
+            "raw_value": raw_value,
+            "formatted_value": rendered_value,
+            "value_kind": value_kind,
+            "metric": metric,
+            "evidence_quote": selection.get("evidence_quote"),
+            "evidence_status": "verified",
+        }
+        if amount is not None:
+            result["numeric_value"] = float(amount)
+        if currency:
+            result["currency"] = currency
+        if unit:
+            result["unit"] = unit
+        if value_kind == "money" and amount is not None:
+            result["money"] = MoneyValue(amount=amount, currency=currency).as_dict()
+        return result
+
+    @staticmethod
+    def mailbox_topic_search(
+        *,
+        topic: str,
+        matches: Sequence[Mapping[str, Any]],
+        no_matches: Sequence[Mapping[str, Any]],
+        unavailable: Sequence[str] = (),
+    ) -> str:
+        """Collapse provider search mechanics into a goal-first conclusion."""
+
+        if matches:
+            match = max(
+                matches,
+                key=lambda item: (
+                    _parse_time(item.get("received_at"))
+                    or datetime.min.replace(tzinfo=timezone.utc)
+                ),
+            )
+            provider = _normalise_text(match.get("provider_name")) or "your mailbox"
+            sender = _normalise_text(match.get("sender"))
+            date = _normalise_text(match.get("date"))
+            natural_topic = (
+                _natural_topic_label(_normalise_text(topic), _normalise_text(match.get("subject")))
+                or "matching message"
+            )
+            if natural_topic.casefold().startswith("my "):
+                natural_topic = "your " + natural_topic[3:]
+            elif not natural_topic.casefold().startswith(("your ", "a ", "an ", "the ")):
+                natural_topic = "your latest " + natural_topic
+            response = f"Yes — I found {natural_topic} in {provider}."
+            details = [
+                part
+                for part in (f"from {sender}" if sender else "", f"dated {date}" if date else "")
+                if part
+            ]
+            if details:
+                response += " It’s " + ", ".join(details) + "."
+            if unavailable:
+                response += f" I couldn’t check {' and '.join(dict.fromkeys(unavailable))}."
+            return response
+
+        parts: list[str] = []
+        for item in no_matches:
+            provider = _normalise_text(item.get("provider_name")) or "that mailbox"
+            checked = item.get("checked")
+            bounded = bool(item.get("bounded"))
+            if bounded:
+                scope = (
+                    f"the {checked} recent {provider} Inbox messages I checked"
+                    if isinstance(checked, int) and checked > 0
+                    else f"the recent {provider} Inbox messages I checked"
+                )
+                parts.append(f"I didn’t find one in {scope}")
+            else:
+                parts.append(f"I didn’t find one in {provider}")
+        response = ". ".join(parts) + ("." if parts else "I didn’t find a matching message.")
+        if unavailable:
+            response += f" I couldn’t check {' and '.join(dict.fromkeys(unavailable))}."
+        return response
 
     @staticmethod
     def answer_attribute(*, attribute: str, resolution: ReferenceResolution) -> str | None:
@@ -1435,8 +1713,12 @@ class ResultIntelligence:
                     or metadata.get("currency")
                     or metadata.get("unit")
                 )
-                rendered_unit = f" {unit}" if unit else ""
-                return f"{item.display_name} is {value:g}{rendered_unit}."
+                value_kind = _normalise_text(metadata.get(f"{metric}_value_kind"))
+                if value_kind == "money" and isinstance(value, (int, float)):
+                    rendered = format_money(value, unit or None)
+                else:
+                    rendered = f"{value:g}{(' ' + unit) if unit else ''}"
+                return f"{item.display_name} is {rendered}."
             return None
         attribute_value = metadata.get(attribute)
         if isinstance(attribute_value, (str, int, float)) and str(attribute_value).strip():
@@ -1458,10 +1740,32 @@ class ResultIntelligence:
             difference = first_value - second_value
             first_name = by_ref.get(str(first.get("reference_id")))
             second_name = by_ref.get(str(second.get("reference_id")))
-            unit = _normalise_text(first.get("unit"))
+            raw_first_unit = _normalise_text(first.get("unit"))
+            raw_second_unit = _normalise_text(second.get("unit"))
+            first_unit = raw_first_unit.upper()
+            second_unit = raw_second_unit.upper()
+            first_money = first_unit in _CURRENCY_SYMBOLS or first.get("value_kind") == "money"
+            second_money = second_unit in _CURRENCY_SYMBOLS or second.get("value_kind") == "money"
+            if (first_money or second_money) and (
+                not first_unit or not second_unit or first_unit != second_unit
+            ):
+                return (
+                    "I can’t compare those monetary amounts directly because their currencies "
+                    "differ or one currency is unverified."
+                )
+            if first_money and first_unit:
+                rendered_difference = format_money(abs(Decimal(str(difference))), first_unit)
+            else:
+                rendered_difference = (
+                    f"{abs(difference):g}{(' ' + raw_first_unit) if raw_first_unit else ''}"
+                )
+            if difference == 0:
+                return "Those grounded values are the same."
+            if first_money:
+                return f"{rendered_difference} {'more' if difference > 0 else 'less'}."
             return (
                 f"{first_name.display_name if first_name else 'The first'} is "
-                f"{abs(difference):g}{(' ' + unit) if unit else ''} "
+                f"{rendered_difference} "
                 f"{'more' if difference > 0 else 'less'} than "
                 f"{second_name.display_name if second_name else 'the second'}."
             )
@@ -1479,9 +1783,12 @@ class ResultIntelligence:
                 if item is None:
                     continue
                 unit = _normalise_text(value.get("unit"))
-                rendered.append(
-                    f"{item.display_name} was {value.get('value')}" + (f" {unit}" if unit else "")
-                )
+                raw_value = value.get("value")
+                if value.get("value_kind") == "money" and isinstance(raw_value, (int, float)):
+                    shown = format_money(raw_value, unit or None)
+                else:
+                    shown = f"{raw_value}" + (f" {unit}" if unit else "")
+                rendered.append(f"{item.display_name} was {shown}")
             if len(rendered) >= 2:
                 return "Because " + " while ".join(rendered) + "."
         names = [item.display_name for item in objects]
@@ -1519,6 +1826,7 @@ __all__ = [
     "ContextObject",
     "ContextFollowUp",
     "EvidenceStatus",
+    "MoneyValue",
     "ReferenceQuery",
     "ReferenceResolution",
     "ReferenceStatus",
@@ -1531,6 +1839,7 @@ __all__ = [
     "model_safe_context",
     "classify_context_followup",
     "common_numeric_metric",
+    "format_money",
     "principal_from_conversation",
     "reference_query",
     "tool_call_projection",

@@ -4829,7 +4829,11 @@ class AIEngine:
             "section, an unqualified question refers to the current document period; select the "
             "cumulative value only when the question asks for it. If the answer is still not "
             "explicit and unambiguous, return found=false. When found, copy label, value, and "
-            "evidence_quote verbatim from one supplied chunk."
+            "evidence_quote verbatim from one supplied chunk. Classify the selected value with "
+            "one semantic_field and value_kind from the supplied schema. Set currency only when "
+            "the same evidence quote explicitly contains that currency's symbol or ISO code; "
+            "otherwise use an empty string. Never infer currency from the user, locale, filename, "
+            "provider, or document topic."
         )
         request: dict[str, Any] = {
             "model": self.model,
@@ -4855,8 +4859,35 @@ class AIEngine:
                             "label": {"type": "string"},
                             "value": {"type": "string"},
                             "evidence_quote": {"type": "string"},
+                            "semantic_field": {
+                                "type": "string",
+                                "enum": [
+                                    "net_pay",
+                                    "gross_pay",
+                                    "income_tax",
+                                    "monetary_amount",
+                                    "measurement",
+                                    "other",
+                                ],
+                            },
+                            "value_kind": {
+                                "type": "string",
+                                "enum": ["money", "number", "text"],
+                            },
+                            "currency": {
+                                "type": "string",
+                                "enum": ["", "GBP", "USD", "EUR"],
+                            },
                         },
-                        "required": ["found", "label", "value", "evidence_quote"],
+                        "required": [
+                            "found",
+                            "label",
+                            "value",
+                            "evidence_quote",
+                            "semantic_field",
+                            "value_kind",
+                            "currency",
+                        ],
                         "additionalProperties": False,
                     },
                 }
