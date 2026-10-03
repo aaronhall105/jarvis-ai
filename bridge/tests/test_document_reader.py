@@ -334,3 +334,40 @@ async def test_document_evidence_selector_does_not_retry_other_incomplete_result
 
     assert result is None
     create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_document_evidence_selector_defines_unqualified_temporal_scope() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.model = "synthetic-model"
+    selected = {
+        "found": True,
+        "label": "Service fee",
+        "value": "GBP 12.00",
+        "evidence_quote": "Service fee GBP 12.00",
+    }
+    create = AsyncMock(
+        return_value=SimpleNamespace(status="completed", output_text=json.dumps(selected))
+    )
+    engine.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+
+    result = await engine.select_document_evidence(
+        question="How much was the service fee?",
+        filename="statement.pdf",
+        text_chunks=[
+            {
+                "page": 1,
+                "chunk_index": 1,
+                "text": (
+                    "Current period\nService fee GBP 12.00\nYear to date\nService fee GBP 44.00"
+                ),
+            }
+        ],
+    )
+
+    assert result == selected
+    request = create.await_args.kwargs
+    assert (
+        "an unqualified question refers to the current document period" in request["instructions"]
+    )
+    assert "Year to date" in request["input"]
