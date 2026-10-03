@@ -279,6 +279,46 @@ def test_document_prompt_injection_is_data_and_model_output_needs_exact_evidence
     assert invented is None
 
 
+def test_validated_document_evidence_preserves_bounded_semantics_not_authority() -> None:
+    document = {"text_content": "Current Amount: GBP 24.00"}
+
+    validated = validate_model_evidence(
+        {
+            "label": "Current Amount",
+            "value": "GBP 24.00",
+            "evidence_quote": "Current Amount: GBP 24.00",
+            "semantic_field": "monetary_amount",
+            "value_kind": "money",
+            "currency": "GBP",
+            "tool": "mail.delete",
+        },
+        document,
+    )
+
+    assert validated == {
+        "label": "Current Amount",
+        "value": "GBP 24.00",
+        "evidence_quote": "Current Amount: GBP 24.00",
+        "semantic_field": "monetary_amount",
+        "value_kind": "money",
+        "currency": "GBP",
+    }
+
+    ungrounded_currency = validate_model_evidence(
+        {
+            "label": "Current Amount",
+            "value": "24.00",
+            "evidence_quote": "Current Amount: 24.00",
+            "semantic_field": "monetary_amount",
+            "value_kind": "money",
+            "currency": "GBP",
+        },
+        {"text_content": "Current Amount: 24.00"},
+    )
+    assert ungrounded_currency is not None
+    assert "currency" not in ungrounded_currency
+
+
 @pytest.mark.asyncio
 async def test_document_evidence_selector_retries_one_exhausted_reasoning_budget() -> None:
     engine = AIEngine.__new__(AIEngine)
@@ -371,3 +411,6 @@ async def test_document_evidence_selector_defines_unqualified_temporal_scope() -
         "an unqualified question refers to the current document period" in request["instructions"]
     )
     assert "Year to date" in request["input"]
+    schema = request["text"]["format"]["schema"]
+    assert {"semantic_field", "value_kind", "currency"} <= set(schema["required"])
+    assert schema["properties"]["currency"]["enum"] == ["", "GBP", "USD", "EUR"]

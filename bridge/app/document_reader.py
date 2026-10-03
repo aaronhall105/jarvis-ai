@@ -594,4 +594,31 @@ def validate_model_evidence(
         or (label and label not in quote)
     ):
         return None
-    return {"label": label[:120], "value": value[:240], "evidence_quote": quote[:500]}
+    validated: dict[str, Any] = {
+        "label": label[:120],
+        "value": value[:240],
+        "evidence_quote": quote[:500],
+    }
+    semantic_field = str(selection.get("semantic_field") or "").strip().casefold()
+    if semantic_field in {
+        "net_pay",
+        "gross_pay",
+        "income_tax",
+        "monetary_amount",
+        "measurement",
+        "other",
+    }:
+        validated["semantic_field"] = semantic_field
+    value_kind = str(selection.get("value_kind") or "").strip().casefold()
+    if value_kind in {"money", "number", "text"}:
+        validated["value_kind"] = value_kind
+    currency = str(selection.get("currency") or "").strip().upper()
+    currency_markers = {
+        "GBP": ("£", r"\bGBP\b"),
+        "USD": ("$", r"\bUSD\b"),
+        "EUR": ("€", r"\bEUR\b"),
+    }
+    marker = currency_markers.get(currency)
+    if marker and (marker[0] in quote or re.search(marker[1], quote, flags=re.IGNORECASE)):
+        validated["currency"] = currency
+    return validated

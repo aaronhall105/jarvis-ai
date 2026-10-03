@@ -1797,9 +1797,8 @@ async def test_cross_mailbox_topic_read_continues_with_healthy_provider_without_
 
     assert result is not None and result["success"] is True
     assert result["intent"] == "email_topic_search"
-    assert "Yes — I found ‘September wageslip’ in Outlook" in str(result["response"])
+    assert "Yes — I found your latest wageslip in Outlook" in str(result["response"])
     assert "It’s from Payroll" in str(result["response"])
-    assert "September wageslip" in str(result["response"])
     assert "Gmail" in str(result["response"])
     assert "shall I" not in str(result["response"])
     assert "if you'd like" not in str(result["response"])
@@ -1859,6 +1858,66 @@ async def test_physical_wageslip_regression_never_reaches_generic_model_or_web(m
         "google_gmail",
         "microsoft_outlook",
     ]
+
+
+@pytest.mark.asyncio
+async def test_multi_provider_topic_search_leads_with_verified_match_not_search_mechanics(
+    monkeypatch,
+) -> None:
+    accounts = [
+        {"provider": "google_gmail", "account_id": "gmail-1", "healthy": True},
+        {
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "healthy": True,
+        },
+    ]
+    engine = bulk_engine(accounts=accounts)
+
+    async def search(**kwargs):
+        if kwargs["provider"] == "google_gmail":
+            return {
+                "success": True,
+                "provider": "google_gmail",
+                "account_id": "gmail-1",
+                "messages": [],
+                "count": 0,
+                "search_strategy": "bounded_metadata_fallback",
+                "searched_metadata_count": 25,
+            }
+        return {
+            "success": True,
+            "provider": "microsoft_outlook",
+            "account_id": "outlook-1",
+            "messages": [
+                {
+                    "message_id": "message-1",
+                    "subject": "WAGE SLIP",
+                    "sender_name": "Joseph Scott",
+                    "received_at": "2026-09-24T09:00:00Z",
+                }
+            ],
+            "count": 7,
+            "search_strategy": "provider_native",
+        }
+
+    engine.search_mailbox.side_effect = search
+    monkeypatch.setattr(main, "email_policies", engine)
+
+    result = await main._try_handle_email_assistant(
+        "Check if I've got my wage slip in my emails.",
+        actor=actor(),
+        conversation_id="usr:aaron:natural-topic-result",
+        request_id="natural-topic-result-1",
+    )
+
+    assert result is not None
+    assert result["response"] == (
+        "Yes — I found your latest wage slip in Outlook. "
+        "It’s from Joseph Scott, dated 24 September."
+    )
+    assert "25 recent Gmail" not in str(result["response"])
+    assert "7 matching messages" not in str(result["response"])
 
 
 @pytest.mark.asyncio
@@ -2043,7 +2102,7 @@ async def test_wageslip_sender_clarification_yes_continues_durable_search(
     )
 
     assert first["intent"] == "email_topic_search"
-    assert "WAGE SLIP" in str(first["response"])
+    assert "your latest wage slip" in str(first["response"])
     assert second["intent"] == "email_topic_sender_clarification"
     assert second["response"] == "Do you mean Joseph Scott?"
     assert waiting is not None

@@ -444,7 +444,7 @@ async def test_temporal_comparison_uses_verified_document_metrics(
         "Is that more than last time?", actor=_actor(), conversation_id=conversation
     )
 
-    assert comparison and "150 GBP more" in str(comparison["response"])
+    assert comparison and comparison["response"] == "£150.00 more."
 
 
 @pytest.mark.asyncio
@@ -586,9 +586,9 @@ async def test_grounded_email_attachment_answers_generic_document_questions(
         "What was my gross pay?", actor=_actor(), conversation_id=conversation
     )
 
-    assert net and net["response"] == "Net Pay was £2400."
-    assert tax and tax["response"] == "Tax was £400."
-    assert gross and gross["response"] == "Gross Pay was £3000."
+    assert net and net["response"] == "Your net pay was £2,400.00."
+    assert tax and tax["response"] == "You paid £400.00 in Income Tax."
+    assert gross and gross["response"] == "Your gross pay was £3,000.00."
     assert all(call.args[0] == "document.read" for call in execute.await_args_list)
     context = await service.get(principal_id="aaron", conversation_id=conversation)
     documents = [item for item in context["objects"] if item["object_type"] == "document"]
@@ -672,7 +672,7 @@ async def test_document_question_resumes_durable_topic_search_then_reads_attachm
         request_id="document-search-resumption-1",
     )
 
-    assert result and result["response"] == "Net Pay was £2400."
+    assert result and result["response"] == "Your net pay was £2,400.00."
     search_mailbox.assert_awaited_once()
     assert search_mailbox.await_args.kwargs["provider"] == "microsoft_outlook"
     assert search_mailbox.await_args.kwargs["topic_query"] == "pay statement"
@@ -752,5 +752,5 @@ async def test_document_context_survives_restart_and_never_grants_delete_authori
         "Delete it", actor=_actor(), conversation_id=conversation
     )
 
-    assert after_restart and after_restart["response"] == "Net Pay was £2400."
+    assert after_restart and after_restart["response"] == "Your net pay was £2,400.00."
     assert delete is None

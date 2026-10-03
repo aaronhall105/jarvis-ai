@@ -1455,26 +1455,31 @@ pending_interactions.register_handler(
 )
 
 
-def _document_metric_metadata(label: str, value: str) -> dict[str, object]:
-    """Project a verified exact document value into generic comparison metadata."""
+def _document_metric_metadata(fact: Mapping[str, Any]) -> dict[str, object]:
+    """Project a verified structured document fact into comparison metadata."""
 
-    metric = re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_")[:80]
+    metric = str(fact.get("metric") or "").strip()
     if not metric:
         return {}
-    match = re.search(r"(?P<currency>£|\$|€)?\s*(-?\d[\d,]*(?:\.\d+)?)", value)
-    if not match:
-        return {"facts": {metric: value}}
-    number = float(match.group(2).replace(",", ""))
-    rendered: int | float = int(number) if number.is_integer() else number
-    unit = {"£": "GBP", "$": "USD", "€": "EUR"}.get(match.group("currency") or "")
     output: dict[str, object] = {
-        metric: rendered,
+        "facts": {metric: fact.get("raw_value")},
         "primary_metric": metric,
-        "facts": {metric: value},
+        "semantic_field": fact.get("semantic_field"),
+        "value_kind": fact.get("value_kind"),
     }
+    numeric = fact.get("numeric_value")
+    if isinstance(numeric, (int, float)):
+        output[metric] = numeric
+        output[f"{metric}_value_kind"] = str(fact.get("value_kind") or "number")
+    unit = str(fact.get("currency") or fact.get("unit") or "").strip()
     if unit:
-        output["currency"] = unit
         output[f"{metric}_unit"] = unit
+        if fact.get("currency"):
+            output["currency"] = unit
+        else:
+            output["unit"] = unit
+    if isinstance(fact.get("money"), Mapping):
+        output["money"] = dict(fact["money"])
     return output
 
 
@@ -1666,11 +1671,15 @@ async def _read_grounded_document(
         immutable=True,
     )
     selection = await _answer_from_document(question=question, document=raw_document)
+    fact: dict[str, Any] | None = None
     fact_metadata: dict[str, object] = {}
     if selection is not None:
-        fact_metadata = _document_metric_metadata(
-            str(selection.get("label") or "value"), str(selection.get("value") or "")
+        fact = ResultIntelligence.document_fact(
+            question=question,
+            selection=selection,
+            document=raw_document,
         )
+        fact_metadata = _document_metric_metadata(fact)
     document_object = make_context_object(
         object_type="document",
         display_name=str(raw_document.get("filename") or attachment_object.display_name),
@@ -1695,7 +1704,7 @@ async def _read_grounded_document(
         immutable=True,
     )
     derived: list[Mapping[str, Any]] = []
-    if selection is not None:
+    if selection is not None and fact is not None:
         derived.append(
             {
                 "result_id": "document_fact:" + str(uuid.uuid4()),
@@ -1703,6 +1712,12 @@ async def _read_grounded_document(
                 "grounded_inputs": [document_object.reference_id],
                 "label": selection.get("label"),
                 "value": selection.get("value"),
+                "semantic_field": fact.get("semantic_field"),
+                "value_kind": fact.get("value_kind"),
+                "numeric_value": fact.get("numeric_value"),
+                "currency": fact.get("currency"),
+                "unit": fact.get("unit"),
+                "money": fact.get("money"),
                 "evidence_quote": selection.get("evidence_quote"),
                 "evidence_status": "verified",
                 "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -1723,10 +1738,8 @@ async def _read_grounded_document(
         focus_refs=[document_object.reference_id],
         derived_results=derived,
     )
-    if selection is not None:
-        label = str(selection.get("label") or "The value").strip().rstrip(":")
-        value = str(selection.get("value") or "").strip()
-        response = f"{label} was {value}."
+    if selection is not None and fact is not None:
+        response = str(fact["response"])
     elif {"open", "read"} & set(re.findall(r"[a-z0-9]+", question.casefold())):
         pages = raw_document.get("page_count")
         page_text = f" ({pages} page{'s' if pages != 1 else ''})" if pages else ""
@@ -4220,7 +4233,8 @@ async def _try_handle_email_assistant(
                 "intent": "email_topic_search_failed",
             }
 
-        topic_parts: list[str] = []
+        topic_matches: list[dict[str, Any]] = []
+        topic_no_matches: list[dict[str, Any]] = []
         document_source: tuple[str, str] | None = None
         for item in successful:
             provider = str(item["provider"])
@@ -4239,29 +4253,26 @@ async def _try_handle_email_assistant(
                 sender, _ = _mail_sender(messages[0])
                 subject = _safe_mail_text(messages[0].get("subject"), limit=160) or "No subject"
                 received = _mail_time(messages[0])
-                date_detail = f", dated {received.split(' at ', 1)[0]}" if received else ""
+                display_date = received.split(" at ", 1)[0] if received else ""
                 count = int(item.get("count") or len(messages))
-                if count == 1:
-                    topic_parts.append(
-                        f"Yes — I found ‘{subject}’ in {provider_name}. "
-                        f"It’s from {sender}{date_detail}"
-                    )
-                else:
-                    topic_parts.append(
-                        f"Yes — I found {count} matching messages in {provider_name}. "
-                        f"The newest is ‘{subject}’ from {sender}{date_detail}"
-                    )
+                topic_matches.append(
+                    {
+                        "provider_name": provider_name,
+                        "subject": subject,
+                        "sender": sender,
+                        "date": display_date,
+                        "count": count,
+                        "received_at": messages[0].get("received_at"),
+                    }
+                )
             else:
-                if item.get("search_strategy") == "bounded_metadata_fallback":
-                    checked = int(item.get("searched_metadata_count") or 0)
-                    result_scope = (
-                        f"the {checked} recent {provider_name} Inbox messages I checked"
-                        if checked
-                        else f"the recent {provider_name} Inbox messages I checked"
-                    )
-                    topic_parts.append(f"I didn't find a matching message in {result_scope}")
-                else:
-                    topic_parts.append(f"I didn't find a matching message in {provider_name}")
+                topic_no_matches.append(
+                    {
+                        "provider_name": provider_name,
+                        "bounded": item.get("search_strategy") == "bounded_metadata_fallback",
+                        "checked": int(item.get("searched_metadata_count") or 0),
+                    }
+                )
             await dialogue.record_email_read_focus(
                 conversation_id,
                 {
@@ -4284,10 +4295,13 @@ async def _try_handle_email_assistant(
         failed_names = [
             "Outlook" if item["provider"] == "microsoft_outlook" else "Gmail" for item in failed
         ]
-        response = ". ".join(topic_parts) + "."
         unavailable_or_failed = list(dict.fromkeys([*unavailable_names, *failed_names]))
-        if unavailable_or_failed:
-            response += f" I couldn't search {' and '.join(unavailable_or_failed)} right now."
+        response = ResultIntelligence.mailbox_topic_search(
+            topic=query,
+            matches=topic_matches,
+            no_matches=topic_no_matches,
+            unavailable=unavailable_or_failed,
+        )
         if read_intent.kind == "topic_document_followup":
             if document_source is None or not document_source[1]:
                 return {
