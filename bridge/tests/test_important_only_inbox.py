@@ -289,6 +289,9 @@ class ImportantRegistry:
         self.writes: list[tuple[str, str, bool, bool]] = []
         self.restores: list[tuple[str, str]] = []
         self.unknown_once: set[str] = set()
+        self.unknown_without_move_once: set[str] = set()
+        self.reject_once: set[str] = set()
+        self.write_idempotency_keys: list[tuple[str, str]] = []
 
     @staticmethod
     def result(
@@ -347,9 +350,18 @@ class ImportantRegistry:
             )
         if capability in {"gmail.trash", "outlook.trash"}:
             message_id = str(request.payload["message_id"])
+            self.write_idempotency_keys.append((message_id, str(request.idempotency_key)))
+            if message_id in self.reject_once:
+                self.reject_once.remove(message_id)
+                rejected = self.result({}, status=ExecutionStatus.REJECTED)
+                rejected.error = "Provider health check timed out"
+                return rejected
             self.writes.append(
                 (capability, message_id, bool(request.confirmed), bool(request.standing_permission))
             )
+            if message_id in self.unknown_without_move_once:
+                self.unknown_without_move_once.remove(message_id)
+                return self.result({}, status=ExecutionStatus.OUTCOME_UNKNOWN, reference=message_id)
             item = self.messages[provider][message_id]
             if capability == "gmail.trash":
                 item["label_ids"] = ["TRASH"]
@@ -732,6 +744,57 @@ async def test_unknown_write_is_reconciled_before_any_retry(tmp_path: Path) -> N
     assert [item for item in registry.writes if item[1] == "gmail-promo"] == [
         ("gmail.trash", "gmail-promo", True, True)
     ]
+
+
+@pytest.mark.asyncio
+async def test_pre_provider_rejection_retries_with_new_idempotency_key(tmp_path: Path) -> None:
+    registry = ImportantRegistry()
+    registry.reject_once.add("gmail-promo")
+    engine = await enabled_engine(tmp_path / "pre-provider-rejection.db", registry)
+
+    first = await engine.run_important_only_once(principal_id="aaron", now=NOW)
+    second = await engine.run_important_only_once(
+        principal_id="aaron", now=NOW + timedelta(minutes=6)
+    )
+
+    assert first["status"] == "waiting_for_jarvis"
+    assert second["status"] in {"monitoring", "running"}
+    assert [item for item in registry.writes if item[1] == "gmail-promo"] == [
+        ("gmail.trash", "gmail-promo", True, True)
+    ]
+    keys = [
+        key for message_id, key in registry.write_idempotency_keys if message_id == "gmail-promo"
+    ]
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+    assert keys[1].endswith(":retry:1")
+
+
+@pytest.mark.asyncio
+async def test_unknown_non_move_is_read_back_before_attempt_scoped_retry(tmp_path: Path) -> None:
+    registry = ImportantRegistry()
+    registry.unknown_without_move_once.add("gmail-promo")
+    engine = await enabled_engine(tmp_path / "unknown-not-applied.db", registry)
+
+    first = await engine.run_important_only_once(principal_id="aaron", now=NOW)
+    second = await engine.run_important_only_once(
+        principal_id="aaron", now=NOW + timedelta(minutes=6)
+    )
+
+    assert first["status"] == "waiting_for_jarvis"
+    assert second["status"] in {"monitoring", "running"}
+    writes = [item for item in registry.writes if item[1] == "gmail-promo"]
+    assert writes == [
+        ("gmail.trash", "gmail-promo", True, True),
+        ("gmail.trash", "gmail-promo", True, True),
+    ]
+    keys = [
+        key for message_id, key in registry.write_idempotency_keys if message_id == "gmail-promo"
+    ]
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+    assert keys[1].endswith(":retry:1")
+    assert registry.messages["google_gmail"]["gmail-promo"]["label_ids"] == ["TRASH"]
 
 
 @pytest.mark.asyncio
