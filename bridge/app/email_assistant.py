@@ -4100,8 +4100,10 @@ class EmailAssistantPolicyEngine:
                 break
             processed += 1
             item_id = str(item["provider_message_id"])
-            item_request = f"email-bulk-item:{bulk_action_id}:{item_id}"
-            if str(item["status"]) == "outcome_unknown":
+            item_request_base = f"email-bulk-item:{bulk_action_id}:{item_id}"
+            item_status = str(item["status"])
+            retry_after_proven_no_write = item_status in {"rejected", "unavailable"}
+            if item_status == "outcome_unknown":
                 applied = await self._bulk_item_already_applied(
                     principal_id=principal_id,
                     conversation_id=conversation_id,
@@ -4112,7 +4114,7 @@ class EmailAssistantPolicyEngine:
                         else item_id
                     ),
                     operation=str(action["operation"]),
-                    request_id=item_request,
+                    request_id=item_request_base,
                 )
                 if applied is True:
                     with self._db() as connection:
@@ -4137,6 +4139,19 @@ class EmailAssistantPolicyEngine:
                         )
                         break
                     continue
+                # A provider readback that definitively shows the move did not
+                # happen makes a new attempt safe.  Never reuse the unknown
+                # receipt's idempotency key: doing so can only replay that
+                # terminal receipt rather than invoke the provider.
+                retry_after_proven_no_write = True
+            item_request = item_request_base
+            if retry_after_proven_no_write:
+                # REJECTED/UNAVAILABLE write receipts are finalized before the
+                # connector is invoked, so they prove that no provider side
+                # effect began.  Use an attempt-scoped key after health and
+                # authority are revalidated; verified/failed/unknown writes
+                # retain their original key and cannot be blindly replayed.
+                item_request = f"{item_request_base}:retry:{int(item['attempts'] or 0)}"
             with self._db() as connection:
                 connection.execute(
                     "UPDATE email_bulk_action_items SET status='executing',attempts=attempts+1,"
