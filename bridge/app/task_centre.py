@@ -286,6 +286,7 @@ class TaskCentre:
         tasks: list[WorkItem] = []
         tasks.extend(await self._executive_tasks(principal_id, maximum))
         tasks.extend(await self._followup_tasks(principal_id, maximum))
+        tasks.extend(await self._important_only_tasks(principal_id))
         tasks.extend(await self._email_bulk_tasks(principal_id, maximum))
         tasks.extend(await self._orphan_plan_tasks(principal_id, tasks, maximum))
         tasks.extend(await self._pending_interaction_tasks(principal_id, maximum))
@@ -616,6 +617,10 @@ class TaskCentre:
         singles: list[dict[str, Any]] = []
         for raw in rows:
             row = dict(raw)
+            # Important-Only frozen batches are implementation details of one
+            # durable maintenance task, not separate confirmation tasks.
+            if str(row.get("filter_kind") or "") == "important_only":
+                continue
             group_id = str(row.get("task_group_id") or "").strip()
             if group_id:
                 grouped.setdefault(group_id, []).append(row)
@@ -628,9 +633,140 @@ class TaskCentre:
         output.extend(self._project_email_bulk_row(row) for row in singles)
         return output
 
+    async def _important_only_tasks(self, principal_id: str) -> list[dict[str, Any]]:
+        status_reader = getattr(self.email_policies, "important_only_status", None)
+        if status_reader is None:
+            return []
+        policy = await status_reader(principal_id=principal_id)
+        states = [
+            dict(item) for item in policy.get("provider_states") or () if isinstance(item, Mapping)
+        ]
+        if not policy.get("enabled") and not states:
+            return []
+        enabled = bool(policy.get("enabled"))
+        raw_statuses = {str(item.get("status") or "pending") for item in states}
+        reconnect = any(self._requires_provider_reconnect(item) for item in states)
+        if not enabled or raw_statuses == {"paused"}:
+            normalized = TaskCentreStatus.PAUSED
+        elif reconnect:
+            normalized = TaskCentreStatus.WAITING_FOR_YOU
+        elif raw_statuses & {"waiting_provider", "waiting_for_jarvis"}:
+            normalized = TaskCentreStatus.WAITING_FOR_JARVIS
+        elif raw_statuses & {"failed"}:
+            normalized = (
+                TaskCentreStatus.PARTIAL
+                if any(int(item.get("moved_count") or 0) for item in states)
+                else TaskCentreStatus.FAILED
+            )
+        else:
+            normalized = TaskCentreStatus.RUNNING
+
+        progress = dict(policy.get("progress") or {})
+        processed = int(progress.get("processed_count") or 0)
+        total = int(progress.get("total_estimate") or 0)
+        moved = int(progress.get("moved_count") or 0)
+        remaining = max(0, total - processed) if total else None
+        provider_steps: list[dict[str, Any]] = []
+        for item in states:
+            provider = str(item.get("provider") or "")
+            provider_name = "Gmail" if provider == "google_gmail" else "Outlook"
+            provider_steps.append(
+                {
+                    "step_id": f"{provider}:{item.get('account_id')}",
+                    "title": provider_name,
+                    "status": str(item.get("status") or "pending"),
+                    "result_summary": (
+                        f"{int(item.get('processed_count') or 0):,} reviewed; "
+                        f"{int(item.get('moved_count') or 0):,} moved to recoverable trash"
+                    ),
+                    "failure": _safe_text(item.get("last_error"), limit=300),
+                }
+            )
+        waiting_reasons = [
+            _safe_text(item.get("last_error"), limit=240)
+            for item in states
+            if item.get("last_error")
+        ]
+        waiting_reason = "; ".join(item for item in waiting_reasons if item) or None
+        phase = (
+            "Monitoring new mail"
+            if states and all(str(item.get("phase")) == "monitoring" for item in states)
+            else "Reviewing the existing inbox backlog"
+        )
+        conversation_id = str(policy.get("conversation_id") or "")
+        created_values = [str(item.get("created_at")) for item in states if item.get("created_at")]
+        updated_values = [str(item.get("updated_at")) for item in states if item.get("updated_at")]
+        capabilities = sorted(
+            {
+                capability
+                for item in states
+                for capability in (
+                    ("gmail.search", "gmail.trash")
+                    if item.get("provider") == "google_gmail"
+                    else ("outlook.search", "outlook.trash")
+                    if item.get("provider") == "microsoft_outlook"
+                    else ()
+                )
+            }
+        )
+        return [
+            self._task(
+                task_id="important_only:inbox",
+                task_type="email_maintenance",
+                title="Important-Only Inbox",
+                summary=phase,
+                status=normalized,
+                underlying_status=",".join(sorted(raw_statuses)) or "configured",
+                conversation_id=conversation_id,
+                created_at=min(created_values) if created_values else policy.get("created_at"),
+                updated_at=max(updated_values) if updated_values else policy.get("updated_at"),
+                current_step=phase,
+                progress_current=processed,
+                progress_total=total or None,
+                progress_unit="messages",
+                next_step=(
+                    "Continue from the durable provider checkpoint"
+                    if normalized is TaskCentreStatus.WAITING_FOR_JARVIS
+                    else "Reconnect the affected mailbox"
+                    if normalized is TaskCentreStatus.WAITING_FOR_YOU
+                    else "Classify new mail as it arrives"
+                    if "monitoring" in raw_statuses
+                    else "Review the next bounded provider page"
+                ),
+                waiting_reason=waiting_reason,
+                error_summary=(
+                    waiting_reason
+                    if normalized in {TaskCentreStatus.FAILED, TaskCentreStatus.PARTIAL}
+                    else None
+                ),
+                providers=[str(item.get("provider") or "") for item in states],
+                capabilities=capabilities,
+                requires_user_action=normalized is TaskCentreStatus.WAITING_FOR_YOU,
+                user_action_type="provider_reconnect" if reconnect else None,
+                can_pause=enabled,
+                can_resume=not enabled and bool(policy.get("recoverable_cleanup_authority")),
+                can_retry=normalized is TaskCentreStatus.WAITING_FOR_JARVIS,
+                result_summary=(
+                    f"{processed:,} reviewed; {moved:,} moved to recoverable trash; "
+                    f"{int(progress.get('kept_important_count') or 0):,} kept important; "
+                    f"{int(progress.get('kept_active_count') or 0):,} kept active; "
+                    f"{int(progress.get('temporary_count') or 0):,} temporary; "
+                    f"{int(progress.get('uncertain_count') or 0):,} uncertain kept"
+                    + (f"; {remaining:,} remaining" if remaining is not None else "")
+                ),
+                planned_steps=provider_steps,
+                metadata={
+                    "permanent_delete": False,
+                    "uncertain_action": "keep",
+                    "remaining": remaining,
+                    "provider_progress": provider_steps,
+                },
+            )
+        ]
+
     @staticmethod
     def _requires_provider_reconnect(row: Mapping[str, Any]) -> bool:
-        reason = str(row.get("halt_reason") or "").casefold()
+        reason = str(row.get("halt_reason") or row.get("last_error") or "").casefold()
         return any(
             marker in reason
             for marker in (
@@ -1744,22 +1880,50 @@ class TaskCentre:
         self, *, principal_id: str, task_id: str, request_id: str
     ) -> dict[str, Any] | None:
         task = await self.get_task(principal_id=principal_id, task_id=task_id)
-        if task is None or not task.get("can_pause") or not task_id.startswith("followup:"):
+        if task is None or not task.get("can_pause"):
             return None
-        await self.followups.pause(
-            task_id.split(":", 1)[1], principal_id=principal_id, request_id=request_id
-        )
+        if task_id.startswith("followup:"):
+            await self.followups.pause(
+                task_id.split(":", 1)[1], principal_id=principal_id, request_id=request_id
+            )
+        elif task_id == "important_only:inbox":
+            policy = await self.email_policies.important_only_status(principal_id=principal_id)
+            providers = dict(policy.get("providers") or {})
+            await self.email_policies.configure_important_only(
+                principal_id=principal_id,
+                conversation_id=str(policy.get("conversation_id") or task.get("conversation_id")),
+                enabled=False,
+                recoverable_cleanup_authority=bool(policy.get("recoverable_cleanup_authority")),
+                gmail_enabled=bool(providers.get("google_gmail")),
+                outlook_enabled=bool(providers.get("microsoft_outlook")),
+            )
+        else:
+            return None
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
     async def resume(
         self, *, principal_id: str, task_id: str, request_id: str
     ) -> dict[str, Any] | None:
         task = await self.get_task(principal_id=principal_id, task_id=task_id)
-        if task is None or not task.get("can_resume") or not task_id.startswith("followup:"):
+        if task is None or not task.get("can_resume"):
             return None
-        await self.followups.resume(
-            task_id.split(":", 1)[1], principal_id=principal_id, request_id=request_id
-        )
+        if task_id.startswith("followup:"):
+            await self.followups.resume(
+                task_id.split(":", 1)[1], principal_id=principal_id, request_id=request_id
+            )
+        elif task_id == "important_only:inbox":
+            policy = await self.email_policies.important_only_status(principal_id=principal_id)
+            providers = dict(policy.get("providers") or {})
+            await self.email_policies.configure_important_only(
+                principal_id=principal_id,
+                conversation_id=str(policy.get("conversation_id") or task.get("conversation_id")),
+                enabled=True,
+                recoverable_cleanup_authority=bool(policy.get("recoverable_cleanup_authority")),
+                gmail_enabled=bool(providers.get("google_gmail")),
+                outlook_enabled=bool(providers.get("microsoft_outlook")),
+            )
+        else:
+            return None
         return await self.get_task(principal_id=principal_id, task_id=task_id)
 
     async def reschedule(
@@ -1868,7 +2032,9 @@ class TaskCentre:
         if task is None or not task.get("can_decline"):
             return None
         source, identity = task_id.split(":", 1)
-        if source in {"email_bulk", "email_group"}:
+        if task_id == "important_only:inbox":
+            await self.email_policies.run_important_only_once(principal_id=principal_id)
+        elif source in {"email_bulk", "email_group"}:
             return await self.cancel(
                 principal_id=principal_id,
                 task_id=task_id,
