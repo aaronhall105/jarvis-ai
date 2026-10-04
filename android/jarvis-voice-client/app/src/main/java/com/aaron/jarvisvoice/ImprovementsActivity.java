@@ -72,7 +72,7 @@ public final class ImprovementsActivity extends androidx.activity.ComponentActiv
         );
 
         store = new SecureStore(this);
-        api = new ImprovementApiClient(store);
+        api = new ImprovementApiClient(this);
 
         configureWindow();
         setContentView(buildContent());

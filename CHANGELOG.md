@@ -2,6 +2,18 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha32 — resilient Core connectivity and task progress
+
+Alpha32 gives every Core-backed Android feature one endpoint authority with
+configured LAN/remote failover and an authenticated last-known-good route. The
+Tasks screen keeps its last redacted snapshot while offline and adds structured
+percent, remaining work, evidence-based ETA, and provider progress without
+parsing presentation prose.
+
+See [the complete alpha32 release notes](docs/releases/CHANGES_V19_0_0_ALPHA32.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha31 — Unified Task Centre
 
 Alpha31 adds a first-class Android Tasks experience and one principal-scoped,

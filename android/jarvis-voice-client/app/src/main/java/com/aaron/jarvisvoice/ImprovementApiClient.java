@@ -1,9 +1,12 @@
 package com.aaron.jarvisvoice;
 
+import android.content.Context;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.util.List;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -28,10 +31,13 @@ public final class ImprovementApiClient {
     }
 
     private final SecureStore store;
+    private final CoreEndpointManager endpoints;
     private final OkHttpClient client;
 
-    public ImprovementApiClient(SecureStore store) {
-        this.store = store;
+    public ImprovementApiClient(Context context) {
+        Context application = context.getApplicationContext();
+        this.store = new SecureStore(application);
+        this.endpoints = CoreEndpointManager.get(application);
         this.client = new OkHttpClient();
     }
 
@@ -169,15 +175,7 @@ public final class ImprovementApiClient {
     }
 
     private void get(String path, JsonCallback callback) {
-        try {
-            Request request = baseRequest(path)
-                .get()
-                .build();
-
-            execute(request, callback);
-        } catch (Exception exception) {
-            callback.onError(safeMessage(exception));
-        }
+        execute("GET", path, null, callback, endpoints.candidates(), 0);
     }
 
     private void post(
@@ -185,21 +183,10 @@ public final class ImprovementApiClient {
         JSONObject body,
         JsonCallback callback
     ) {
-        try {
-            RequestBody requestBody =
-                RequestBody.create(body.toString(), JSON);
-
-            Request request = baseRequest(path)
-                .post(requestBody)
-                .build();
-
-            execute(request, callback);
-        } catch (Exception exception) {
-            callback.onError(safeMessage(exception));
-        }
+        execute("POST", path, body, callback, endpoints.candidates(), 0);
     }
 
-    private Request.Builder baseRequest(String path) {
+    private Request.Builder baseRequest(String base, String path) {
         String token = store.improvementAdminToken();
 
         if (token.isBlank()) {
@@ -208,21 +195,36 @@ public final class ImprovementApiClient {
             );
         }
 
-        String base = store.coreUrl();
-
-        while (base.endsWith("/")) {
-            base = base.substring(0, base.length() - 1);
-        }
-
         return new Request.Builder()
             .url(base + path)
             .header("X-Jarvis-Admin-Token", token);
     }
 
     private void execute(
-        Request request,
-        JsonCallback callback
+        String method,
+        String path,
+        JSONObject payload,
+        JsonCallback callback,
+        List<String> candidates,
+        int index
     ) {
+        if (index >= candidates.size()) {
+            callback.onError("Can't reach Jarvis Core.");
+            return;
+        }
+        String endpoint = candidates.get(index);
+        final Request request;
+        try {
+            Request.Builder builder = baseRequest(endpoint, path);
+            if ("GET".equals(method)) builder.get();
+            else builder.post(RequestBody.create(
+                payload == null ? "{}" : payload.toString(), JSON
+            ));
+            request = builder.build();
+        } catch (Exception exception) {
+            callback.onError(safeMessage(exception));
+            return;
+        }
         client.newCall(request).enqueue(
             new Callback() {
                 @Override
@@ -230,7 +232,8 @@ public final class ImprovementApiClient {
                     Call call,
                     IOException exception
                 ) {
-                    callback.onError(safeMessage(exception));
+                    endpoints.reportTransportFailure(endpoint);
+                    execute(method, path, payload, callback, candidates, index + 1);
                 }
 
                 @Override
@@ -250,6 +253,8 @@ public final class ImprovementApiClient {
                             );
                             return;
                         }
+
+                        endpoints.reportSuccess(endpoint);
 
                         callback.onSuccess(
                             body.isBlank()

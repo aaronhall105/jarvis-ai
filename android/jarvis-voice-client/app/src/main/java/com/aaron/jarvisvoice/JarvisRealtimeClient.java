@@ -86,6 +86,8 @@ public final class JarvisRealtimeClient {
 
     private final String lanCoreUrl;
     private final CoreEndpointSelector endpoints;
+    private final CoreEndpointManager endpointManager;
+    private final CoreEndpointManager.Listener endpointListener;
     private final String token;
     private final String deviceId;
     private final String userId;
@@ -188,13 +190,25 @@ public final class JarvisRealtimeClient {
 
         restoreDurableRecovery();
 
+        endpointManager = CoreEndpointManager.get(context);
         endpoints =
             new CoreEndpointSelector(
                 context,
                 coreUrl
             );
+        endpointListener = state -> {
+            if (state.state() != CoreEndpointManager.State.CONNECTED
+                || state.endpoint().isBlank()
+                || state.endpoint().equals(activeCoreUrl)
+                || !shouldReconnect
+                || !ready
+                || opening
+                || probing) return;
+            main.post(() -> switchToManagedEndpoint(state.endpoint(), state.name()));
+        };
+        endpointManager.addListener(endpointListener);
         lanRecheckTask = () -> {
-            if (!ready || endpoints.isLan(activeCoreUrl)) return;
+            if (!ready || endpoints.lanUrl().isBlank() || endpoints.isLan(activeCoreUrl)) return;
             endpoints.probeLan(new CoreEndpointSelector.Listener() {
                 @Override public void onSelected(String url, String name) {
                     if (!ready || endpoints.isLan(activeCoreUrl)) return;
@@ -306,6 +320,7 @@ public final class JarvisRealtimeClient {
         }
 
         network.close();
+        endpointManager.removeListener(endpointListener);
     }
 
     public boolean sendAudio(byte[] pcm16) {
@@ -695,6 +710,7 @@ public final class JarvisRealtimeClient {
                     recordAuthenticationRejected(value);
                     return;
                 }
+                endpointManager.reportTransportFailure(activeCoreUrl);
                 diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
@@ -737,6 +753,7 @@ public final class JarvisRealtimeClient {
                     recordAuthenticationRejected(value);
                     return;
                 }
+                endpointManager.reportTransportFailure(activeCoreUrl);
                 diagnostics.recordCoreReachability("Unreachable", value);
                 post(() -> listener.onDisconnected(value));
                 scheduleReconnect(value);
@@ -764,6 +781,7 @@ public final class JarvisRealtimeClient {
         switch (event.type) {
             case "auth.ok" -> {
                 authenticated = true;
+                endpointManager.reportSuccess(activeCoreUrl);
                 reconnectAttempt = 0;
                 // A newly authenticated Core WebSocket is a new server-session
                 // epoch. Old socket callbacks are already fenced by
@@ -2211,6 +2229,24 @@ public final class JarvisRealtimeClient {
 
         turnRecovery.onTransportLost();
 
+        WebSocket current = socket;
+        socket = null;
+        authenticated = false;
+        ready = false;
+        opening = false;
+        probing = false;
+        generation++;
+        cancelTimers();
+        if (current != null) current.cancel();
+        openSocket(url, name);
+    }
+
+    private void switchToManagedEndpoint(String url, String name) {
+        if (!shouldReconnect || !ready || url.equals(activeCoreUrl)) return;
+        diagnostics.recordRecovery("Core endpoint authority selected " + name);
+        diagnostics.recordEndpoint(name, url);
+        post(() -> listener.onStatus("Jarvis connection changed — reconnecting"));
+        turnRecovery.onTransportLost();
         WebSocket current = socket;
         socket = null;
         authenticated = false;

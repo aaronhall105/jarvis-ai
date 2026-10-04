@@ -21,7 +21,7 @@ from app.agent_planner import (
 )
 from app.dialogue_manager import DialogueManager
 from app.pending_interactions import PendingInteractionKind, PendingInteractionService
-from app.task_centre import TaskCentre
+from app.task_centre import TaskCentre, TaskCentreStatus
 
 
 NOW = datetime.now(timezone.utc).isoformat()
@@ -408,6 +408,17 @@ async def test_important_only_is_one_generic_task_without_batch_confirmations(tm
     assert task["metadata"]["permanent_delete"] is False
     assert task["metadata"]["remaining"] == 23_000
     assert "250 kept active" in task["result_summary"]
+    assert task["progress"] == {
+        "mode": "DETERMINATE",
+        "current": 12_000,
+        "total": 35_000,
+        "unit": "messages",
+        "fraction": 12_000 / 35_000,
+        "percent": 34,
+        "remaining": 23_000,
+    }
+    assert {item["title"] for item in task["subtasks"]} == {"Gmail", "Outlook"}
+    assert next(item for item in task["metrics"] if item["key"] == "moved")["value"] == 9_000
 
     paused = await centre.pause(principal_id="aaron", task_id=task["task_id"], request_id="pause-1")
     assert paused is not None and paused["status"] == "PAUSED"
@@ -415,6 +426,124 @@ async def test_important_only_is_one_generic_task_without_batch_confirmations(tm
         principal_id="aaron", task_id=task["task_id"], request_id="resume-1"
     )
     assert resumed is not None and resumed["status"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_task_progress_eta_uses_bounded_review_history_and_clamps_percent(
+    tmp_path: Path,
+) -> None:
+    centre = service(tmp_path / "tasks.db")
+    centre.email_policies.important_only = {
+        "enabled": True,
+        "recoverable_cleanup_authority": True,
+        "conversation_id": "usr:aaron:important-only",
+        "providers": {"google_gmail": True, "microsoft_outlook": True},
+        "progress": {"total_estimate": 50_654, "processed_count": 43_998},
+        "provider_states": [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-account",
+                "phase": "backlog",
+                "status": "running",
+                "processed_count": 10_598,
+                "moved_count": 6_289,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-account",
+                "phase": "backlog",
+                "status": "running",
+                "processed_count": 33_400,
+                "moved_count": 999,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+        ],
+    }
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(centre.path) as connection:
+        connection.executemany(
+            "INSERT INTO task_progress_samples(principal_id,task_id,observed_at,"
+            "progress_current,progress_total,progress_unit) VALUES(?,?,?,?,?,?)",
+            [
+                (
+                    "aaron",
+                    "important_only:inbox",
+                    (now - timedelta(minutes=10)).isoformat(),
+                    40_000,
+                    50_654,
+                    "messages",
+                ),
+                (
+                    "aaron",
+                    "important_only:inbox",
+                    (now - timedelta(minutes=5)).isoformat(),
+                    42_000,
+                    50_654,
+                    "messages",
+                ),
+            ],
+        )
+
+    task = next(
+        item
+        for item in await centre.list_tasks(principal_id="aaron", filter_name="ALL")
+        if item["task_id"] == "important_only:inbox"
+    )
+
+    assert task["progress"]["percent"] == 87
+    assert task["progress"]["remaining"] == 6_656
+    assert task["timing"]["throughput_per_second"] > 0
+    assert task["timing"]["eta_seconds"] > 0
+    assert task["timing"]["eta_quality"] == "smoothed_rolling_15_minute"
+
+    first_rate = task["timing"]["review_rate_per_second"]
+    centre.email_policies.important_only["progress"]["processed_count"] = 48_000
+    faster = next(
+        item
+        for item in await centre.list_tasks(principal_id="aaron", filter_name="ALL")
+        if item["task_id"] == "important_only:inbox"
+    )
+    assert faster["timing"]["review_rate_per_second"] > first_rate
+    assert faster["timing"]["review_rate_per_second"] < first_rate * 1.5
+
+    task["progress_current"] = 60_000
+    centre._decorate_structured_progress("aaron", task)
+    assert task["progress"]["percent"] == 100
+    assert task["progress"]["remaining"] == 0
+    assert task["timing"]["eta_seconds"] is None
+
+    task["status"] = TaskCentreStatus.COMPLETED.value
+    task["progress_current"] = 40_000
+    centre._decorate_structured_progress("aaron", task)
+    assert task["progress"]["current"] == 50_654
+    assert task["progress"]["percent"] == 100
+    assert task["progress"]["remaining"] == 0
+    assert task["timing"]["eta_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_total_and_paused_tasks_never_invent_eta(tmp_path: Path) -> None:
+    centre = service(tmp_path / "tasks.db")
+    task = centre._task(
+        task_id="fake:one",
+        task_type="generic",
+        title="Review results",
+        status=TaskCentreStatus.PAUSED,
+        underlying_status="paused",
+        progress_current=400,
+        progress_total=None,
+        progress_unit="items",
+    )
+
+    centre._decorate_structured_progress("aaron", task)
+
+    assert task["progress"]["mode"] == "INDETERMINATE"
+    assert task["progress"]["percent"] is None
+    assert task["progress"]["remaining"] is None
+    assert task["timing"]["eta_seconds"] is None
 
 
 @pytest.mark.asyncio
