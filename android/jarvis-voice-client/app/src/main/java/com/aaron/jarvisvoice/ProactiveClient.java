@@ -9,9 +9,7 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -38,6 +36,7 @@ public final class ProactiveClient implements AutoCloseable {
         MediaType.get("application/json; charset=utf-8");
 
     private final SecureStore store;
+    private final CoreEndpointManager endpoints;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final OkHttpClient client = new OkHttpClient.Builder()
@@ -48,7 +47,9 @@ public final class ProactiveClient implements AutoCloseable {
         .build();
 
     public ProactiveClient(Context context) {
-        store = new SecureStore(context.getApplicationContext());
+        Context application = context.getApplicationContext();
+        store = new SecureStore(application);
+        endpoints = CoreEndpointManager.get(application);
     }
 
     public void feed(FeedCallback callback) {
@@ -156,15 +157,19 @@ public final class ProactiveClient implements AutoCloseable {
                         ? ""
                         : response.body().string();
                     if (!response.isSuccessful()) {
-                        throw new IOException(
+                        throw new IllegalStateException(
                             "Jarvis Core HTTP " + response.code()
                                 + (raw.isBlank() ? "" : ": " + raw)
                         );
                     }
+                    endpoints.reportSuccess(endpoint);
                     return raw.isBlank() ? new JSONObject() : new JSONObject(raw);
                 }
-            } catch (Exception exception) {
+            } catch (IOException exception) {
+                endpoints.reportTransportFailure(endpoint);
                 last = exception;
+            } catch (Exception exception) {
+                throw exception;
             }
         }
         throw last == null
@@ -173,14 +178,7 @@ public final class ProactiveClient implements AutoCloseable {
     }
 
     private List<String> endpoints() {
-        Set<String> values = new LinkedHashSet<>();
-        String configured = CoreEndpointSelector.normaliseBaseUrl(store.coreUrl());
-        if (!configured.isBlank()) values.add(configured);
-        String remote = CoreEndpointSelector.normaliseOptionalBaseUrl(
-            store.remoteCoreUrl()
-        );
-        if (!remote.isBlank()) values.add(remote);
-        return new ArrayList<>(values);
+        return endpoints.candidates();
     }
 
     private static String message(Exception exception) {

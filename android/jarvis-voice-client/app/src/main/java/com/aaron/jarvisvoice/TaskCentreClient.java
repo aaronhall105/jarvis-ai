@@ -37,9 +37,13 @@ public final class TaskCentreClient implements AutoCloseable {
         void onError(String message);
     }
 
+    public record CachedList(List<TaskItem> tasks, JSONObject counts, long receivedAtMillis) {}
+
     private static final MediaType JSON = MediaType.get("application/json; charset=utf-8");
     private final Context context;
     private final SecureStore store;
+    private final CoreEndpointManager endpoints;
+    private final TaskSnapshotStore snapshots;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final OkHttpClient client = new OkHttpClient.Builder()
@@ -52,6 +56,8 @@ public final class TaskCentreClient implements AutoCloseable {
     public TaskCentreClient(Context context) {
         this.context = context.getApplicationContext();
         store = new SecureStore(this.context);
+        endpoints = CoreEndpointManager.get(this.context);
+        snapshots = new TaskSnapshotStore(this.context, store.userId());
     }
 
     public void list(String filter, ListCallback callback) {
@@ -61,22 +67,40 @@ public final class TaskCentreClient implements AutoCloseable {
                     "GET", List.of("api", "tasks"),
                     new JSONObject(), "filter", filter == null ? "ACTIVE" : filter
                 );
-                List<TaskItem> tasks = new ArrayList<>();
-                JSONArray values = response.optJSONArray("tasks");
-                if (values != null) {
-                    for (int index = 0; index < values.length(); index++) {
-                        JSONObject value = values.optJSONObject(index);
-                        if (value != null) tasks.add(TaskItem.fromJson(value));
-                    }
-                }
+                List<TaskItem> tasks = parseTasks(response);
                 JSONObject counts = response.optJSONObject("counts");
+                snapshots.save(filter, response, System.currentTimeMillis());
                 main.post(() -> callback.onSuccess(
                     tasks, counts == null ? new JSONObject() : counts
                 ));
             } catch (Exception exception) {
-                main.post(() -> callback.onError(message(exception)));
+                main.post(() -> callback.onError(userMessage(exception)));
             }
         });
+    }
+
+    public CachedList cached(String filter) {
+        TaskSnapshotStore.Snapshot snapshot = snapshots.load(filter);
+        if (snapshot == null) return null;
+        JSONObject counts = snapshot.response().optJSONObject("counts");
+        return new CachedList(
+            parseTasks(snapshot.response()),
+            counts == null ? new JSONObject() : counts,
+            snapshot.receivedAtMillis()
+        );
+    }
+
+    public TaskItem cachedTask(String taskId) {
+        for (String filter : List.of(
+            "ACTIVE", "WAITING_FOR_YOU", "SCHEDULED", "COMPLETED", "PROBLEMS"
+        )) {
+            CachedList cached = cached(filter);
+            if (cached == null) continue;
+            for (TaskItem task : cached.tasks()) {
+                if (taskId.equals(task.taskId)) return task;
+            }
+        }
+        return null;
     }
 
     public void task(String taskId, TaskCallback callback) {
@@ -141,7 +165,7 @@ public final class TaskCentreClient implements AutoCloseable {
                 TaskItem task = TaskItem.fromJson(response);
                 main.post(() -> callback.onSuccess(task));
             } catch (Exception exception) {
-                main.post(() -> callback.onError(message(exception)));
+                main.post(() -> callback.onError(userMessage(exception)));
             }
         });
     }
@@ -156,9 +180,7 @@ public final class TaskCentreClient implements AutoCloseable {
         String token = store.mobileToken();
         if (token.isBlank()) throw new IOException("Mobile voice token is not configured");
         IOException last = null;
-        for (String endpoint : CoreEndpointSelector.candidateUrls(
-            context, store.coreUrl(), store.remoteCoreUrl()
-        )) {
+        for (String endpoint : endpoints.candidates()) {
             try {
                 HttpUrl base = HttpUrl.parse(endpoint);
                 if (base == null) continue;
@@ -183,18 +205,35 @@ public final class TaskCentreClient implements AutoCloseable {
                             detail.isBlank() ? "Task request failed" : detail
                         );
                     }
+                    endpoints.reportSuccess(endpoint);
                     return raw.isBlank() ? new JSONObject() : new JSONObject(raw);
                 }
             } catch (IOException exception) {
+                endpoints.reportTransportFailure(endpoint);
                 last = exception;
             }
         }
+        endpoints.reportOffline();
         throw last == null ? new IOException("Jarvis Core could not be reached") : last;
     }
 
-    private static String message(Exception exception) {
-        String value = exception.getMessage();
-        return value == null || value.isBlank() ? "Jarvis Core could not be reached" : value;
+    static String userMessage(Exception exception) {
+        if (exception instanceof TaskRequestException) {
+            String value = exception.getMessage();
+            return value == null || value.isBlank() ? "Task request failed." : value;
+        }
+        return "Can't reach Jarvis Core.";
+    }
+
+    private static List<TaskItem> parseTasks(JSONObject response) {
+        List<TaskItem> tasks = new ArrayList<>();
+        JSONArray values = response.optJSONArray("tasks");
+        if (values == null) return tasks;
+        for (int index = 0; index < values.length(); index++) {
+            JSONObject value = values.optJSONObject(index);
+            if (value != null) tasks.add(TaskItem.fromJson(value));
+        }
+        return tasks;
     }
 
     @Override public void close() {

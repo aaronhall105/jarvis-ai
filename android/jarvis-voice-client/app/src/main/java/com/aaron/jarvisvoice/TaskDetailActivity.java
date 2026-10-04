@@ -13,6 +13,7 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -83,8 +84,23 @@ public final class TaskDetailActivity extends Activity {
         client.task(taskId, new TaskCentreClient.TaskCallback() {
             @Override public void onSuccess(TaskItem task) { render(task); }
             @Override public void onError(String message) {
-                content.removeAllViews();
-                content.addView(text("This task is unavailable. " + message, 15, MID), matchWrap());
+                TaskItem cached = client.cachedTask(taskId);
+                if (cached != null) {
+                    render(cached);
+                    TextView offline = text(
+                        "Offline — showing the last saved task update while Jarvis reconnects.",
+                        13,
+                        MID
+                    );
+                    content.addView(offline, 0, matchWrap(0, dp(12)));
+                } else {
+                    content.removeAllViews();
+                    content.addView(text(
+                        "Can't reach Jarvis Core. Try again when the connection returns.",
+                        15,
+                        MID
+                    ), matchWrap());
+                }
             }
         });
     }
@@ -101,6 +117,25 @@ public final class TaskDetailActivity extends Activity {
 
         addFact("Current", task.activityText());
         addFact("Progress", task.progressText());
+        addFact("Complete", task.percentText());
+        if ("DETERMINATE".equals(task.progressMode) && task.progressFraction != null) {
+            ProgressBar progress = new ProgressBar(
+                this, null, android.R.attr.progressBarStyleHorizontal
+            );
+            progress.setMax(1000);
+            progress.setProgress((int) Math.round(
+                Math.max(0d, Math.min(task.progressFraction, 1d)) * 1000d
+            ));
+            progress.setProgressTintList(android.content.res.ColorStateList.valueOf(BLACK));
+            progress.setProgressBackgroundTintList(
+                android.content.res.ColorStateList.valueOf(LINE)
+            );
+            content.addView(progress, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(5)
+            ));
+        }
+        addFact("Remaining", task.remainingText());
+        addFact("Estimated time remaining", task.etaText());
         addFact("Why it is waiting", task.waitingReason);
         addFact("Next", task.nextStep);
         addFact("Result", task.resultSummary);
@@ -120,6 +155,46 @@ public final class TaskDetailActivity extends Activity {
             notificationState(task.notificationOnFailure, task.failureNotificationState)
         );
         addFact("Notification delivered", displayTime(task.notificationDeliveredAt));
+
+        if (!task.metrics.isEmpty()) {
+            section("Overall statistics");
+            for (JSONObject metric : task.metrics) {
+                String label = TaskItem.optionalString(metric, "label", "Metric");
+                long value = metric.optLong("value", 0L);
+                addFact(label, String.format("%,d", value));
+            }
+        }
+        if (!task.subtasks.isEmpty()) {
+            section("Provider progress");
+            for (JSONObject subtask : task.subtasks) {
+                String name = TaskItem.optionalString(subtask, "title", "Provider");
+                JSONObject progress = subtask.optJSONObject("progress");
+                String detail = "";
+                if (progress != null && !progress.isNull("current")) {
+                    detail = String.format("%,d reviewed", progress.optLong("current", 0L));
+                }
+                org.json.JSONArray metrics = subtask.optJSONArray("metrics");
+                if (metrics != null) {
+                    for (int index = 0; index < metrics.length(); index++) {
+                        JSONObject metric = metrics.optJSONObject(index);
+                        if (metric == null || !metric.optBoolean("primary", false)) continue;
+                        String label = TaskItem.optionalString(metric, "label", "Result")
+                            .toLowerCase();
+                        String destination = TaskItem.optionalString(
+                            metric, "destination", ""
+                        );
+                        detail += (detail.isBlank() ? "" : " · ")
+                            + String.format(
+                                "%,d %s%s",
+                                metric.optLong("value", 0L),
+                                label,
+                                destination.isBlank() ? "" : " to " + destination
+                            );
+                    }
+                }
+                addFact(name, detail);
+            }
+        }
 
         if (!task.plannedSteps.isEmpty()) {
             boolean hasCompleted = false;

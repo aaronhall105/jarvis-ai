@@ -31,6 +31,12 @@ public final class TaskItem {
     public final Integer progressCurrent;
     public final Integer progressTotal;
     public final String progressUnit;
+    public final String progressMode;
+    public final Double progressFraction;
+    public final Integer progressPercent;
+    public final Integer progressRemaining;
+    public final Long etaSeconds;
+    public final String etaQuality;
     public final Integer currentStepIndex;
     public final Integer stepCount;
     public final boolean requiresUserAction;
@@ -51,37 +57,51 @@ public final class TaskItem {
     public final boolean canDecline;
     public final List<JSONObject> plannedSteps;
     public final List<JSONObject> timeline;
+    public final List<JSONObject> metrics;
+    public final List<JSONObject> subtasks;
     public final List<String> providers;
     public final List<String> capabilities;
 
     private TaskItem(JSONObject value) {
-        taskId = value.optString("task_id", "");
-        source = value.optString("source", "");
-        sourceTaskId = value.optString("source_task_id", "");
-        taskType = value.optString("task_type", "");
-        title = value.optString("title", "Jarvis task");
-        summary = value.optString("summary", "");
-        status = value.optString("status", "WAITING_FOR_JARVIS");
-        underlyingStatus = value.optString("underlying_status", "");
-        conversationId = value.optString("conversation_id", "");
-        openChatConversationId = value.optString("open_chat_conversation_id", "");
-        currentStep = value.optString("current_step", "");
-        nextStep = value.optString("next_step", "");
-        waitingReason = value.optString("waiting_reason", "");
-        errorSummary = value.optString("error_summary", "");
-        resultSummary = value.optString("result_summary", "");
-        createdAt = value.optString("created_at", "");
-        startedAt = value.optString("started_at", "");
-        updatedAt = value.optString("updated_at", "");
-        completedAt = value.optString("completed_at", "");
-        scheduledAt = value.optString("scheduled_at", "");
-        progressCurrent = nullableInt(value, "progress_current");
-        progressTotal = nullableInt(value, "progress_total");
-        progressUnit = value.optString("progress_unit", "");
+        taskId = optionalString(value, "task_id", "");
+        source = optionalString(value, "source", "");
+        sourceTaskId = optionalString(value, "source_task_id", "");
+        taskType = optionalString(value, "task_type", "");
+        title = optionalString(value, "title", "Jarvis task");
+        summary = optionalString(value, "summary", "");
+        status = optionalString(value, "status", "WAITING_FOR_JARVIS");
+        underlyingStatus = optionalString(value, "underlying_status", "");
+        conversationId = optionalString(value, "conversation_id", "");
+        openChatConversationId = optionalString(value, "open_chat_conversation_id", "");
+        currentStep = optionalString(value, "current_step", "");
+        nextStep = optionalString(value, "next_step", "");
+        waitingReason = optionalString(value, "waiting_reason", "");
+        errorSummary = optionalString(value, "error_summary", "");
+        resultSummary = optionalString(value, "result_summary", "");
+        createdAt = optionalString(value, "created_at", "");
+        startedAt = optionalString(value, "started_at", "");
+        updatedAt = optionalString(value, "updated_at", "");
+        completedAt = optionalString(value, "completed_at", "");
+        scheduledAt = optionalString(value, "scheduled_at", "");
+        JSONObject progress = value.optJSONObject("progress");
+        progressCurrent = nullableInt(progress, "current", nullableInt(value, "progress_current"));
+        progressTotal = nullableInt(progress, "total", nullableInt(value, "progress_total"));
+        progressUnit = progress == null
+            ? optionalString(value, "progress_unit", "")
+            : optionalString(progress, "unit", optionalString(value, "progress_unit", ""));
+        progressMode = progress == null
+            ? progressTotal != null && progressTotal > 0 ? "DETERMINATE" : "INDETERMINATE"
+            : optionalString(progress, "mode", "INDETERMINATE");
+        progressFraction = nullableDouble(progress, "fraction");
+        progressPercent = nullableInt(progress, "percent");
+        progressRemaining = nullableInt(progress, "remaining");
+        JSONObject timing = value.optJSONObject("timing");
+        etaSeconds = nullableLong(timing, "eta_seconds");
+        etaQuality = optionalString(timing, "eta_quality", "unavailable");
         currentStepIndex = nullableInt(value, "current_step_index");
         stepCount = nullableInt(value, "step_count");
         requiresUserAction = value.optBoolean("requires_user_action", false);
-        userActionType = value.optString("user_action_type", "");
+        userActionType = optionalString(value, "user_action_type", "");
         notificationOnCompletion = value.optBoolean("notification_on_completion", false);
         notificationOnFailure = value.optBoolean("notification_on_failure", false);
         completionNotificationState = value.optString(
@@ -90,8 +110,8 @@ public final class TaskItem {
         failureNotificationState = value.optString(
             "failure_notification_state", "not_requested"
         );
-        notificationDeliveredAt = value.optString("notification_delivered_at", "");
-        notificationDeliveryMessage = value.optString("notification_delivery_message", "");
+        notificationDeliveredAt = optionalString(value, "notification_delivered_at", "");
+        notificationDeliveryMessage = optionalString(value, "notification_delivery_message", "");
         canCancel = value.optBoolean("can_cancel", false);
         canPause = value.optBoolean("can_pause", false);
         canResume = value.optBoolean("can_resume", false);
@@ -106,6 +126,8 @@ public final class TaskItem {
             : requiresUserAction && "confirmation".equals(userActionType);
         plannedSteps = objects(value.optJSONArray("planned_steps"));
         timeline = objects(value.optJSONArray("timeline"));
+        metrics = objects(value.optJSONArray("metrics"));
+        subtasks = objects(value.optJSONArray("subtasks"));
         providers = strings(value.optJSONArray("providers"));
         capabilities = strings(value.optJSONArray("capabilities"));
     }
@@ -116,12 +138,11 @@ public final class TaskItem {
 
     public String statusLabel() {
         return switch (status) {
-            case "WAITING_FOR_JARVIS" -> "Waiting for Jarvis";
+            case "WAITING_FOR_JARVIS" -> "Waiting for service";
             case "WAITING_FOR_YOU" -> "Waiting for you";
             case "SCHEDULED" -> "Scheduled";
             case "COMPLETED" -> "Completed";
-            case "PARTIAL" -> "Partially completed";
-            case "FAILED" -> "Failed";
+            case "PARTIAL", "FAILED" -> "Needs attention";
             case "CANCELLED" -> "Cancelled";
             case "PLANNING" -> "Planning";
             case "PAUSED" -> "Paused";
@@ -140,11 +161,55 @@ public final class TaskItem {
 
     public String progressText() {
         if (progressCurrent != null && progressTotal != null && progressTotal > 0) {
-            String unit = progressUnit.isBlank() ? "items" : progressUnit;
-            return String.format("%,d / %,d %s", progressCurrent, progressTotal, unit);
+            String action = "messages".equals(progressUnit) ? " reviewed" : " " + unitLabel();
+            return String.format("%,d of %,d%s", progressCurrent, progressTotal, action);
+        }
+        if (progressCurrent != null) {
+            String action = "messages".equals(progressUnit) ? " reviewed" : " " + unitLabel();
+            return String.format("%,d%s", progressCurrent, action);
         }
         if (currentStepIndex != null && stepCount != null && stepCount > 0) {
             return "Step " + currentStepIndex + " of " + stepCount;
+        }
+        return "";
+    }
+
+    public String percentText() {
+        if (!"DETERMINATE".equals(progressMode) || progressPercent == null) return "";
+        return Math.max(0, Math.min(progressPercent, 100)) + "% complete";
+    }
+
+    public String remainingText() {
+        if (progressRemaining == null) return "";
+        return String.format("%,d remaining", Math.max(progressRemaining, 0));
+    }
+
+    public String etaText() {
+        if (!"RUNNING".equals(status) || progressRemaining == null || progressRemaining <= 0) return "";
+        if (etaSeconds == null || etaSeconds <= 0 || "unavailable".equals(etaQuality)) {
+            return "Calculating estimate…";
+        }
+        long seconds = etaSeconds;
+        if (seconds < 60) return "Less than a minute";
+        long minutes = Math.max(1, Math.round(seconds / 60.0));
+        if (minutes < 60) return "About " + minutes + (minutes == 1 ? " minute" : " minutes");
+        long hours = Math.max(1, Math.round(minutes / 60.0));
+        return "About " + hours + (hours == 1 ? " hour" : " hours");
+    }
+
+    public long metricValue(String key) {
+        for (JSONObject metric : metrics) {
+            if (key.equals(optionalString(metric, "key", ""))) return metric.optLong("value", 0L);
+        }
+        return 0L;
+    }
+
+    public String primaryMetricText() {
+        for (JSONObject metric : metrics) {
+            if (!metric.optBoolean("primary", false)) continue;
+            String label = optionalString(metric, "label", "");
+            if (label.isBlank() || metric.isNull("value")) continue;
+            return String.format("%,d %s", metric.optLong("value", 0L), lowerFirst(label));
         }
         return "";
     }
@@ -157,7 +222,40 @@ public final class TaskItem {
     }
 
     private static Integer nullableInt(JSONObject value, String key) {
-        return value.isNull(key) || !value.has(key) ? null : value.optInt(key);
+        return nullableInt(value, key, null);
+    }
+
+    private static Integer nullableInt(JSONObject value, String key, Integer fallback) {
+        if (value == null || value.isNull(key) || !value.has(key)) return fallback;
+        return Integer.valueOf(value.optInt(key));
+    }
+
+    private static Long nullableLong(JSONObject value, String key) {
+        return value == null || value.isNull(key) || !value.has(key) ? null : value.optLong(key);
+    }
+
+    private static Double nullableDouble(JSONObject value, String key) {
+        return value == null || value.isNull(key) || !value.has(key) ? null : value.optDouble(key);
+    }
+
+    static String optionalString(JSONObject value, String key, String fallback) {
+        if (value == null || !value.has(key) || value.isNull(key)) return fallback;
+        String candidate = value.optString(key, "").trim();
+        if (candidate.isBlank()
+            || "null".equalsIgnoreCase(candidate)
+            || "none".equalsIgnoreCase(candidate)
+            || "{}".equals(candidate)
+            || "[]".equals(candidate)) return fallback;
+        return candidate;
+    }
+
+    private String unitLabel() {
+        return progressUnit.isBlank() ? "items" : progressUnit;
+    }
+
+    private static String lowerFirst(String value) {
+        if (value == null || value.isBlank()) return "";
+        return Character.toLowerCase(value.charAt(0)) + value.substring(1);
     }
 
     private static List<JSONObject> objects(JSONArray values) {

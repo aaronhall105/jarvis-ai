@@ -65,6 +65,7 @@ public final class IntegrationsClient implements AutoCloseable {
     static final long PROVIDER_CALL_TIMEOUT_SECONDS = 50L;
     private final SecureStore store;
     private final Context context;
+    private final CoreEndpointManager endpoints;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final OkHttpClient client = new OkHttpClient.Builder()
@@ -77,6 +78,7 @@ public final class IntegrationsClient implements AutoCloseable {
     public IntegrationsClient(Context context) {
         this.context = context.getApplicationContext();
         store = new SecureStore(this.context);
+        endpoints = CoreEndpointManager.get(this.context);
     }
 
     public void providers(ProvidersCallback callback) {
@@ -246,6 +248,7 @@ public final class IntegrationsClient implements AutoCloseable {
                     if (!response.isSuccessful()) {
                         throw new IntegrationException(failureForHttpCode(response.code()));
                     }
+                    endpoints.reportSuccess(endpoint);
                     String raw = response.body() == null ? "" : response.body().string();
                     try {
                         return raw.isBlank() ? new JSONObject() : new JSONObject(raw);
@@ -262,6 +265,7 @@ public final class IntegrationsClient implements AutoCloseable {
                 // transport failure from another candidate endpoint.
                 throw exception;
             } catch (IOException exception) {
+                endpoints.reportTransportFailure(endpoint);
                 lastTransportFailure = exception;
             }
         }
@@ -274,11 +278,7 @@ public final class IntegrationsClient implements AutoCloseable {
     }
 
     private List<String> endpoints() {
-        return CoreEndpointSelector.candidateUrls(
-            context,
-            store.coreUrl(),
-            store.remoteCoreUrl()
-        );
+        return endpoints.candidates();
     }
 
     static boolean isGoogleAuthorizationUrl(String value) {

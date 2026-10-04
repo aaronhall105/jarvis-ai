@@ -2,9 +2,9 @@
 
 The Task Centre deliberately owns no execution semantics.  It reads the
 authoritative stores, normalises their states for clients, and delegates every
-mutation to the engine that created the task.  Its only durable state is the
-user's notification preference and the exactly-once delivery ledger for that
-preference.
+mutation to the engine that created the task.  Its durable projection state is
+limited to notification delivery and bounded progress samples used for honest
+rolling-rate estimates; execution remains owned by the source engines.
 """
 
 from __future__ import annotations
@@ -205,6 +205,24 @@ class TaskCentre:
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_centre_events
                     ON task_centre_events(principal_id, task_id, event_id);
+                CREATE TABLE IF NOT EXISTS task_progress_samples (
+                    principal_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    progress_current INTEGER NOT NULL,
+                    progress_total INTEGER,
+                    progress_unit TEXT,
+                    PRIMARY KEY(principal_id, task_id, observed_at)
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_progress_samples_recent
+                    ON task_progress_samples(principal_id, task_id, observed_at DESC);
+                CREATE TABLE IF NOT EXISTS task_progress_estimates (
+                    principal_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    smoothed_rate REAL NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(principal_id, task_id)
+                );
                 """
             )
             delivery_columns = {
@@ -295,6 +313,7 @@ class TaskCentre:
         subscriptions = self._subscriptions(principal_id)
         deliveries = self._notification_deliveries(principal_id)
         for task in tasks:
+            self._decorate_structured_progress(principal_id, task)
             subscription = subscriptions.get(str(task["task_id"]), {})
             task["notification_on_completion"] = bool(subscription.get("notify_on_completion"))
             task["notification_on_failure"] = bool(subscription.get("notify_on_failure"))
@@ -335,6 +354,158 @@ class TaskCentre:
         filtered = [task for task in tasks if self.matches_filter(task, filter_name)]
         filtered.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         return filtered[:maximum]
+
+    def _decorate_structured_progress(
+        self,
+        principal_id: str,
+        task: WorkItem,
+    ) -> None:
+        """Add a generic, optional measured-progress contract to every task."""
+
+        raw_current = task.get("progress_current")
+        raw_total = task.get("progress_total")
+        current = max(0, int(raw_current)) if raw_current is not None else None
+        total = max(0, int(raw_total)) if raw_total is not None else None
+        unit = str(task.get("progress_unit") or "").strip() or None
+        determinate = current is not None and total is not None and total > 0
+        if determinate and str(task.get("status") or "") == TaskCentreStatus.COMPLETED.value:
+            # COMPLETED is authoritative terminal evidence. Normalise stale source
+            # counters to the known denominator rather than showing a completed
+            # task as partly done or above 100 percent.
+            current = total
+            task["progress_current"] = current
+        bounded_current: int | None
+        remaining: int | None
+        fraction: float | None
+        if determinate:
+            assert current is not None and total is not None
+            bounded_current = min(current, total)
+            remaining = max(total - current, 0)
+            fraction = bounded_current / total
+        else:
+            bounded_current = current
+            remaining = None
+            fraction = None
+        percent = round(fraction * 100) if fraction is not None else None
+        task["progress"] = {
+            "mode": "DETERMINATE" if determinate else "INDETERMINATE",
+            "current": current,
+            "total": total if determinate else None,
+            "unit": unit,
+            "fraction": fraction,
+            "percent": percent,
+            "remaining": remaining,
+        }
+
+        timing = dict(task.get("timing") or {})
+        timing.setdefault("started_at", task.get("started_at"))
+        timing.setdefault("updated_at", task.get("updated_at"))
+        timing.setdefault("throughput_per_second", None)
+        timing.setdefault("eta_seconds", None)
+        timing.setdefault("eta_quality", "unavailable")
+        if current is not None:
+            timing.update(
+                self._progress_estimate(
+                    principal_id=principal_id,
+                    task_id=str(task["task_id"]),
+                    current=current,
+                    total=total if determinate else None,
+                    unit=unit,
+                    running=str(task.get("status") or "") == TaskCentreStatus.RUNNING.value,
+                )
+            )
+        task["timing"] = timing
+        task.setdefault("metrics", [])
+        task.setdefault("subtasks", [])
+
+    def _progress_estimate(
+        self,
+        *,
+        principal_id: str,
+        task_id: str,
+        current: int,
+        total: int | None,
+        unit: str | None,
+        running: bool,
+    ) -> dict[str, Any]:
+        observed = _now()
+        observed_iso = _iso(observed)
+        cutoff = _iso(observed - timedelta(hours=24))
+        window = _iso(observed - timedelta(minutes=15))
+        with self._db() as connection:
+            latest = connection.execute(
+                "SELECT observed_at,progress_current,progress_total FROM task_progress_samples "
+                "WHERE principal_id=? AND task_id=? ORDER BY observed_at DESC LIMIT 1",
+                (principal_id, task_id),
+            ).fetchone()
+            if latest is None or (
+                int(latest["progress_current"]) != current or latest["progress_total"] != total
+            ):
+                connection.execute(
+                    "INSERT INTO task_progress_samples(principal_id,task_id,observed_at,"
+                    "progress_current,progress_total,progress_unit) VALUES(?,?,?,?,?,?)",
+                    (principal_id, task_id, observed_iso, current, total, unit),
+                )
+            connection.execute(
+                "DELETE FROM task_progress_samples WHERE observed_at<?",
+                (cutoff,),
+            )
+            rows = connection.execute(
+                "SELECT observed_at,progress_current,progress_total FROM task_progress_samples "
+                "WHERE principal_id=? AND task_id=? AND observed_at>=? ORDER BY observed_at",
+                (principal_id, task_id, window),
+            ).fetchall()
+
+        unavailable = {
+            "throughput_per_second": None,
+            "review_rate_per_second": None,
+            "eta_seconds": None,
+            "eta_quality": "unavailable",
+        }
+        if not running or total is None or current >= total:
+            return unavailable
+        calculating = {**unavailable, "eta_quality": "calculating"}
+        if len(rows) < 3:
+            return calculating
+        first = rows[0]
+        last = rows[-1]
+        try:
+            first_at = datetime.fromisoformat(str(first["observed_at"]).replace("Z", "+00:00"))
+            last_at = datetime.fromisoformat(str(last["observed_at"]).replace("Z", "+00:00"))
+        except ValueError:
+            return calculating
+        seconds = (last_at - first_at).total_seconds()
+        advanced = int(last["progress_current"]) - int(first["progress_current"])
+        if seconds < 60 or advanced <= 0:
+            return calculating
+        observed_rate = advanced / seconds
+        with self._db() as connection:
+            previous = connection.execute(
+                "SELECT smoothed_rate FROM task_progress_estimates "
+                "WHERE principal_id=? AND task_id=?",
+                (principal_id, task_id),
+            ).fetchone()
+            previous_rate = float(previous["smoothed_rate"]) if previous is not None else None
+            rate = (
+                observed_rate
+                if previous_rate is None or previous_rate <= 0
+                else previous_rate * 0.75 + observed_rate * 0.25
+            )
+            connection.execute(
+                "INSERT INTO task_progress_estimates(principal_id,task_id,smoothed_rate,updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(principal_id,task_id) DO UPDATE SET "
+                "smoothed_rate=excluded.smoothed_rate,updated_at=excluded.updated_at",
+                (principal_id, task_id, rate, observed_iso),
+            )
+        eta = int(round(max(total - current, 0) / rate))
+        if eta <= 0 or eta > 7 * 24 * 60 * 60:
+            return calculating
+        return {
+            "throughput_per_second": rate,
+            "review_rate_per_second": rate,
+            "eta_seconds": eta,
+            "eta_quality": "smoothed_rolling_15_minute",
+        }
 
     async def _pending_interaction_tasks(
         self, principal_id: str, limit: int
@@ -682,6 +853,73 @@ class TaskCentre:
                     "failure": _safe_text(item.get("last_error"), limit=300),
                 }
             )
+        provider_subtasks: list[dict[str, Any]] = []
+        for item in states:
+            provider = str(item.get("provider") or "")
+            provider_name = "Gmail" if provider == "google_gmail" else "Outlook"
+            provider_current = max(0, int(item.get("processed_count") or 0))
+            provider_total = max(0, int(item.get("total_estimate") or 0))
+            provider_subtasks.append(
+                {
+                    "subtask_id": f"{provider}:{item.get('account_id')}",
+                    "title": provider_name,
+                    "provider": provider,
+                    "status": str(item.get("status") or "pending"),
+                    "progress": {
+                        "mode": "DETERMINATE" if provider_total else "INDETERMINATE",
+                        "current": provider_current,
+                        "total": provider_total or None,
+                        "unit": "messages",
+                        "remaining": max(provider_total - provider_current, 0)
+                        if provider_total
+                        else None,
+                        "fraction": min(provider_current, provider_total) / provider_total
+                        if provider_total
+                        else None,
+                        "percent": round(
+                            min(provider_current, provider_total) / provider_total * 100
+                        )
+                        if provider_total
+                        else None,
+                    },
+                    "metrics": [
+                        {
+                            "key": "moved",
+                            "label": "Moved",
+                            "value": int(item.get("moved_count") or 0),
+                            "unit": "messages",
+                            "destination": "Bin" if provider == "google_gmail" else "Deleted Items",
+                            "primary": True,
+                        },
+                        {
+                            "key": "kept_important",
+                            "label": "Kept important",
+                            "value": int(item.get("kept_important_count") or 0),
+                            "unit": "messages",
+                        },
+                        {
+                            "key": "kept_active",
+                            "label": "Kept active",
+                            "value": int(item.get("kept_active_count") or 0),
+                            "unit": "messages",
+                        },
+                        {
+                            "key": "temporary",
+                            "label": "Temporary",
+                            "value": int(item.get("temporary_count") or 0),
+                            "unit": "messages",
+                        },
+                        {
+                            "key": "uncertain_kept",
+                            "label": "Uncertain kept",
+                            "value": int(item.get("uncertain_count") or 0),
+                            "unit": "messages",
+                        },
+                    ],
+                    "updated_at": item.get("updated_at"),
+                    "waiting_reason": _safe_text(item.get("last_error"), limit=240),
+                }
+            )
         waiting_reasons = [
             _safe_text(item.get("last_error"), limit=240)
             for item in states
@@ -755,6 +993,40 @@ class TaskCentre:
                     + (f"; {remaining:,} remaining" if remaining is not None else "")
                 ),
                 planned_steps=provider_steps,
+                metrics=[
+                    {
+                        "key": "moved",
+                        "label": "Moved to deleted folders",
+                        "value": moved,
+                        "unit": "messages",
+                        "primary": True,
+                    },
+                    {
+                        "key": "kept_important",
+                        "label": "Kept important",
+                        "value": int(progress.get("kept_important_count") or 0),
+                        "unit": "messages",
+                    },
+                    {
+                        "key": "kept_active",
+                        "label": "Kept active",
+                        "value": int(progress.get("kept_active_count") or 0),
+                        "unit": "messages",
+                    },
+                    {
+                        "key": "temporary",
+                        "label": "Temporary",
+                        "value": int(progress.get("temporary_count") or 0),
+                        "unit": "messages",
+                    },
+                    {
+                        "key": "uncertain_kept",
+                        "label": "Uncertain kept",
+                        "value": int(progress.get("uncertain_count") or 0),
+                        "unit": "messages",
+                    },
+                ],
+                subtasks=provider_subtasks,
                 metadata={
                     "permanent_delete": False,
                     "uncertain_action": "keep",
@@ -1352,6 +1624,9 @@ class TaskCentre:
             "scheduled_at": values.pop("scheduled_at", None),
             "recurrence": values.pop("recurrence", None),
             "metadata": values.pop("metadata", {}),
+            "metrics": values.pop("metrics", []),
+            "subtasks": values.pop("subtasks", []),
+            "timing": values.pop("timing", {}),
         }
         source, source_task_id = task["task_id"].split(":", 1)
         task["source"] = source

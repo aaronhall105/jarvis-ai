@@ -686,7 +686,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startJarvisIfConfigured() {
-        if (!store.hasMobileToken() || store.coreUrl().isBlank()) return;
+        if (!store.hasMobileToken() || !store.hasConfiguredCoreEndpoint()) return;
 
         boolean microphoneGranted =
             checkSelfPermission(Manifest.permission.RECORD_AUDIO)
@@ -1240,7 +1240,7 @@ public final class MainActivity extends Activity {
     }
 
     private boolean credentialsReady() {
-        if (store.coreUrl().isBlank() || store.mobileToken().isBlank()) {
+        if (!store.hasConfiguredCoreEndpoint() || store.mobileToken().isBlank()) {
             Toast.makeText(
                 this,
                 "Open Settings and add the Jarvis Core URL and mobile token",

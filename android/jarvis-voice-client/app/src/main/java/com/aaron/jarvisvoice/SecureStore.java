@@ -27,6 +27,7 @@ public final class SecureStore {
     private static final String IMPROVEMENT_ADMIN_TOKEN =
         "improvement_admin_token_v190140";
     private static final String DEVELOPER_TOKEN = "developer_token_v190210";
+    private static final String LAST_GOOD_CORE_URL = "last_good_core_url_v190340";
 
     private final Context context;
     private final SharedPreferences preferences;
@@ -243,13 +244,10 @@ public final class SecureStore {
 
     private void migrateRemoteCoreAlpha14() {
         if (preferences.getBoolean("remote_core_migration_v190140", false)) return;
-        SharedPreferences.Editor editor = preferences.edit();
-        if (!preferences.contains("remote_core_url_v190140")) {
-            // One-time compatibility import of the Alpha5.1 Tailscale endpoint.
-            // After migration it is ordinary user configuration, not runtime policy.
-            editor.putString("remote_core_url_v190140", "http://100.127.215.111:8000");
-        }
-        editor.putBoolean("remote_core_migration_v190140", true).apply();
+        // Older installed builds already retain their explicitly migrated value.
+        // New installs must receive remote/Tailscale endpoints from configuration,
+        // never from a private address embedded in application source.
+        preferences.edit().putBoolean("remote_core_migration_v190140", true).apply();
     }
 
     public String remoteCoreUrl() {
@@ -312,6 +310,18 @@ public final class SecureStore {
         preferences.edit()
             .putString("remote_core_url_v190140", trimTrailingSlash(candidate))
             .apply();
+    }
+
+    public String lastGoodCoreUrl() {
+        return preferences.getString(LAST_GOOD_CORE_URL, "").trim();
+    }
+
+    public void setLastGoodCoreUrl(String value) {
+        String candidate = value == null ? "" : trimTrailingSlash(value.trim());
+        SharedPreferences.Editor editor = preferences.edit();
+        if (candidate.isBlank()) editor.remove(LAST_GOOD_CORE_URL);
+        else editor.putString(LAST_GOOD_CORE_URL, candidate);
+        editor.apply();
     }
 
     public void resetToDedicatedWake() {
@@ -403,7 +413,12 @@ public final class SecureStore {
     }
 
     public String coreUrl() {
-        return preferences.getString("core_url", "http://192.168.1.40:8000");
+        return preferences.getString("core_url", "").trim();
+    }
+
+    /** True when either supported Core route has been explicitly configured. */
+    public boolean hasConfiguredCoreEndpoint() {
+        return !coreUrl().isBlank() || !remoteCoreUrl().isBlank();
     }
 
     public String userName() {

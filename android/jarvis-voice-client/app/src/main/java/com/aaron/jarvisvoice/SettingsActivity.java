@@ -453,7 +453,7 @@ public final class SettingsActivity extends Activity {
 
     private View buildCoreCard() {
         LinearLayout card = card();
-        coreUrl = field("http://192.168.1.40:8000", false);
+        coreUrl = field("LAN URL or stable hostname", false);
         remoteCoreUrl = field("Remote HTTPS or Tailscale URL", false);
         mobileToken = field("Mobile voice token", true);
         userName = field("Aaron", false);

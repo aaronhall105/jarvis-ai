@@ -282,7 +282,7 @@ public final class VoiceService extends Service implements
         }
 
         return (
-            (!store.coreUrl().isBlank() && !store.mobileToken().isBlank())
+            (store.hasConfiguredCoreEndpoint() && !store.mobileToken().isBlank())
                 || store.backgroundConversations()
                 || wakeWordUsesVoiceService()
                 || (
@@ -400,7 +400,7 @@ public final class VoiceService extends Service implements
     }
 
     private void ensureConnected() {
-        if (store.coreUrl().isBlank() || store.mobileToken().isBlank()) {
+        if (!store.hasConfiguredCoreEndpoint() || store.mobileToken().isBlank()) {
             status("Open Settings and add the Jarvis Core URL and mobile token");
             return;
         }
@@ -687,7 +687,7 @@ public final class VoiceService extends Service implements
         endpointGeneration = generation;
         watchStartupAudio.begin(generation);
         audioEndpointRouter.begin(voiceEndpoint, endpointGeneration);
-        if (store.coreUrl().isBlank() || store.mobileToken().isBlank()) {
+        if (!store.hasConfiguredCoreEndpoint() || store.mobileToken().isBlank()) {
             wearVoiceBridge.error("Configure Jarvis on the phone first", endpointGeneration);
             voiceEndpoint = VoiceEndpoint.PHONE;
             requestedVoiceActive = false;
@@ -703,7 +703,7 @@ public final class VoiceService extends Service implements
 
     /** Starts the WATCH-authenticated Core handshake as soon as the channel wakes the hub. */
     private void prepareWatchTransport() {
-        if (voiceActive || stopping || store.coreUrl().isBlank()
+        if (voiceActive || stopping || !store.hasConfiguredCoreEndpoint()
                 || store.mobileToken().isBlank()) return;
         if (clientEndpoint == VoiceEndpoint.WATCH && client != null
                 && ConversationMode.LIVE.equals(clientConversationMode)) return;
