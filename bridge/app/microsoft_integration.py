@@ -1111,10 +1111,17 @@ class MicrosoftConnector(Connector):
         if supplied_cursor:
             parsed_cursor = urlsplit(supplied_cursor)
             expected_path = f"/v1.0{path}"
+            allowed_paths = {expected_path}
+            # Graph canonicalizes the well-known Inbox segment in nextLink
+            # values to OData's parenthesized form, even when the request used
+            # the equivalent slash form. Keep the continuation bound to that
+            # exact folder/resource rather than accepting arbitrary Graph URLs.
+            if folder.casefold() == "inbox":
+                allowed_paths.add("/v1.0/me/mailFolders('inbox')/messages")
             if (
                 parsed_cursor.scheme != "https"
                 or parsed_cursor.netloc != "graph.microsoft.com"
-                or parsed_cursor.path != expected_path
+                or parsed_cursor.path not in allowed_paths
                 or parsed_cursor.fragment
                 or parsed_cursor.username
                 or parsed_cursor.password

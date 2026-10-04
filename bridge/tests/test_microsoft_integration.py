@@ -144,7 +144,10 @@ class GraphFixture:
                     "@odata.deltaLink": "https://graph.microsoft.com/v1.0/delta-token",
                 },
             )
-        if path == "/v1.0/me/mailFolders/inbox/messages":
+        if path in {
+            "/v1.0/me/mailFolders/inbox/messages",
+            "/v1.0/me/mailFolders('inbox')/messages",
+        }:
             token = request.url.params.get("$skiptoken") or "first"
             return httpx.Response(
                 200,
@@ -398,7 +401,9 @@ async def test_outlook_search_snapshots_all_delta_safe_pages(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_outlook_cursor_mode_returns_one_validated_metadata_page(tmp_path: Path) -> None:
     _, _, connector, fixture, client = await connected_graph(tmp_path)
-    next_link = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=second"
+    next_link = (
+        "https://graph.microsoft.com/v1.0/me/mailFolders('inbox')/messages?$skiptoken=second"
+    )
     fixture.search_pages = {
         "first": {
             "value": [fixture.message(f"message-{index}") for index in range(25)],
@@ -443,6 +448,19 @@ async def test_outlook_cursor_mode_returns_one_validated_metadata_page(tmp_path:
                 "metadata_only": True,
                 "cursor_mode": True,
                 "page_cursor": "https://attacker.example/messages?$skiptoken=x",
+            },
+        )
+    with pytest.raises(ValueError, match="page_cursor"):
+        await connector._search(
+            "aaron",
+            {
+                "folder": "inbox",
+                "metadata_only": True,
+                "cursor_mode": True,
+                "page_cursor": (
+                    "https://graph.microsoft.com/v1.0/me/mailFolders('archive')/messages"
+                    "?$skiptoken=x"
+                ),
             },
         )
     await client.aclose()
