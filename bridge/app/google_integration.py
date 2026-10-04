@@ -1577,6 +1577,7 @@ class GoogleConnector(Connector):
             "date": headers.get("date"),
             "message_id_header": headers.get("message-id"),
             "reply_to": headers.get("reply-to"),
+            "list_id": headers.get("list-id"),
             "list_unsubscribe": headers.get("list-unsubscribe"),
             "precedence": headers.get("precedence"),
             "delivered_to": headers.get("delivered-to"),
@@ -1704,11 +1705,15 @@ class GoogleConnector(Connector):
                 "truncated": False,
             }, None
         all_pages = payload.get("all_pages") is True
+        cursor_mode = payload.get("cursor_mode") is True
+        supplied_cursor = str(payload.get("page_cursor") or "").strip()
+        if supplied_cursor and (len(supplied_cursor) > 2_000 or not cursor_mode):
+            raise ValueError("page_cursor is invalid")
         maximum_limit = 50_000 if payload.get("metadata_only") is True else 10_000
         maximum = max(1, min(int(payload.get("max_messages") or 5_000), maximum_limit))
         requested = self._limit(payload)
         messages: list[Mapping[str, Any]] = []
-        page_token: str | None = None
+        page_token: str | None = supplied_cursor or None
         result_size_estimate = 0
         pages = 0
         while pages < 100 and len(messages) < maximum:
@@ -1735,23 +1740,42 @@ class GoogleConnector(Connector):
             page_token = str(result.get("nextPageToken") or "").strip() or None
             if not all_pages or not page_token:
                 break
+        if len(messages) > maximum:
+            messages = messages[:maximum]
         # Gmail documents resultSizeEstimate as an estimate.  Once an all-pages
         # walk reaches a response without nextPageToken, a larger estimate is
         # not proof that IDs were omitted.  A remaining page token still fails
         # closed when the page or maximum bound stops the walk.
         truncated = bool(page_token) or (not all_pages and result_size_estimate > len(messages))
         ids = [str(item.get("id")) for item in messages if item.get("id")]
-        details = await asyncio.gather(
-            *(
-                self._request(
+        detail_ids = ids if cursor_mode and payload.get("metadata_only") is True else ids[:25]
+        semaphore = asyncio.Semaphore(10)
+
+        async def metadata(message_id: str) -> Mapping[str, Any]:
+            async with semaphore:
+                return await self._request(
                     principal,
                     "GET",
                     f"{GMAIL_API}/messages/{self._segment(message_id)}",
-                    params={"format": "metadata"},
+                    params={
+                        "format": "metadata",
+                        "metadataHeaders": [
+                            "From",
+                            "To",
+                            "Cc",
+                            "Delivered-To",
+                            "Subject",
+                            "Date",
+                            "Message-ID",
+                            "Reply-To",
+                            "List-ID",
+                            "List-Unsubscribe",
+                            "Precedence",
+                        ],
+                    },
                 )
-                for message_id in ids[:25]
-            )
-        )
+
+        details = await asyncio.gather(*(metadata(message_id) for message_id in detail_ids))
         summaries = [self._message_summary(item) for item in details]
         return {
             "query": query,
@@ -1762,6 +1786,8 @@ class GoogleConnector(Connector):
             "result_size_estimate": result_size_estimate or len(ids),
             "pages": pages,
             "truncated": truncated,
+            "next_page_cursor": page_token if cursor_mode else None,
+            "cursor_complete": cursor_mode and page_token is None,
         }, ids[0] if ids else None
 
     async def _gmail_changes(

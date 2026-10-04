@@ -923,6 +923,17 @@ class MicrosoftConnector(Connector):
             )
         except ValueError:
             epoch_ms = None
+        internet_headers = [
+            {
+                "name": str(header.get("name") or "")[:200],
+                "value": str(header.get("value") or "")[:2_000],
+            }
+            for header in item.get("internetMessageHeaders") or ()
+            if isinstance(header, Mapping) and header.get("name")
+        ][:100]
+        header_map = {
+            str(header["name"]).casefold(): str(header["value"]) for header in internet_headers
+        }
         return {
             "provider": "microsoft_outlook",
             "message_id": item.get("id"),
@@ -939,8 +950,11 @@ class MicrosoftConnector(Connector):
             "received_at": timestamp,
             "label_ids": labels,
             "attachments": ([{"present": True}] if item.get("hasAttachments") else []),
-            "list_unsubscribe": " unsubscribe "
-            in f" {cls._body_text(body.get('content')).casefold()} ",
+            "list_id": header_map.get("list-id"),
+            "list_unsubscribe": header_map.get("list-unsubscribe"),
+            "precedence": header_map.get("precedence"),
+            "internet_message_headers": internet_headers,
+            "inference_classification": item.get("inferenceClassification"),
             "parent_folder_id": item.get("parentFolderId"),
             "has_attachments": bool(item.get("hasAttachments")),
             "is_draft": bool(item.get("isDraft")),
@@ -950,7 +964,8 @@ class MicrosoftConnector(Connector):
     def _select() -> str:
         return (
             "id,conversationId,internetMessageId,parentFolderId,subject,body,bodyPreview,"
-            "from,toRecipients,receivedDateTime,sentDateTime,isRead,isDraft,importance,flag,hasAttachments"
+            "from,toRecipients,receivedDateTime,sentDateTime,isRead,isDraft,importance,flag,"
+            "hasAttachments,inferenceClassification"
         )
 
     async def _account(
@@ -1004,7 +1019,10 @@ class MicrosoftConnector(Connector):
         if len(query) > 1000:
             raise ValueError("query is invalid")
         metadata_only = payload.get("metadata_only") is True
-        limit_maximum = 1_000 if metadata_only and payload.get("all_pages") is True else 100
+        cursor_mode = payload.get("cursor_mode") is True
+        limit_maximum = (
+            1_000 if metadata_only and (payload.get("all_pages") is True or cursor_mode) else 100
+        )
         limit = max(1, min(int(payload.get("limit") or 20), limit_maximum))
         all_pages = payload.get("all_pages") is True
         maximum_limit = 50_000 if metadata_only else 10_000
@@ -1040,8 +1058,8 @@ class MicrosoftConnector(Connector):
             # not every full message body.  Avoiding body expansion keeps a
             # bounded multi-page Graph read inside the capability timeout.
             select = (
-                "id,conversationId,parentFolderId,subject,from,receivedDateTime,"
-                "isRead,importance,flag,hasAttachments"
+                "id,conversationId,parentFolderId,subject,from,toRecipients,"
+                "receivedDateTime,isRead,importance,flag,hasAttachments,inferenceClassification"
             )
         initial_params: dict[str, Any] = {
             "$top": limit,
@@ -1087,9 +1105,26 @@ class MicrosoftConnector(Connector):
             initial_params["$filter"] = (
                 f"{age_filter} and {existing_filter}" if existing_filter else age_filter
             )
-        params: Mapping[str, Any] | None = initial_params
+        supplied_cursor = str(payload.get("page_cursor") or "").strip()
+        if supplied_cursor and not cursor_mode:
+            raise ValueError("page_cursor is invalid")
+        if supplied_cursor:
+            parsed_cursor = urlsplit(supplied_cursor)
+            expected_path = f"/v1.0{path}"
+            if (
+                parsed_cursor.scheme != "https"
+                or parsed_cursor.netloc != "graph.microsoft.com"
+                or parsed_cursor.path != expected_path
+                or parsed_cursor.fragment
+                or parsed_cursor.username
+                or parsed_cursor.password
+                or len(supplied_cursor) > 10_000
+            ):
+                raise ValueError("page_cursor is invalid")
+            url, params = supplied_cursor, None
+        else:
+            url, params = GRAPH_API + path, initial_params
         messages: list[dict[str, Any]] = []
-        url = GRAPH_API + path
         pages = 0
         next_link = ""
         while pages < 100 and len(messages) < maximum:
@@ -1123,6 +1158,8 @@ class MicrosoftConnector(Connector):
             "pages": pages,
             "truncated": bool(next_link),
             "exact": not bool(next_link),
+            "next_page_cursor": next_link if cursor_mode else None,
+            "cursor_complete": cursor_mode and not bool(next_link),
         }, None
 
     async def _changes(
@@ -1185,11 +1222,21 @@ class MicrosoftConnector(Connector):
         self, principal: str, payload: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None]:
         message_id = self._required(payload, "message_id", limit=1000)
+        select = f"{self._select()},internetMessageHeaders"
+        if payload.get("classification_metadata") is True:
+            select = (
+                "id,conversationId,parentFolderId,subject,bodyPreview,from,toRecipients,"
+                "receivedDateTime,isRead,isDraft,importance,flag,hasAttachments,"
+                "inferenceClassification,internetMessageHeaders"
+            )
         value = await self._request(
             principal,
             "GET",
             f"{GRAPH_API}/me/messages/{self._segment(message_id)}",
-            params={"$select": self._select()},
+            # Graph exposes RFC headers only on an exact message GET.  They are
+            # useful classification evidence (List-ID, List-Unsubscribe and
+            # Precedence) and remain bounded/redacted by _message.
+            params={"$select": select},
         )
         return {"message": self._message(value)}, message_id
 

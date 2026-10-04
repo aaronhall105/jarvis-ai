@@ -588,6 +588,17 @@ class EmailAssistantSettingsRequest(BaseModel):
     cleanup_interval_seconds: int | None = Field(default=None, ge=3600, le=2_592_000)
 
 
+class ImportantOnlyInboxRequest(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=300)
+    enabled: bool
+    recoverable_cleanup_authority: bool
+    gmail_enabled: bool = True
+    outlook_enabled: bool = True
+    uncertain_action: str = Field(default="keep", max_length=20)
+    allow_permanent_delete: bool = False
+    audit_enabled: bool = True
+
+
 async def _try_handle_personal_task(
     text: str,
     *,
@@ -5027,6 +5038,30 @@ async def _try_handle_email_assistant(
         }
 
     if _explicit_cleanup_restore_request(command):
+        if "cleanup batch" in command:
+            restored_batch = await email_policies.restore_last_cleanup_batch(
+                principal_id=actor.user_key,
+                conversation_id=conversation_id,
+                request_id=request_id or str(uuid.uuid4()),
+            )
+            restored_count = int(restored_batch.get("restored") or 0)
+            failed_count = int(restored_batch.get("failed") or 0)
+            if restored_batch.get("reason") == "not_found":
+                response = "I couldn't find a verified recoverable cleanup batch to restore."
+            elif failed_count:
+                response = (
+                    f"I restored {restored_count:,} messages from the last cleanup batch, "
+                    f"but {failed_count:,} could not be verified."
+                )
+            else:
+                response = (
+                    f"Done — I restored {restored_count:,} messages from the last cleanup batch."
+                )
+            return {
+                "success": bool(restored_batch.get("success")),
+                "response": response,
+                "intent": "email_cleanup_restore_batch",
+            }
         history = await email_policies.cleanup_history_items(
             principal_id=actor.user_key,
             operation="trash",
@@ -6226,6 +6261,7 @@ async def email_assistant_status(
 ) -> dict[str, object]:
     principal_id = _require_mobile_integration_principal(authorization)
     status = await email_policies.assistant_status(principal_id=principal_id)
+    important_only = await email_policies.important_only_status(principal_id=principal_id)
     if status is None:
         return {
             "principal_id": principal_id,
@@ -6243,8 +6279,9 @@ async def email_assistant_status(
             "evaluated_count": 0,
             "important_detected_count": 0,
             "notified_count": 0,
+            "important_only": important_only,
         }
-    return status
+    return {**status, "important_only": important_only}
 
 
 @app.post("/api/email-assistant/settings")
@@ -6271,6 +6308,45 @@ async def configure_email_assistant(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/email-assistant/important-only")
+async def important_only_inbox_status(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await email_policies.important_only_status(principal_id=principal_id)
+
+
+@app.post("/api/email-assistant/important-only")
+async def configure_important_only_inbox(
+    request: ImportantOnlyInboxRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    _, scoped_conversation = scope_conversation_id(request.conversation_id, principal_id)
+    try:
+        return await email_policies.configure_important_only(
+            principal_id=principal_id,
+            conversation_id=scoped_conversation,
+            enabled=request.enabled,
+            recoverable_cleanup_authority=request.recoverable_cleanup_authority,
+            gmail_enabled=request.gmail_enabled,
+            outlook_enabled=request.outlook_enabled,
+            uncertain_action=request.uncertain_action,
+            allow_permanent_delete=request.allow_permanent_delete,
+            audit_enabled=request.audit_enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/email-assistant/important-only/run")
+async def run_important_only_inbox_once(
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    return await email_policies.run_important_only_once(principal_id=principal_id)
 
 
 @app.post("/api/email-assistant/cleanup/preview")

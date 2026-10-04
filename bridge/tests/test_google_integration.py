@@ -1002,6 +1002,51 @@ async def test_gmail_search_snapshots_every_provider_page(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_gmail_cursor_mode_returns_one_bounded_metadata_page(tmp_path: Path) -> None:
+    fixture = GoogleFixture()
+    fixture.gmail_search_pages = {
+        "first": {
+            "messages": [{"id": f"page-message-{index}"} for index in range(25)],
+            "resultSizeEstimate": 35_000,
+            "nextPageToken": "second",
+        },
+        "second": {
+            "messages": [{"id": f"page-message-{index}"} for index in range(25, 50)],
+            "resultSizeEstimate": 35_000,
+        },
+    }
+    _, _, connector, client = await connected_google(tmp_path, fixture)
+
+    first, _ = await connector._gmail_search(
+        "aaron",
+        {
+            "query": "in:inbox",
+            "metadata_only": True,
+            "cursor_mode": True,
+            "max_messages": 25,
+        },
+    )
+    second, _ = await connector._gmail_search(
+        "aaron",
+        {
+            "query": "in:inbox",
+            "metadata_only": True,
+            "cursor_mode": True,
+            "page_cursor": first["next_page_cursor"],
+            "max_messages": 25,
+        },
+    )
+
+    assert first["count"] == 25
+    assert first["next_page_cursor"] == "second"
+    assert first["cursor_complete"] is False
+    assert len(first["messages"]) == 25
+    assert second["message_ids"][0] == "page-message-25"
+    assert second["cursor_complete"] is True
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_gmail_completed_page_walk_does_not_trust_larger_size_estimate(
     tmp_path: Path,
 ) -> None:

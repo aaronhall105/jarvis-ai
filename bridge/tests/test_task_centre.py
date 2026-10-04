@@ -111,6 +111,29 @@ class FakeEmailPolicies:
     def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
         self.rows = rows or []
         self.calls: list[tuple[str, str]] = []
+        self.important_only: dict[str, Any] = {
+            "enabled": False,
+            "recoverable_cleanup_authority": False,
+            "providers": {"google_gmail": True, "microsoft_outlook": True},
+            "provider_states": [],
+        }
+
+    async def important_only_status(self, *, principal_id: str):
+        return {"principal_id": principal_id, **self.important_only}
+
+    async def configure_important_only(
+        self, *, enabled: bool, recoverable_cleanup_authority: bool, **_: Any
+    ):
+        self.calls.append(("important_only", "resume" if enabled else "pause"))
+        self.important_only["enabled"] = enabled
+        self.important_only["recoverable_cleanup_authority"] = recoverable_cleanup_authority
+        for item in self.important_only.get("provider_states") or ():
+            item["status"] = "pending" if enabled else "paused"
+        return dict(self.important_only)
+
+    async def run_important_only_once(self, **_: Any):
+        self.calls.append(("important_only", "retry"))
+        return {"status": "running", "ran": True}
 
     async def list_bulk_actions(self, *, principal_id: str, limit: int):
         return [row for row in self.rows if row["principal_id"] == principal_id][:limit]
@@ -322,6 +345,121 @@ async def test_unified_projection_contains_active_scheduled_executive_email_and_
     assert waiting["progress_total"] == 46_502
     assert waiting["requires_user_action"] is True
     assert waiting["result_summary"] == "No email has been changed yet"
+
+
+@pytest.mark.asyncio
+async def test_important_only_is_one_generic_task_without_batch_confirmations(tmp_path: Path):
+    centre = service(tmp_path / "tasks.db")
+    centre.email_policies.important_only = {
+        "enabled": True,
+        "recoverable_cleanup_authority": True,
+        "conversation_id": "usr:aaron:important-only",
+        "created_at": NOW,
+        "updated_at": NOW,
+        "providers": {"google_gmail": True, "microsoft_outlook": True},
+        "progress": {
+            "total_estimate": 35_000,
+            "processed_count": 12_000,
+            "moved_count": 9_000,
+            "kept_important_count": 2_000,
+            "kept_active_count": 250,
+            "temporary_count": 500,
+            "uncertain_count": 500,
+        },
+        "provider_states": [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-account",
+                "phase": "backlog",
+                "status": "pending",
+                "processed_count": 7_000,
+                "moved_count": 5_000,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-account",
+                "phase": "backlog",
+                "status": "pending",
+                "processed_count": 5_000,
+                "moved_count": 4_000,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+        ],
+    }
+    centre.email_policies.rows = [
+        {
+            **bulk("internal-batch", "running"),
+            "filter_kind": "important_only",
+        }
+    ]
+
+    tasks = await centre.list_tasks(principal_id="aaron", filter_name="ALL")
+    task = next(item for item in tasks if item["task_id"] == "important_only:inbox")
+
+    assert not any(item["task_id"] == "email_bulk:internal-batch" for item in tasks)
+    assert task["status"] == "RUNNING"
+    assert task["progress_current"] == 12_000
+    assert task["progress_total"] == 35_000
+    assert task["requires_user_action"] is False
+    assert task["can_confirm"] is False
+    assert task["metadata"]["permanent_delete"] is False
+    assert task["metadata"]["remaining"] == 23_000
+    assert "250 kept active" in task["result_summary"]
+
+    paused = await centre.pause(principal_id="aaron", task_id=task["task_id"], request_id="pause-1")
+    assert paused is not None and paused["status"] == "PAUSED"
+    resumed = await centre.resume(
+        principal_id="aaron", task_id=task["task_id"], request_id="resume-1"
+    )
+    assert resumed is not None and resumed["status"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_important_only_task_never_creates_authority_and_uses_provider_error_state(
+    tmp_path: Path,
+):
+    centre = service(tmp_path / "tasks.db")
+    centre.email_policies.important_only = {
+        "enabled": False,
+        "recoverable_cleanup_authority": False,
+        "conversation_id": "usr:aaron:important-only",
+        "providers": {"google_gmail": True, "microsoft_outlook": False},
+        "progress": {},
+        "provider_states": [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-account",
+                "phase": "backlog",
+                "status": "paused",
+                "last_error": "Gmail needs reconnecting",
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        ],
+    }
+
+    task = await centre.get_task(principal_id="aaron", task_id="important_only:inbox")
+
+    assert task is not None
+    assert task["can_resume"] is False
+    assert (
+        await centre.resume(
+            principal_id="aaron", task_id="important_only:inbox", request_id="resume-no-authority"
+        )
+        is None
+    )
+    assert centre.email_policies.calls == []
+
+    centre.email_policies.important_only["enabled"] = True
+    centre.email_policies.important_only["recoverable_cleanup_authority"] = True
+    centre.email_policies.important_only["provider_states"][0]["status"] = "waiting_provider"
+    waiting = await centre.get_task(principal_id="aaron", task_id="important_only:inbox")
+    assert waiting is not None
+    assert waiting["status"] == "WAITING_FOR_YOU"
+    assert waiting["user_action_type"] == "provider_reconnect"
 
 
 @pytest.mark.asyncio

@@ -19,6 +19,12 @@ from typing import Any, Protocol
 from app.connectors import CapabilityRequest, ConnectorRegistry, ExecutionStatus, ReceiptStatus
 from app.connectors.credentials import redact_text
 from app.email_semantic_routing import rank_email_topic_messages
+from app.important_only_inbox import (
+    DecisionConfidence,
+    InboxDisposition,
+    LifecycleState,
+    classify_important_only,
+)
 from app.response_presentation import clean_email_reply_body, present_user_response
 
 
@@ -83,6 +89,7 @@ class EmailAssistantPolicyEngine:
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._run_lock = asyncio.Lock()
+        self._important_only_lock = asyncio.Lock()
         self._init()
 
     @contextmanager
@@ -307,6 +314,96 @@ class EmailAssistantPolicyEngine:
                 );
                 CREATE INDEX IF NOT EXISTS idx_email_bulk_items_open
                   ON email_bulk_action_items(bulk_action_id,status,ordinal);
+
+                CREATE TABLE IF NOT EXISTS important_only_inbox_policies (
+                  principal_id TEXT PRIMARY KEY,
+                  conversation_id TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 0,
+                  recoverable_cleanup_authority INTEGER NOT NULL DEFAULT 0,
+                  allow_permanent_delete INTEGER NOT NULL DEFAULT 0 CHECK(allow_permanent_delete=0),
+                  gmail_enabled INTEGER NOT NULL DEFAULT 1,
+                  outlook_enabled INTEGER NOT NULL DEFAULT 1,
+                  uncertain_action TEXT NOT NULL DEFAULT 'keep' CHECK(uncertain_action='keep'),
+                  disposal_threshold TEXT NOT NULL DEFAULT 'high_confidence_disposable',
+                  audit_enabled INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS important_only_provider_state (
+                  principal_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  account_email TEXT,
+                  phase TEXT NOT NULL DEFAULT 'backlog',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  page_cursor TEXT,
+                  total_estimate INTEGER NOT NULL DEFAULT 0,
+                  processed_count INTEGER NOT NULL DEFAULT 0,
+                  moved_count INTEGER NOT NULL DEFAULT 0,
+                  kept_important_count INTEGER NOT NULL DEFAULT 0,
+                  kept_active_count INTEGER NOT NULL DEFAULT 0,
+                  temporary_count INTEGER NOT NULL DEFAULT 0,
+                  uncertain_count INTEGER NOT NULL DEFAULT 0,
+                  failed_count INTEGER NOT NULL DEFAULT 0,
+                  outcome_unknown_count INTEGER NOT NULL DEFAULT 0,
+                  batches_completed INTEGER NOT NULL DEFAULT 0,
+                  pending_batch_id TEXT,
+                  pending_next_cursor TEXT,
+                  pending_counts_json TEXT NOT NULL DEFAULT '{}',
+                  next_run_at TEXT NOT NULL,
+                  last_run_at TEXT,
+                  last_error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(principal_id,provider,account_id),
+                  FOREIGN KEY(principal_id) REFERENCES important_only_inbox_policies(principal_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_important_only_due
+                  ON important_only_provider_state(status,next_run_at);
+                CREATE TABLE IF NOT EXISTS important_only_campaigns (
+                  principal_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  campaign_signature TEXT NOT NULL,
+                  decision_json TEXT NOT NULL,
+                  observed_count INTEGER NOT NULL DEFAULT 1,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(principal_id,provider,account_id,campaign_signature)
+                );
+                CREATE TABLE IF NOT EXISTS important_only_lifecycle_items (
+                  principal_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  message_id TEXT NOT NULL,
+                  lifecycle TEXT NOT NULL,
+                  disposition TEXT NOT NULL,
+                  decision_json TEXT NOT NULL DEFAULT '{}',
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  next_review_at TEXT NOT NULL,
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  last_error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(principal_id,provider,account_id,message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_important_only_lifecycle_due
+                  ON important_only_lifecycle_items(status,next_review_at);
+                CREATE TABLE IF NOT EXISTS important_only_incremental_queue (
+                  principal_id TEXT NOT NULL,
+                  provider TEXT NOT NULL,
+                  account_id TEXT NOT NULL,
+                  message_id TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  attempts INTEGER NOT NULL DEFAULT 0,
+                  next_run_at TEXT NOT NULL,
+                  last_error TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  PRIMARY KEY(principal_id,provider,account_id,message_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_important_only_incremental_due
+                  ON important_only_incremental_queue(status,next_run_at);
                 """
             )
             policy_columns = {
@@ -370,6 +467,15 @@ class EmailAssistantPolicyEngine:
             }
             if "task_group_id" not in bulk_columns:
                 connection.execute("ALTER TABLE email_bulk_actions ADD COLUMN task_group_id TEXT")
+            for column, definition in {
+                "authority_kind": "TEXT NOT NULL DEFAULT 'explicit_confirmation'",
+                "standing_policy_id": "TEXT",
+                "checkpoint_applied": "INTEGER NOT NULL DEFAULT 0",
+            }.items():
+                if column not in bulk_columns:
+                    connection.execute(
+                        f"ALTER TABLE email_bulk_actions ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_email_bulk_task_group ON "
                 "email_bulk_actions(principal_id,task_group_id,updated_at DESC)"
@@ -428,6 +534,18 @@ class EmailAssistantPolicyEngine:
                 "halt_reason='Core restarted during bulk execution',updated_at=? "
                 "WHERE status='running'",
                 (self._iso(self._now()),),
+            )
+            connection.execute(
+                "UPDATE important_only_provider_state SET status='waiting_for_jarvis',"
+                "last_error='Core restarted during Important-Only processing',updated_at=? "
+                "WHERE status='running'",
+                (self._iso(self._now()),),
+            )
+            connection.execute(
+                "UPDATE important_only_incremental_queue SET status='pending',"
+                "last_error='Core restarted before incremental classification completed',"
+                "next_run_at=?,updated_at=? WHERE status='processing'",
+                (self._iso(self._now()), self._iso(self._now())),
             )
             connection.execute(
                 "UPDATE email_bulk_actions SET status='interrupted',"
@@ -917,7 +1035,13 @@ class EmailAssistantPolicyEngine:
         )
         if cleanup_interval < 3600 or cleanup_interval > 30 * 86_400:
             raise ValueError("Cleanup interval must be between 1 hour and 30 days")
-        status = "active" if important or replies or cleanup else "paused"
+        with self._db() as connection:
+            important_only_row = connection.execute(
+                "SELECT enabled FROM important_only_inbox_policies WHERE principal_id=?",
+                (principal,),
+            ).fetchone()
+        important_only_enabled = bool(important_only_row and important_only_row["enabled"])
+        status = "active" if important or replies or cleanup or important_only_enabled else "paused"
         now = self._now()
         now_text = self._iso(now)
         with self._db() as connection:
@@ -1011,6 +1135,1540 @@ class EmailAssistantPolicyEngine:
             result["account_id"] = accounts[0].get("account_id")
             result["account_email"] = accounts[0].get("account_email")
         return result
+
+    @staticmethod
+    def _important_only_policy_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "principal_id": str(row["principal_id"]),
+            "conversation_id": str(row["conversation_id"]),
+            "enabled": bool(row["enabled"]),
+            "recoverable_cleanup_authority": bool(row["recoverable_cleanup_authority"]),
+            "allow_permanent_delete": bool(row["allow_permanent_delete"]),
+            "providers": {
+                "google_gmail": bool(row["gmail_enabled"]),
+                "microsoft_outlook": bool(row["outlook_enabled"]),
+            },
+            "uncertain_action": str(row["uncertain_action"]),
+            "disposal_threshold": str(row["disposal_threshold"]),
+            "audit_enabled": bool(row["audit_enabled"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+        }
+
+    @staticmethod
+    def _important_only_state_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        for key in (
+            "total_estimate",
+            "processed_count",
+            "moved_count",
+            "kept_important_count",
+            "kept_active_count",
+            "temporary_count",
+            "uncertain_count",
+            "failed_count",
+            "outcome_unknown_count",
+            "batches_completed",
+        ):
+            value[key] = int(value.get(key) or 0)
+        # Provider cursors are internal continuation state, not mobile/API data.
+        value.pop("page_cursor", None)
+        value.pop("pending_batch_id", None)
+        value.pop("pending_next_cursor", None)
+        value.pop("pending_counts_json", None)
+        return value
+
+    @staticmethod
+    def _important_only_execution_policy_id(
+        principal_id: str, provider: str, account_id: str
+    ) -> str:
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"jarvis:important-only:{principal_id}:{provider}:{account_id}",
+            )
+        )
+
+    async def important_only_status(self, *, principal_id: str) -> dict[str, Any]:
+        principal = str(principal_id or "").strip()
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT * FROM important_only_inbox_policies WHERE principal_id=?",
+                (principal,),
+            ).fetchone()
+            state_rows = connection.execute(
+                "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                "ORDER BY provider,account_id",
+                (principal,),
+            ).fetchall()
+        if row is None:
+            return {
+                "principal_id": principal,
+                "enabled": False,
+                "recoverable_cleanup_authority": False,
+                "allow_permanent_delete": False,
+                "providers": {"google_gmail": True, "microsoft_outlook": True},
+                "uncertain_action": "keep",
+                "disposal_threshold": DecisionConfidence.HIGH_CONFIDENCE_DISPOSABLE.value,
+                "audit_enabled": True,
+                "provider_states": [],
+            }
+        policy = self._important_only_policy_row(row)
+        states = [self._important_only_state_row(item) for item in state_rows]
+        policy["provider_states"] = states
+        policy["progress"] = {
+            key: sum(int(item.get(key) or 0) for item in states)
+            for key in (
+                "total_estimate",
+                "processed_count",
+                "moved_count",
+                "kept_important_count",
+                "kept_active_count",
+                "temporary_count",
+                "uncertain_count",
+                "failed_count",
+                "outcome_unknown_count",
+            )
+        }
+        return policy
+
+    async def configure_important_only(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        enabled: bool,
+        recoverable_cleanup_authority: bool,
+        gmail_enabled: bool = True,
+        outlook_enabled: bool = True,
+        uncertain_action: str = "keep",
+        allow_permanent_delete: bool = False,
+        audit_enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Persist explicit, principal-scoped standing recoverable-cleanup authority."""
+
+        principal = str(principal_id or "").strip()
+        conversation = str(conversation_id or "").strip()
+        if not principal or not conversation:
+            raise ValueError("A principal and conversation are required")
+        if conversation.startswith("usr:") and not conversation.startswith(f"usr:{principal}:"):
+            raise ValueError("Important-Only policy conversation is owned by another principal")
+        if allow_permanent_delete:
+            raise ValueError("Important-Only Inbox can never authorize permanent deletion")
+        if str(uncertain_action).casefold() != "keep":
+            raise ValueError("Important-Only Inbox must keep uncertain mail")
+        if enabled and not recoverable_cleanup_authority:
+            raise ValueError("Automatic cleanup requires explicit recoverable cleanup authority")
+        now = self._iso(self._now())
+        with self._db() as connection:
+            previous = connection.execute(
+                "SELECT enabled FROM important_only_inbox_policies WHERE principal_id=?",
+                (principal,),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO important_only_inbox_policies "
+                "(principal_id,conversation_id,enabled,recoverable_cleanup_authority,"
+                "allow_permanent_delete,gmail_enabled,outlook_enabled,uncertain_action,"
+                "disposal_threshold,audit_enabled,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(principal_id) DO UPDATE SET "
+                "conversation_id=excluded.conversation_id,enabled=excluded.enabled,"
+                "recoverable_cleanup_authority=excluded.recoverable_cleanup_authority,"
+                "allow_permanent_delete=0,gmail_enabled=excluded.gmail_enabled,"
+                "outlook_enabled=excluded.outlook_enabled,uncertain_action='keep',"
+                "disposal_threshold=excluded.disposal_threshold,"
+                "audit_enabled=excluded.audit_enabled,updated_at=excluded.updated_at",
+                (
+                    principal,
+                    conversation,
+                    int(enabled),
+                    int(recoverable_cleanup_authority),
+                    0,
+                    int(gmail_enabled),
+                    int(outlook_enabled),
+                    "keep",
+                    DecisionConfidence.HIGH_CONFIDENCE_DISPOSABLE.value,
+                    int(audit_enabled),
+                    now,
+                    now,
+                ),
+            )
+        # The existing provider-delta worker is also the incremental feed for
+        # Important-Only mode.  Re-evaluate the shared profile after changing
+        # the policy so this feed is active even when notifications and the
+        # legacy conservative cleanup are both disabled.
+        await self.configure_assistant(
+            principal_id=principal,
+            conversation_id=conversation,
+        )
+        await self._sync_important_only_provider_states(
+            principal_id=principal,
+            reset_backlog=bool(enabled and previous is None),
+        )
+        return await self.important_only_status(principal_id=principal)
+
+    async def _sync_important_only_provider_states(
+        self, *, principal_id: str, reset_backlog: bool = False
+    ) -> None:
+        policy = await self.important_only_status(principal_id=principal_id)
+        enabled = bool(policy.get("enabled"))
+        selected = {
+            provider for provider, value in dict(policy.get("providers") or {}).items() if value
+        }
+        accounts = (
+            [dict(item) for item in await self.account_resolver(principal_id)]
+            if self.account_resolver is not None
+            else []
+        )
+        now = self._iso(self._now())
+        active_keys: set[tuple[str, str]] = set()
+        with self._db() as connection:
+            for account in accounts:
+                provider = str(account.get("provider") or "")
+                account_id = str(account.get("account_id") or "")
+                if provider not in selected or not account_id:
+                    continue
+                active_keys.add((provider, account_id))
+                policy_id = self._important_only_execution_policy_id(
+                    principal_id, provider, account_id
+                )
+                connection.execute(
+                    "INSERT INTO email_policies "
+                    "(policy_id,principal_id,conversation_id,kind,status,retention_days,"
+                    "interval_seconds,idempotency_key,created_at,updated_at,next_run_at,"
+                    "cleanup_mode,dry_run,protected_senders_json,classification_version,"
+                    "provider,account_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(policy_id) DO UPDATE SET conversation_id=excluded.conversation_id,"
+                    "status=excluded.status,updated_at=excluded.updated_at,"
+                    "next_run_at=CASE WHEN excluded.status='active' THEN excluded.next_run_at "
+                    "ELSE email_policies.next_run_at END",
+                    (
+                        policy_id,
+                        principal_id,
+                        policy["conversation_id"],
+                        "important_only",
+                        "active" if enabled else "paused",
+                        0,
+                        300,
+                        f"important-only:{principal_id}:{provider}:{account_id}",
+                        now,
+                        now,
+                        now,
+                        "trash",
+                        0,
+                        "[]",
+                        "important-only-v1",
+                        provider,
+                        account_id,
+                    ),
+                )
+                if reset_backlog:
+                    connection.execute(
+                        "DELETE FROM important_only_provider_state WHERE principal_id=? "
+                        "AND provider=? AND account_id=?",
+                        (principal_id, provider, account_id),
+                    )
+                connection.execute(
+                    "INSERT INTO important_only_provider_state "
+                    "(principal_id,provider,account_id,account_email,phase,status,next_run_at,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(principal_id,provider,account_id) DO UPDATE SET "
+                    "account_email=excluded.account_email,status=CASE "
+                    "WHEN ?=0 THEN 'paused' WHEN important_only_provider_state.status='paused' "
+                    "THEN CASE WHEN important_only_provider_state.phase='monitoring' "
+                    "THEN 'monitoring' ELSE 'pending' END "
+                    "ELSE important_only_provider_state.status END,"
+                    "next_run_at=CASE WHEN ?=1 THEN excluded.next_run_at "
+                    "ELSE important_only_provider_state.next_run_at END,updated_at=excluded.updated_at",
+                    (
+                        principal_id,
+                        provider,
+                        account_id,
+                        account.get("account_email"),
+                        "backlog",
+                        "pending" if enabled else "paused",
+                        now,
+                        now,
+                        now,
+                        int(enabled),
+                        int(enabled),
+                    ),
+                )
+            rows = connection.execute(
+                "SELECT provider,account_id FROM important_only_provider_state "
+                "WHERE principal_id=?",
+                (principal_id,),
+            ).fetchall()
+            for row in rows:
+                key = (str(row["provider"]), str(row["account_id"]))
+                if key not in active_keys or not enabled:
+                    connection.execute(
+                        "UPDATE important_only_provider_state SET status='paused',updated_at=? "
+                        "WHERE principal_id=? AND provider=? AND account_id=?",
+                        (now, principal_id, *key),
+                    )
+
+    def _important_only_authorized(self, action: Mapping[str, Any]) -> bool:
+        if (
+            str(action.get("filter_kind") or "") != "important_only"
+            or str(action.get("operation") or "") != "trash"
+            or str(action.get("authority_kind") or "") != "standing_policy"
+        ):
+            return False
+        principal = str(action.get("principal_id") or "")
+        provider = str(action.get("provider") or "")
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT * FROM important_only_inbox_policies WHERE principal_id=?",
+                (principal,),
+            ).fetchone()
+        if row is None:
+            return False
+        policy = self._important_only_policy_row(row)
+        return bool(
+            policy["enabled"]
+            and policy["recoverable_cleanup_authority"]
+            and not policy["allow_permanent_delete"]
+            and policy["uncertain_action"] == "keep"
+            and dict(policy["providers"]).get(provider) is True
+            and str(action.get("standing_policy_id") or "")
+            == self._important_only_execution_policy_id(
+                principal, provider, str(action.get("account_id") or "")
+            )
+        )
+
+    def list_important_only_provider_states(
+        self, *, principal_id: str
+    ) -> builtins.list[dict[str, Any]]:
+        with self._db() as connection:
+            rows = connection.execute(
+                "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                "ORDER BY provider,account_id",
+                (str(principal_id),),
+            ).fetchall()
+        return [self._important_only_state_row(row) for row in rows]
+
+    def _record_important_only_campaign(
+        self,
+        *,
+        principal_id: str,
+        provider: str,
+        account_id: str,
+        decision: Mapping[str, Any],
+    ) -> None:
+        signature = str(decision.get("campaign_signature") or "").strip()
+        if not signature:
+            return
+        # Campaign cache contains only a digest and aggregate classification;
+        # it never stores message content or provider IDs.
+        safe = {
+            "disposition": decision.get("disposition"),
+            "lifecycle": decision.get("lifecycle"),
+            "confidence": decision.get("confidence"),
+            "reason_codes": list(decision.get("reason_codes") or ()),
+            "classification_version": decision.get("classification_version"),
+        }
+        now = self._iso(self._now())
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO important_only_campaigns "
+                "(principal_id,provider,account_id,campaign_signature,decision_json,"
+                "observed_count,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?) "
+                "ON CONFLICT(principal_id,provider,account_id,campaign_signature) DO UPDATE SET "
+                "decision_json=excluded.decision_json,"
+                "observed_count=important_only_campaigns.observed_count+1,"
+                "updated_at=excluded.updated_at",
+                (
+                    principal_id,
+                    provider,
+                    account_id,
+                    signature,
+                    json.dumps(safe, sort_keys=True, separators=(",", ":")),
+                    now,
+                    now,
+                ),
+            )
+
+    def _track_important_only_lifecycle(
+        self,
+        *,
+        principal_id: str,
+        provider: str,
+        account_id: str,
+        message_id: str,
+        decision: Mapping[str, Any],
+    ) -> None:
+        disposition = str(decision.get("disposition") or "")
+        now = self._now()
+        if disposition != InboxDisposition.TEMPORARY.value:
+            return
+        candidates: builtins.list[datetime] = []
+        for raw in decision.get("evidence") or ():
+            if not isinstance(raw, Mapping):
+                continue
+            for key in ("expires_at", "review_at"):
+                value = self._parse_timestamp(raw.get(key))
+                if value is not None:
+                    candidates.append(value)
+        next_review = min(candidates) if candidates else now + timedelta(days=1)
+        if next_review <= now:
+            next_review = now + timedelta(minutes=5)
+        safe_decision = {
+            "disposition": disposition,
+            "lifecycle": decision.get("lifecycle"),
+            "confidence": decision.get("confidence"),
+            "reason_codes": list(decision.get("reason_codes") or ()),
+            "classification_version": decision.get("classification_version"),
+        }
+        now_text = self._iso(now)
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO important_only_lifecycle_items "
+                "(principal_id,provider,account_id,message_id,lifecycle,disposition,"
+                "decision_json,status,next_review_at,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,'pending',?,?,?) "
+                "ON CONFLICT(principal_id,provider,account_id,message_id) DO UPDATE SET "
+                "lifecycle=excluded.lifecycle,disposition=excluded.disposition,"
+                "decision_json=excluded.decision_json,status='pending',"
+                "next_review_at=excluded.next_review_at,last_error=NULL,updated_at=excluded.updated_at",
+                (
+                    principal_id,
+                    provider,
+                    account_id,
+                    message_id,
+                    str(decision.get("lifecycle") or LifecycleState.UNKNOWN.value),
+                    disposition,
+                    json.dumps(safe_decision, sort_keys=True, separators=(",", ":")),
+                    self._iso(next_review),
+                    now_text,
+                    now_text,
+                ),
+            )
+
+    async def _important_only_page_decisions(
+        self,
+        *,
+        policy: Mapping[str, Any],
+        state: Mapping[str, Any],
+        messages: Sequence[Mapping[str, Any]],
+    ) -> tuple[builtins.list[dict[str, Any]], dict[str, int]]:
+        provider = str(state["provider"])
+        account_id = str(state["account_id"])
+        profile = await self.assistant_status(principal_id=str(policy["principal_id"]))
+        protected_senders = list((profile or {}).get("protected_senders") or ())
+        execution_policy_id = self._important_only_execution_policy_id(
+            str(policy["principal_id"]), provider, account_id
+        )
+        with self._db() as connection:
+            watched_threads = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT provider_thread_id FROM email_reply_watches WHERE principal_id=? "
+                    "AND provider=? AND COALESCE(account_id,'')=? AND status='active'",
+                    (policy["principal_id"], provider, account_id),
+                ).fetchall()
+                if row[0]
+            }
+            restored_message_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT message_id FROM email_policy_items WHERE policy_id=? "
+                    "AND status='restored'",
+                    (execution_policy_id,),
+                ).fetchall()
+            }
+        results: builtins.list[dict[str, Any]] = []
+        counts = {
+            "processed_count": 0,
+            "kept_important_count": 0,
+            "kept_active_count": 0,
+            "temporary_count": 0,
+            "uncertain_count": 0,
+            "disposable_count": 0,
+        }
+        for raw in messages:
+            message = dict(raw)
+            message_id = str(message.get("message_id") or "").strip()
+            if not message_id:
+                continue
+            labels = {str(item).upper() for item in message.get("label_ids") or ()}
+            if "INBOX" not in labels or labels & {"TRASH", "SENT", "DRAFT"}:
+                continue
+            base_classification = self.classify_message(
+                message,
+                owner_email=str(state.get("account_email") or ""),
+                known_contact=False,
+                watched_reply=str(message.get("thread_id") or "") in watched_threads,
+            )
+            decision = classify_important_only(
+                message,
+                now=self._now(),
+                owner_email=str(state.get("account_email") or ""),
+                known_contact=None,
+                protected_senders=protected_senders,
+                watched_reply=str(message.get("thread_id") or "") in watched_threads,
+                base_classification=base_classification,
+                explicitly_protected=message_id in restored_message_ids,
+            )
+            # Outlook list headers require an exact GET.  Fetch the bounded
+            # header/preview projection only for messages that cheap metadata
+            # could not safely decide; never download all bodies into memory.
+            if (
+                provider == "microsoft_outlook"
+                and decision.disposition is InboxDisposition.UNCERTAIN
+                and str(message.get("inference_classification") or "").casefold() == "other"
+            ):
+                enriched = await self.registry.execute(
+                    CapabilityRequest(
+                        capability_id="outlook.read",
+                        payload={
+                            "message_id": message_id,
+                            "classification_metadata": True,
+                        },
+                        request_id=str(uuid.uuid4()),
+                        conversation_id=str(policy["conversation_id"]),
+                        principal_id=str(policy["principal_id"]),
+                        operation="important_only_classification_evidence",
+                        target=message_id,
+                    ),
+                    refresh_health=False,
+                )
+                enriched_message = enriched.data.get("message") if enriched.success else None
+                if isinstance(enriched_message, Mapping):
+                    message = dict(enriched_message)
+                    message["label_ids"] = list(
+                        dict.fromkeys([*(message.get("label_ids") or ()), "INBOX"])
+                    )
+                    base_classification = self.classify_message(
+                        message,
+                        owner_email=str(state.get("account_email") or ""),
+                        known_contact=False,
+                        watched_reply=str(message.get("thread_id") or "") in watched_threads,
+                    )
+                    decision = classify_important_only(
+                        message,
+                        now=self._now(),
+                        owner_email=str(state.get("account_email") or ""),
+                        known_contact=None,
+                        protected_senders=protected_senders,
+                        watched_reply=str(message.get("thread_id") or "") in watched_threads,
+                        base_classification=base_classification,
+                        explicitly_protected=message_id in restored_message_ids,
+                    )
+            structured = decision.as_dict()
+            self._track_important_only_lifecycle(
+                principal_id=str(policy["principal_id"]),
+                provider=provider,
+                account_id=account_id,
+                message_id=message_id,
+                decision=structured,
+            )
+            self._record_important_only_campaign(
+                principal_id=str(policy["principal_id"]),
+                provider=provider,
+                account_id=account_id,
+                decision=structured,
+            )
+            counts["processed_count"] += 1
+            if decision.disposition is InboxDisposition.KEEP_IMPORTANT:
+                counts["kept_important_count"] += 1
+            elif decision.disposition is InboxDisposition.KEEP_ACTIVE:
+                counts["kept_active_count"] += 1
+            elif decision.disposition is InboxDisposition.TEMPORARY:
+                counts["temporary_count"] += 1
+            elif decision.disposition is InboxDisposition.DISPOSABLE:
+                counts["disposable_count"] += 1
+            else:
+                counts["uncertain_count"] += 1
+            results.append(
+                {
+                    "message": message,
+                    "message_id": message_id,
+                    "decision": structured,
+                }
+            )
+        return results, counts
+
+    def _freeze_important_only_batch(
+        self,
+        *,
+        policy: Mapping[str, Any],
+        state: Mapping[str, Any],
+        decisions: Sequence[Mapping[str, Any]],
+        page_cursor: str | None,
+        next_cursor: str | None,
+        counts: Mapping[str, int],
+    ) -> str | None:
+        candidates = [
+            item
+            for item in decisions
+            if bool((item.get("decision") or {}).get("automatic_disposal_eligible"))
+        ]
+        if not candidates:
+            return None
+        cursor_digest = hashlib.sha256(str(page_cursor or "first-page").encode()).hexdigest()[:24]
+        batch_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "important-only-batch:"
+                f"{policy['principal_id']}:{state['provider']}:{state['account_id']}:"
+                f"{cursor_digest}:{int(state.get('batches_completed') or 0)}",
+            )
+        )
+        reason_counts: dict[str, int] = {}
+        metadata: dict[str, Mapping[str, Any]] = {}
+        ids: builtins.list[str] = []
+        execution_policy_id = self._important_only_execution_policy_id(
+            str(policy["principal_id"]), str(state["provider"]), str(state["account_id"])
+        )
+        for item in candidates:
+            message_id = str(item["message_id"])
+            message = dict(item["message"])
+            decision = dict(item["decision"])
+            ids.append(message_id)
+            metadata[message_id] = message
+            for reason in decision.get("reason_codes") or ():
+                reason_counts[str(reason)] = reason_counts.get(str(reason), 0) + 1
+            eligibility_key = hashlib.sha256(
+                f"{execution_policy_id}:{message_id}:important-only-v1".encode()
+            ).hexdigest()
+            evidence = {
+                "classification": decision,
+                "provider": state["provider"],
+                "account_id": state["account_id"],
+                "cleanup_mode": "trash",
+                "permanent_delete": False,
+                "standing_policy_authority": True,
+                "message_metadata": {
+                    **self._cleanup_message_metadata(message),
+                    **(
+                        {"previous_folder_id": message.get("parent_folder_id")}
+                        if state["provider"] == "microsoft_outlook"
+                        else {}
+                    ),
+                },
+                "policy_version": "important-only-v1",
+                "cleanup_run_at": self._iso(self._now()),
+                "cleanup_batch_id": batch_id,
+            }
+            self._record_item(
+                policy_id=execution_policy_id,
+                message_id=message_id,
+                eligibility_key=eligibility_key,
+                status="frozen",
+                attempts=0,
+                evidence=evidence,
+            )
+        filter_evidence = {
+            "kind": "important_only",
+            "classification_version": "important-only-v1",
+            "reason_counts": reason_counts,
+            "frozen": True,
+            "permanent_delete": False,
+            "standing_policy_authority": True,
+            "uncertain_action": "keep",
+        }
+        prepared, proceed = self._begin_bulk_snapshot(
+            action_id=batch_id,
+            principal_id=str(policy["principal_id"]),
+            conversation_id=str(policy["conversation_id"]),
+            provider=str(state["provider"]),
+            account_id=str(state["account_id"]),
+            operation="trash",
+            filter_kind="important_only",
+            filter_evidence=filter_evidence,
+            original_authorization_text="Standing Important-Only Inbox recoverable cleanup policy",
+            idempotency_key=f"important-only-batch:{batch_id}",
+            task_group_id=f"important-only:{policy['principal_id']}",
+            ttl_seconds=3600,
+            batch_size=25,
+        )
+        if proceed:
+            self._complete_bulk_snapshot(
+                action_id=batch_id,
+                filter_evidence=filter_evidence,
+                ids=ids,
+                metadata=metadata,
+            )
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='authorized',authority_kind='standing_policy',"
+                    "standing_policy_id=?,expires_at=?,updated_at=? WHERE bulk_action_id=? "
+                    "AND status='awaiting_confirmation'",
+                    (
+                        execution_policy_id,
+                        self._iso(self._now() + timedelta(days=7)),
+                        self._iso(self._now()),
+                        batch_id,
+                    ),
+                )
+        elif prepared.get("status") not in {
+            "authorized",
+            "interrupted",
+            "partial",
+            "completed",
+            "running",
+        }:
+            raise RuntimeError("Important-Only frozen batch is not safely executable")
+        if prepared.get("status") == "completed" and bool(prepared.get("checkpoint_applied")):
+            return batch_id
+        with self._db() as connection:
+            connection.execute(
+                "UPDATE important_only_provider_state SET pending_batch_id=?,"
+                "pending_next_cursor=?,pending_counts_json=?,status='running',updated_at=? "
+                "WHERE principal_id=? AND provider=? AND account_id=?",
+                (
+                    batch_id,
+                    next_cursor,
+                    json.dumps(dict(counts), sort_keys=True, separators=(",", ":")),
+                    self._iso(self._now()),
+                    policy["principal_id"],
+                    state["provider"],
+                    state["account_id"],
+                ),
+            )
+        return batch_id
+
+    def _sync_important_only_policy_items(self, bulk_action_id: str) -> None:
+        with self._db() as connection:
+            action = connection.execute(
+                "SELECT * FROM email_bulk_actions WHERE bulk_action_id=?",
+                (bulk_action_id,),
+            ).fetchone()
+            if action is None or not action["standing_policy_id"]:
+                return
+            rows = connection.execute(
+                "SELECT * FROM email_bulk_action_items WHERE bulk_action_id=?",
+                (bulk_action_id,),
+            ).fetchall()
+            for row in rows:
+                item = connection.execute(
+                    "SELECT * FROM email_policy_items WHERE policy_id=? AND message_id=? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (str(action["standing_policy_id"]), str(row["provider_message_id"])),
+                ).fetchone()
+                if item is None:
+                    continue
+                evidence = json.loads(str(item["evidence_json"] or "{}"))
+                evidence["verification"] = json.loads(str(row["verification_json"] or "{}"))
+                evidence["action_receipt_id"] = row["action_receipt_id"]
+                evidence["cleanup_provider_reference"] = row["provider_reference"]
+                status = str(row["status"])
+                mapped = "verified" if status == "verified" else status
+                connection.execute(
+                    "UPDATE email_policy_items SET status=?,attempts=?,action_id=?,"
+                    "provider_reference=?,evidence_json=?,error=?,updated_at=? "
+                    "WHERE policy_id=? AND message_id=? AND eligibility_key=?",
+                    (
+                        mapped,
+                        int(row["attempts"] or 0),
+                        row["action_receipt_id"],
+                        row["provider_reference"],
+                        json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+                        row["error"],
+                        self._iso(self._now()),
+                        str(item["policy_id"]),
+                        str(item["message_id"]),
+                        str(item["eligibility_key"]),
+                    ),
+                )
+
+    async def _finish_important_only_page(
+        self,
+        *,
+        state: Mapping[str, Any],
+        bulk_result: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        counts = json.loads(str(state.get("pending_counts_json") or "{}"))
+        next_cursor = state.get("pending_next_cursor")
+        succeeded = int((bulk_result or {}).get("succeeded_count") or 0)
+        failed = int((bulk_result or {}).get("failed_count") or 0)
+        outcome_unknown = (
+            int((bulk_result or {}).get("remaining_count") or 0)
+            if (bulk_result and bulk_result.get("status") != "completed")
+            else 0
+        )
+        complete = not next_cursor
+        now = self._now()
+        checkpoint_applied = True
+        with self._db() as connection:
+            bulk_action_id = str((bulk_result or {}).get("bulk_action_id") or "")
+            if bulk_action_id:
+                checkpoint_applied = bool(
+                    connection.execute(
+                        "UPDATE email_bulk_actions SET checkpoint_applied=1,updated_at=? "
+                        "WHERE bulk_action_id=? AND checkpoint_applied=0",
+                        (self._iso(now), bulk_action_id),
+                    ).rowcount
+                )
+            if checkpoint_applied:
+                connection.execute(
+                    "UPDATE important_only_provider_state SET phase=?,status=?,page_cursor=?,"
+                    "processed_count=processed_count+?,moved_count=moved_count+?,"
+                    "kept_important_count=kept_important_count+?,"
+                    "kept_active_count=kept_active_count+?,temporary_count=temporary_count+?,"
+                    "uncertain_count=uncertain_count+?,failed_count=failed_count+?,"
+                    "outcome_unknown_count=outcome_unknown_count+?,"
+                    "batches_completed=batches_completed+1,pending_batch_id=NULL,"
+                    "pending_next_cursor=NULL,pending_counts_json='{}',last_run_at=?,"
+                    "next_run_at=?,last_error=NULL,updated_at=? "
+                    "WHERE principal_id=? AND provider=? AND account_id=?",
+                    (
+                        "monitoring" if complete else "backlog",
+                        "monitoring" if complete else "pending",
+                        next_cursor,
+                        int(counts.get("processed_count") or 0),
+                        succeeded,
+                        int(counts.get("kept_important_count") or 0),
+                        int(counts.get("kept_active_count") or 0),
+                        int(counts.get("temporary_count") or 0),
+                        int(counts.get("uncertain_count") or 0),
+                        failed,
+                        outcome_unknown,
+                        self._iso(now),
+                        self._iso(now + timedelta(seconds=300 if complete else 2)),
+                        self._iso(now),
+                        state["principal_id"],
+                        state["provider"],
+                        state["account_id"],
+                    ),
+                )
+        return {
+            "status": "monitoring" if complete else "running",
+            "provider": state["provider"],
+            "processed": int(counts.get("processed_count") or 0) if checkpoint_applied else 0,
+            "moved": succeeded if checkpoint_applied else 0,
+            "permanent_deleted": 0,
+        }
+
+    async def run_important_only_once(
+        self,
+        *,
+        principal_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Process one bounded provider page through frozen recoverable batches."""
+
+        async with self._important_only_lock:
+            return await self._run_important_only_once_unlocked(
+                principal_id=principal_id,
+                now=now,
+            )
+
+    async def _run_important_only_once_unlocked(
+        self,
+        *,
+        principal_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+
+        current = (now or self._now()).astimezone(timezone.utc)
+        clauses = [
+            "p.enabled=1",
+            "p.recoverable_cleanup_authority=1",
+            "s.status NOT IN ('paused','monitoring')",
+        ]
+        values: builtins.list[Any] = []
+        if principal_id is not None:
+            clauses.append("s.principal_id=?")
+            values.append(str(principal_id))
+        else:
+            clauses.append("s.next_run_at<=?")
+            values.append(self._iso(current))
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT s.* FROM important_only_provider_state s "
+                "JOIN important_only_inbox_policies p ON p.principal_id=s.principal_id WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY s.next_run_at,s.provider,s.account_id LIMIT 1",
+                values,
+            ).fetchone()
+            policy_row = (
+                connection.execute(
+                    "SELECT * FROM important_only_inbox_policies WHERE principal_id=?",
+                    (str(row["principal_id"]),),
+                ).fetchone()
+                if row is not None
+                else None
+            )
+        if row is None or policy_row is None:
+            return {"status": "idle", "ran": False}
+        state = dict(row)
+        policy = self._important_only_policy_row(policy_row)
+        pending_batch = str(state.get("pending_batch_id") or "")
+        if pending_batch:
+            result = await self.execute_bulk_action(
+                principal_id=str(state["principal_id"]),
+                conversation_id=str(policy["conversation_id"]),
+                bulk_action_id=pending_batch,
+                max_items=25,
+            )
+            self._sync_important_only_policy_items(pending_batch)
+            if result.get("status") == "completed":
+                return await self._finish_important_only_page(state=state, bulk_result=result)
+            bounded_pause = (
+                result.get("status") == "interrupted"
+                and str(result.get("halt_reason") or "")
+                == "Bounded execution paused before the next batch"
+            )
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_provider_state SET status=?,"
+                    "last_error=?,next_run_at=?,updated_at=? WHERE principal_id=? "
+                    "AND provider=? AND account_id=?",
+                    (
+                        "pending" if bounded_pause else "waiting_for_jarvis",
+                        (
+                            None
+                            if bounded_pause
+                            else str(
+                                result.get("halt_reason")
+                                or "Recoverable batch needs reconciliation"
+                            )[:1000]
+                        ),
+                        self._iso(
+                            current
+                            + (timedelta(seconds=2) if bounded_pause else timedelta(minutes=5))
+                        ),
+                        self._iso(current),
+                        state["principal_id"],
+                        state["provider"],
+                        state["account_id"],
+                    ),
+                )
+            return {
+                "status": "running" if bounded_pause else "waiting_for_jarvis",
+                "ran": True,
+                "provider": state["provider"],
+            }
+
+        try:
+            account = await self._require_email_account(
+                principal_id=str(state["principal_id"]),
+                provider=str(state["provider"]),
+                account_id=str(state["account_id"]),
+            )
+            if account.get("healthy") is False or account.get("reauthorization_required") is True:
+                raise ValueError("The provider account is not healthy")
+            capability = "gmail.search" if state["provider"] == "google_gmail" else "outlook.search"
+            total_estimate = int(state.get("total_estimate") or 0)
+            if total_estimate <= 0:
+                count_payload: dict[str, Any] = {"count_only": True}
+                if state["provider"] == "google_gmail":
+                    count_payload["filter_kind"] = "all_inbox"
+                else:
+                    count_payload["folder"] = "inbox"
+                count_result = await self.registry.execute(
+                    CapabilityRequest(
+                        capability_id=capability,
+                        payload=count_payload,
+                        request_id=str(uuid.uuid4()),
+                        conversation_id=str(policy["conversation_id"]),
+                        principal_id=str(state["principal_id"]),
+                        operation="important_only_backlog_count",
+                    ),
+                    refresh_health=True,
+                )
+                if not count_result.success:
+                    raise RuntimeError(
+                        count_result.error or "The provider could not count the Inbox"
+                    )
+                total_estimate = max(0, int(count_result.data.get("count") or 0))
+            payload: dict[str, Any] = {
+                "limit": 100,
+                "metadata_only": True,
+                "cursor_mode": True,
+                "page_cursor": state.get("page_cursor"),
+                "max_messages": 100,
+            }
+            if state["provider"] == "google_gmail":
+                payload["query"] = "in:inbox"
+            else:
+                payload["folder"] = "inbox"
+            page = await self.registry.execute(
+                CapabilityRequest(
+                    capability_id=capability,
+                    payload=payload,
+                    request_id=str(uuid.uuid4()),
+                    conversation_id=str(policy["conversation_id"]),
+                    principal_id=str(state["principal_id"]),
+                    operation="important_only_backlog_page",
+                ),
+                refresh_health=True,
+                result_item_limit=100,
+            )
+            if not page.success:
+                raise RuntimeError(page.error or "The provider could not enumerate the Inbox")
+            messages = [
+                dict(item) for item in page.data.get("messages") or () if isinstance(item, Mapping)
+            ]
+            decisions, counts = await self._important_only_page_decisions(
+                policy=policy,
+                state=state,
+                messages=messages,
+            )
+            next_cursor = str(page.data.get("next_page_cursor") or "") or None
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_provider_state SET status='running',"
+                    "total_estimate=MAX(total_estimate,?),last_run_at=?,last_error=NULL,updated_at=? "
+                    "WHERE principal_id=? AND provider=? AND account_id=?",
+                    (
+                        max(
+                            total_estimate,
+                            int(
+                                page.data.get("result_size_estimate") or page.data.get("count") or 0
+                            ),
+                        ),
+                        self._iso(current),
+                        self._iso(current),
+                        state["principal_id"],
+                        state["provider"],
+                        state["account_id"],
+                    ),
+                )
+            batch_id = self._freeze_important_only_batch(
+                policy=policy,
+                state=state,
+                decisions=decisions,
+                page_cursor=str(state.get("page_cursor") or "") or None,
+                next_cursor=next_cursor,
+                counts=counts,
+            )
+            if batch_id is None:
+                synthetic_state = {
+                    **state,
+                    "pending_next_cursor": next_cursor,
+                    "pending_counts_json": json.dumps(counts),
+                }
+                return await self._finish_important_only_page(
+                    state=synthetic_state,
+                    bulk_result={"status": "completed", "succeeded_count": 0},
+                )
+            with self._db() as connection:
+                refreshed = connection.execute(
+                    "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                    "AND provider=? AND account_id=?",
+                    (state["principal_id"], state["provider"], state["account_id"]),
+                ).fetchone()
+            if refreshed is None:
+                raise RuntimeError("Important-Only provider state disappeared")
+            result = await self.execute_bulk_action(
+                principal_id=str(state["principal_id"]),
+                conversation_id=str(policy["conversation_id"]),
+                bulk_action_id=batch_id,
+                max_items=25,
+            )
+            self._sync_important_only_policy_items(batch_id)
+            if result.get("status") == "completed":
+                return await self._finish_important_only_page(
+                    state=dict(refreshed), bulk_result=result
+                )
+            bounded_pause = (
+                result.get("status") == "interrupted"
+                and str(result.get("halt_reason") or "")
+                == "Bounded execution paused before the next batch"
+            )
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_provider_state SET status=?,last_error=?,"
+                    "next_run_at=?,updated_at=? WHERE principal_id=? AND provider=? "
+                    "AND account_id=?",
+                    (
+                        "pending" if bounded_pause else "waiting_for_jarvis",
+                        (
+                            None
+                            if bounded_pause
+                            else str(
+                                result.get("halt_reason")
+                                or "Recoverable batch needs reconciliation"
+                            )[:1000]
+                        ),
+                        self._iso(
+                            current
+                            + (timedelta(seconds=2) if bounded_pause else timedelta(minutes=5))
+                        ),
+                        self._iso(current),
+                        state["principal_id"],
+                        state["provider"],
+                        state["account_id"],
+                    ),
+                )
+            return {
+                "status": "running" if bounded_pause else "waiting_for_jarvis",
+                "ran": True,
+                "provider": state["provider"],
+            }
+        except Exception as exc:
+            safe = redact_text(exc, max_length=1000)
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_provider_state SET status='waiting_provider',"
+                    "last_error=?,next_run_at=?,updated_at=? WHERE principal_id=? "
+                    "AND provider=? AND account_id=?",
+                    (
+                        safe,
+                        self._iso(current + timedelta(minutes=15)),
+                        self._iso(current),
+                        state["principal_id"],
+                        state["provider"],
+                        state["account_id"],
+                    ),
+                )
+            return {
+                "status": "waiting_provider",
+                "ran": True,
+                "provider": state["provider"],
+                "error": safe,
+                "permanent_deleted": 0,
+            }
+
+    async def _process_important_only_incremental_message(
+        self,
+        *,
+        principal_id: str,
+        provider: str,
+        account_id: str,
+        message: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Apply the same frozen policy path to one provider delta message."""
+
+        async with self._important_only_lock:
+            return await self._process_important_only_incremental_message_unlocked(
+                principal_id=principal_id,
+                provider=provider,
+                account_id=account_id,
+                message=message,
+            )
+
+    async def _process_important_only_incremental_message_unlocked(
+        self,
+        *,
+        principal_id: str,
+        provider: str,
+        account_id: str,
+        message: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        message_id = str(message.get("message_id") or "").strip()
+        if not message_id:
+            return {"status": "ignored", "moved": 0}
+        with self._db() as connection:
+            policy_row = connection.execute(
+                "SELECT * FROM important_only_inbox_policies WHERE principal_id=? "
+                "AND enabled=1 AND recoverable_cleanup_authority=1",
+                (principal_id,),
+            ).fetchone()
+            state_row = connection.execute(
+                "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                "AND provider=? AND account_id=?",
+                (principal_id, provider, account_id),
+            ).fetchone()
+        if policy_row is None or state_row is None:
+            return {"status": "not_active", "moved": 0}
+        policy = self._important_only_policy_row(policy_row)
+        if dict(policy.get("providers") or {}).get(provider) is not True:
+            return {"status": "not_active", "moved": 0}
+        state = dict(state_row)
+        now = self._iso(self._now())
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO important_only_incremental_queue "
+                "(principal_id,provider,account_id,message_id,status,next_run_at,created_at,updated_at) "
+                "VALUES(?,?,?,?,'pending',?,?,?) ON CONFLICT(principal_id,provider,account_id,"
+                "message_id) DO UPDATE SET updated_at=excluded.updated_at",
+                (principal_id, provider, account_id, message_id, now, now, now),
+            )
+        if state.get("phase") != "monitoring" or state.get("status") != "monitoring":
+            return {"status": "queued", "moved": 0}
+        return await self._run_important_only_incremental_once_unlocked(
+            principal_id=principal_id,
+            provider=provider,
+            account_id=account_id,
+            message_id=message_id,
+        )
+
+    async def _important_only_read_inbox_message(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        provider: str,
+        message_id: str,
+    ) -> dict[str, Any] | None:
+        capability = "gmail.read" if provider == "google_gmail" else "outlook.read"
+        payload: dict[str, Any] = {"message_id": message_id}
+        if provider == "microsoft_outlook":
+            payload["classification_metadata"] = True
+        observed = await self.registry.execute(
+            CapabilityRequest(
+                capability_id=capability,
+                payload=payload,
+                request_id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="important_only_incremental_read",
+                target=message_id,
+            ),
+            refresh_health=True,
+        )
+        if not observed.success:
+            raise RuntimeError(observed.error or "Incremental message evidence is unavailable")
+        raw = observed.data.get("message") if provider == "microsoft_outlook" else observed.data
+        if not isinstance(raw, Mapping):
+            raise RuntimeError("The provider returned malformed incremental message evidence")
+        message = dict(raw)
+        labels = {str(value).upper() for value in message.get("label_ids") or ()}
+        if provider == "google_gmail":
+            return (
+                message if "INBOX" in labels and not labels & {"TRASH", "SENT", "DRAFT"} else None
+            )
+        folders = await self.registry.execute(
+            CapabilityRequest(
+                capability_id="outlook.folders",
+                payload={},
+                request_id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                principal_id=principal_id,
+                operation="important_only_incremental_folder_check",
+            ),
+            refresh_health=False,
+        )
+        if not folders.success:
+            raise RuntimeError(folders.error or "Outlook Inbox identity is unavailable")
+        inbox_ids = {
+            str(item.get("id") or "")
+            for item in folders.data.get("folders") or ()
+            if isinstance(item, Mapping)
+            and str(item.get("displayName") or "").casefold() == "inbox"
+        }
+        if not inbox_ids or str(message.get("parent_folder_id") or "") not in inbox_ids:
+            return None
+        message["label_ids"] = list(dict.fromkeys([*(message.get("label_ids") or ()), "INBOX"]))
+        return message
+
+    async def run_important_only_incremental_once(
+        self,
+        *,
+        principal_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Drain one durable provider delta after backlog classification is complete."""
+
+        async with self._important_only_lock:
+            return await self._run_important_only_incremental_once_unlocked(
+                principal_id=principal_id,
+                now=now,
+            )
+
+    async def _run_important_only_incremental_once_unlocked(
+        self,
+        *,
+        principal_id: str | None = None,
+        provider: str | None = None,
+        account_id: str | None = None,
+        message_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        current = (now or self._now()).astimezone(timezone.utc)
+        clauses = [
+            "q.status='pending'",
+            "q.next_run_at<=?",
+            "p.enabled=1",
+            "p.recoverable_cleanup_authority=1",
+            "s.phase='monitoring'",
+            "s.status='monitoring'",
+        ]
+        values: builtins.list[Any] = [self._iso(current)]
+        for column, value in (
+            ("q.principal_id", principal_id),
+            ("q.provider", provider),
+            ("q.account_id", account_id),
+            ("q.message_id", message_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column}=?")
+                values.append(str(value))
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT q.*,p.conversation_id FROM important_only_incremental_queue q "
+                "JOIN important_only_inbox_policies p ON p.principal_id=q.principal_id "
+                "JOIN important_only_provider_state s ON s.principal_id=q.principal_id "
+                "AND s.provider=q.provider AND s.account_id=q.account_id WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY q.next_run_at,q.created_at LIMIT 1",
+                values,
+            ).fetchone()
+            if row is not None:
+                connection.execute(
+                    "UPDATE important_only_incremental_queue SET status='processing',"
+                    "attempts=attempts+1,updated_at=? WHERE principal_id=? AND provider=? "
+                    "AND account_id=? AND message_id=? AND status='pending'",
+                    (
+                        self._iso(current),
+                        row["principal_id"],
+                        row["provider"],
+                        row["account_id"],
+                        row["message_id"],
+                    ),
+                )
+        if row is None:
+            return {"status": "idle", "ran": False, "moved": 0}
+        item = dict(row)
+        try:
+            message = await self._important_only_read_inbox_message(
+                principal_id=str(item["principal_id"]),
+                conversation_id=str(item["conversation_id"]),
+                provider=str(item["provider"]),
+                message_id=str(item["message_id"]),
+            )
+            if message is None:
+                result = {"status": "no_longer_in_inbox", "ran": True, "moved": 0}
+            else:
+                result = await self._apply_important_only_incremental_message_unlocked(
+                    principal_id=str(item["principal_id"]),
+                    provider=str(item["provider"]),
+                    account_id=str(item["account_id"]),
+                    message=message,
+                )
+            terminal = result.get("status") not in {"waiting_for_jarvis", "waiting_provider"}
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_incremental_queue SET status=?,last_error=NULL,"
+                    "next_run_at=?,updated_at=? WHERE principal_id=? AND provider=? "
+                    "AND account_id=? AND message_id=?",
+                    (
+                        "completed" if terminal else "pending",
+                        self._iso(
+                            current + (timedelta(days=3650) if terminal else timedelta(minutes=5))
+                        ),
+                        self._iso(current),
+                        item["principal_id"],
+                        item["provider"],
+                        item["account_id"],
+                        item["message_id"],
+                    ),
+                )
+            return {**result, "ran": True}
+        except Exception as exc:
+            safe = redact_text(exc, max_length=500)
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE important_only_incremental_queue SET status='pending',last_error=?,"
+                    "next_run_at=?,updated_at=? WHERE principal_id=? AND provider=? "
+                    "AND account_id=? AND message_id=?",
+                    (
+                        safe,
+                        self._iso(current + timedelta(minutes=15)),
+                        self._iso(current),
+                        item["principal_id"],
+                        item["provider"],
+                        item["account_id"],
+                        item["message_id"],
+                    ),
+                )
+            return {"status": "waiting_provider", "ran": True, "moved": 0, "error": safe}
+
+    async def _apply_important_only_incremental_message_unlocked(
+        self,
+        *,
+        principal_id: str,
+        provider: str,
+        account_id: str,
+        message: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        with self._db() as connection:
+            policy_row = connection.execute(
+                "SELECT * FROM important_only_inbox_policies WHERE principal_id=? "
+                "AND enabled=1 AND recoverable_cleanup_authority=1",
+                (principal_id,),
+            ).fetchone()
+            state_row = connection.execute(
+                "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                "AND provider=? AND account_id=? AND phase='monitoring' AND status='monitoring'",
+                (principal_id, provider, account_id),
+            ).fetchone()
+        if policy_row is None or state_row is None:
+            return {"status": "not_active", "moved": 0}
+        policy = self._important_only_policy_row(policy_row)
+        state = dict(state_row)
+        decisions, counts = await self._important_only_page_decisions(
+            policy=policy,
+            state=state,
+            messages=[message],
+        )
+        message_id = str(message.get("message_id") or "")
+        batch_id = self._freeze_important_only_batch(
+            policy=policy,
+            state={**state, "batches_completed": 0},
+            decisions=decisions,
+            page_cursor=f"incremental:{message_id}",
+            next_cursor=None,
+            counts=counts,
+        )
+        if batch_id is None:
+            synthetic = {
+                **state,
+                "pending_next_cursor": None,
+                "pending_counts_json": json.dumps(counts),
+            }
+            return await self._finish_important_only_page(
+                state=synthetic,
+                bulk_result={"status": "completed", "succeeded_count": 0},
+            )
+        with self._db() as connection:
+            refreshed = connection.execute(
+                "SELECT * FROM important_only_provider_state WHERE principal_id=? "
+                "AND provider=? AND account_id=?",
+                (principal_id, provider, account_id),
+            ).fetchone()
+        if refreshed is None:
+            raise RuntimeError("Important-Only provider state disappeared")
+        result = await self.execute_bulk_action(
+            principal_id=principal_id,
+            conversation_id=str(policy["conversation_id"]),
+            bulk_action_id=batch_id,
+            max_items=1,
+        )
+        self._sync_important_only_policy_items(batch_id)
+        if result.get("status") == "completed":
+            return await self._finish_important_only_page(state=dict(refreshed), bulk_result=result)
+        return {"status": "waiting_for_jarvis", "moved": 0}
+
+    async def run_important_only_lifecycle_once(
+        self, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Reconsider one due temporary message from provider evidence."""
+
+        async with self._important_only_lock:
+            current = (now or self._now()).astimezone(timezone.utc)
+            with self._db() as connection:
+                row = connection.execute(
+                    "SELECT l.*,p.conversation_id FROM important_only_lifecycle_items l "
+                    "JOIN important_only_inbox_policies p ON p.principal_id=l.principal_id "
+                    "JOIN important_only_provider_state s ON s.principal_id=l.principal_id "
+                    "AND s.provider=l.provider AND s.account_id=l.account_id "
+                    "WHERE l.status='pending' AND l.next_review_at<=? AND p.enabled=1 "
+                    "AND p.recoverable_cleanup_authority=1 AND s.phase='monitoring' "
+                    "AND s.status='monitoring' ORDER BY l.next_review_at LIMIT 1",
+                    (self._iso(current),),
+                ).fetchone()
+            if row is None:
+                return {"status": "idle", "ran": False}
+            item = dict(row)
+            try:
+                await self._require_email_account(
+                    principal_id=str(item["principal_id"]),
+                    provider=str(item["provider"]),
+                    account_id=str(item["account_id"]),
+                )
+                message = await self._important_only_read_inbox_message(
+                    principal_id=str(item["principal_id"]),
+                    conversation_id=str(item["conversation_id"]),
+                    provider=str(item["provider"]),
+                    message_id=str(item["message_id"]),
+                )
+                if message is None:
+                    with self._db() as connection:
+                        connection.execute(
+                            "DELETE FROM important_only_lifecycle_items WHERE principal_id=? "
+                            "AND provider=? AND account_id=? AND message_id=?",
+                            (
+                                item["principal_id"],
+                                item["provider"],
+                                item["account_id"],
+                                item["message_id"],
+                            ),
+                        )
+                    return {"status": "no_longer_in_inbox", "ran": True, "moved": 0}
+                state_rows = self.list_important_only_provider_states(
+                    principal_id=str(item["principal_id"])
+                )
+                state = next(
+                    value
+                    for value in state_rows
+                    if value["provider"] == item["provider"]
+                    and value["account_id"] == item["account_id"]
+                )
+                with self._db() as connection:
+                    policy_row = connection.execute(
+                        "SELECT * FROM important_only_inbox_policies WHERE principal_id=?",
+                        (item["principal_id"],),
+                    ).fetchone()
+                if policy_row is None:
+                    return {"status": "policy_disabled", "ran": False}
+                policy = self._important_only_policy_row(policy_row)
+                decisions, _ = await self._important_only_page_decisions(
+                    policy=policy,
+                    state=state,
+                    messages=[message],
+                )
+                decision = dict(decisions[0]["decision"]) if decisions else {}
+                if not decision.get("automatic_disposal_eligible"):
+                    if decision.get("disposition") != InboxDisposition.TEMPORARY.value:
+                        with self._db() as connection:
+                            connection.execute(
+                                "DELETE FROM important_only_lifecycle_items WHERE principal_id=? "
+                                "AND provider=? AND account_id=? AND message_id=?",
+                                (
+                                    item["principal_id"],
+                                    item["provider"],
+                                    item["account_id"],
+                                    item["message_id"],
+                                ),
+                            )
+                    return {
+                        "status": str(decision.get("disposition") or "kept"),
+                        "ran": True,
+                        "moved": 0,
+                    }
+                result = await self._apply_important_only_incremental_message_unlocked(
+                    principal_id=str(item["principal_id"]),
+                    provider=str(item["provider"]),
+                    account_id=str(item["account_id"]),
+                    message=message,
+                )
+                if int(result.get("moved") or 0):
+                    with self._db() as connection:
+                        connection.execute(
+                            "DELETE FROM important_only_lifecycle_items WHERE principal_id=? "
+                            "AND provider=? AND account_id=? AND message_id=?",
+                            (
+                                item["principal_id"],
+                                item["provider"],
+                                item["account_id"],
+                                item["message_id"],
+                            ),
+                        )
+                        connection.execute(
+                            "UPDATE important_only_provider_state SET "
+                            "processed_count=MAX(0,processed_count-1),"
+                            "temporary_count=MAX(0,temporary_count-1),updated_at=? "
+                            "WHERE principal_id=? AND provider=? AND account_id=?",
+                            (
+                                self._iso(self._now()),
+                                item["principal_id"],
+                                item["provider"],
+                                item["account_id"],
+                            ),
+                        )
+                return {**result, "lifecycle_recheck": True}
+            except Exception as exc:
+                safe = redact_text(exc, max_length=500)
+                with self._db() as connection:
+                    connection.execute(
+                        "UPDATE important_only_lifecycle_items SET attempts=attempts+1,"
+                        "last_error=?,next_review_at=?,updated_at=? WHERE principal_id=? "
+                        "AND provider=? AND account_id=? AND message_id=?",
+                        (
+                            safe,
+                            self._iso(current + timedelta(minutes=15)),
+                            self._iso(current),
+                            item["principal_id"],
+                            item["provider"],
+                            item["account_id"],
+                            item["message_id"],
+                        ),
+                    )
+                return {"status": "waiting_provider", "ran": True, "error": safe, "moved": 0}
 
     @staticmethod
     def _bulk_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2165,6 +3823,26 @@ class EmailAssistantPolicyEngine:
             return {"success": False, "status": "not_found"}
         if action["status"] == "completed":
             return {"success": True, **action}
+        standing_policy = str(action.get("filter_kind") or "") == "important_only"
+        if standing_policy and not self._important_only_authorized(action):
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='interrupted',"
+                    "halt_reason='Standing Important-Only authority is not active',updated_at=? "
+                    "WHERE bulk_action_id=?",
+                    (self._iso(self._now()), bulk_action_id),
+                )
+            return {
+                "success": False,
+                **(
+                    await self.bulk_action(
+                        principal_id=principal_id,
+                        conversation_id=conversation_id,
+                        bulk_action_id=bulk_action_id,
+                    )
+                    or {}
+                ),
+            }
         if action["status"] in {"cancelled", "expired"} and action.get("confirmed_at") is None:
             expires = datetime.fromisoformat(str(action["expires_at"]))
             reusable = (
@@ -2333,6 +4011,26 @@ class EmailAssistantPolicyEngine:
             return {"success": False, **action}
         if action["status"] == "completed":
             return {"success": True, **action}
+        standing_policy = str(action.get("filter_kind") or "") == "important_only"
+        if standing_policy and not self._important_only_authorized(action):
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='interrupted',"
+                    "halt_reason='Standing Important-Only authority is not active',updated_at=? "
+                    "WHERE bulk_action_id=?",
+                    (self._iso(self._now()), bulk_action_id),
+                )
+            return {
+                "success": False,
+                **(
+                    await self.bulk_action(
+                        principal_id=principal_id,
+                        conversation_id=conversation_id,
+                        bulk_action_id=bulk_action_id,
+                    )
+                    or {}
+                ),
+            }
         expires = datetime.fromisoformat(str(action["expires_at"]))
         if action["status"] == "awaiting_confirmation" and expires <= self._now():
             with self._db() as connection:
@@ -2352,11 +4050,32 @@ class EmailAssistantPolicyEngine:
                     or {}
                 ),
             }
-        await self._require_email_account(
+        account = await self._require_email_account(
             principal_id=principal_id,
             provider=str(action["provider"]),
             account_id=str(action["account_id"]),
         )
+        if standing_policy and (
+            account.get("healthy") is False or account.get("reauthorization_required") is True
+        ):
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE email_bulk_actions SET status='interrupted',"
+                    "halt_reason='The provider account needs reconnecting',updated_at=? "
+                    "WHERE bulk_action_id=?",
+                    (self._iso(self._now()), bulk_action_id),
+                )
+            return {
+                "success": False,
+                **(
+                    await self.bulk_action(
+                        principal_id=principal_id,
+                        conversation_id=conversation_id,
+                        bulk_action_id=bulk_action_id,
+                    )
+                    or {}
+                ),
+            }
         now = self._iso(self._now())
         with self._db() as connection:
             connection.execute(
@@ -2371,8 +4090,13 @@ class EmailAssistantPolicyEngine:
             ).fetchall()
         limit = len(items) if max_items is None else max(0, int(max_items))
         processed = 0
+        authority_revoked = False
+        provider_halt: str | None = None
         for item in items:
             if processed >= limit:
+                break
+            if standing_policy and not self._important_only_authorized(action):
+                authority_revoked = True
                 break
             processed += 1
             item_id = str(item["provider_message_id"])
@@ -2382,7 +4106,11 @@ class EmailAssistantPolicyEngine:
                     principal_id=principal_id,
                     conversation_id=conversation_id,
                     provider=str(action["provider"]),
-                    message_id=item_id,
+                    message_id=(
+                        str(item["provider_reference"] or item_id)
+                        if action["provider"] == "microsoft_outlook"
+                        else item_id
+                    ),
                     operation=str(action["operation"]),
                     request_id=item_request,
                 )
@@ -2403,6 +4131,11 @@ class EmailAssistantPolicyEngine:
                 if applied is None:
                     # Provider state is unknown. Never replay a potentially
                     # successful move merely because readback is unavailable.
+                    if standing_policy:
+                        provider_halt = (
+                            "A recoverable move has an unknown outcome and must be reconciled"
+                        )
+                        break
                     continue
             with self._db() as connection:
                 connection.execute(
@@ -2422,9 +4155,14 @@ class EmailAssistantPolicyEngine:
                     request_id=str(uuid.uuid5(uuid.NAMESPACE_URL, item_request)),
                     conversation_id=conversation_id,
                     principal_id=principal_id,
-                    operation=f"explicit_bulk_email_{action['operation']}",
+                    operation=(
+                        "important_only_recoverable_cleanup"
+                        if standing_policy
+                        else f"explicit_bulk_email_{action['operation']}"
+                    ),
                     target=item_id,
                     confirmed=True,
+                    standing_permission=standing_policy,
                     idempotency_key=item_request,
                 ),
                 refresh_health=True,
@@ -2459,6 +4197,16 @@ class EmailAssistantPolicyEngine:
                         item_id,
                     ),
                 )
+            if standing_policy and not verified:
+                # A provider failure, throttling response, or unknown outcome
+                # is a live stop condition for autonomous cleanup. Preserve
+                # the exact remaining frozen set and wait for health/readback
+                # reconciliation instead of mutating later messages.
+                provider_halt = redact_text(
+                    result.error or "The provider did not verify the recoverable move",
+                    max_length=500,
+                )
+                break
         with self._db() as connection:
             counts = connection.execute(
                 "SELECT COUNT(*) AS total,"
@@ -2473,7 +4221,11 @@ class EmailAssistantPolicyEngine:
             attempted = int(counts["attempted"] or 0)
             failed = int(counts["failed"] or 0)
             remaining = total - succeeded
-            if succeeded == total:
+            if authority_revoked:
+                status_value, halt = "interrupted", "Standing Important-Only authority was revoked"
+            elif provider_halt is not None:
+                status_value, halt = "partial", provider_halt
+            elif succeeded == total:
                 status_value, halt = "completed", None
             elif processed < len(items):
                 status_value, halt = "interrupted", "Bounded execution paused before the next batch"
@@ -2899,7 +4651,8 @@ class EmailAssistantPolicyEngine:
             rows = connection.execute(
                 "SELECT a.operation,a.state,a.evidence_json,a.created_at "
                 "FROM email_policy_audit a JOIN email_policies p ON p.policy_id=a.policy_id "
-                "WHERE a.principal_id=? AND p.kind LIKE 'safe_cleanup%'"
+                "WHERE a.principal_id=? AND (p.kind LIKE 'safe_cleanup%' "
+                "OR p.kind='important_only')"
                 + since_clause
                 + " ORDER BY a.audit_id DESC LIMIT 100",
                 values,
@@ -3011,6 +4764,7 @@ class EmailAssistantPolicyEngine:
             or bool(evidence.get("undone_at")),
             "action_at": EmailAssistantPolicyEngine._iso(action_at) if action_at else None,
             "cleanup_run_at": str(evidence.get("cleanup_run_at") or "").strip() or None,
+            "cleanup_batch_id": str(evidence.get("cleanup_batch_id") or "").strip() or None,
             "metadata_complete": bool(sender_address and subject and thread_id),
         }
 
@@ -3041,7 +4795,8 @@ class EmailAssistantPolicyEngine:
                 "SELECT i.*,p.principal_id,p.cleanup_mode,p.classification_version,"
                 "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
+                "WHERE p.principal_id=? AND (p.kind LIKE 'safe_cleanup%' "
+                "OR p.kind='important_only') "
                 "AND i.status IN ('verified','verified_after_unknown','restored') "
                 "ORDER BY i.updated_at DESC LIMIT 1000",
                 (principal,),
@@ -3124,7 +4879,8 @@ class EmailAssistantPolicyEngine:
                     "SELECT i.message_id,i.provider_reference,i.evidence_json,p.provider,p.account_id "
                     "FROM email_policy_items i "
                     "JOIN email_policies p ON p.policy_id=i.policy_id "
-                    f"WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
+                    f"WHERE p.principal_id=? AND (p.kind LIKE 'safe_cleanup%' "
+                    f"OR p.kind='important_only') "
                     f"AND i.message_id IN ({placeholders}) "
                     "AND i.status IN ('verified','verified_after_unknown','restored')",
                     (principal, *requested),
@@ -3289,7 +5045,8 @@ class EmailAssistantPolicyEngine:
                 "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id,"
                 "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' "
+                "WHERE p.principal_id=? AND (p.kind LIKE 'safe_cleanup%' "
+                "OR p.kind='important_only') "
                 "AND p.cleanup_mode='trash' "
                 "AND i.status IN ('verified','verified_after_unknown') "
                 "ORDER BY i.updated_at DESC LIMIT 20",
@@ -3403,7 +5160,8 @@ class EmailAssistantPolicyEngine:
                 "SELECT i.*,p.cleanup_mode,p.conversation_id,p.principal_id,"
                 "p.provider,p.account_id "
                 "FROM email_policy_items i JOIN email_policies p ON p.policy_id=i.policy_id "
-                "WHERE p.principal_id=? AND p.kind LIKE 'safe_cleanup%' AND i.message_id=? "
+                "WHERE p.principal_id=? AND (p.kind LIKE 'safe_cleanup%' "
+                "OR p.kind='important_only') AND i.message_id=? "
                 "AND i.status IN "
                 "('verified','verified_after_unknown','restored') "
                 "ORDER BY i.updated_at DESC LIMIT 50",
@@ -3521,6 +5279,72 @@ class EmailAssistantPolicyEngine:
             ),
         }
 
+    async def restore_last_cleanup_batch(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Restore the latest exact recoverable cleanup batch, idempotently."""
+
+        history = await self.cleanup_history_items(
+            principal_id=principal_id,
+            operation="trash",
+            limit=25,
+        )
+        latest = next(
+            (dict(item) for item in history.get("items") or () if not item.get("restored")),
+            None,
+        )
+        if latest is None:
+            return {"success": True, "restored": 0, "failed": 0, "reason": "not_found"}
+        batch_id = str(latest.get("cleanup_batch_id") or "")
+        with self._db() as connection:
+            rows = connection.execute(
+                "SELECT i.*,p.cleanup_mode,p.provider,p.account_id FROM email_policy_items i "
+                "JOIN email_policies p "
+                "ON p.policy_id=i.policy_id WHERE p.principal_id=? "
+                "AND (p.kind LIKE 'safe_cleanup%' OR p.kind='important_only') "
+                "AND i.status IN ('verified','verified_after_unknown','restored') "
+                "ORDER BY i.updated_at DESC LIMIT 500",
+                (principal_id,),
+            ).fetchall()
+        candidates: list[str] = []
+        for raw in rows:
+            item = self._history_item(dict(raw))
+            if item.get("operation") != "trash" or item.get("restored"):
+                continue
+            if batch_id and item.get("cleanup_batch_id") != batch_id:
+                continue
+            candidates.append(str(item["message_id"]))
+            if not batch_id or len(candidates) >= 100:
+                break
+        restored = 0
+        failed = 0
+        for message_id in candidates:
+            result = await self.restore_cleanup_item(
+                principal_id=principal_id,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                request_id=str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"{request_id}:restore-cleanup-batch:{batch_id}:{message_id}",
+                    )
+                ),
+            )
+            restored += int(result.get("restored") or 0)
+            failed += int(not bool(result.get("success")))
+        return {
+            "success": failed == 0,
+            "restored": restored,
+            "failed": failed,
+            "intended": len(candidates),
+            "cleanup_batch_id": batch_id or None,
+            "reason": "verified" if failed == 0 else "partial",
+        }
+
     async def _sync_safe_cleanup_policy(self, principal_id: str) -> None:
         profile = await self.assistant_status(principal_id=principal_id)
         if profile is None:
@@ -3590,7 +5414,10 @@ class EmailAssistantPolicyEngine:
             profiles = connection.execute(
                 "SELECT principal_id FROM email_assistant_profiles "
                 "WHERE status='active' AND "
-                "(important_alerts_enabled=1 OR reply_alerts_enabled=1) "
+                "(important_alerts_enabled=1 OR reply_alerts_enabled=1 OR EXISTS ("
+                "SELECT 1 FROM important_only_inbox_policies io "
+                "WHERE io.principal_id=email_assistant_profiles.principal_id AND io.enabled=1 "
+                "AND io.recoverable_cleanup_authority=1)) "
                 "AND next_check_at<=? ORDER BY next_check_at LIMIT 20",
                 (self._iso(current),),
             ).fetchall()
@@ -3610,7 +5437,8 @@ class EmailAssistantPolicyEngine:
                 )
         with self._db() as connection:
             rows = connection.execute(
-                "SELECT * FROM email_policies WHERE status='active' AND next_run_at<=? "
+                "SELECT * FROM email_policies WHERE status='active' AND kind!='important_only' "
+                "AND next_run_at<=? "
                 "ORDER BY next_run_at LIMIT 20",
                 (self._iso(current),),
             ).fetchall()
@@ -3644,6 +5472,57 @@ class EmailAssistantPolicyEngine:
                         "error": redact_text(exc, max_length=300),
                     }
                 )
+        # Important-Only work has its own durable provider checkpoints and
+        # frozen-batch authority. Process only a few pages per worker tick so
+        # normal notification/retention work cannot be starved by a backlog.
+        for _ in range(4):
+            try:
+                result = await self.run_important_only_once(now=current)
+                if result.get("ran") is not True:
+                    break
+                results.append(result)
+            except Exception as exc:
+                logger.exception("Important-Only Inbox pass failed")
+                results.append(
+                    {
+                        "service": "important_only_inbox",
+                        "status": "failed",
+                        "error": redact_text(exc, max_length=300),
+                    }
+                )
+                break
+        for _ in range(20):
+            try:
+                incremental = await self.run_important_only_incremental_once(now=current)
+                if incremental.get("ran") is not True:
+                    break
+                results.append(incremental)
+            except Exception as exc:
+                logger.exception("Important-Only incremental queue pass failed")
+                results.append(
+                    {
+                        "service": "important_only_incremental",
+                        "status": "failed",
+                        "error": redact_text(exc, max_length=300),
+                    }
+                )
+                break
+        for _ in range(4):
+            try:
+                lifecycle = await self.run_important_only_lifecycle_once(now=current)
+                if lifecycle.get("ran") is not True:
+                    break
+                results.append(lifecycle)
+            except Exception as exc:
+                logger.exception("Important-Only lifecycle pass failed")
+                results.append(
+                    {
+                        "service": "important_only_lifecycle",
+                        "status": "failed",
+                        "error": redact_text(exc, max_length=300),
+                    }
+                )
+                break
         return results
 
     async def _execute_read(
@@ -4560,6 +6439,7 @@ class EmailAssistantPolicyEngine:
             watches += await self._bootstrap_outlook_sent_watches(scoped)
         queued = 0
         processed = 0
+        important_only_moved = 0
         threshold = _PRIORITY_LEVELS[str(profile["importance_threshold"])]
         for raw in data.get("messages") or ():
             if not isinstance(raw, Mapping):
@@ -4625,6 +6505,23 @@ class EmailAssistantPolicyEngine:
                         classification=classification,
                     )
                 )
+            try:
+                incremental = await self._process_important_only_incremental_message(
+                    principal_id=principal_id,
+                    provider="microsoft_outlook",
+                    account_id=account_id,
+                    message=message,
+                )
+                important_only_moved += int(incremental.get("moved") or 0)
+            except Exception:
+                # Frozen candidate and receipt state are durable.  The backlog
+                # worker will reconcile/resume it; do not lose the provider
+                # delta or blindly replay a write here.
+                logger.exception(
+                    "Important-Only incremental Outlook pass failed principal=%s account=%s",
+                    principal_id,
+                    account_id,
+                )
         next_check = now + timedelta(seconds=int(profile["poll_interval_seconds"]))
         now_text = self._iso(now)
         with self._db() as connection:
@@ -4665,6 +6562,7 @@ class EmailAssistantPolicyEngine:
             "notifications_queued": queued,
             "notifications_delivered": delivered,
             "reply_watches_observed": watches,
+            "important_only_moved": important_only_moved,
             "next_check_at": self._iso(next_check),
         }
 
@@ -4809,8 +6707,17 @@ class EmailAssistantPolicyEngine:
         account_email = str(data.get("account_email") or profile.get("account_email") or "")
         queued = 0
         processed = 0
+        important_only_moved = 0
         skipped_not_found = max(0, int(data.get("skipped_not_found_count") or 0))
         threshold = _PRIORITY_LEVELS[str(profile["importance_threshold"])]
+        gmail_accounts = [
+            dict(item)
+            for item in profile.get("accounts") or ()
+            if isinstance(item, Mapping) and item.get("provider") == "google_gmail"
+        ]
+        gmail_account_id = (
+            str(gmail_accounts[0].get("account_id") or "") if len(gmail_accounts) == 1 else ""
+        )
         for raw_message in data.get("messages") or ():
             if not isinstance(raw_message, Mapping):
                 continue
@@ -4879,6 +6786,21 @@ class EmailAssistantPolicyEngine:
                         classification=classification,
                     )
                 )
+            if gmail_account_id:
+                try:
+                    incremental = await self._process_important_only_incremental_message(
+                        principal_id=principal_id,
+                        provider="google_gmail",
+                        account_id=gmail_account_id,
+                        message=message,
+                    )
+                    important_only_moved += int(incremental.get("moved") or 0)
+                except Exception:
+                    logger.exception(
+                        "Important-Only incremental Gmail pass failed principal=%s account=%s",
+                        principal_id,
+                        gmail_account_id,
+                    )
         next_check = current + timedelta(seconds=int(profile["poll_interval_seconds"]))
         with self._db() as connection:
             connection.execute(
@@ -4924,6 +6846,7 @@ class EmailAssistantPolicyEngine:
             "notifications_queued": queued,
             "notifications_delivered": delivered,
             "reply_watches_observed": watches,
+            "important_only_moved": important_only_moved,
             "next_check_at": self._iso(next_check),
         }
 

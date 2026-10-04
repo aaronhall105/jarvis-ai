@@ -396,6 +396,59 @@ async def test_outlook_search_snapshots_all_delta_safe_pages(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_outlook_cursor_mode_returns_one_validated_metadata_page(tmp_path: Path) -> None:
+    _, _, connector, fixture, client = await connected_graph(tmp_path)
+    next_link = "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages?$skiptoken=second"
+    fixture.search_pages = {
+        "first": {
+            "value": [fixture.message(f"message-{index}") for index in range(25)],
+            "@odata.nextLink": next_link,
+        },
+        "second": {"value": [fixture.message(f"message-{index}") for index in range(25, 50)]},
+    }
+
+    first, _ = await connector._search(
+        "aaron",
+        {
+            "folder": "inbox",
+            "metadata_only": True,
+            "cursor_mode": True,
+            "limit": 25,
+            "max_messages": 25,
+        },
+    )
+    second, _ = await connector._search(
+        "aaron",
+        {
+            "folder": "inbox",
+            "metadata_only": True,
+            "cursor_mode": True,
+            "page_cursor": first["next_page_cursor"],
+            "limit": 25,
+            "max_messages": 25,
+        },
+    )
+
+    assert first["count"] == 25
+    assert first["next_page_cursor"] == next_link
+    assert first["cursor_complete"] is False
+    assert second["message_ids"][0] == "message-25"
+    assert second["cursor_complete"] is True
+
+    with pytest.raises(ValueError, match="page_cursor"):
+        await connector._search(
+            "aaron",
+            {
+                "folder": "inbox",
+                "metadata_only": True,
+                "cursor_mode": True,
+                "page_cursor": "https://attacker.example/messages?$skiptoken=x",
+            },
+        )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("unread", "expected"), ((True, 47), (False, 201)))
 async def test_outlook_folder_count_uses_exact_graph_metadata(
     tmp_path: Path, unread: bool, expected: int
