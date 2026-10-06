@@ -12,7 +12,7 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.view.View;
 import android.view.ViewGroup;
-import android.widget.HorizontalScrollView;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.work.Configuration;
@@ -175,6 +175,96 @@ public final class TaskCentreUiTest {
         assertEquals("", task.etaText());
     }
 
+    @Test public void continuousMonitoringShowsHistoryWithoutFakeRemainingOrEta()
+        throws Exception {
+        JSONObject value = new JSONObject()
+            .put("task_id", "important_only:inbox")
+            .put("title", "Important-Only Inbox")
+            .put("status", "MONITORING")
+            .put("work_mode", "CONTINUOUS")
+            .put("phase", "MONITORING")
+            .put("current_step", "Monitoring new mail")
+            .put("activity_time_label", "Last mailbox activity")
+            .put("updated_at", "2026-10-04T21:01:28Z")
+            .put("progress", new JSONObject()
+                .put("mode", "NONE")
+                .put("current", JSONObject.NULL)
+                .put("total", JSONObject.NULL)
+                .put("remaining", JSONObject.NULL)
+                .put("percent", JSONObject.NULL))
+            .put("timing", new JSONObject()
+                .put("eta_seconds", JSONObject.NULL)
+                .put("eta_quality", "not_applicable"))
+            .put("backlog", new JSONObject()
+                .put("status", "COMPLETED")
+                .put("title", "Initial cleanup")
+                .put("summary", "48,513 messages reviewed · 7,380 moved to deleted folders")
+                .put("reviewed_count", 48_513)
+                .put("moved_count", 7_380)
+                .put("initial_estimate", 50_654))
+            .put("subtasks", new JSONArray().put(new JSONObject()
+                .put("title", "Gmail")
+                .put("status", "monitoring")
+                .put("progress", new JSONObject().put("mode", "NONE"))
+                .put("backlog", new JSONObject()
+                    .put("status", "COMPLETED")
+                    .put("summary", "10,863 reviewed during initial cleanup"))
+                .put("metrics", new JSONArray().put(new JSONObject()
+                    .put("key", "moved")
+                    .put("label", "Moved")
+                    .put("value", 6_333)
+                    .put("destination", "Bin")
+                    .put("primary", true)))))
+            .put("metadata", new JSONObject().put("policy_label", "Important-Only active"));
+        TaskItem task = TaskItem.fromJson(value);
+
+        assertEquals("Monitoring", task.statusLabel());
+        assertTrue(task.isActive());
+        assertEquals("", task.percentText());
+        assertEquals("", task.progressText());
+        assertEquals("", task.remainingText());
+        assertEquals("", task.etaText());
+
+        TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
+        java.lang.reflect.Method renderer = TasksActivity.class.getDeclaredMethod(
+            "card", TaskItem.class, boolean.class
+        );
+        renderer.setAccessible(true);
+        View card = (View) renderer.invoke(activity, task, false);
+        java.util.List<String> text = flattenText(card);
+        assertTrue(text.contains("Monitoring"));
+        assertTrue(text.contains("Initial cleanup complete"));
+        assertTrue(text.contains("48,513 messages reviewed · 7,380 moved to deleted folders"));
+        assertTrue(text.contains("10,863 reviewed during initial cleanup"));
+        assertTrue(text.stream().noneMatch(item -> item.contains("remaining")));
+        assertTrue(text.stream().noneMatch(item -> item.contains("Calculating estimate")));
+        assertTrue(text.stream().noneMatch(item -> item.contains("% complete")));
+        activity.onDestroy();
+
+        Intent detailIntent = new Intent(
+            RuntimeEnvironment.getApplication(), TaskDetailActivity.class
+        ).putExtra(TaskDetailActivity.EXTRA_TASK_ID, task.taskId);
+        org.robolectric.android.controller.ActivityController<TaskDetailActivity> controller =
+            Robolectric.buildActivity(TaskDetailActivity.class, detailIntent).create();
+        TaskDetailActivity detail = controller.get();
+        java.lang.reflect.Method detailRenderer = TaskDetailActivity.class.getDeclaredMethod(
+            "render", TaskItem.class
+        );
+        detailRenderer.setAccessible(true);
+        detailRenderer.invoke(detail, task);
+        java.util.List<String> detailText = flattenText(
+            detail.findViewById(android.R.id.content)
+        );
+        assertTrue(detailText.contains("Monitoring"));
+        assertTrue(detailText.contains("Initial cleanup: Complete"));
+        assertTrue(detailText.contains("Last mailbox activity"));
+        assertTrue(detailText.contains("Last synced"));
+        assertTrue(detailText.contains("Important-Only active"));
+        assertTrue(detailText.stream().noneMatch(item -> item.contains("remaining")));
+        assertTrue(detailText.stream().noneMatch(item -> item.contains("Estimated time")));
+        controller.destroy();
+    }
+
     @Test public void nullLikeWaitingReasonNeverRendersWhyNull() throws Exception {
         TaskItem task = TaskItem.fromJson(new JSONObject()
             .put("task_id", "generic:null-reason")
@@ -218,7 +308,8 @@ public final class TaskCentreUiTest {
         TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
         View root = activity.findViewById(android.R.id.content);
         assertNotNull(findText(root, "Important-Only Inbox"));
-        assertTrue(flattenText(root).stream().anyMatch(text -> text.contains("Offline")));
+        assertTrue(flattenText(root).stream().anyMatch(text -> text.contains("Reconnecting")));
+        assertTrue(flattenText(root).stream().anyMatch(text -> text.contains("Last synced")));
         activity.onDestroy();
     }
 
@@ -241,12 +332,54 @@ public final class TaskCentreUiTest {
         assertEquals(2_000L, stored.receivedAtMillis());
     }
 
-    @Test public void narrowPhoneKeepsEveryFilterInScrollableRow() {
+    @Test public void successfulSyncFreshnessDoesNotDependOnTaskActivityTime() throws Exception {
+        TaskItem unchanged = TaskItem.fromJson(new JSONObject()
+            .put("task_id", "monitor:one")
+            .put("title", "Continuous monitor")
+            .put("status", "MONITORING")
+            .put("updated_at", "2026-01-01T00:00:00Z")
+            .put("progress", new JSONObject().put("mode", "NONE")));
         TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
-        View root = activity.findViewById(android.R.id.content);
-        assertNotNull(findText(root, "Completed"));
-        assertNotNull(findText(root, "Problems"));
-        assertNotNull(findType(root, HorizontalScrollView.class));
+        java.lang.reflect.Method renderer = TasksActivity.class.getDeclaredMethod(
+            "render", java.util.List.class, JSONObject.class, boolean.class, long.class
+        );
+        renderer.setAccessible(true);
+        renderer.invoke(
+            activity,
+            java.util.List.of(unchanged),
+            new JSONObject().put("ACTIVE", 1),
+            false,
+            System.currentTimeMillis()
+        );
+
+        java.util.List<String> text = flattenText(activity.findViewById(android.R.id.content));
+        assertTrue(text.stream().anyMatch(item -> item.startsWith("Synced just now")));
+        assertTrue(text.stream().noneMatch(item -> item.startsWith("Updated ")));
+        activity.onDestroy();
+    }
+
+    @Test public void phoneWidthsShowAllPrimaryFiltersWithoutClipping() throws Exception {
+        TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
+        java.lang.reflect.Method factory = TasksActivity.class.getDeclaredMethod("filters");
+        factory.setAccessible(true);
+        LinearLayout filters = (LinearLayout) factory.invoke(activity);
+        for (int widthDp : new int[] {384, 320}) {
+            int width = Math.round(
+                widthDp * activity.getResources().getDisplayMetrics().density
+            );
+            filters.measure(
+                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+            );
+            filters.layout(0, 0, width, filters.getMeasuredHeight());
+            assertEquals(width, filters.getMeasuredWidth());
+            assertEquals(4, filters.getChildCount());
+            assertTrue(filters.getChildAt(3).getRight() <= width);
+        }
+        assertNotNull(findText(filters, "Active"));
+        assertNotNull(findText(filters, "Waiting"));
+        assertNotNull(findText(filters, "Scheduled"));
+        assertNotNull(findText(filters, "Completed"));
         activity.onDestroy();
     }
 
@@ -361,15 +494,18 @@ public final class TaskCentreUiTest {
 
     @Test public void filtersUsePlainEnglishLabels() {
         assertEquals("Active", TasksActivity.filterLabel("ACTIVE"));
-        assertEquals("Waiting for you", TasksActivity.filterLabel("WAITING_FOR_YOU"));
+        assertEquals("Waiting", TasksActivity.filterLabel("WAITING_FOR_YOU"));
+        assertEquals(
+            "Waiting for you", TasksActivity.filterAccessibilityLabel("WAITING_FOR_YOU")
+        );
         assertEquals("Problems", TasksActivity.filterLabel("PROBLEMS"));
     }
 
     @Test public void taskFilterSurvivesActivityRecreation() {
         TasksActivity first = Robolectric.buildActivity(TasksActivity.class).create().get();
-        TextView problems = findText(first.findViewById(android.R.id.content), "Problems");
-        assertNotNull(problems);
-        problems.performClick();
+        TextView waiting = findText(first.findViewById(android.R.id.content), "Waiting");
+        assertNotNull(waiting);
+        waiting.performClick();
         Bundle state = new Bundle();
         first.onSaveInstanceState(state);
         first.onDestroy();
@@ -379,7 +515,7 @@ public final class TaskCentreUiTest {
 
         assertNotNull(findDescription(
             recreated.findViewById(android.R.id.content),
-            "Show Problems tasks, selected"
+            "Show Waiting for you tasks, selected"
         ));
         recreated.onDestroy();
     }

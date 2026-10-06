@@ -163,6 +163,7 @@ public final class TaskCentreClient implements AutoCloseable {
                 if (action != null && !action.isBlank()) segments.add(action);
                 JSONObject response = request(method, segments, payload, null, null);
                 TaskItem task = TaskItem.fromJson(response);
+                snapshots.markSuccessfulSync(System.currentTimeMillis());
                 main.post(() -> callback.onSuccess(task));
             } catch (Exception exception) {
                 main.post(() -> callback.onError(userMessage(exception)));
@@ -223,6 +224,10 @@ public final class TaskCentreClient implements AutoCloseable {
             return value == null || value.isBlank() ? "Task request failed." : value;
         }
         return "Can't reach Jarvis Core.";
+    }
+
+    long lastSuccessfulSyncAt() {
+        return snapshots.lastSuccessfulSyncAt();
     }
 
     private static List<TaskItem> parseTasks(JSONObject response) {

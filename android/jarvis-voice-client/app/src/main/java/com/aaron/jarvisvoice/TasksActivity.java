@@ -12,7 +12,6 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -32,7 +31,7 @@ public final class TasksActivity extends Activity {
     private static final int LINE = Color.rgb(226, 226, 226);
     private static final int SOFT = Color.rgb(246, 246, 246);
     private static final String[] FILTERS = {
-        "ACTIVE", "WAITING_FOR_YOU", "SCHEDULED", "COMPLETED", "PROBLEMS"
+        "ACTIVE", "WAITING_FOR_YOU", "SCHEDULED", "COMPLETED"
     };
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refresher = this::refresh;
@@ -135,10 +134,6 @@ public final class TasksActivity extends Activity {
     }
 
     private View filters() {
-        HorizontalScrollView scroll = new HorizontalScrollView(this);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.setHorizontalFadingEdgeEnabled(true);
-        scroll.setFillViewport(true);
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         for (String value : FILTERS) {
@@ -148,12 +143,12 @@ public final class TasksActivity extends Activity {
             button.setTextSize(12);
             button.setTextColor(BLACK);
             button.setBackground(rounded(value.equals(filter) ? LINE : SOFT, 18, 0, Color.TRANSPARENT));
-            button.setMinWidth(dp(72));
-            button.setMinimumWidth(dp(72));
-            button.setPadding(dp(12), 0, dp(12), 0);
+            button.setMinWidth(0);
+            button.setMinimumWidth(0);
+            button.setPadding(dp(3), 0, dp(3), 0);
             button.setSelected(value.equals(filter));
             button.setContentDescription(
-                "Show " + filterLabel(value) + " tasks"
+                "Show " + filterAccessibilityLabel(value) + " tasks"
                     + (value.equals(filter) ? ", selected" : "")
             );
             button.setOnClickListener(view -> {
@@ -162,16 +157,12 @@ public final class TasksActivity extends Activity {
                 refresh();
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
+                0, dp(38), 1f
             );
-            params.setMarginEnd(dp(8));
+            if (!value.equals(FILTERS[FILTERS.length - 1])) params.setMarginEnd(dp(5));
             row.addView(button, params);
         }
-        row.setPadding(0, 0, dp(18), 0);
-        scroll.addView(row, new HorizontalScrollView.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-        return scroll;
+        return row;
     }
 
     private void refresh() {
@@ -217,19 +208,29 @@ public final class TasksActivity extends Activity {
         int active = counts.optInt("ACTIVE", 0);
         if (stale) {
             status.setText(
-                "Offline — showing last update from " + relativeTimeMillis(receivedAtMillis)
+                "Reconnecting… Last synced " + relativeTimeMillis(receivedAtMillis)
             );
         } else {
-            status.setText(active == 1 ? "1 active task" : active + " active tasks");
+            status.setText(
+                "Synced " + relativeTimeMillis(receivedAtMillis) + " · "
+                    + (active == 1 ? "1 active task" : active + " active tasks")
+            );
         }
         if (tasks.isEmpty()) {
             renderEmpty(emptyMessage());
             return;
         }
-        for (TaskItem item : tasks) taskList.addView(card(item, stale), matchWrap(0, dp(12)));
+        for (TaskItem item : tasks) {
+            taskList.addView(card(item, stale, receivedAtMillis), matchWrap(0, dp(12)));
+        }
     }
 
     private View card(TaskItem item, boolean stale) {
+        long syncAt = client == null ? 0L : client.lastSuccessfulSyncAt();
+        return card(item, stale, syncAt > 0L ? syncAt : System.currentTimeMillis());
+    }
+
+    private View card(TaskItem item, boolean stale, long syncAtMillis) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(16), dp(15), dp(16), dp(14));
@@ -257,6 +258,25 @@ public final class TasksActivity extends Activity {
         TextView activity = text(item.activityText(), 15, MID);
         activity.setPadding(0, dp(8), 0, 0);
         card.addView(activity, matchWrap());
+
+        if (!item.backlogTitle().isBlank() || !item.backlogSummary().isBlank()) {
+            String backlogTitle = item.backlogTitle();
+            String stateLabel = item.backlogStatusLabel();
+            String headingText = backlogTitle.isBlank()
+                ? stateLabel
+                : stateLabel.isBlank()
+                    ? backlogTitle
+                    : backlogTitle + " " + stateLabel.toLowerCase();
+            if (!headingText.isBlank()) {
+                TextView historyTitle = text(headingText, 13, BLACK);
+                historyTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+                historyTitle.setPadding(0, dp(12), 0, 0);
+                card.addView(historyTitle, matchWrap());
+            }
+            if (!item.backlogSummary().isBlank()) {
+                card.addView(text(item.backlogSummary(), 13, MID), matchWrap(0, dp(3)));
+            }
+        }
 
         if (!item.percentText().isBlank()) {
             TextView percent = text(item.percentText(), 22, BLACK);
@@ -297,7 +317,7 @@ public final class TasksActivity extends Activity {
             card.addView(estimateLabel, matchWrap());
             card.addView(text(item.etaText(), 14, BLACK), matchWrap(0, dp(2)));
         }
-        if (!item.primaryMetricText().isBlank()) {
+        if (!item.primaryMetricText().isBlank() && item.backlogSummary().isBlank()) {
             TextView metric = text(item.primaryMetricText(), 14, BLACK);
             metric.setPadding(0, dp(12), 0, 0);
             card.addView(metric, matchWrap());
@@ -310,9 +330,9 @@ public final class TasksActivity extends Activity {
             reason.setPadding(0, dp(8), 0, 0);
             card.addView(reason, matchWrap());
         }
-        String time = relativeTime(item.updatedAt);
+        String time = relativeTimeMillis(syncAtMillis);
         if (!time.isBlank()) {
-            TextView updated = text((stale ? "Last known update " : "Updated ") + time, 12, MID);
+            TextView updated = text((stale ? "Last synced " : "Synced ") + time, 12, MID);
             updated.setPadding(0, dp(8), 0, 0);
             card.addView(updated, matchWrap());
         }
@@ -342,6 +362,15 @@ public final class TasksActivity extends Activity {
             TextView reviewed = text(String.format("%,d reviewed", current), 13, BLACK);
             reviewed.setPadding(0, dp(5), 0, 0);
             section.addView(reviewed, matchWrap());
+        }
+        JSONObject backlog = subtask.optJSONObject("backlog");
+        if (backlog != null) {
+            String backlogSummary = TaskItem.optionalString(backlog, "summary", "");
+            if (!backlogSummary.isBlank()) {
+                TextView history = text(backlogSummary, 13, BLACK);
+                history.setPadding(0, dp(5), 0, 0);
+                section.addView(history, matchWrap());
+            }
         }
         org.json.JSONArray metrics = subtask.optJSONArray("metrics");
         if (metrics != null) {
@@ -394,12 +423,16 @@ public final class TasksActivity extends Activity {
 
     static String filterLabel(String value) {
         return switch (value) {
-            case "WAITING_FOR_YOU" -> "Waiting for you";
+            case "WAITING_FOR_YOU" -> "Waiting";
             case "PROBLEMS" -> "Problems";
             case "COMPLETED" -> "Completed";
             case "SCHEDULED" -> "Scheduled";
             default -> "Active";
         };
+    }
+
+    static String filterAccessibilityLabel(String value) {
+        return "WAITING_FOR_YOU".equals(value) ? "Waiting for you" : filterLabel(value);
     }
 
     static String relativeTime(String raw) {
