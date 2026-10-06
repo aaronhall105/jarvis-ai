@@ -116,6 +116,20 @@ public final class TaskDetailActivity extends Activity {
         content.addView(state, matchWrap());
 
         addFact("Current", task.activityText());
+        if (!task.backlogTitle().isBlank() || !task.backlogStatusLabel().isBlank()) {
+            String backlogState = task.backlogTitle();
+            if (!task.backlogStatusLabel().isBlank()) {
+                backlogState += (backlogState.isBlank() ? "" : ": ") + task.backlogStatusLabel();
+            }
+            addFact("Initial work", backlogState);
+            addFact("Initial work result", task.backlogSummary());
+            if (!task.backlog.isNull("initial_estimate")) {
+                addFact(
+                    "Initial estimate",
+                    String.format("%,d messages", task.backlog.optLong("initial_estimate", 0L))
+                );
+            }
+        }
         addFact("Progress", task.progressText());
         addFact("Complete", task.percentText());
         if ("DETERMINATE".equals(task.progressMode) && task.progressFraction != null) {
@@ -144,7 +158,9 @@ public final class TaskDetailActivity extends Activity {
         addFact("Capabilities", String.join(", ", task.capabilities));
         addFact("Created", displayTime(task.createdAt));
         addFact("Started", displayTime(task.startedAt));
-        addFact("Last updated", TasksActivity.relativeTime(task.updatedAt));
+        addFact(task.activityTimeLabel, TasksActivity.relativeTime(task.updatedAt));
+        addFact("Last synced", TasksActivity.relativeTimeMillis(client.lastSuccessfulSyncAt()));
+        addFact("Policy", TaskItem.optionalString(task.metadata, "policy_label", ""));
         addFact("Completed", displayTime(task.completedAt));
         addFact(
             "Completion notification",
@@ -172,6 +188,11 @@ public final class TaskDetailActivity extends Activity {
                 String detail = "";
                 if (progress != null && !progress.isNull("current")) {
                     detail = String.format("%,d reviewed", progress.optLong("current", 0L));
+                }
+                JSONObject backlog = subtask.optJSONObject("backlog");
+                if (backlog != null) {
+                    String summary = TaskItem.optionalString(backlog, "summary", "");
+                    if (!summary.isBlank()) detail = summary;
                 }
                 org.json.JSONArray metrics = subtask.optJSONArray("metrics");
                 if (metrics != null) {

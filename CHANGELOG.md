@@ -2,6 +2,19 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha33 — truthful continuous task monitoring
+
+Alpha33 distinguishes finite task backlogs from continuous monitoring. Once a
+bounded phase completes, Task Centre retains its historical outcome but no
+longer presents an estimated denominator as unfinished work, a completion
+percentage, remaining count, or ETA. Android separately reports successful API
+sync freshness, preserves offline snapshots, and uses a responsive four-part
+filter row.
+
+See [the complete alpha33 release notes](docs/releases/CHANGES_V19_0_0_ALPHA33.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha32 — resilient Core connectivity and task progress
 
 Alpha32 gives every Core-backed Android feature one endpoint authority with

@@ -19,6 +19,9 @@ public final class TaskItem {
     public final String conversationId;
     public final String openChatConversationId;
     public final String currentStep;
+    public final String activityTimeLabel;
+    public final String workMode;
+    public final String phase;
     public final String nextStep;
     public final String waitingReason;
     public final String errorSummary;
@@ -61,6 +64,8 @@ public final class TaskItem {
     public final List<JSONObject> subtasks;
     public final List<String> providers;
     public final List<String> capabilities;
+    public final JSONObject backlog;
+    public final JSONObject metadata;
 
     private TaskItem(JSONObject value) {
         taskId = optionalString(value, "task_id", "");
@@ -74,6 +79,9 @@ public final class TaskItem {
         conversationId = optionalString(value, "conversation_id", "");
         openChatConversationId = optionalString(value, "open_chat_conversation_id", "");
         currentStep = optionalString(value, "current_step", "");
+        activityTimeLabel = optionalString(value, "activity_time_label", "Last task activity");
+        workMode = optionalString(value, "work_mode", "BOUNDED");
+        phase = optionalString(value, "phase", "");
         nextStep = optionalString(value, "next_step", "");
         waitingReason = optionalString(value, "waiting_reason", "");
         errorSummary = optionalString(value, "error_summary", "");
@@ -130,6 +138,10 @@ public final class TaskItem {
         subtasks = objects(value.optJSONArray("subtasks"));
         providers = strings(value.optJSONArray("providers"));
         capabilities = strings(value.optJSONArray("capabilities"));
+        JSONObject backlogValue = value.optJSONObject("backlog");
+        backlog = backlogValue == null ? new JSONObject() : backlogValue;
+        JSONObject metadataValue = value.optJSONObject("metadata");
+        metadata = metadataValue == null ? new JSONObject() : metadataValue;
     }
 
     public static TaskItem fromJson(JSONObject value) {
@@ -146,6 +158,7 @@ public final class TaskItem {
             case "CANCELLED" -> "Cancelled";
             case "PLANNING" -> "Planning";
             case "PAUSED" -> "Paused";
+            case "MONITORING" -> "Monitoring";
             case "RUNNING" -> "Running";
             default -> "Waiting for Jarvis";
         };
@@ -160,6 +173,7 @@ public final class TaskItem {
     }
 
     public String progressText() {
+        if ("NONE".equals(progressMode)) return "";
         if (progressCurrent != null && progressTotal != null && progressTotal > 0) {
             String action = "messages".equals(progressUnit) ? " reviewed" : " " + unitLabel();
             return String.format("%,d of %,d%s", progressCurrent, progressTotal, action);
@@ -214,9 +228,26 @@ public final class TaskItem {
         return "";
     }
 
+    public String backlogTitle() {
+        return optionalString(backlog, "title", "");
+    }
+
+    public String backlogSummary() {
+        return optionalString(backlog, "summary", "");
+    }
+
+    public String backlogStatusLabel() {
+        String value = optionalString(backlog, "status", "");
+        return switch (value) {
+            case "COMPLETED" -> "Complete";
+            case "IN_PROGRESS" -> "In progress";
+            default -> "";
+        };
+    }
+
     public boolean isActive() {
         return switch (status) {
-            case "PLANNING", "RUNNING", "WAITING_FOR_JARVIS", "WAITING_FOR_YOU", "SCHEDULED", "PAUSED" -> true;
+            case "PLANNING", "RUNNING", "MONITORING", "WAITING_FOR_JARVIS", "WAITING_FOR_YOU", "SCHEDULED", "PAUSED" -> true;
             default -> false;
         };
     }

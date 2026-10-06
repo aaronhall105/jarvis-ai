@@ -24,7 +24,18 @@ final class TaskSnapshotStore {
         preferences.edit()
             .putString(key(filter, "json"), response.toString())
             .putLong(key(filter, "received"), Math.max(receivedAtMillis, 0L))
+            .putLong(key("all", "last_successful_sync"), Math.max(receivedAtMillis, 0L))
             .apply();
+    }
+
+    void markSuccessfulSync(long receivedAtMillis) {
+        preferences.edit()
+            .putLong(key("all", "last_successful_sync"), Math.max(receivedAtMillis, 0L))
+            .apply();
+    }
+
+    long lastSuccessfulSyncAt() {
+        return preferences.getLong(key("all", "last_successful_sync"), 0L);
     }
 
     Snapshot load(String filter) {

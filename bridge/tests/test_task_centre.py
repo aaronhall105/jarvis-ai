@@ -429,6 +429,208 @@ async def test_important_only_is_one_generic_task_without_batch_confirmations(tm
 
 
 @pytest.mark.asyncio
+async def test_important_only_monitoring_is_continuous_not_unfinished_backlog(
+    tmp_path: Path,
+) -> None:
+    centre = service(tmp_path / "tasks.db")
+    centre.email_policies.important_only = {
+        "enabled": True,
+        "recoverable_cleanup_authority": True,
+        "conversation_id": "usr:aaron:important-only",
+        "progress": {
+            "total_estimate": 50_654,
+            "processed_count": 48_513,
+            "moved_count": 7_380,
+        },
+        "provider_states": [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-account",
+                "phase": "monitoring",
+                "status": "monitoring",
+                "total_estimate": 11_363,
+                "processed_count": 10_863,
+                "moved_count": 6_333,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-account",
+                "phase": "monitoring",
+                "status": "monitoring",
+                "total_estimate": 39_291,
+                "processed_count": 37_650,
+                "moved_count": 1_047,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+        ],
+    }
+
+    task = next(
+        item
+        for item in await centre.list_tasks(principal_id="aaron", filter_name="ACTIVE")
+        if item["task_id"] == "important_only:inbox"
+    )
+
+    assert task["status"] == "MONITORING"
+    assert task["work_mode"] == "CONTINUOUS"
+    assert task["phase"] == "MONITORING"
+    assert task["progress"] == {
+        "mode": "NONE",
+        "current": None,
+        "total": None,
+        "unit": "messages",
+        "fraction": None,
+        "percent": None,
+        "remaining": None,
+    }
+    assert task["timing"]["eta_seconds"] is None
+    assert task["timing"]["eta_quality"] == "not_applicable"
+    assert task["backlog"]["status"] == "COMPLETED"
+    assert task["backlog"]["reviewed_count"] == 48_513
+    assert task["backlog"]["moved_count"] == 7_380
+    assert task["backlog"]["initial_estimate"] == 50_654
+    assert "remaining" not in task["result_summary"]
+    assert all(item["progress"]["mode"] == "NONE" for item in task["subtasks"])
+    assert all(item["backlog"]["status"] == "COMPLETED" for item in task["subtasks"])
+
+    centre.email_policies.important_only["progress"]["processed_count"] = 48_520
+    centre.email_policies.important_only["progress"]["moved_count"] = 7_382
+    centre.email_policies.important_only["provider_states"][0]["processed_count"] = 10_870
+    restarted = service(tmp_path / "tasks.db")
+    restarted.email_policies.important_only = centre.email_policies.important_only
+    after_restart = next(
+        item
+        for item in await restarted.list_tasks(principal_id="aaron", filter_name="ACTIVE")
+        if item["task_id"] == "important_only:inbox"
+    )
+    assert after_restart["backlog"]["reviewed_count"] == 48_513
+    assert after_restart["backlog"]["moved_count"] == 7_380
+    gmail = next(item for item in after_restart["subtasks"] if item["title"] == "Gmail")
+    assert gmail["backlog"]["reviewed_count"] == 10_863
+
+
+@pytest.mark.asyncio
+async def test_mixed_monitoring_and_backlog_only_counts_bounded_provider(
+    tmp_path: Path,
+) -> None:
+    centre = service(tmp_path / "tasks.db")
+    centre.email_policies.important_only = {
+        "enabled": True,
+        "recoverable_cleanup_authority": True,
+        "conversation_id": "usr:aaron:important-only",
+        "progress": {
+            "total_estimate": 50_654,
+            "processed_count": 30_863,
+            "moved_count": 7_000,
+        },
+        "provider_states": [
+            {
+                "provider": "google_gmail",
+                "account_id": "gmail-account",
+                "phase": "monitoring",
+                "status": "monitoring",
+                "total_estimate": 11_363,
+                "processed_count": 10_863,
+                "moved_count": 6_333,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+            {
+                "provider": "microsoft_outlook",
+                "account_id": "outlook-account",
+                "phase": "backlog",
+                "status": "running",
+                "total_estimate": 39_291,
+                "processed_count": 20_000,
+                "moved_count": 667,
+                "created_at": NOW,
+                "updated_at": NOW,
+            },
+        ],
+    }
+
+    task = next(
+        item
+        for item in await centre.list_tasks(principal_id="aaron", filter_name="ACTIVE")
+        if item["task_id"] == "important_only:inbox"
+    )
+
+    assert task["status"] == "RUNNING"
+    assert task["work_mode"] == "BOUNDED"
+    assert task["progress"]["current"] == 20_000
+    assert task["progress"]["total"] == 39_291
+    assert task["progress"]["remaining"] == 19_291
+    gmail = next(item for item in task["subtasks"] if item["title"] == "Gmail")
+    outlook = next(item for item in task["subtasks"] if item["title"] == "Outlook")
+    assert gmail["progress"]["mode"] == "NONE"
+    assert outlook["progress"]["mode"] == "DETERMINATE"
+
+
+def test_generic_continuous_task_has_no_fake_completion_or_eta(tmp_path: Path) -> None:
+    centre = service(tmp_path / "tasks.db")
+    task = centre._task(
+        task_id="external:weather-watch",
+        task_type="external_monitor",
+        title="Watch the forecast",
+        status=TaskCentreStatus.MONITORING,
+        underlying_status="active",
+        work_mode="CONTINUOUS",
+        phase="MONITORING",
+        progress_mode="NONE",
+        progress_current=412,
+        progress_total=500,
+        progress_unit="checks",
+    )
+
+    centre._decorate_structured_progress("aaron", task)
+
+    assert task["status"] == "MONITORING"
+    assert task["progress"]["mode"] == "NONE"
+    assert task["progress"]["current"] is None
+    assert task["progress"]["percent"] is None
+    assert task["progress"]["remaining"] is None
+    assert task["timing"]["eta_seconds"] is None
+    assert task["timing"]["eta_quality"] == "not_applicable"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskCentreStatus.MONITORING,
+        TaskCentreStatus.WAITING_FOR_JARVIS,
+        TaskCentreStatus.WAITING_FOR_YOU,
+        TaskCentreStatus.PAUSED,
+        TaskCentreStatus.COMPLETED,
+    ],
+)
+def test_eta_is_suppressed_for_every_non_running_state(
+    tmp_path: Path,
+    status: TaskCentreStatus,
+) -> None:
+    centre = service(tmp_path / f"tasks-{status.value}.db")
+    task = centre._task(
+        task_id=f"generic:{status.value.casefold()}",
+        task_type="generic",
+        title="Background work",
+        status=status,
+        underlying_status=status.value.casefold(),
+        work_mode="CONTINUOUS" if status is TaskCentreStatus.MONITORING else "BOUNDED",
+        progress_mode="NONE" if status is TaskCentreStatus.MONITORING else None,
+        progress_current=40,
+        progress_total=100,
+        progress_unit="items",
+    )
+
+    centre._decorate_structured_progress("aaron", task)
+
+    assert task["timing"]["eta_seconds"] is None
+    assert task["timing"]["review_rate_per_second"] is None
+
+
+@pytest.mark.asyncio
 async def test_task_progress_eta_uses_bounded_review_history_and_clamps_percent(
     tmp_path: Path,
 ) -> None:
@@ -501,6 +703,7 @@ async def test_task_progress_eta_uses_bounded_review_history_and_clamps_percent(
 
     first_rate = task["timing"]["review_rate_per_second"]
     centre.email_policies.important_only["progress"]["processed_count"] = 48_000
+    centre.email_policies.important_only["provider_states"][1]["processed_count"] = 37_402
     faster = next(
         item
         for item in await centre.list_tasks(principal_id="aaron", filter_name="ALL")
@@ -589,6 +792,7 @@ async def test_important_only_task_never_creates_authority_and_uses_provider_err
     assert waiting is not None
     assert waiting["status"] == "WAITING_FOR_YOU"
     assert waiting["user_action_type"] == "provider_reconnect"
+    assert waiting["timing"]["eta_seconds"] is None
 
 
 @pytest.mark.asyncio

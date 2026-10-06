@@ -30,6 +30,7 @@ logger = logging.getLogger("jarvis-core.task-centre")
 class TaskCentreStatus(str, Enum):
     PLANNING = "PLANNING"
     RUNNING = "RUNNING"
+    MONITORING = "MONITORING"
     WAITING_FOR_JARVIS = "WAITING_FOR_JARVIS"
     WAITING_FOR_YOU = "WAITING_FOR_YOU"
     SCHEDULED = "SCHEDULED"
@@ -43,6 +44,7 @@ class TaskCentreStatus(str, Enum):
 ACTIVE_STATUSES = {
     TaskCentreStatus.PLANNING.value,
     TaskCentreStatus.RUNNING.value,
+    TaskCentreStatus.MONITORING.value,
     TaskCentreStatus.WAITING_FOR_JARVIS.value,
     TaskCentreStatus.WAITING_FOR_YOU.value,
     TaskCentreStatus.SCHEDULED.value,
@@ -223,6 +225,14 @@ class TaskCentre:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(principal_id, task_id)
                 );
+                CREATE TABLE IF NOT EXISTS task_phase_snapshots (
+                    principal_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    phase TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    captured_at TEXT NOT NULL,
+                    PRIMARY KEY(principal_id, task_id, phase)
+                );
                 """
             )
             delivery_columns = {
@@ -367,7 +377,11 @@ class TaskCentre:
         current = max(0, int(raw_current)) if raw_current is not None else None
         total = max(0, int(raw_total)) if raw_total is not None else None
         unit = str(task.get("progress_unit") or "").strip() or None
-        determinate = current is not None and total is not None and total > 0
+        requested_mode = str(task.get("progress_mode") or "").strip().upper()
+        no_active_progress = requested_mode == "NONE"
+        determinate = (
+            not no_active_progress and current is not None and total is not None and total > 0
+        )
         if determinate and str(task.get("status") or "") == TaskCentreStatus.COMPLETED.value:
             # COMPLETED is authoritative terminal evidence. Normalise stale source
             # counters to the known denominator rather than showing a completed
@@ -383,13 +397,17 @@ class TaskCentre:
             remaining = max(total - current, 0)
             fraction = bounded_current / total
         else:
-            bounded_current = current
+            bounded_current = None if no_active_progress else current
             remaining = None
             fraction = None
         percent = round(fraction * 100) if fraction is not None else None
         task["progress"] = {
-            "mode": "DETERMINATE" if determinate else "INDETERMINATE",
-            "current": current,
+            "mode": "DETERMINATE"
+            if determinate
+            else "NONE"
+            if no_active_progress
+            else "INDETERMINATE",
+            "current": bounded_current,
             "total": total if determinate else None,
             "unit": unit,
             "fraction": fraction,
@@ -403,7 +421,7 @@ class TaskCentre:
         timing.setdefault("throughput_per_second", None)
         timing.setdefault("eta_seconds", None)
         timing.setdefault("eta_quality", "unavailable")
-        if current is not None:
+        if current is not None and not no_active_progress:
             timing.update(
                 self._progress_estimate(
                     principal_id=principal_id,
@@ -411,8 +429,20 @@ class TaskCentre:
                     current=current,
                     total=total if determinate else None,
                     unit=unit,
-                    running=str(task.get("status") or "") == TaskCentreStatus.RUNNING.value,
+                    running=(
+                        str(task.get("status") or "") == TaskCentreStatus.RUNNING.value
+                        and str(task.get("work_mode") or "BOUNDED") == "BOUNDED"
+                    ),
                 )
+            )
+        elif no_active_progress:
+            timing.update(
+                {
+                    "throughput_per_second": None,
+                    "review_rate_per_second": None,
+                    "eta_seconds": None,
+                    "eta_quality": "not_applicable",
+                }
             )
         task["timing"] = timing
         task.setdefault("metrics", [])
@@ -507,6 +537,47 @@ class TaskCentre:
             "eta_quality": "smoothed_rolling_15_minute",
         }
 
+    def _phase_snapshot(
+        self,
+        *,
+        principal_id: str,
+        task_id: str,
+        phase: str,
+        observed: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Freeze a completed bounded-phase summary without owning task execution."""
+
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT snapshot_json,captured_at FROM task_phase_snapshots "
+                "WHERE principal_id=? AND task_id=? AND phase=?",
+                (principal_id, task_id, phase),
+            ).fetchone()
+            if row is None:
+                captured_at = _iso()
+                safe = redact_secrets(dict(observed))
+                payload = dict(safe) if isinstance(safe, Mapping) else {}
+                connection.execute(
+                    "INSERT INTO task_phase_snapshots(principal_id,task_id,phase,snapshot_json,"
+                    "captured_at) VALUES(?,?,?,?,?)",
+                    (
+                        principal_id,
+                        task_id,
+                        phase,
+                        json.dumps(payload, separators=(",", ":")),
+                        captured_at,
+                    ),
+                )
+                return {**payload, "captured_at": captured_at}
+        try:
+            payload = json.loads(str(row["snapshot_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        return {
+            **(dict(payload) if isinstance(payload, Mapping) else {}),
+            "captured_at": row["captured_at"],
+        }
+
     async def _pending_interaction_tasks(
         self, principal_id: str, limit: int
     ) -> list[dict[str, Any]]:
@@ -576,6 +647,7 @@ class TaskCentre:
             return status in {
                 TaskCentreStatus.PLANNING.value,
                 TaskCentreStatus.RUNNING.value,
+                TaskCentreStatus.MONITORING.value,
                 TaskCentreStatus.WAITING_FOR_JARVIS.value,
                 TaskCentreStatus.WAITING_FOR_YOU.value,
             }
@@ -829,6 +901,8 @@ class TaskCentre:
                 if any(int(item.get("moved_count") or 0) for item in states)
                 else TaskCentreStatus.FAILED
             )
+        elif states and all(str(item.get("phase") or "") == "monitoring" for item in states):
+            normalized = TaskCentreStatus.MONITORING
         else:
             normalized = TaskCentreStatus.RUNNING
 
@@ -836,7 +910,66 @@ class TaskCentre:
         processed = int(progress.get("processed_count") or 0)
         total = int(progress.get("total_estimate") or 0)
         moved = int(progress.get("moved_count") or 0)
-        remaining = max(0, total - processed) if total else None
+        all_monitoring = bool(states) and all(
+            str(item.get("phase") or "") == "monitoring" for item in states
+        )
+        bounded_states = [item for item in states if str(item.get("phase") or "") != "monitoring"]
+        active_processed = sum(int(item.get("processed_count") or 0) for item in bounded_states)
+        active_total = sum(int(item.get("total_estimate") or 0) for item in bounded_states)
+        if bounded_states and len(bounded_states) == len(states) and active_total <= 0:
+            # Older projections may only expose the aggregate estimate. It is
+            # still usable while every provider is in the bounded backlog.
+            active_total = total
+        remaining = max(0, active_total - active_processed) if active_total else None
+        historical = (
+            self._phase_snapshot(
+                principal_id=principal_id,
+                task_id="important_only:inbox",
+                phase="BACKLOG_COMPLETED",
+                observed={
+                    "reviewed_count": processed,
+                    "moved_count": moved,
+                    "kept_important_count": int(progress.get("kept_important_count") or 0),
+                    "kept_active_count": int(progress.get("kept_active_count") or 0),
+                    "temporary_count": int(progress.get("temporary_count") or 0),
+                    "uncertain_count": int(progress.get("uncertain_count") or 0),
+                    "initial_estimate": total or None,
+                    "unit": "messages",
+                },
+            )
+            if all_monitoring
+            else {
+                "reviewed_count": processed,
+                "moved_count": moved,
+                "kept_important_count": int(progress.get("kept_important_count") or 0),
+                "kept_active_count": int(progress.get("kept_active_count") or 0),
+                "temporary_count": int(progress.get("temporary_count") or 0),
+                "uncertain_count": int(progress.get("uncertain_count") or 0),
+                "initial_estimate": total or None,
+                "unit": "messages",
+            }
+        )
+        historical_processed = int(historical.get("reviewed_count") or 0)
+        historical_moved = int(historical.get("moved_count") or 0)
+        historical_kept_important = int(historical.get("kept_important_count") or 0)
+        historical_kept_active = int(historical.get("kept_active_count") or 0)
+        historical_temporary = int(historical.get("temporary_count") or 0)
+        historical_uncertain = int(historical.get("uncertain_count") or 0)
+        backlog = {
+            "status": "COMPLETED" if all_monitoring else "IN_PROGRESS",
+            "title": "Initial cleanup",
+            "summary": (
+                f"{historical_processed:,} messages reviewed · "
+                f"{historical_moved:,} moved to deleted folders"
+                if all_monitoring
+                else None
+            ),
+            "reviewed_count": historical_processed,
+            "moved_count": historical_moved,
+            "initial_estimate": historical.get("initial_estimate"),
+            "captured_at": historical.get("captured_at"),
+            "unit": "messages",
+        }
         provider_steps: list[dict[str, Any]] = []
         for item in states:
             provider = str(item.get("provider") or "")
@@ -859,6 +992,36 @@ class TaskCentre:
             provider_name = "Gmail" if provider == "google_gmail" else "Outlook"
             provider_current = max(0, int(item.get("processed_count") or 0))
             provider_total = max(0, int(item.get("total_estimate") or 0))
+            provider_monitoring = str(item.get("phase") or "") == "monitoring"
+            provider_history = (
+                self._phase_snapshot(
+                    principal_id=principal_id,
+                    task_id=f"important_only:inbox:{provider}:{item.get('account_id')}",
+                    phase="BACKLOG_COMPLETED",
+                    observed={
+                        "reviewed_count": provider_current,
+                        "moved_count": int(item.get("moved_count") or 0),
+                        "kept_important_count": int(item.get("kept_important_count") or 0),
+                        "kept_active_count": int(item.get("kept_active_count") or 0),
+                        "temporary_count": int(item.get("temporary_count") or 0),
+                        "uncertain_count": int(item.get("uncertain_count") or 0),
+                        "initial_estimate": provider_total or None,
+                        "unit": "messages",
+                    },
+                )
+                if provider_monitoring
+                else {
+                    "reviewed_count": provider_current,
+                    "moved_count": int(item.get("moved_count") or 0),
+                    "kept_important_count": int(item.get("kept_important_count") or 0),
+                    "kept_active_count": int(item.get("kept_active_count") or 0),
+                    "temporary_count": int(item.get("temporary_count") or 0),
+                    "uncertain_count": int(item.get("uncertain_count") or 0),
+                    "initial_estimate": provider_total or None,
+                    "unit": "messages",
+                }
+            )
+            provider_history_reviewed = int(provider_history.get("reviewed_count") or 0)
             provider_subtasks.append(
                 {
                     "subtask_id": f"{provider}:{item.get('account_id')}",
@@ -866,27 +1029,52 @@ class TaskCentre:
                     "provider": provider,
                     "status": str(item.get("status") or "pending"),
                     "progress": {
-                        "mode": "DETERMINATE" if provider_total else "INDETERMINATE",
-                        "current": provider_current,
-                        "total": provider_total or None,
+                        "mode": "NONE"
+                        if provider_monitoring
+                        else "DETERMINATE"
+                        if provider_total
+                        else "INDETERMINATE",
+                        "current": None if provider_monitoring else provider_current,
+                        "total": None if provider_monitoring else provider_total or None,
                         "unit": "messages",
                         "remaining": max(provider_total - provider_current, 0)
-                        if provider_total
+                        if provider_total and not provider_monitoring
                         else None,
                         "fraction": min(provider_current, provider_total) / provider_total
-                        if provider_total
+                        if provider_total and not provider_monitoring
                         else None,
                         "percent": round(
                             min(provider_current, provider_total) / provider_total * 100
                         )
-                        if provider_total
+                        if provider_total and not provider_monitoring
                         else None,
+                    },
+                    "backlog": {
+                        "status": "COMPLETED" if provider_monitoring else "IN_PROGRESS",
+                        "title": "Initial cleanup",
+                        "summary": (
+                            f"{provider_history_reviewed:,} reviewed during initial cleanup"
+                            if provider_monitoring
+                            else None
+                        ),
+                        "reviewed_count": provider_history_reviewed,
+                        "moved_count": int(provider_history.get("moved_count") or 0),
+                        "initial_estimate": provider_history.get("initial_estimate"),
+                        "captured_at": provider_history.get("captured_at"),
+                        "unit": "messages",
                     },
                     "metrics": [
                         {
                             "key": "moved",
                             "label": "Moved",
-                            "value": int(item.get("moved_count") or 0),
+                            "value": int(
+                                (
+                                    provider_history.get("moved_count")
+                                    if provider_monitoring
+                                    else item.get("moved_count")
+                                )
+                                or 0
+                            ),
                             "unit": "messages",
                             "destination": "Bin" if provider == "google_gmail" else "Deleted Items",
                             "primary": True,
@@ -894,25 +1082,53 @@ class TaskCentre:
                         {
                             "key": "kept_important",
                             "label": "Kept important",
-                            "value": int(item.get("kept_important_count") or 0),
+                            "value": int(
+                                (
+                                    provider_history.get("kept_important_count")
+                                    if provider_monitoring
+                                    else item.get("kept_important_count")
+                                )
+                                or 0
+                            ),
                             "unit": "messages",
                         },
                         {
                             "key": "kept_active",
                             "label": "Kept active",
-                            "value": int(item.get("kept_active_count") or 0),
+                            "value": int(
+                                (
+                                    provider_history.get("kept_active_count")
+                                    if provider_monitoring
+                                    else item.get("kept_active_count")
+                                )
+                                or 0
+                            ),
                             "unit": "messages",
                         },
                         {
                             "key": "temporary",
                             "label": "Temporary",
-                            "value": int(item.get("temporary_count") or 0),
+                            "value": int(
+                                (
+                                    provider_history.get("temporary_count")
+                                    if provider_monitoring
+                                    else item.get("temporary_count")
+                                )
+                                or 0
+                            ),
                             "unit": "messages",
                         },
                         {
                             "key": "uncertain_kept",
                             "label": "Uncertain kept",
-                            "value": int(item.get("uncertain_count") or 0),
+                            "value": int(
+                                (
+                                    provider_history.get("uncertain_count")
+                                    if provider_monitoring
+                                    else item.get("uncertain_count")
+                                )
+                                or 0
+                            ),
                             "unit": "messages",
                         },
                     ],
@@ -926,11 +1142,7 @@ class TaskCentre:
             if item.get("last_error")
         ]
         waiting_reason = "; ".join(item for item in waiting_reasons if item) or None
-        phase = (
-            "Monitoring new mail"
-            if states and all(str(item.get("phase")) == "monitoring" for item in states)
-            else "Reviewing the existing inbox backlog"
-        )
+        phase = "Monitoring new mail" if all_monitoring else "Reviewing the existing inbox backlog"
         conversation_id = str(policy.get("conversation_id") or "")
         created_values = [str(item.get("created_at")) for item in states if item.get("created_at")]
         updated_values = [str(item.get("updated_at")) for item in states if item.get("updated_at")]
@@ -959,8 +1171,12 @@ class TaskCentre:
                 created_at=min(created_values) if created_values else policy.get("created_at"),
                 updated_at=max(updated_values) if updated_values else policy.get("updated_at"),
                 current_step=phase,
-                progress_current=processed,
-                progress_total=total or None,
+                activity_time_label="Last mailbox activity",
+                work_mode="CONTINUOUS" if all_monitoring else "BOUNDED",
+                phase="MONITORING" if all_monitoring else "BACKLOG",
+                progress_mode="NONE" if all_monitoring else None,
+                progress_current=None if all_monitoring else active_processed,
+                progress_total=None if all_monitoring else active_total or None,
                 progress_unit="messages",
                 next_step=(
                     "Continue from the durable provider checkpoint"
@@ -968,7 +1184,7 @@ class TaskCentre:
                     else "Reconnect the affected mailbox"
                     if normalized is TaskCentreStatus.WAITING_FOR_YOU
                     else "Classify new mail as it arrives"
-                    if "monitoring" in raw_statuses
+                    if all_monitoring
                     else "Review the next bounded provider page"
                 ),
                 waiting_reason=waiting_reason,
@@ -985,52 +1201,68 @@ class TaskCentre:
                 can_resume=not enabled and bool(policy.get("recoverable_cleanup_authority")),
                 can_retry=normalized is TaskCentreStatus.WAITING_FOR_JARVIS,
                 result_summary=(
-                    f"{processed:,} reviewed; {moved:,} moved to recoverable trash; "
-                    f"{int(progress.get('kept_important_count') or 0):,} kept important; "
-                    f"{int(progress.get('kept_active_count') or 0):,} kept active; "
-                    f"{int(progress.get('temporary_count') or 0):,} temporary; "
-                    f"{int(progress.get('uncertain_count') or 0):,} uncertain kept"
-                    + (f"; {remaining:,} remaining" if remaining is not None else "")
+                    ("Initial cleanup complete; " if all_monitoring else "")
+                    + f"{historical_processed if all_monitoring else processed:,} reviewed; "
+                    f"{historical_moved if all_monitoring else moved:,} moved to recoverable trash; "
+                    f"{historical_kept_important if all_monitoring else int(progress.get('kept_important_count') or 0):,} kept important; "
+                    f"{historical_kept_active if all_monitoring else int(progress.get('kept_active_count') or 0):,} kept active; "
+                    f"{historical_temporary if all_monitoring else int(progress.get('temporary_count') or 0):,} temporary; "
+                    f"{historical_uncertain if all_monitoring else int(progress.get('uncertain_count') or 0):,} uncertain kept"
+                    + (
+                        f"; {remaining:,} remaining"
+                        if remaining is not None and not all_monitoring
+                        else ""
+                    )
                 ),
                 planned_steps=provider_steps,
                 metrics=[
                     {
                         "key": "moved",
                         "label": "Moved to deleted folders",
-                        "value": moved,
+                        "value": historical_moved if all_monitoring else moved,
                         "unit": "messages",
                         "primary": True,
                     },
                     {
                         "key": "kept_important",
                         "label": "Kept important",
-                        "value": int(progress.get("kept_important_count") or 0),
+                        "value": historical_kept_important
+                        if all_monitoring
+                        else int(progress.get("kept_important_count") or 0),
                         "unit": "messages",
                     },
                     {
                         "key": "kept_active",
                         "label": "Kept active",
-                        "value": int(progress.get("kept_active_count") or 0),
+                        "value": historical_kept_active
+                        if all_monitoring
+                        else int(progress.get("kept_active_count") or 0),
                         "unit": "messages",
                     },
                     {
                         "key": "temporary",
                         "label": "Temporary",
-                        "value": int(progress.get("temporary_count") or 0),
+                        "value": historical_temporary
+                        if all_monitoring
+                        else int(progress.get("temporary_count") or 0),
                         "unit": "messages",
                     },
                     {
                         "key": "uncertain_kept",
                         "label": "Uncertain kept",
-                        "value": int(progress.get("uncertain_count") or 0),
+                        "value": historical_uncertain
+                        if all_monitoring
+                        else int(progress.get("uncertain_count") or 0),
                         "unit": "messages",
                     },
                 ],
                 subtasks=provider_subtasks,
+                backlog=backlog,
                 metadata={
                     "permanent_delete": False,
                     "uncertain_action": "keep",
-                    "remaining": remaining,
+                    "policy_label": "Important-Only active" if enabled else "Important-Only paused",
+                    "remaining": remaining if not all_monitoring else None,
                     "provider_progress": provider_steps,
                 },
             )
@@ -1597,8 +1829,12 @@ class TaskCentre:
             "conversation_id": conversation_id,
             "open_chat_conversation_id": None,
             "current_step": values.pop("current_step", None),
+            "activity_time_label": values.pop("activity_time_label", "Last task activity"),
             "current_step_index": values.pop("current_step_index", None),
             "step_count": values.pop("step_count", None),
+            "work_mode": values.pop("work_mode", "BOUNDED"),
+            "phase": values.pop("phase", None),
+            "progress_mode": values.pop("progress_mode", None),
             "progress_current": values.pop("progress_current", None),
             "progress_total": values.pop("progress_total", None),
             "progress_unit": values.pop("progress_unit", None),
@@ -1626,6 +1862,7 @@ class TaskCentre:
             "metadata": values.pop("metadata", {}),
             "metrics": values.pop("metrics", []),
             "subtasks": values.pop("subtasks", []),
+            "backlog": values.pop("backlog", None),
             "timing": values.pop("timing", {}),
         }
         source, source_task_id = task["task_id"].split(":", 1)
@@ -1814,6 +2051,7 @@ class TaskCentre:
             in {
                 TaskCentreStatus.PLANNING.value,
                 TaskCentreStatus.RUNNING.value,
+                TaskCentreStatus.MONITORING.value,
                 TaskCentreStatus.WAITING_FOR_JARVIS.value,
                 TaskCentreStatus.WAITING_FOR_YOU.value,
             }
