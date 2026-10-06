@@ -2,6 +2,17 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha34 — premium shared shell and persistent chat input
+
+Alpha34 gives Chat and Tasks one stable visual shell, a lighter Smart Inbox
+presentation, and a shared token-based Android design language. Typed and IME
+sends now clear the composer while retaining focus and the open keyboard;
+streaming updates no longer steal input focus.
+
+See [the complete alpha34 release notes](docs/releases/CHANGES_V19_0_0_ALPHA34.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha33 — truthful continuous task monitoring
 
 Alpha33 distinguishes finite task backlogs from continuous monitoring. Once a

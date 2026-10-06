@@ -6,13 +6,13 @@ device evidence.
 
 ## Validated source and release
 
-- Current release candidate: `v19.0.0-alpha33`
+- Current release candidate: `v19.0.0-alpha34`
 - Release source: the immutable tag, product manifest, and OTA manifest must
   record the exact approved `jarvis/unified-production` revision
 - Authoritative branch: `jarvis/unified-production`
 - Core application version: `3.7.0`
 - Realtime protocol: `2`
-- Android Phone and Wear versionCode: `190350`
+- Android Phone and Wear versionCode: `190360`
 
 The tag-triggered workflow fails closed unless the tag equals the current
 authoritative branch head. It builds Phone and Watch from that one revision,
@@ -22,14 +22,14 @@ from the exact published bytes.
 
 ## Core and repository checks
 
-The alpha33 release candidate adds a generic continuous-monitoring task phase,
-durable bounded-phase summaries, API-sync freshness distinct from task activity,
-and a responsive four-part Task filter row while preserving the Task Centre and
-Important-Only Inbox execution and authority semantics already in production.
+The alpha34 release candidate gives Chat and Tasks one shared visual shell,
+introduces a lighter Smart Inbox presentation, and preserves the focused text
+composer and soft keyboard across typed and IME sends. It retains alpha33's
+continuous-monitoring semantics, offline Task cache, and endpoint failover.
 Its complete test and release-gate evidence is recorded in the release PR and
 immutable OTA workflow run rather than inferred here.
 
-The protected release PR and post-merge alpha33 head must repeat the applicable
+The protected release PR and post-merge alpha34 head must repeat the applicable
 checks before the immutable release tag is created.
 
 ## Google Personal Integrations v1
@@ -58,17 +58,17 @@ closed without inventing addresses.
 
 ## Android Phone and Wear OS
 
-The alpha33 source retains the approved Phone/Watch lineage, shared protocol,
+The alpha34 source retains the approved Phone/Watch lineage, shared protocol,
 Integrations activity and OAuth deep link, Developer capability,
 delete-current-chat, realtime recovery, assistant/overlay/wake support, Wear
 bridge, Tile, voice, and current branding. The Android connected-provider
 parser now renders null/missing/blank detail as no detail rather than the
 literal text `null`; tests cover both empty detail and verified account email.
 
-Alpha33 keeps first-class Chat/Tasks navigation, shared Core routing, offline
+Alpha34 keeps first-class Chat/Tasks navigation, shared Core routing, offline
 cached task state, and a generic bounded/continuous progress renderer. Package, version, versionCode,
 production signature, resources, manifest, and compiled markers are verified
-again from the final signed alpha33 APKs during publication.
+again from the final signed alpha34 APKs during publication.
 
 ## Persistence and runtime
 

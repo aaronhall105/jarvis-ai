@@ -32,6 +32,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.Button;
 import android.widget.FrameLayout;
@@ -54,11 +55,14 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public final class MainActivity extends Activity {
-    private static final int BLACK = Color.rgb(20, 20, 20);
-    private static final int MID = Color.rgb(103, 103, 103);
-    private static final int LINE = Color.rgb(226, 226, 226);
-    private static final int SOFT = Color.rgb(246, 246, 246);
-    private static final int WHITE = Color.WHITE;
+    static final String EXTRA_SHOW_MODE_PICKER = "show_mode_picker";
+    static final String EXTRA_CONFIRM_CLEAR_CHAT = "confirm_clear_chat";
+    static final String EXTRA_NEW_CHAT = "new_chat";
+    private static final int BLACK = JarvisUi.BLACK;
+    private static final int MID = JarvisUi.MID;
+    private static final int LINE = JarvisUi.LINE;
+    private static final int SOFT = JarvisUi.SOFT;
+    private static final int WHITE = JarvisUi.WHITE;
     private static final int REQUEST_VOICE_PERMISSIONS = 1800;
     private static final int REQUEST_DEVELOPER_DICTATION = 1801;
     private static final int REQUEST_DEVELOPER_ATTACHMENT = 1802;
@@ -68,6 +72,7 @@ public final class MainActivity extends Activity {
     private ChatHistoryStore history;
     private LinearLayout root;
     private LinearLayout topBar;
+    private JarvisAppShell.Header appShell;
     private LinearLayout composerShell;
     private LinearLayout developerChrome;
     private LinearLayout developerSessionRow;
@@ -192,6 +197,7 @@ public final class MainActivity extends Activity {
         updateMicButton();
         startJarvisIfConfigured();
         applyAssistantMode(false);
+        handleShellIntent(getIntent());
     }
 
     @Override protected void onStart() {
@@ -209,6 +215,12 @@ public final class MainActivity extends Activity {
         updateMicButton();
         refreshTaskCount();
         JarvisVoiceInteractionService.ensureWakeIfActive(this);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleShellIntent(intent);
     }
 
     @Override protected void onStop() {
@@ -258,9 +270,9 @@ public final class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(WHITE);
 
-        topBar = buildTopBar();
-        root.addView(topBar, matchWrap());
-        root.addView(buildPrimaryNavigation(), matchWrap(0, dp(8)));
+        appShell = buildAppShell();
+        topBar = appShell.topBar;
+        root.addView(appShell.view, matchWrap());
         developerChrome = buildDeveloperChrome();
         root.addView(developerChrome, matchWrap());
 
@@ -312,38 +324,39 @@ public final class MainActivity extends Activity {
         return root;
     }
 
-    private LinearLayout buildPrimaryNavigation() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setPadding(dp(16), 0, dp(16), 0);
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setBackground(rounded(SOFT, 22, 0, Color.TRANSPARENT));
-        TextView chat = primaryTab("Chat", true);
-        tabs.addView(chat, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        tasksTab = primaryTab("Tasks", false);
-        tasksTab.setOnClickListener(view ->
-            startActivity(new Intent(this, TasksActivity.class))
+    private JarvisAppShell.Header buildAppShell() {
+        JarvisAppShell.Header header = JarvisAppShell.create(
+            this,
+            JarvisAppShell.Destination.CHAT,
+            DeveloperRoutingPolicy.routesToDeveloper(assistantMode) ? "Developer  ⌄" : "Jarvis  ⌄",
+            "Connecting",
+            new JarvisAppShell.Actions() {
+                @Override public void onMode() { showModePicker(); }
+                @Override public void onNotifications() {
+                    startActivity(new Intent(MainActivity.this, ProactiveActivity.class));
+                }
+                @Override public void onNewChat() {
+                    if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
+                        confirmDeleteDeveloperChat();
+                    } else {
+                        newChat();
+                    }
+                }
+                @Override public void onClearChat() { confirmDeleteChat(); }
+                @Override public void onSettings() {
+                    startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+                }
+                @Override public void onChat() { }
+                @Override public void onTasks() { openTasks(); }
+            }
         );
-        tabs.addView(tasksTab, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        row.addView(tabs, new LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-        return row;
-    }
-
-    private TextView primaryTab(String label, boolean selected) {
-        TextView tab = text(label, 14, selected ? WHITE : BLACK);
-        tab.setGravity(Gravity.CENTER);
-        tab.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tab.setBackground(rounded(
-            selected ? BLACK : Color.TRANSPARENT,
-            20,
-            0,
-            Color.TRANSPARENT
-        ));
-        tab.setContentDescription(label + (selected ? ", selected" : ""));
-        return tab;
+        modeText = header.mode;
+        statusText = header.context;
+        proactiveButton = header.notifications;
+        topNewChatButton = header.newChat;
+        clearChatButton = header.clearChat;
+        tasksTab = header.tasksTab;
+        return header;
     }
 
     private void refreshTaskCount() {
@@ -351,7 +364,7 @@ public final class MainActivity extends Activity {
         taskCentreClient.list("ACTIVE", new TaskCentreClient.ListCallback() {
             @Override public void onSuccess(List<TaskItem> tasks, JSONObject counts) {
                 int active = counts.optInt("ACTIVE", tasks.size());
-                tasksTab.setText(active > 0 ? "Tasks • " + active : "Tasks");
+                tasksTab.setText("Tasks");
                 tasksTab.setContentDescription(
                     active > 0 ? "Tasks, " + active + " active" : "Tasks"
                 );
@@ -360,87 +373,6 @@ public final class MainActivity extends Activity {
                 tasksTab.setText("Tasks");
             }
         });
-    }
-
-    private LinearLayout buildTopBar() {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackgroundColor(WHITE);
-
-        LinearLayout titleBlock = new LinearLayout(this);
-        titleBlock.setOrientation(LinearLayout.VERTICAL);
-        TextView title = text("J A R V I S", 18, BLACK);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setLetterSpacing(0.12f);
-        titleBlock.addView(title, matchWrap());
-        modeText = text("Jarvis  ⌄", 13, BLACK);
-        modeText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        modeText.setPadding(0, dp(3), dp(12), dp(2));
-        modeText.setOnClickListener(view -> showModePicker());
-        titleBlock.addView(modeText, matchWrap());
-        statusText = text("Connecting", 12, MID);
-        statusText.setMaxLines(1);
-        statusText.setPadding(0, dp(2), dp(8), 0);
-        titleBlock.addView(statusText, matchWrap());
-        bar.addView(titleBlock, new LinearLayout.LayoutParams(
-            0,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            1f
-        ));
-
-        proactiveButton = iconButton(
-            R.drawable.ic_notifications,
-            "House activity",
-            SOFT,
-            BLACK
-        );
-        proactiveButton.setOnClickListener(view ->
-            startActivity(
-                new Intent(this, ProactiveActivity.class)
-            )
-        );
-        bar.addView(
-            proactiveButton,
-            iconParams(dp(40), dp(6))
-        );
-
-        topNewChatButton = iconButton(
-            R.drawable.ic_add,
-            "New chat",
-            SOFT,
-            BLACK
-        );
-        topNewChatButton.setOnClickListener(view -> {
-            if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) confirmDeleteDeveloperChat();
-            else newChat();
-        });
-        bar.addView(
-            topNewChatButton,
-            iconParams(dp(40), dp(6))
-        );
-
-        clearChatButton = assetButton(
-            R.drawable.control_delete_red,
-            "Clear current chat"
-        );
-        clearChatButton.setOnClickListener(view -> confirmDeleteChat());
-        bar.addView(clearChatButton, iconParams(dp(44), dp(6)));
-
-        ImageButton settings = iconButton(
-            R.drawable.ic_settings,
-            "Settings",
-            SOFT,
-            BLACK
-        );
-        settings.setOnClickListener(view ->
-            startActivity(new Intent(this, SettingsActivity.class))
-        );
-        bar.addView(
-            settings,
-            iconParams(dp(40), 0)
-        );
-        return bar;
     }
 
     private LinearLayout buildDeveloperChrome() {
@@ -500,12 +432,16 @@ public final class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(6), dp(6), dp(6));
-        row.setBackground(rounded(SOFT, 25, 1, LINE));
+        row.setPadding(dp(8), dp(4), dp(4), dp(4));
+        row.setBackground(rounded(SOFT, 28, 1, LINE));
+        row.setElevation(0f);
+        row.setStateListAnimator(null);
 
-        ImageButton addButton = iconButton(R.drawable.ic_add, "Add attachment or action", SOFT, BLACK);
+        ImageButton addButton = iconButton(
+            R.drawable.ic_add, "Add attachment or action", Color.TRANSPARENT, BLACK
+        );
         addButton.setOnClickListener(this::showComposerActions);
-        row.addView(addButton, iconParams(dp(42), dp(8)));
+        row.addView(addButton, iconParams(dp(48), dp(4)));
 
         composer = new EditText(this);
         composer.setHint("Message Jarvis");
@@ -523,7 +459,7 @@ public final class MainActivity extends Activity {
                 | InputType.TYPE_TEXT_FLAG_MULTI_LINE
         );
         composer.setImeOptions(
-            EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            EditorInfo.IME_ACTION_SEND | EditorInfo.IME_FLAG_NO_EXTRACT_UI
         );
         composer.setBackgroundColor(Color.TRANSPARENT);
         composer.setPadding(0, 0, dp(8), 0);
@@ -536,10 +472,12 @@ public final class MainActivity extends Activity {
                             == KeyEvent.KEYCODE_ENTER
                         && event.getAction()
                             == KeyEvent.ACTION_DOWN;
-                if (controlEnter) {
+                boolean imeSend = actionId == EditorInfo.IME_ACTION_SEND;
+                if ((controlEnter || imeSend) && !generating) {
                     sendMessage();
                     return true;
                 }
+                if (imeSend) return true;
                 return false;
             }
         );
@@ -550,7 +488,7 @@ public final class MainActivity extends Activity {
             }
             @Override public void afterTextChanged(Editable value) {}
         });
-        composer.setMinHeight(dp(44));
+        composer.setMinHeight(dp(48));
         row.addView(composer, new LinearLayout.LayoutParams(
             0,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -559,10 +497,11 @@ public final class MainActivity extends Activity {
 
         micButton = assetButton(R.drawable.control_mic, "Start voice");
         micButton.setOnClickListener(view -> {
+            dismissComposerKeyboard();
             if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) startDeveloperDictation();
             else toggleVoice();
         });
-        row.addView(micButton, iconParams(dp(42), dp(6)));
+        row.addView(micButton, iconParams(dp(48), dp(2)));
 
         sendButton = iconButton(
             R.drawable.ic_send,
@@ -573,7 +512,7 @@ public final class MainActivity extends Activity {
         sendButton.setOnClickListener(
             view -> handleSendOrStop()
         );
-        row.addView(sendButton, iconParams(dp(42), 0));
+        row.addView(sendButton, iconParams(dp(48), 0));
 
         wrapper.addView(row, matchWrap());
         updateSendButton();
@@ -662,12 +601,7 @@ public final class MainActivity extends Activity {
             Insets ime = windowInsets.getInsets(WindowInsets.Type.ime());
             int bottomInset = Math.max(bars.bottom, ime.bottom);
 
-            topBar.setPadding(
-                dp(16) + bars.left,
-                dp(9) + bars.top,
-                dp(12) + bars.right,
-                dp(9)
-            );
+            appShell.applySystemInsets(bars);
             messageScroll.setPadding(
                 dp(14) + bars.left,
                 dp(8),
@@ -714,19 +648,16 @@ public final class MainActivity extends Activity {
         if (value.isEmpty()) return;
         if (DeveloperRoutingPolicy.routesToDeveloper(assistantMode)) {
             composer.setText("");
+            ChatInputFocus.retainAfterSend(composer);
             addMessageView(new ChatMessage(ChatMessage.USER, value, System.currentTimeMillis()), true);
             JSONArray attachments = pendingDeveloperAttachments;
             pendingDeveloperAttachments = new JSONArray();
             developerClient.sendInstruction(value, attachments);
-            composer.post(() -> composer.requestFocus());
             return;
         }
         if (!credentialsReady()) return;
         composer.setText("");
-        composer.post(() -> {
-            composer.requestFocus();
-            composer.setSelection(composer.length());
-        });
+        ChatInputFocus.retainAfterSend(composer);
         startForegroundService(
             new Intent(this, VoiceService.class)
                 .setAction(VoiceService.ACTION_SEND_TEXT)
@@ -798,6 +729,31 @@ public final class MainActivity extends Activity {
         } else {
             developerClient.close(); renderHistory(); statusText.setText("Ready");
         }
+    }
+
+    private void openTasks() {
+        dismissComposerKeyboard();
+        startActivity(new Intent(this, TasksActivity.class));
+        overridePendingTransition(0, 0);
+    }
+
+    private void dismissComposerKeyboard() {
+        composer.clearFocus();
+        InputMethodManager keyboard = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(composer.getWindowToken(), 0);
+    }
+
+    private void handleShellIntent(Intent intent) {
+        if (intent == null || root == null) return;
+        boolean showMode = intent.getBooleanExtra(EXTRA_SHOW_MODE_PICKER, false);
+        boolean confirmClear = intent.getBooleanExtra(EXTRA_CONFIRM_CLEAR_CHAT, false);
+        boolean newChat = intent.getBooleanExtra(EXTRA_NEW_CHAT, false);
+        intent.removeExtra(EXTRA_SHOW_MODE_PICKER);
+        intent.removeExtra(EXTRA_CONFIRM_CLEAR_CHAT);
+        intent.removeExtra(EXTRA_NEW_CHAT);
+        if (showMode) root.post(this::showModePicker);
+        if (confirmClear) root.post(this::confirmDeleteChat);
+        if (newChat) root.post(this::newChat);
     }
 
     private void renderDeveloperEvent(JSONObject event) {
@@ -1538,7 +1494,10 @@ public final class MainActivity extends Activity {
     }
 
     private void scrollToBottom() {
-        messageScroll.post(() -> messageScroll.fullScroll(View.FOCUS_DOWN));
+        messageScroll.post(() -> {
+            View child = messageScroll.getChildAt(0);
+            if (child != null) messageScroll.smoothScrollTo(0, child.getHeight());
+        });
     }
 
     private void updateMicButton() {
@@ -1603,6 +1562,8 @@ public final class MainActivity extends Activity {
         value.setMinimumWidth(0);
         value.setMinimumHeight(0);
         value.setBackground(rounded(background, 21, 0, Color.TRANSPARENT));
+        value.setElevation(0f);
+        value.setStateListAnimator(null);
         return value;
     }
 
@@ -1652,6 +1613,8 @@ public final class MainActivity extends Activity {
         button.setPadding(dp(2), dp(2), dp(2), dp(2));
         button.setBackgroundColor(Color.TRANSPARENT);
         button.setContentDescription(description);
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         return button;
     }
 
@@ -1670,13 +1633,7 @@ public final class MainActivity extends Activity {
         int strokeDp,
         int strokeColour
     ) {
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(fill);
-        background.setCornerRadius(dp(radiusDp));
-        if (strokeDp > 0) {
-            background.setStroke(dp(strokeDp), strokeColour);
-        }
-        return background;
+        return JarvisUi.rounded(this, fill, radiusDp, strokeDp, strokeColour);
     }
 
     private LinearLayout.LayoutParams iconParams(int size, int rightMargin) {
@@ -1715,7 +1672,7 @@ public final class MainActivity extends Activity {
     }
 
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return JarvisUi.dp(this, value);
     }
 
     private static String safe(String value) {
