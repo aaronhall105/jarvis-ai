@@ -234,8 +234,10 @@ public final class TaskCentreUiTest {
         java.util.List<String> text = flattenText(card);
         assertTrue(text.contains("Monitoring"));
         assertTrue(text.contains("Initial cleanup complete"));
-        assertTrue(text.contains("48,513 messages reviewed · 7,380 moved to deleted folders"));
+        assertTrue(text.contains("48,513 reviewed · 7,380 removed"));
         assertTrue(text.contains("10,863 reviewed during initial cleanup"));
+        assertTrue(text.contains("Smart Inbox"));
+        assertTrue(text.stream().noneMatch(item -> item.contains("Important-Only Inbox")));
         assertTrue(text.stream().noneMatch(item -> item.contains("remaining")));
         assertTrue(text.stream().noneMatch(item -> item.contains("Calculating estimate")));
         assertTrue(text.stream().noneMatch(item -> item.contains("% complete")));
@@ -259,7 +261,9 @@ public final class TaskCentreUiTest {
         assertTrue(detailText.contains("Initial cleanup: Complete"));
         assertTrue(detailText.contains("Last mailbox activity"));
         assertTrue(detailText.contains("Last synced"));
-        assertTrue(detailText.contains("Important-Only active"));
+        assertTrue(detailText.contains("Smart Inbox active"));
+        assertTrue(detailText.contains("Smart Inbox"));
+        assertTrue(detailText.stream().noneMatch(item -> item.contains("Important-Only Inbox")));
         assertTrue(detailText.stream().noneMatch(item -> item.contains("remaining")));
         assertTrue(detailText.stream().noneMatch(item -> item.contains("Estimated time")));
         controller.destroy();
@@ -307,7 +311,8 @@ public final class TaskCentreUiTest {
 
         TasksActivity activity = Robolectric.buildActivity(TasksActivity.class).create().get();
         View root = activity.findViewById(android.R.id.content);
-        assertNotNull(findText(root, "Important-Only Inbox"));
+        assertNotNull(findText(root, "Smart Inbox"));
+        assertTrue(flattenText(root).stream().noneMatch(text -> text.contains("Important-Only Inbox")));
         assertTrue(flattenText(root).stream().anyMatch(text -> text.contains("Reconnecting")));
         assertTrue(flattenText(root).stream().anyMatch(text -> text.contains("Last synced")));
         activity.onDestroy();

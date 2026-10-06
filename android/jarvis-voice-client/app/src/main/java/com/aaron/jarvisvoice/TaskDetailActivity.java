@@ -107,7 +107,7 @@ public final class TaskDetailActivity extends Activity {
 
     private void render(TaskItem task) {
         content.removeAllViews();
-        TextView title = text(task.title, 25, BLACK);
+        TextView title = text(TaskPresentation.title(task), 25, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         content.addView(title, matchWrap());
         TextView state = text(task.statusLabel(), 14, MID);
@@ -115,7 +115,10 @@ public final class TaskDetailActivity extends Activity {
         state.setPadding(0, dp(5), 0, 0);
         content.addView(state, matchWrap());
 
-        addFact("Current", task.activityText());
+        String purpose = TaskPresentation.subtitle(task);
+        String activity = TaskPresentation.activity(task);
+        if (!purpose.equals(activity)) addFact("Purpose", purpose);
+        addFact("Current", activity.isBlank() ? task.activityText() : activity);
         if (!task.backlogTitle().isBlank() || !task.backlogStatusLabel().isBlank()) {
             String backlogState = task.backlogTitle();
             if (!task.backlogStatusLabel().isBlank()) {
@@ -160,7 +163,7 @@ public final class TaskDetailActivity extends Activity {
         addFact("Started", displayTime(task.startedAt));
         addFact(task.activityTimeLabel, TasksActivity.relativeTime(task.updatedAt));
         addFact("Last synced", TasksActivity.relativeTimeMillis(client.lastSuccessfulSyncAt()));
-        addFact("Policy", TaskItem.optionalString(task.metadata, "policy_label", ""));
+        addFact("Policy", TaskPresentation.policyLabel(task));
         addFact("Completed", displayTime(task.completedAt));
         addFact(
             "Completion notification",

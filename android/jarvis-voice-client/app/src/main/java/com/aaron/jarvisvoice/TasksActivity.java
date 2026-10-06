@@ -3,6 +3,7 @@ package com.aaron.jarvisvoice;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
@@ -11,6 +12,10 @@ import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -26,17 +31,21 @@ import java.util.List;
 /** Top-level Tasks destination for durable Jarvis work. */
 public final class TasksActivity extends Activity {
     private static final String STATE_FILTER = "task_filter";
-    private static final int BLACK = Color.rgb(20, 20, 20);
-    private static final int MID = Color.rgb(103, 103, 103);
-    private static final int LINE = Color.rgb(226, 226, 226);
-    private static final int SOFT = Color.rgb(246, 246, 246);
+    private static final int BLACK = JarvisUi.BLACK;
+    private static final int MID = JarvisUi.MID;
+    private static final int LINE = JarvisUi.LINE;
+    private static final int SOFT = JarvisUi.SOFT;
     private static final String[] FILTERS = {
         "ACTIVE", "WAITING_FOR_YOU", "SCHEDULED", "COMPLETED"
     };
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refresher = this::refresh;
     private TaskCentreClient client;
+    private SecureStore store;
+    private LinearLayout root;
     private LinearLayout taskList;
+    private LinearLayout filterRow;
+    private JarvisAppShell.Header appShell;
     private TextView status;
     private Button retry;
     private String filter = "ACTIVE";
@@ -46,8 +55,12 @@ public final class TasksActivity extends Activity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         if (state != null) filter = state.getString(STATE_FILTER, "ACTIVE");
+        store = new SecureStore(this);
         client = new TaskCentreClient(this);
+        configureWindow();
         setContentView(build());
+        applySystemBarAppearance();
+        applySystemInsets();
         renderCachedSnapshot();
     }
 
@@ -74,20 +87,30 @@ public final class TasksActivity extends Activity {
     }
 
     private View build() {
-        LinearLayout root = new LinearLayout(this);
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.WHITE);
-        root.setPadding(dp(18), dp(18), dp(18), dp(12));
+        appShell = JarvisAppShell.create(
+            this,
+            JarvisAppShell.Destination.TASKS,
+            DeveloperRoutingPolicy.routesToDeveloper(store.assistantMode())
+                ? "Developer  ⌄"
+                : "Jarvis  ⌄",
+            "Context ready for " + store.userName(),
+            shellActions()
+        );
+        boolean developer = DeveloperRoutingPolicy.routesToDeveloper(store.assistantMode());
+        appShell.notifications.setVisibility(developer ? View.GONE : View.VISIBLE);
+        appShell.clearChat.setVisibility(developer ? View.GONE : View.VISIBLE);
+        root.addView(appShell.view, matchWrap());
 
-        TextView heading = text("J A R V I S", 18, BLACK);
-        heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        heading.setLetterSpacing(.12f);
-        root.addView(heading, matchWrap());
-        root.addView(primaryNavigation(), matchWrap(0, dp(12)));
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(JarvisUi.PAGE_MARGIN), 0, dp(JarvisUi.PAGE_MARGIN), dp(12));
 
-        TextView title = text("Tasks", 28, BLACK);
+        TextView title = text("Tasks", 26, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        root.addView(title, matchWrap(0, dp(14)));
+        body.addView(title, matchWrap(0, dp(4)));
         LinearLayout connectionRow = new LinearLayout(this);
         connectionRow.setOrientation(LinearLayout.HORIZONTAL);
         connectionRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -99,70 +122,118 @@ public final class TasksActivity extends Activity {
         retry.setVisibility(View.GONE);
         retry.setOnClickListener(view -> refresh());
         connectionRow.addView(retry, wrapWrap());
-        root.addView(connectionRow, matchWrap(0, dp(8)));
-        root.addView(filters(), matchWrap(0, dp(14)));
+        body.addView(connectionRow, matchWrap(0, dp(8)));
+        body.addView(filters(), matchWrap(0, dp(10)));
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         taskList = new LinearLayout(this);
         taskList.setOrientation(LinearLayout.VERTICAL);
-        taskList.setPadding(0, 0, 0, dp(30));
+        taskList.setPadding(0, 0, 0, dp(24));
         scroll.addView(taskList, new ScrollView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        root.addView(scroll, new LinearLayout.LayoutParams(
+        body.addView(scroll, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+        ));
+        root.addView(body, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ));
         return root;
     }
 
-    private View primaryNavigation() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setBackground(rounded(SOFT, 22, 0, Color.TRANSPARENT));
-        TextView chat = tab("Chat", false);
-        chat.setOnClickListener(view -> {
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
-            startActivity(intent);
-            finish();
-        });
-        row.addView(chat, new LinearLayout.LayoutParams(0, dp(42), 1f));
-        row.addView(tab("Tasks", true), new LinearLayout.LayoutParams(0, dp(42), 1f));
-        return row;
+    private JarvisAppShell.Actions shellActions() {
+        return new JarvisAppShell.Actions() {
+            @Override public void onMode() {
+                openChat(MainActivity.EXTRA_SHOW_MODE_PICKER);
+            }
+            @Override public void onNotifications() {
+                startActivity(new Intent(TasksActivity.this, ProactiveActivity.class));
+            }
+            @Override public void onNewChat() {
+                openChat(
+                    DeveloperRoutingPolicy.routesToDeveloper(store.assistantMode())
+                        ? null
+                        : MainActivity.EXTRA_NEW_CHAT
+                );
+            }
+            @Override public void onClearChat() {
+                openChat(MainActivity.EXTRA_CONFIRM_CLEAR_CHAT);
+            }
+            @Override public void onSettings() {
+                startActivity(new Intent(TasksActivity.this, SettingsActivity.class));
+            }
+            @Override public void onChat() { openChat(null); }
+            @Override public void onTasks() { }
+        };
+    }
+
+    private void openChat(String extra) {
+        Intent intent = new Intent(this, MainActivity.class)
+            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+        if (extra != null) intent.putExtra(extra, true);
+        startActivity(intent);
+        finish();
+        overridePendingTransition(0, 0);
     }
 
     private View filters() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
+        filterRow = new LinearLayout(this);
+        filterRow.setOrientation(LinearLayout.HORIZONTAL);
+        filterRow.setContentDescription("Task filters");
         for (String value : FILTERS) {
-            Button button = new Button(this);
-            button.setAllCaps(false);
+            TextView button = text(filterLabel(value), 12, BLACK);
+            button.setGravity(Gravity.CENTER);
             button.setText(filterLabel(value));
-            button.setTextSize(12);
-            button.setTextColor(BLACK);
-            button.setBackground(rounded(value.equals(filter) ? LINE : SOFT, 18, 0, Color.TRANSPARENT));
-            button.setMinWidth(0);
-            button.setMinimumWidth(0);
-            button.setPadding(dp(3), 0, dp(3), 0);
+            button.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            button.setBackground(rounded(
+                value.equals(filter) ? BLACK : SOFT,
+                JarvisUi.RADIUS_PILL,
+                value.equals(filter) ? 0 : 1,
+                LINE
+            ));
+            button.setTextColor(value.equals(filter) ? Color.WHITE : BLACK);
             button.setSelected(value.equals(filter));
+            button.setTag(value);
+            button.setElevation(0f);
+            button.setStateListAnimator(null);
             button.setContentDescription(
                 "Show " + filterAccessibilityLabel(value) + " tasks"
                     + (value.equals(filter) ? ", selected" : "")
             );
             button.setOnClickListener(view -> {
                 filter = value;
-                setContentView(build());
+                refreshFilterStyles();
                 refresh();
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                0, dp(38), 1f
+                0, dp(JarvisUi.FILTER_HEIGHT), 1f
             );
-            if (!value.equals(FILTERS[FILTERS.length - 1])) params.setMarginEnd(dp(5));
-            row.addView(button, params);
+            if (!value.equals(FILTERS[FILTERS.length - 1])) params.setMarginEnd(dp(4));
+            filterRow.addView(button, params);
         }
-        return row;
+        return filterRow;
+    }
+
+    private void refreshFilterStyles() {
+        for (int index = 0; index < filterRow.getChildCount(); index++) {
+            TextView button = (TextView) filterRow.getChildAt(index);
+            String value = String.valueOf(button.getTag());
+            boolean selected = value.equals(filter);
+            button.setSelected(selected);
+            button.setTextColor(selected ? Color.WHITE : BLACK);
+            button.setBackground(rounded(
+                selected ? BLACK : SOFT,
+                JarvisUi.RADIUS_PILL,
+                selected ? 0 : 1,
+                LINE
+            ));
+            button.setContentDescription(
+                "Show " + filterAccessibilityLabel(value) + " tasks"
+                    + (selected ? ", selected" : "")
+            );
+        }
     }
 
     private void refresh() {
@@ -233,11 +304,14 @@ public final class TasksActivity extends Activity {
     private View card(TaskItem item, boolean stale, long syncAtMillis) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(16), dp(15), dp(16), dp(14));
-        card.setBackground(rounded(Color.WHITE, 18, 1, LINE));
+        card.setPadding(dp(16), dp(14), dp(16), dp(12));
+        card.setBackground(rounded(Color.WHITE, JarvisUi.RADIUS_MEDIUM, 1, LINE));
+        card.setElevation(0f);
+        card.setStateListAnimator(null);
         card.setClickable(true);
         card.setFocusable(true);
-        card.setContentDescription(item.title + ", " + item.statusLabel());
+        String displayTitle = TaskPresentation.title(item);
+        card.setContentDescription(displayTitle + ", " + item.statusLabel());
         card.setOnClickListener(view -> {
             Intent intent = new Intent(this, TaskDetailActivity.class);
             intent.putExtra(TaskDetailActivity.EXTRA_TASK_ID, item.taskId);
@@ -247,19 +321,32 @@ public final class TasksActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = text(item.title, 17, BLACK);
+        TextView title = text(displayTitle, 17, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         TextView state = text(item.statusLabel(), 12, statusColor(item.status));
         state.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        state.setGravity(Gravity.CENTER);
+        state.setPadding(dp(10), dp(5), dp(10), dp(5));
+        state.setBackground(statusBackground(item.status));
         header.addView(state, wrapWrap());
         card.addView(header, matchWrap());
 
-        TextView activity = text(item.activityText(), 15, MID);
-        activity.setPadding(0, dp(8), 0, 0);
-        card.addView(activity, matchWrap());
+        String subtitle = TaskPresentation.subtitle(item);
+        if (!subtitle.isBlank()) {
+            TextView subtitleView = text(subtitle, 14, MID);
+            subtitleView.setPadding(0, dp(6), 0, 0);
+            card.addView(subtitleView, matchWrap());
+        }
+        String activityText = TaskPresentation.activity(item);
+        if (!activityText.isBlank() && !activityText.equals(subtitle)) {
+            TextView activity = text(activityText, 13, BLACK);
+            activity.setPadding(0, dp(8), 0, 0);
+            card.addView(activity, matchWrap());
+        }
 
-        if (!item.backlogTitle().isBlank() || !item.backlogSummary().isBlank()) {
+        String backlogSummary = TaskPresentation.backlogSummary(item);
+        if (!item.backlogTitle().isBlank() || !backlogSummary.isBlank()) {
             String backlogTitle = item.backlogTitle();
             String stateLabel = item.backlogStatusLabel();
             String headingText = backlogTitle.isBlank()
@@ -270,11 +357,11 @@ public final class TasksActivity extends Activity {
             if (!headingText.isBlank()) {
                 TextView historyTitle = text(headingText, 13, BLACK);
                 historyTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-                historyTitle.setPadding(0, dp(12), 0, 0);
+                historyTitle.setPadding(0, dp(10), 0, 0);
                 card.addView(historyTitle, matchWrap());
             }
-            if (!item.backlogSummary().isBlank()) {
-                card.addView(text(item.backlogSummary(), 13, MID), matchWrap(0, dp(3)));
+            if (!backlogSummary.isBlank()) {
+                card.addView(text(backlogSummary, 13, MID), matchWrap(0, dp(3)));
             }
         }
 
@@ -317,7 +404,7 @@ public final class TasksActivity extends Activity {
             card.addView(estimateLabel, matchWrap());
             card.addView(text(item.etaText(), 14, BLACK), matchWrap(0, dp(2)));
         }
-        if (!item.primaryMetricText().isBlank() && item.backlogSummary().isBlank()) {
+        if (!item.primaryMetricText().isBlank() && backlogSummary.isBlank()) {
             TextView metric = text(item.primaryMetricText(), 14, BLACK);
             metric.setPadding(0, dp(12), 0, 0);
             card.addView(metric, matchWrap());
@@ -330,26 +417,36 @@ public final class TasksActivity extends Activity {
             reason.setPadding(0, dp(8), 0, 0);
             card.addView(reason, matchWrap());
         }
-        String time = relativeTimeMillis(syncAtMillis);
-        if (!time.isBlank()) {
-            TextView updated = text((stale ? "Last synced " : "Synced ") + time, 12, MID);
-            updated.setPadding(0, dp(8), 0, 0);
-            card.addView(updated, matchWrap());
-        }
+        LinearLayout detailRow = new LinearLayout(this);
+        detailRow.setOrientation(LinearLayout.HORIZONTAL);
+        detailRow.setGravity(Gravity.CENTER_VERTICAL);
+        detailRow.setPadding(0, dp(11), 0, 0);
         TextView details = text("View details", 13, BLACK);
         details.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        details.setPadding(0, dp(10), 0, 0);
-        card.addView(details, matchWrap());
+        details.setContentDescription("View " + displayTitle + " details");
+        detailRow.addView(details, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+        ));
+        TextView chevron = text("›", 20, MID);
+        chevron.setContentDescription("Open");
+        detailRow.addView(chevron, wrapWrap());
+        card.addView(detailRow, matchWrap());
         return card;
     }
 
     private void addSubtask(LinearLayout card, JSONObject subtask) {
         LinearLayout section = new LinearLayout(this);
         section.setOrientation(LinearLayout.VERTICAL);
-        section.setPadding(dp(12), dp(10), dp(12), dp(10));
-        section.setBackground(rounded(SOFT, 12, 0, Color.TRANSPARENT));
+        section.setPadding(0, dp(10), 0, 0);
+        View divider = new View(this);
+        divider.setBackgroundColor(LINE);
+        section.addView(divider, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)
+        ));
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setPadding(0, dp(10), 0, 0);
         String title = TaskItem.optionalString(subtask, "title", "Provider");
         TextView name = text(title, 14, BLACK);
         name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -357,23 +454,26 @@ public final class TasksActivity extends Activity {
         heading.addView(text(providerStatus(subtask.optString("status", "")), 12, MID), wrapWrap());
         section.addView(heading, matchWrap());
         JSONObject progress = subtask.optJSONObject("progress");
+        boolean renderedSummary = false;
         if (progress != null && !progress.isNull("current")) {
             long current = Math.max(0L, progress.optLong("current", 0L));
             TextView reviewed = text(String.format("%,d reviewed", current), 13, BLACK);
-            reviewed.setPadding(0, dp(5), 0, 0);
+            reviewed.setPadding(0, dp(4), 0, 0);
             section.addView(reviewed, matchWrap());
+            renderedSummary = true;
         }
         JSONObject backlog = subtask.optJSONObject("backlog");
         if (backlog != null) {
-            String backlogSummary = TaskItem.optionalString(backlog, "summary", "");
-            if (!backlogSummary.isBlank()) {
-                TextView history = text(backlogSummary, 13, BLACK);
-                history.setPadding(0, dp(5), 0, 0);
+            String providerSummary = compactProviderSummary(subtask, backlog);
+            if (!providerSummary.isBlank()) {
+                TextView history = text(providerSummary, 13, renderedSummary ? MID : BLACK);
+                history.setPadding(0, dp(4), 0, 0);
                 section.addView(history, matchWrap());
+                renderedSummary = true;
             }
         }
         org.json.JSONArray metrics = subtask.optJSONArray("metrics");
-        if (metrics != null) {
+        if (metrics != null && backlog == null) {
             for (int index = 0; index < metrics.length(); index++) {
                 JSONObject metric = metrics.optJSONObject(index);
                 if (metric == null || !metric.optBoolean("primary", false)) continue;
@@ -388,7 +488,32 @@ public final class TasksActivity extends Activity {
                 ), matchWrap(0, 0));
             }
         }
-        card.addView(section, matchWrap(dp(10), 0));
+        card.addView(section, matchWrap(dp(4), 0));
+    }
+
+    private static String compactProviderSummary(JSONObject subtask, JSONObject backlog) {
+        long reviewed = backlog.optLong("reviewed_count", -1L);
+        long moved = backlog.optLong("moved_count", -1L);
+        String destination = "";
+        org.json.JSONArray metrics = subtask.optJSONArray("metrics");
+        if (metrics != null) {
+            for (int index = 0; index < metrics.length(); index++) {
+                JSONObject metric = metrics.optJSONObject(index);
+                if (metric == null || !metric.optBoolean("primary", false)) continue;
+                if (moved < 0L) moved = metric.optLong("value", -1L);
+                destination = TaskItem.optionalString(metric, "destination", "");
+                break;
+            }
+        }
+        if (reviewed >= 0L) {
+            String summary = String.format("%,d reviewed", reviewed);
+            if (moved >= 0L) {
+                summary += String.format(" · %,d moved", moved);
+                if (!destination.isBlank()) summary += " to " + destination;
+            }
+            return summary;
+        }
+        return TaskItem.optionalString(backlog, "summary", "");
     }
 
     private static String providerStatus(String raw) {
@@ -472,36 +597,31 @@ public final class TasksActivity extends Activity {
         return button;
     }
 
-    private TextView tab(String label, boolean selected) {
-        TextView tab = text(label, 14, selected ? Color.WHITE : BLACK);
-        tab.setGravity(Gravity.CENTER);
-        tab.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        tab.setBackground(rounded(selected ? BLACK : Color.TRANSPARENT, 20, 0, Color.TRANSPARENT));
-        tab.setContentDescription(label + (selected ? ", selected" : ""));
-        return tab;
-    }
-
     private int statusColor(String value) {
         if ("FAILED".equals(value) || "PARTIAL".equals(value)) return Color.rgb(160, 40, 32);
         if ("WAITING_FOR_YOU".equals(value)) return Color.rgb(126, 79, 0);
         return MID;
     }
 
+    private GradientDrawable statusBackground(String value) {
+        int fill = SOFT;
+        int border = LINE;
+        if ("FAILED".equals(value) || "PARTIAL".equals(value)) {
+            fill = Color.rgb(255, 246, 246);
+            border = Color.rgb(244, 210, 210);
+        } else if ("WAITING_FOR_YOU".equals(value)) {
+            fill = Color.rgb(255, 250, 239);
+            border = Color.rgb(238, 222, 185);
+        }
+        return rounded(fill, JarvisUi.RADIUS_PILL, 1, border);
+    }
+
     private TextView text(String value, float size, int color) {
-        TextView view = new TextView(this);
-        view.setText(value);
-        view.setTextSize(size);
-        view.setTextColor(color);
-        view.setLineSpacing(0, 1.08f);
-        return view;
+        return JarvisUi.text(this, value, size, color);
     }
 
     private GradientDrawable rounded(int color, int radius, int stroke, int strokeColor) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(color);
-        drawable.setCornerRadius(dp(radius));
-        if (stroke > 0) drawable.setStroke(dp(stroke), strokeColor);
-        return drawable;
+        return JarvisUi.rounded(this, color, radius, stroke, strokeColor);
     }
 
     private LinearLayout.LayoutParams matchWrap() { return matchWrap(0, 0); }
@@ -518,6 +638,35 @@ public final class TasksActivity extends Activity {
         );
     }
     private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+        return JarvisUi.dp(this, value);
+    }
+
+    private void configureWindow() {
+        Window window = getWindow();
+        window.setStatusBarColor(Color.TRANSPARENT);
+        window.setNavigationBarColor(Color.TRANSPARENT);
+        window.setNavigationBarDividerColor(Color.TRANSPARENT);
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+    }
+
+    private void applySystemBarAppearance() {
+        View decorView = getWindow().getDecorView();
+        decorView.post(() -> {
+            WindowInsetsController controller = decorView.getWindowInsetsController();
+            if (controller == null) return;
+            int appearance = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+            controller.setSystemBarsAppearance(appearance, appearance);
+        });
+    }
+
+    private void applySystemInsets() {
+        root.setOnApplyWindowInsetsListener((view, windowInsets) -> {
+            Insets bars = windowInsets.getInsets(WindowInsets.Type.systemBars());
+            appShell.applySystemInsets(bars);
+            root.setPadding(0, 0, 0, bars.bottom);
+            return windowInsets;
+        });
+        root.requestApplyInsets();
     }
 }
