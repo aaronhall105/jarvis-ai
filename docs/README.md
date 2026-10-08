@@ -26,6 +26,7 @@ release instructions apply only to `jarvis/unified-production`.
 - [Developer mode](developer-mode.md)
 - [Self-improvement](SELF_IMPROVEMENT.md)
 - [Proactive orchestrator](PROACTIVE_ORCHESTRATOR.md)
+- [Proactive home intelligence](PROACTIVE_HOME_INTELLIGENCE.md)
 - [Temporal action engine](TEMPORAL_ACTION_ENGINE.md)
 - [Whole-home intelligence](WHOLE_HOME_INTELLIGENCE.md)
 - [Subject-aware memory](SUBJECT_AWARE_MEMORY.md)

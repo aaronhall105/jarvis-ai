@@ -3,8 +3,8 @@
   "authoritative_branch": "jarvis/unified-production",
   "audited_at_utc": "2026-10-08",
   "current_release": {
-    "version_name": "19.0.0-alpha35",
-    "version_code": 190370,
+    "version_name": "19.0.0-alpha36",
+    "version_code": 190380,
     "core_application_version": "3.7.0",
     "realtime_protocol": 2,
     "phone_package": "com.aaron.jarvisvoice",

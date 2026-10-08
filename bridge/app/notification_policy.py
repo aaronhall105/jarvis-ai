@@ -156,11 +156,25 @@ def contextual_level(
             "Routine arrival and departure changes remain in activity history.",
         )
 
-    if kind in {"critical_unavailable", "camera_offline"}:
+    if kind == "device_unavailable" and str(event.get("category") or "") == "cameras":
+        return (
+            "important",
+            "persistent_camera_unavailable",
+            "A grounded camera device remained unavailable beyond its persistence threshold.",
+        )
+
+    if kind in {"critical_unavailable", "camera_offline", "device_unavailable"}:
         return (
             "useful",
             "integration_or_device_unavailable",
             "A device or integration became unavailable.",
+        )
+
+    if kind == "device_recovered":
+        return (
+            "useful",
+            "reported_device_recovered",
+            "A previously reported unavailable device is available again.",
         )
 
     if kind in {"high_power", "energy_high"}:

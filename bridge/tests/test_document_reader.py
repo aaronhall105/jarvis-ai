@@ -20,6 +20,7 @@ from app.document_reader import (
     document_currency_evidence,
     exact_evidence_answer,
     extract_document,
+    rank_document_message_candidates,
     validate_model_evidence,
 )
 
@@ -85,6 +86,45 @@ class _FakeRegistry:
             provider_id="fake",
             status=ExecutionStatus.SUCCEEDED,
             data={"document": self.document},
+        )
+
+
+class _ThreadRegistry:
+    def __init__(self, messages: list[dict], documents: dict[str, dict]) -> None:
+        self.messages = messages
+        self.documents = documents
+        self.read_calls: list[tuple[str, str]] = []
+
+    async def execute(self, capability_id, payload, **kwargs):
+        del kwargs
+        if capability_id == "outlook.thread":
+            return CapabilityExecution(
+                request_id="thread",
+                capability_id=capability_id,
+                provider_id="fake",
+                status=ExecutionStatus.SUCCEEDED,
+                data={"messages": self.messages},
+            )
+        if capability_id == "outlook.attachments":
+            message = next(
+                (item for item in self.messages if item["message_id"] == payload["message_id"]),
+                {},
+            )
+            return CapabilityExecution(
+                request_id="metadata",
+                capability_id=capability_id,
+                provider_id="fake",
+                status=ExecutionStatus.SUCCEEDED,
+                data={"attachments": message.get("attachments") or []},
+            )
+        attachment_id = str(payload["attachment_id"])
+        self.read_calls.append((str(payload["message_id"]), attachment_id))
+        return CapabilityExecution(
+            request_id="read",
+            capability_id=capability_id,
+            provider_id="fake",
+            status=ExecutionStatus.SUCCEEDED,
+            data={"document": self.documents[attachment_id]},
         )
 
 
@@ -346,6 +386,236 @@ async def test_document_connector_rejects_oversized_attachment_before_content_re
     assert result.status.value == "failed"
     assert result.error.startswith("document_too_large:")
     assert registry.read_calls == 0
+
+
+def _thread_attachment(attachment_id: str, filename: str = "pay.txt") -> dict:
+    return {
+        "attachment_id": attachment_id,
+        "filename": filename,
+        "mime_type": "text/plain",
+        "size": 256,
+        "is_inline": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_thread_selection_prefers_evidence_attachment_over_newer_empty_reply(
+    tmp_path,
+) -> None:
+    messages = [
+        {
+            "message_id": "older-evidence",
+            "conversation_id": "pay-thread",
+            "subject": "October payroll document",
+            "received_at": "2026-10-01T09:00:00Z",
+            "has_attachments": True,
+            "attachments": [_thread_attachment("pay-document")],
+        },
+        {
+            "message_id": "newer-reply",
+            "conversation_id": "pay-thread",
+            "subject": "Re: October payroll document",
+            "received_at": "2026-10-02T09:00:00Z",
+            "body": "Thanks, received.",
+            "has_attachments": False,
+        },
+    ]
+    registry = _ThreadRegistry(messages, {"pay-document": _document()})
+    connector = DocumentConnector(
+        registry=registry,
+        cache=DocumentExtractionCache(tmp_path / "documents.db"),
+    )
+
+    result = await connector.execute(
+        connector.capabilities[1],
+        CapabilityRequest(
+            capability_id="document.read",
+            principal_id="aaron",
+            payload={
+                "provider": "microsoft_outlook",
+                "message_id": "newer-reply",
+                "thread_id": "pay-thread",
+                "question": "What was my net pay?",
+            },
+        ),
+    )
+
+    assert result.status.value == "succeeded"
+    assert result.data["message_id"] == "older-evidence"
+    assert result.data["source_type"] == "attachment"
+    assert registry.read_calls == [("older-evidence", "pay-document")]
+
+
+@pytest.mark.asyncio
+async def test_thread_selection_keeps_newest_body_when_it_contains_grounded_answer(
+    tmp_path,
+) -> None:
+    messages = [
+        {
+            "message_id": "older-evidence",
+            "conversation_id": "pay-thread",
+            "subject": "Payroll document",
+            "received_at": "2026-09-01T09:00:00Z",
+            "has_attachments": True,
+            "attachments": [_thread_attachment("old-document")],
+        },
+        {
+            "message_id": "newer-answer",
+            "conversation_id": "pay-thread",
+            "subject": "Re: Payroll document",
+            "received_at": "2026-10-02T09:00:00Z",
+            "body": "Net Pay: GBP 2600.00",
+            "has_attachments": False,
+        },
+    ]
+    registry = _ThreadRegistry(messages, {"old-document": _document()})
+    connector = DocumentConnector(
+        registry=registry,
+        cache=DocumentExtractionCache(tmp_path / "documents.db"),
+    )
+
+    result = await connector.execute(
+        connector.capabilities[1],
+        CapabilityRequest(
+            capability_id="document.read",
+            principal_id="aaron",
+            payload={
+                "provider": "microsoft_outlook",
+                "message_id": "newer-answer",
+                "thread_id": "pay-thread",
+                "question": "What was my net pay?",
+            },
+        ),
+    )
+
+    assert result.status.value == "succeeded"
+    assert result.data["message_id"] == "newer-answer"
+    assert result.data["source_type"] == "message_body"
+
+
+@pytest.mark.asyncio
+async def test_thread_selection_uses_current_period_when_documents_are_equally_relevant(
+    tmp_path,
+) -> None:
+    messages = [
+        {
+            "message_id": "september",
+            "conversation_id": "pay-thread",
+            "subject": "Payroll document",
+            "received_at": "2026-09-01T09:00:00Z",
+            "has_attachments": True,
+            "attachments": [_thread_attachment("september-document")],
+        },
+        {
+            "message_id": "october",
+            "conversation_id": "pay-thread",
+            "subject": "Payroll document",
+            "received_at": "2026-10-01T09:00:00Z",
+            "has_attachments": True,
+            "attachments": [_thread_attachment("october-document")],
+        },
+    ]
+    registry = _ThreadRegistry(
+        messages,
+        {
+            "september-document": _document(),
+            "october-document": {
+                **_document(),
+                "text_content": "Net Pay: GBP 2544.76",
+                "text_chunks": [{"chunk_index": 1, "text": "Net Pay: GBP 2544.76"}],
+            },
+        },
+    )
+    connector = DocumentConnector(
+        registry=registry,
+        cache=DocumentExtractionCache(tmp_path / "documents.db"),
+    )
+
+    result = await connector.execute(
+        connector.capabilities[1],
+        CapabilityRequest(
+            capability_id="document.read",
+            principal_id="aaron",
+            payload={
+                "provider": "microsoft_outlook",
+                "message_id": "october",
+                "thread_id": "pay-thread",
+                "question": "What was my net pay?",
+            },
+        ),
+    )
+
+    assert result.status.value == "succeeded"
+    assert result.data["message_id"] == "october"
+
+
+@pytest.mark.asyncio
+async def test_thread_selection_rejects_unrelated_attachment_even_if_provider_returns_it(
+    tmp_path,
+) -> None:
+    messages = [
+        {
+            "message_id": "current",
+            "conversation_id": "current-thread",
+            "subject": "Payroll question",
+            "received_at": "2026-10-02T09:00:00Z",
+            "body": "Thanks.",
+            "has_attachments": False,
+        },
+        {
+            "message_id": "unrelated",
+            "conversation_id": "different-thread",
+            "subject": "Old payroll document",
+            "received_at": "2025-10-02T09:00:00Z",
+            "has_attachments": True,
+            "attachments": [_thread_attachment("unrelated-document")],
+        },
+    ]
+    registry = _ThreadRegistry(messages, {"unrelated-document": _document()})
+    connector = DocumentConnector(
+        registry=registry,
+        cache=DocumentExtractionCache(tmp_path / "documents.db"),
+    )
+
+    result = await connector.execute(
+        connector.capabilities[1],
+        CapabilityRequest(
+            capability_id="document.read",
+            principal_id="aaron",
+            payload={
+                "provider": "microsoft_outlook",
+                "message_id": "current",
+                "thread_id": "current-thread",
+                "question": "What was my net pay?",
+            },
+        ),
+    )
+
+    assert result.status.value == "failed"
+    assert registry.read_calls == []
+
+
+def test_document_candidate_ranking_is_evidence_aware_not_newest_only() -> None:
+    ranked = rank_document_message_candidates(
+        "What was my net pay?",
+        [
+            {
+                "message_id": "evidence",
+                "subject": "Payroll document",
+                "has_attachments": True,
+                "received_at": "2026-10-01T09:00:00Z",
+            },
+            {
+                "message_id": "reply",
+                "subject": "Re: Payroll document",
+                "body": "Thanks.",
+                "received_at": "2026-10-02T09:00:00Z",
+            },
+        ],
+        preferred_message_id="reply",
+    )
+
+    assert ranked[0]["message_id"] == "evidence"
 
 
 def test_document_prompt_injection_is_data_and_model_output_needs_exact_evidence() -> None:

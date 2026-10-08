@@ -106,6 +106,7 @@ class HouseAwarenessEngine:
         proactive_min_importance: int = 80,
         proactive_target: str = "living_room",
         proactive_cooldown_seconds: int = 300,
+        direct_proactive_delivery: bool = True,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -118,6 +119,7 @@ class HouseAwarenessEngine:
         self.proactive_min_importance = max(1, min(int(proactive_min_importance), 100))
         self.proactive_target = str(proactive_target or "living_room").strip() or "living_room"
         self.proactive_cooldown_seconds = max(30, min(int(proactive_cooldown_seconds), 3600))
+        self.direct_proactive_delivery = bool(direct_proactive_delivery)
 
         self._last_proactive_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
@@ -283,6 +285,38 @@ class HouseAwarenessEngine:
         """
         return [item for item in self._state_cache.values() if isinstance(item, dict)]
 
+    def grounded_state_snapshot(self) -> list[dict[str, Any]]:
+        """Return live state enriched with authoritative registry/device identity."""
+
+        result: list[dict[str, Any]] = []
+        for entity_id, state in self._state_cache.items():
+            if not isinstance(state, dict):
+                continue
+            meta = self._effective_metadata(entity_id, state)
+            attributes = state.get("attributes")
+            attributes = dict(attributes) if isinstance(attributes, dict) else {}
+            state_value = str(state.get("state") or "unknown")
+            unit = str(attributes.get("unit_of_measurement") or "") or None
+            result.append(
+                {
+                    **state,
+                    "entity_id": entity_id,
+                    "domain": entity_id.partition(".")[0],
+                    "name": meta.get("friendly_name") or entity_id,
+                    "area_id": meta.get("area_id"),
+                    "area_name": meta.get("area_name"),
+                    "device_id": meta.get("device_id"),
+                    "device_name": meta.get("device_name"),
+                    "device_class": meta.get("device_class"),
+                    "entity_category": meta.get("entity_category"),
+                    "platform": meta.get("platform"),
+                    "available": state_value not in {"unavailable", "unknown", ""},
+                    "unit": unit,
+                    "display_value": f"{state_value} {unit}" if unit else state_value,
+                }
+            )
+        return result
+
     async def _seed_state_cache(self) -> None:
         states = await self.client.get_states()
         self._state_cache = {
@@ -370,7 +404,11 @@ class HouseAwarenessEngine:
         event_id: int,
         event: AwarenessEvent,
     ) -> None:
-        if not self.proactive_enabled or not event.proactive_candidate:
+        if (
+            not self.proactive_enabled
+            or not self.direct_proactive_delivery
+            or not event.proactive_candidate
+        ):
             return
         if event.event_type not in {
             "safety_alert",
@@ -442,6 +480,7 @@ class HouseAwarenessEngine:
         return {
             "area_id": area_id,
             "area_name": area_name,
+            "device_id": str(entity_registry.get("device_id") or "") or None,
             "friendly_name": self._display_name(friendly_name),
             "device_name": self._display_name(device_name) if device_name else None,
             "device_class": str(attributes.get("device_class") or "") or None,
@@ -946,6 +985,7 @@ class HouseAwarenessEngine:
             "last_error": self._last_error,
             "event_count": total,
             "proactive_enabled": self.proactive_enabled,
+            "direct_proactive_delivery": self.direct_proactive_delivery,
             "proactive_target": self.proactive_target,
             "proactive_cooldown_seconds": self.proactive_cooldown_seconds,
             "pending_proactive_candidates": candidates,

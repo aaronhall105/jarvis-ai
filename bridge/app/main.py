@@ -152,6 +152,9 @@ awareness = HouseAwarenessEngine(
     proactive_min_importance=settings.jarvis_proactive_min_importance,
     proactive_target=settings.jarvis_proactive_target,
     proactive_cooldown_seconds=settings.jarvis_proactive_cooldown_seconds,
+    # v19 ProactiveEngine is the sole notification authority. House Awareness
+    # remains the grounded event/state substrate and never delivers in parallel.
+    direct_proactive_delivery=False,
 )
 admin = AdminEngine(
     client=home_assistant,
@@ -1549,7 +1552,16 @@ async def _read_grounded_document(
             "response": "Which grounded email attachment should I read?",
             "intent": "document_read_missing_source",
         }
-    payload: dict[str, object] = {"provider": provider, "message_id": message_id}
+    payload: dict[str, object] = {
+        "provider": provider,
+        "message_id": message_id,
+        "question": question,
+    }
+    thread_id = str(
+        source.metadata.get("thread_id") or source.metadata.get("conversation_id") or ""
+    ).strip()
+    if thread_id and not selected_attachment:
+        payload["thread_id"] = thread_id
     if selected_attachment:
         payload["attachment_id"] = selected_attachment
     execution = await external_agent.execute(
@@ -1671,18 +1683,53 @@ async def _read_grounded_document(
             "response": "The attachment reader returned malformed evidence.",
             "intent": "document_read_malformed",
         }
+    selected_message_id = str(result.get("message_id") or message_id)
+    selected_message_raw = result.get("selected_message")
+    selected_message = (
+        dict(selected_message_raw) if isinstance(selected_message_raw, Mapping) else {}
+    )
+    message_reference = source.reference_id
+    context_objects: list[Any] = []
+    if selected_message_id != message_id:
+        selected_message_object = make_context_object(
+            object_type="email_message",
+            display_name=str(selected_message.get("subject") or source.display_name),
+            source="provider_thread_document_selection",
+            canonical_id=selected_message_id,
+            provider=provider,
+            capability="email.read",
+            metadata={
+                "thread_id": selected_message.get("thread_id")
+                or selected_message.get("conversation_id")
+                or thread_id,
+                "sender": selected_message.get("from"),
+                "sender_name": selected_message.get("sender_name"),
+                "received_at": selected_message.get("received_at"),
+                "evidence_selection": "thread_document_candidate",
+            },
+            immutable=True,
+        )
+        context_objects.append(selected_message_object)
+        message_reference = selected_message_object.reference_id
     attachment_identity = str(raw_attachment.get("attachment_id") or selected_attachment or "")
+    source_type = str(
+        result.get("source_type") or raw_attachment.get("source_type") or "attachment"
+    )
     attachment_object = make_context_object(
         object_type="attachment",
         display_name=str(
             raw_attachment.get("filename") or raw_document.get("filename") or "Attachment"
         ),
-        source="provider_attachment_read",
+        source=(
+            "provider_message_body_evidence"
+            if source_type == "message_body"
+            else "provider_attachment_read"
+        ),
         canonical_id=attachment_identity or None,
         provider=provider,
         capability="document.read",
-        metadata={**dict(raw_attachment), "message_id": message_id},
-        relations={"email_message": source.reference_id},
+        metadata={**dict(raw_attachment), "message_id": selected_message_id},
+        relations={"email_message": message_reference},
         immutable=True,
     )
     selection = await _answer_from_document(question=question, document=raw_document)
@@ -1703,7 +1750,7 @@ async def _read_grounded_document(
         provider=provider,
         capability="document.read",
         metadata={
-            "message_id": message_id,
+            "message_id": selected_message_id,
             "attachment_id": attachment_identity,
             "filename": raw_document.get("filename"),
             "mime_type": raw_document.get("mime_type"),
@@ -1714,7 +1761,7 @@ async def _read_grounded_document(
             **fact_metadata,
         },
         relations={
-            "email_message": source.reference_id,
+            "email_message": message_reference,
             "attachment": attachment_object.reference_id,
         },
         immutable=True,
@@ -1744,7 +1791,7 @@ async def _read_grounded_document(
     await working_context.project(
         principal_id=actor.user_key,
         conversation_id=conversation_id,
-        objects=[attachment_object, document_object],
+        objects=[*context_objects, attachment_object, document_object],
         intent="document_read",
         result_set={
             "result_set_id": "document:" + str(uuid.uuid4()),
@@ -5485,7 +5532,7 @@ async def lifespan(_: FastAPI):
         try:
             await awareness.start()
 
-            proactive_engine.set_state_provider(awareness.state_snapshot)
+            proactive_engine.set_state_provider(awareness.grounded_state_snapshot)
             vision_engine.set_state_provider(awareness.state_snapshot)
 
             logger.info(

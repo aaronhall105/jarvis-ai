@@ -4,7 +4,13 @@ import pytest
 
 from app.ai_engine import AIEngine
 from app.dialogue_manager import DialogueManager
-from app.home_intelligence import HomeIntelligenceEngine, HomeQueryPlan
+from app.home_intelligence import (
+    DeviceAvailability,
+    GroundedHomeEntity,
+    HomeIntelligenceEngine,
+    HomeQueryPlan,
+    roll_up_physical_devices,
+)
 from app.response_presentation import render_home_query_evidence
 from app.working_context import (
     ReferenceStatus,
@@ -274,6 +280,140 @@ async def test_complete_unavailable_device_query_uses_explicit_unavailable_state
         )
         == "1 device is unavailable: Hallway Camera."
     )
+
+
+def test_physical_device_rollup_collapses_child_entities_without_losing_evidence() -> None:
+    observed_at = "2026-10-08T12:00:00+00:00"
+    entities = tuple(
+        GroundedHomeEntity.from_state(item, observed_at)
+        for item in (
+            {
+                "entity_id": "camera.hallway",
+                "domain": "camera",
+                "name": "Hallway Camera Stream",
+                "device_id": "camera-device-1",
+                "device_name": "Hallway Camera",
+                "state": "unavailable",
+            },
+            *(
+                {
+                    "entity_id": f"sensor.hallway_camera_diagnostic_{index}",
+                    "domain": "sensor",
+                    "name": f"Hallway Camera Diagnostic {index}",
+                    "device_id": "camera-device-1",
+                    "device_name": "Hallway Camera",
+                    "entity_category": "diagnostic",
+                    "state": "unavailable",
+                }
+                for index in range(1, 8)
+            ),
+        )
+    )
+
+    devices = roll_up_physical_devices(entities, observed_at=observed_at)
+
+    assert len(devices) == 1
+    assert devices[0].availability is DeviceAvailability.UNAVAILABLE
+    assert devices[0].name == "Hallway Camera"
+    assert devices[0].unavailable_entity_count == 8
+    assert len(devices[0].member_entities) == 8
+
+
+def test_available_primary_device_with_failed_diagnostic_is_partial_not_offline() -> None:
+    observed_at = "2026-10-08T12:00:00+00:00"
+    entities = tuple(
+        GroundedHomeEntity.from_state(item, observed_at)
+        for item in (
+            {
+                "entity_id": "camera.hallway",
+                "domain": "camera",
+                "name": "Hallway Camera",
+                "device_id": "camera-device-1",
+                "state": "streaming",
+            },
+            {
+                "entity_id": "sensor.hallway_camera_temperature",
+                "domain": "sensor",
+                "name": "Hallway Camera Temperature",
+                "device_id": "camera-device-1",
+                "entity_category": "diagnostic",
+                "state": "unavailable",
+            },
+        )
+    )
+
+    device = roll_up_physical_devices(entities, observed_at=observed_at)[0]
+
+    assert device.availability is DeviceAvailability.PARTIAL
+    assert device.unavailable_entity_count == 1
+
+
+def test_device_rollup_never_groups_unlinked_entities_by_similar_names() -> None:
+    observed_at = "2026-10-08T12:00:00+00:00"
+    entities = tuple(
+        GroundedHomeEntity.from_state(item, observed_at)
+        for item in (
+            {
+                "entity_id": "camera.hallway",
+                "domain": "camera",
+                "name": "Hallway Camera",
+                "state": "unavailable",
+            },
+            {
+                "entity_id": "sensor.hallway_camera_status",
+                "domain": "sensor",
+                "name": "Hallway Camera Status",
+                "state": "unavailable",
+            },
+        )
+    )
+
+    devices = roll_up_physical_devices(entities, observed_at=observed_at)
+
+    assert len(devices) == 2
+    assert {item.device_key for item in devices} == {
+        "entity:camera.hallway",
+        "entity:sensor.hallway_camera_status",
+    }
+    assert all(item.device_id is None for item in devices)
+
+
+@pytest.mark.asyncio
+async def test_two_unavailable_physical_devices_render_as_two_devices() -> None:
+    states = (
+        {
+            "entity_id": "camera.hallway",
+            "domain": "camera",
+            "name": "Hallway Camera Stream",
+            "device_id": "camera-device-1",
+            "device_name": "Hallway Camera",
+            "state": "unavailable",
+        },
+        {
+            "entity_id": "media_player.bedroom_echo",
+            "domain": "media_player",
+            "name": "Bedroom Echo Player",
+            "device_id": "echo-device-1",
+            "device_name": "Bedroom Echo",
+            "state": "unavailable",
+        },
+    )
+    plan = HomeQueryPlan.from_mapping(
+        {
+            "scope": "HOME",
+            "category": "devices",
+            "predicate": "UNAVAILABLE",
+            "aggregation": "LIST",
+        }
+    )
+    result = (await _engine(states).query(plan)).as_result()
+
+    assert result["count"] == 2
+    assert [item["name"] for item in result["devices"]] == [
+        "Bedroom Echo",
+        "Hallway Camera",
+    ]
+    assert len(result["entities"]) == 2
 
 
 @pytest.mark.asyncio

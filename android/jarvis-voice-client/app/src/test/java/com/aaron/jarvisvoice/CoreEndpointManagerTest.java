@@ -154,8 +154,8 @@ public final class CoreEndpointManagerTest {
             });
 
             long deadline = System.currentTimeMillis() + 6_000L;
-            while (!healthy.equals(manager.snapshot().endpoint())
-                && System.currentTimeMillis() < deadline) {
+            while (!healthy.equals(selected.get()) && System.currentTimeMillis() < deadline) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
                 Thread.sleep(25L);
             }
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle();
