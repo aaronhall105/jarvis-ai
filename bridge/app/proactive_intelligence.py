@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import ipaddress
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -34,6 +36,11 @@ from .notification_policy import (
     normalise_mode,
     notification_recipients,
 )
+from .home_intelligence import (
+    DeviceAvailability,
+    GroundedHomeEntity,
+    roll_up_physical_devices,
+)
 
 
 logger = logging.getLogger("jarvis-core.proactive")
@@ -51,6 +58,10 @@ CATEGORIES = (
 )
 SAFE_TURN_OFF = {"light", "switch", "fan", "media_player"}
 BLOCKED_CONTROL = {"lock", "alarm_control_panel", "cover", "siren"}
+
+
+class NotificationOutcomeUnknown(RuntimeError):
+    """The notification request may have reached the provider; never retry blindly."""
 
 
 def env(*names: str, default: str = "") -> str:
@@ -106,10 +117,19 @@ class Candidate:
     confidence: float = 1.0
     evidence: tuple[str, ...] = ()
     room: str = ""
+    device_id: str = ""
+    device_name: str = ""
+    area_id: str = ""
+    previous_state: str = ""
+    current_state: str = ""
+    observed_at: int = 0
+    persistence_seconds: int = 0
+    recovery_of: str = ""
 
     @property
     def fingerprint(self) -> str:
-        raw = f"{self.category}|{self.kind}|{self.entity_id}|{self.target_user}"
+        subject = f"device:{self.device_id}" if self.device_id else self.entity_id
+        raw = f"{self.category}|{self.kind}|{subject}|{self.target_user}"
         return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
@@ -118,11 +138,11 @@ class Rules:
         self,
         door_seconds: int = 600,
         oven_seconds: int = 1800,
-        high_power_w: float = 3000.0,
+        high_power_w: float | None = None,
     ) -> None:
         self.door_seconds = max(60, door_seconds)
         self.oven_seconds = max(300, oven_seconds)
-        self.high_power_w = max(250.0, high_power_w)
+        self.high_power_w = max(250.0, high_power_w) if high_power_w is not None else None
         self.battery_low_percent = float(
             env(
                 "JARVIS_PROACTIVE_BATTERY_LOW_PERCENT",
@@ -348,7 +368,7 @@ class Rules:
             if watts is not None:
                 if unit == "kw":
                     watts *= 1000
-                if watts >= self.high_power_w:
+                if self.high_power_w is not None and watts >= self.high_power_w:
                     result.append(
                         Candidate(
                             "energy",
@@ -356,28 +376,11 @@ class Rules:
                             entity_id,
                             "High energy use",
                             f"{name} is using about {round(watts)} watts.",
-                            f"{entity_id} exceeded {self.high_power_w:.0f} W",
+                            f"{entity_id} exceeded the configured {self.high_power_w:.0f} W threshold",
                             84,
                         )
                     )
 
-        if (
-            state == "unavailable"
-            and old not in {"", "unavailable"}
-            and entity_domain
-            in {"camera", "binary_sensor", "climate", "lock", "alarm_control_panel"}
-        ):
-            result.append(
-                Candidate(
-                    "system",
-                    "critical_unavailable",
-                    entity_id,
-                    "Device unavailable",
-                    f"{name} has become unavailable.",
-                    f"{entity_id} changed from {old} to unavailable",
-                    85,
-                )
-            )
         return result
 
 
@@ -423,6 +426,7 @@ class ProactiveEngine:
         cooldown: int = 300,
         poll_seconds: int = 15,
         speaker_entity: str = "",
+        principal_id: str = "aaron",
     ) -> None:
         self.database_path = Path(database_path)
         self.ha_url = ha_url.rstrip("/")
@@ -438,8 +442,13 @@ class ProactiveEngine:
             self.cooldown,
             int(env("JARVIS_PROACTIVE_INCIDENT_COOLDOWN_SECONDS", default="3600")),
         )
+        self.device_unavailable_seconds = max(
+            30,
+            int(env("JARVIS_PROACTIVE_DEVICE_UNAVAILABLE_SECONDS", default="120")),
+        )
         self.poll_seconds = max(5, poll_seconds)
         self.speaker_entity = speaker_entity.strip()
+        self.home_principal = normalise_user(principal_id)
         self.reply_window_seconds = max(
             5, min(60, int(env("JARVIS_PROACTIVE_REPLY_WINDOW_SECONDS", default="12")))
         )
@@ -449,11 +458,19 @@ class ProactiveEngine:
         self.learning_threshold = max(
             3, min(30, int(env("JARVIS_PROACTIVE_LEARNING_THRESHOLD", default="5")))
         )
+        self.global_notification_limit = max(
+            1,
+            min(30, int(env("JARVIS_PROACTIVE_MAX_NOTIFICATIONS_5M", default="6"))),
+        )
         self.speaker_map = self._speaker_map()
         self.rules = Rules(
             int(env("JARVIS_PROACTIVE_DOOR_OPEN_SECONDS", default="600")),
             int(env("JARVIS_PROACTIVE_OVEN_ON_SECONDS", default="1800")),
-            float(env("JARVIS_PROACTIVE_HIGH_POWER_W", default="3000")),
+            (
+                float(env("JARVIS_PROACTIVE_HIGH_POWER_W"))
+                if env("JARVIS_PROACTIVE_HIGH_POWER_W")
+                else None
+            ),
         )
         self.targets = {
             "aaron": env(
@@ -471,6 +488,21 @@ class ProactiveEngine:
         self.task: asyncio.Task | None = None
         self.initialised = False
         self.state_provider: Any = None
+        self.pipeline_counts = {
+            "raw_observations": 0,
+            "normalized_events": 0,
+            "semantic_candidates": 0,
+            "notifications": 0,
+        }
+        self.pipeline_timings_ms = {
+            "raw_observation_processing": 0.0,
+            "device_rollup": 0.0,
+            "event_normalization": 0.0,
+            "deterministic_prefilter": 0.0,
+            "semantic_significance": 0.0,
+            "snapshot_update": 0.0,
+            "end_to_end_decision": 0.0,
+        }
 
     @classmethod
     def from_env(cls) -> "ProactiveEngine":
@@ -492,6 +524,7 @@ class ProactiveEngine:
             cooldown=int(env("JARVIS_PROACTIVE_COOLDOWN_SECONDS", default="300")),
             poll_seconds=int(env("JARVIS_PROACTIVE_POLL_SECONDS", default="15")),
             speaker_entity=env("JARVIS_PROACTIVE_SPEAKER_ENTITY"),
+            principal_id=env("JARVIS_PROACTIVE_HOME_PRINCIPAL", default="aaron"),
         )
 
     def connection(self) -> sqlite3.Connection:
@@ -600,6 +633,15 @@ class ProactiveEngine:
                 "ON proactive_incidents(incident_key,status,last_seen DESC);"
                 "CREATE INDEX IF NOT EXISTS idx_proactive_incidents_entity_status "
                 "ON proactive_incidents(entity_id,status,last_seen DESC);"
+                "CREATE TABLE IF NOT EXISTS proactive_conditions ("
+                " condition_key TEXT PRIMARY KEY, principal_id TEXT NOT NULL,"
+                " kind TEXT NOT NULL, subject_key TEXT NOT NULL, status TEXT NOT NULL,"
+                " first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,"
+                " qualified_at INTEGER, recovered_at INTEGER,"
+                " suppression_reason TEXT, evidence_json TEXT NOT NULL DEFAULT '{}',"
+                " notified_event_id TEXT);"
+                "CREATE INDEX IF NOT EXISTS idx_proactive_conditions_status "
+                "ON proactive_conditions(status,last_seen DESC);"
             )
             incident_columns = {
                 str(row[1])
@@ -750,6 +792,323 @@ class ProactiveEngine:
             return start <= hour < end
         return hour >= start or hour < end
 
+    def conditions(
+        self,
+        limit: int = 100,
+        *,
+        principal_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.initialise()
+        principal = normalise_user(principal_id or self.home_principal)
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM proactive_conditions WHERE principal_id=? "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (principal, max(1, min(500, int(limit)))),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["evidence"] = json.loads(str(item.pop("evidence_json")))
+            except (json.JSONDecodeError, TypeError):
+                item["evidence"] = {}
+            result.append(item)
+        return result
+
+    def pipeline_report(self) -> dict[str, Any]:
+        raw = int(self.pipeline_counts["raw_observations"])
+        normalized = int(self.pipeline_counts["normalized_events"])
+        semantic = int(self.pipeline_counts["semantic_candidates"])
+        notifications = int(self.pipeline_counts["notifications"])
+        return {
+            "counts": dict(self.pipeline_counts),
+            "timings_ms": dict(self.pipeline_timings_ms),
+            "candidate_reduction": {
+                "raw_to_normalized": round(normalized / raw, 6) if raw else 0.0,
+                "normalized_to_semantic": round(semantic / normalized, 6) if normalized else 0.0,
+                "semantic_to_notification": round(notifications / semantic, 6) if semantic else 0.0,
+            },
+            "llm_calls_per_raw_observation": 0.0,
+        }
+
+    @staticmethod
+    def _availability_subject(device: Any) -> str:
+        return str(device.device_id or device.device_key)
+
+    @staticmethod
+    def _availability_is_user_facing(device: Any) -> bool:
+        domains = {item.domain for item in device.member_entities}
+        return bool(
+            device.device_id
+            and domains
+            & {
+                "alarm_control_panel",
+                "camera",
+                "climate",
+                "cover",
+                "fan",
+                "humidifier",
+                "light",
+                "lock",
+                "media_player",
+                "siren",
+                "switch",
+                "vacuum",
+                "water_heater",
+            }
+        )
+
+    def _condition_upsert(self, device: Any, now: int) -> tuple[sqlite3.Row, bool]:
+        subject = self._availability_subject(device)
+        key = f"{self.home_principal}:device_unavailable:{subject}"
+        evidence = {
+            "device_id": device.device_id,
+            "device_name": device.name,
+            "area_id": device.area_id,
+            "area_name": device.area_name,
+            "availability": device.availability.value,
+            "unavailable_entity_count": device.unavailable_entity_count,
+            "member_entities": [
+                {
+                    "entity_id": item.entity_id,
+                    "domain": item.domain,
+                    "state": item.state,
+                    "observed_at": item.observed_at,
+                }
+                for item in device.member_entities
+            ],
+            "evidence_kind": device.evidence_kind,
+        }
+        with self.connection() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM proactive_conditions WHERE condition_key=?",
+                (key,),
+            ).fetchone()
+            connection.execute(
+                "INSERT INTO proactive_conditions("
+                "condition_key,principal_id,kind,subject_key,status,first_seen,last_seen,"
+                "evidence_json) VALUES(?,?,'device_unavailable',?,'observed',?,?,?) "
+                "ON CONFLICT(condition_key) DO UPDATE SET last_seen=excluded.last_seen,"
+                "evidence_json=excluded.evidence_json",
+                (
+                    key,
+                    self.home_principal,
+                    subject,
+                    now,
+                    now,
+                    json.dumps(evidence, separators=(",", ":")),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM proactive_conditions WHERE condition_key=?",
+                (key,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("Proactive condition persistence failed")
+        return row, existing is None
+
+    def _condition_transition(
+        self,
+        condition_key: str,
+        *,
+        status: str,
+        now: int,
+        suppression_reason: str | None = None,
+        event_id: str | None = None,
+    ) -> None:
+        with self.connection() as connection:
+            connection.execute(
+                "UPDATE proactive_conditions SET status=?,last_seen=?,"
+                "qualified_at=CASE WHEN ?='qualified' THEN COALESCE(qualified_at,?) "
+                "ELSE qualified_at END,"
+                "recovered_at=CASE WHEN ? IN ('recovered','suppressed') THEN ? "
+                "ELSE recovered_at END,suppression_reason=?,"
+                "notified_event_id=COALESCE(?,notified_event_id) WHERE condition_key=?",
+                (
+                    status,
+                    now,
+                    status,
+                    now,
+                    status,
+                    now,
+                    suppression_reason,
+                    event_id,
+                    condition_key,
+                ),
+            )
+
+    async def _process_device_availability(
+        self,
+        states: list[dict[str, Any]],
+        *,
+        now: int,
+    ) -> None:
+        started = time.monotonic()
+        observed_at = datetime.fromtimestamp(now, tz=timezone.utc).isoformat()
+        raw_started = time.monotonic()
+        entities: list[GroundedHomeEntity] = []
+        for state in states:
+            try:
+                entities.append(GroundedHomeEntity.from_state(state, observed_at))
+            except ValueError:
+                continue
+        self.pipeline_timings_ms["raw_observation_processing"] = round(
+            (time.monotonic() - raw_started) * 1000,
+            3,
+        )
+        rollup_started = time.monotonic()
+        devices = roll_up_physical_devices(entities, observed_at=observed_at)
+        self.pipeline_timings_ms["device_rollup"] = round(
+            (time.monotonic() - rollup_started) * 1000,
+            3,
+        )
+        normalization_started = time.monotonic()
+        by_key = {
+            f"{self.home_principal}:device_unavailable:{self._availability_subject(item)}": item
+            for item in devices
+            if self._availability_is_user_facing(item)
+        }
+        self.pipeline_timings_ms["event_normalization"] = round(
+            (time.monotonic() - normalization_started) * 1000,
+            3,
+        )
+        self.pipeline_counts["raw_observations"] += len(states)
+        prefilter_started = time.monotonic()
+        for key, device in by_key.items():
+            if device.availability is DeviceAvailability.UNAVAILABLE:
+                row, created = self._condition_upsert(device, now)
+                if created:
+                    self.pipeline_counts["normalized_events"] += 1
+                if str(row["status"]) == "qualified":
+                    continue
+                first_seen = int(row["first_seen"])
+                elapsed = max(0, now - first_seen)
+                if elapsed < self.device_unavailable_seconds:
+                    self._condition_transition(
+                        key,
+                        status="observed",
+                        now=now,
+                        suppression_reason="persistence_threshold_pending",
+                    )
+                    continue
+                representative = next(
+                    (
+                        item
+                        for item in device.member_entities
+                        if item.state == "unavailable" and item.domain == "camera"
+                    ),
+                    next(item for item in device.member_entities if item.state == "unavailable"),
+                )
+                category = (
+                    "cameras"
+                    if any(item.domain == "camera" for item in device.member_entities)
+                    else "system"
+                )
+                event = await self.record(
+                    Candidate(
+                        category=category,
+                        kind="device_unavailable",
+                        entity_id=representative.entity_id,
+                        title="Device unavailable",
+                        message=(
+                            f"{device.name} has been unavailable for "
+                            f"{max(1, elapsed // 60)} minutes."
+                        ),
+                        reason=(
+                            f"Home Assistant's primary device surface remained unavailable "
+                            f"for {elapsed} seconds."
+                        ),
+                        importance=85,
+                        target_user=self.home_principal,
+                        confidence=1.0,
+                        evidence=tuple(
+                            item.entity_id
+                            for item in device.member_entities
+                            if item.state == "unavailable"
+                        ),
+                        room=str(device.area_name or ""),
+                        device_id=str(device.device_id or ""),
+                        device_name=device.name,
+                        area_id=str(device.area_id or ""),
+                        previous_state="available",
+                        current_state="unavailable",
+                        observed_at=first_seen,
+                        persistence_seconds=elapsed,
+                    )
+                )
+                self.pipeline_counts["semantic_candidates"] += 1
+                notified_event_id = (
+                    str(event["id"])
+                    if event is not None and event.get("notified_at") is not None
+                    else None
+                )
+                self._condition_transition(
+                    key,
+                    status="qualified",
+                    now=now,
+                    event_id=notified_event_id,
+                )
+                continue
+
+            with self.connection() as connection:
+                row = connection.execute(
+                    "SELECT * FROM proactive_conditions WHERE condition_key=? "
+                    "AND status IN ('observed','qualified')",
+                    (key,),
+                ).fetchone()
+            if row is None:
+                continue
+            was_qualified = str(row["status"]) == "qualified"
+            was_notified = bool(row["notified_event_id"])
+            self._condition_transition(
+                key,
+                status="recovered" if was_qualified else "suppressed",
+                now=now,
+                suppression_reason=(None if was_qualified else "recovered_before_threshold"),
+            )
+            self._resolve_device_incidents(str(device.device_id or ""), now)
+            if not was_qualified or not was_notified:
+                continue
+            representative = device.member_entities[0]
+            await self.record(
+                Candidate(
+                    category=(
+                        "cameras"
+                        if any(item.domain == "camera" for item in device.member_entities)
+                        else "system"
+                    ),
+                    kind="device_recovered",
+                    entity_id=representative.entity_id,
+                    title="Device available again",
+                    message=f"{device.name} is back online.",
+                    reason="Home Assistant's primary device surface is available again.",
+                    importance=80,
+                    target_user=self.home_principal,
+                    actions=("dismiss",),
+                    evidence=tuple(item.entity_id for item in device.member_entities),
+                    room=str(device.area_name or ""),
+                    device_id=str(device.device_id or ""),
+                    device_name=device.name,
+                    area_id=str(device.area_id or ""),
+                    previous_state="unavailable",
+                    current_state="available",
+                    observed_at=now,
+                    recovery_of=str(row["notified_event_id"] or ""),
+                )
+            )
+        self.pipeline_timings_ms["deterministic_prefilter"] = round(
+            (time.monotonic() - prefilter_started) * 1000,
+            3,
+        )
+        # The grounded deterministic path deliberately performs no per-state
+        # semantic/LLM call. Keep this explicit for production observability.
+        self.pipeline_timings_ms["semantic_significance"] = 0.0
+        self.pipeline_timings_ms["end_to_end_decision"] = round(
+            (time.monotonic() - started) * 1000,
+            3,
+        )
+
     async def ingest(
         self,
         previous: dict[str, Any] | None,
@@ -785,6 +1144,7 @@ class ProactiveEngine:
             "person_detected",
             "oven_left_on",
             "critical_unavailable",
+            "device_unavailable",
         }
 
     @staticmethod
@@ -800,7 +1160,35 @@ class ProactiveEngine:
             return active in {"on", "heating", "preheating"}
         if kind == "critical_unavailable":
             return active == "unavailable"
+        if kind == "device_unavailable":
+            return active == "unavailable"
         return False
+
+    def _resolve_device_incidents(self, device_id: str, now: int) -> None:
+        if not device_id:
+            return
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT incident_id,last_decision_json FROM proactive_incidents "
+                "WHERE kind='device_unavailable' AND status='active' AND target_user=?",
+                (self.home_principal,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    decision = json.loads(str(row["last_decision_json"] or "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                subject = decision.get("subject")
+                if (
+                    not isinstance(subject, dict)
+                    or str(subject.get("device_id") or "") != device_id
+                ):
+                    continue
+                connection.execute(
+                    "UPDATE proactive_incidents SET status='resolved',resolved_at=?,last_seen=? "
+                    "WHERE incident_id=?",
+                    (now, now, str(row["incident_id"])),
+                )
 
     def _resolve_inactive_incidents(self, current: dict[str, Any], now: int) -> None:
         entity_id = str(current.get("entity_id") or "")
@@ -1018,6 +1406,12 @@ class ProactiveEngine:
             ).fetchone()[0]
         )
         suppressed_reason = ""
+        recent_notifications = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM proactive_events WHERE notified_at >= ?",
+                (now - 300,),
+            ).fetchone()[0]
+        )
         suppressed = connection.execute(
             "SELECT reason FROM initiative_suppressions WHERE fingerprint = ?",
             (candidate.fingerprint,),
@@ -1028,6 +1422,8 @@ class ProactiveEngine:
             suppressed_reason = "confidence_below_announcement_threshold"
         elif spoken_today >= self.daily_speech_budget and not critical:
             suppressed_reason = "daily_attention_budget_exhausted"
+        elif recent_notifications >= self.global_notification_limit and not critical:
+            suppressed_reason = "global_notification_rate_limit"
         speaker = self.speaker_map.get(room) or self.speaker_entity
         event = {
             "category": candidate.category,
@@ -1038,6 +1434,8 @@ class ProactiveEngine:
             "reason": candidate.reason,
             "importance": candidate.importance,
             "target_user": candidate.target_user,
+            "device_id": candidate.device_id,
+            "persistence_seconds": candidate.persistence_seconds,
         }
         recipient_decisions: dict[str, dict[str, Any]] = {}
         for recipient in notification_recipients(event):
@@ -1054,6 +1452,7 @@ class ProactiveEngine:
                 in {
                     "disabled_by_user_feedback",
                     "confidence_below_announcement_threshold",
+                    "global_notification_rate_limit",
                 }
                 and not critical
             ):
@@ -1065,12 +1464,18 @@ class ProactiveEngine:
                         "reason": (
                             "This event type was disabled by explicit user feedback."
                             if suppressed_reason == "disabled_by_user_feedback"
-                            else "This event does not have enough confidence to interrupt."
+                            else (
+                                "This event does not have enough confidence to interrupt."
+                                if suppressed_reason == "confidence_below_announcement_threshold"
+                                else "The household notification rate limit is active."
+                            )
                         ),
                     }
                 )
             recipient_decisions[recipient] = resolved
         should_notify = any(bool(value.get("notify")) for value in recipient_decisions.values())
+        persistence_modifier = min(10, max(0, candidate.persistence_seconds // 60))
+        recurrence_penalty = 0
         return {
             "critical": critical,
             "confidence": confidence,
@@ -1087,6 +1492,35 @@ class ProactiveEngine:
             "recipient_decisions": recipient_decisions,
             "should_notify": should_notify,
             "notification_outcome": "eligible" if should_notify else "activity_only",
+            "subject": {
+                "entity_id": candidate.entity_id,
+                "device_id": candidate.device_id or None,
+                "device_name": candidate.device_name or None,
+                "area_id": candidate.area_id or None,
+            },
+            "transition": {
+                "previous_state": candidate.previous_state or None,
+                "current_state": candidate.current_state or None,
+                "observed_at": candidate.observed_at or now,
+                "persistence_seconds": candidate.persistence_seconds,
+                "recovery_of": candidate.recovery_of or None,
+            },
+            "significance": {
+                "base_importance": candidate.importance,
+                "persistence_modifier": persistence_modifier,
+                "novelty_modifier": 0,
+                "user_relevance_modifier": 0,
+                "recurrence_penalty": recurrence_penalty,
+                "cooldown_penalty": 0,
+                "bounded_score": max(
+                    0,
+                    min(
+                        100,
+                        candidate.importance + persistence_modifier - recurrence_penalty,
+                    ),
+                ),
+                "deterministic": True,
+            },
         }
 
     def _consider_learning(
@@ -1232,21 +1666,38 @@ class ProactiveEngine:
             target = self.targets.get(user, "")
             if target.startswith("notify."):
                 try:
-                    await self.mobile_notify(target, event)
+                    receipt = await self.mobile_notify(target, event)
                     notified = True
                     delivery_results[user] = {
                         "accepted": True,
+                        "verified_delivered": False,
+                        "outcome": "accepted",
                         "target": target,
+                        "provider_receipt": (
+                            receipt if isinstance(receipt, (dict, list)) else None
+                        ),
                     }
+                except NotificationOutcomeUnknown as exc:
+                    delivery_results[user] = {
+                        "accepted": False,
+                        "verified_delivered": False,
+                        "outcome": "unknown",
+                        "error": type(exc).__name__,
+                    }
+                    logger.warning("Mobile proactive notification outcome is unknown")
                 except Exception as exc:
                     delivery_results[user] = {
                         "accepted": False,
+                        "verified_delivered": False,
+                        "outcome": "failed",
                         "error": type(exc).__name__,
                     }
                     logger.exception("Mobile proactive notification failed")
             else:
                 delivery_results[user] = {
                     "accepted": False,
+                    "verified_delivered": False,
+                    "outcome": "failed",
                     "error": "notification_target_unavailable",
                 }
             if (
@@ -1305,9 +1756,20 @@ class ProactiveEngine:
             fields["reply_until"] = now + self.reply_window_seconds
         self.update(event["id"], **fields)
         decision["delivery_results"] = delivery_results
-        decision["notification_outcome"] = (
-            "delivered" if notified else "delivery_failed" if delivery_results else "activity_only"
+        outcome_unknown = any(
+            value.get("outcome") == "unknown" for value in delivery_results.values()
         )
+        decision["notification_outcome"] = (
+            "accepted"
+            if notified
+            else "outcome_unknown"
+            if outcome_unknown
+            else "delivery_failed"
+            if delivery_results
+            else "activity_only"
+        )
+        if notified:
+            self.pipeline_counts["notifications"] += 1
         incident_id = str(decision.get("incident_id") or "")
         with self.connection() as connection:
             connection.execute(
@@ -1329,7 +1791,7 @@ class ProactiveEngine:
                             incident_id,
                         ),
                     )
-                else:
+                elif not outcome_unknown:
                     attempts = 1 if delivery_results else 0
                     next_retry_at = now + 30 if delivery_results else None
                     connection.execute(
@@ -1340,6 +1802,16 @@ class ProactiveEngine:
                             json.dumps(decision, separators=(",", ":")),
                             attempts,
                             next_retry_at,
+                            incident_id,
+                        ),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE proactive_incidents SET last_decision_json=?,"
+                        "delivery_attempts=delivery_attempts+1,next_retry_at=NULL "
+                        "WHERE incident_id=?",
+                        (
+                            json.dumps(decision, separators=(",", ":")),
                             incident_id,
                         ),
                     )
@@ -1358,11 +1830,126 @@ class ProactiveEngine:
             ).fetchone()
         return self.row(row) if row is not None else None
 
+    def latest_reported_event(self, user: str, now: int | None = None) -> dict[str, Any] | None:
+        self.initialise()
+        current = int(now or time.time())
+        requester = normalise_user(user)
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM proactive_events WHERE notified_at IS NOT NULL "
+                "AND notified_at >= ? AND target_user IN (?, 'all') "
+                "ORDER BY notified_at DESC LIMIT 1",
+                (current - 86400, requester),
+            ).fetchone()
+        return self.row(row) if row is not None else None
+
+    def significant_brief(self, user: str) -> str:
+        self.initialise()
+        requester = normalise_user(user)
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT incident_id,last_event_id FROM proactive_incidents "
+                "WHERE status='active' AND notification_count > 0 "
+                "AND target_user IN (?, 'all') "
+                "ORDER BY last_notified_at DESC LIMIT 3",
+                (requester,),
+            ).fetchall()
+            event_ids = [str(row["last_event_id"] or "") for row in rows if row["last_event_id"]]
+            events = []
+            for event_id in event_ids:
+                row = connection.execute(
+                    "SELECT * FROM proactive_events WHERE id=? AND target_user IN (?, 'all')",
+                    (event_id, requester),
+                ).fetchone()
+                if row is not None:
+                    events.append(self.row(row))
+        if not events:
+            return "Everything looks normal."
+        messages = [str(item["message"]).rstrip(".") for item in events]
+        if len(messages) == 1:
+            return f"One thing is worth noting: {messages[0]}."
+        return (
+            f"{len(messages)} things are worth noting: "
+            + "; ".join(messages[:-1])
+            + f"; and {messages[-1]}."
+        )
+
+    async def _grounded_subject_status(self, event: dict[str, Any]) -> str:
+        decision = event.get("decision")
+        subject = decision.get("subject") if isinstance(decision, dict) else None
+        subject = subject if isinstance(subject, dict) else {}
+        device_id = str(subject.get("device_id") or "").strip()
+        entity_id = str(subject.get("entity_id") or event.get("entity_id") or "").strip()
+        name = str(subject.get("device_name") or event.get("title") or "That device").strip()
+        states = await self.fetch_states()
+        observed_at = datetime.now(timezone.utc).isoformat()
+        entities: list[GroundedHomeEntity] = []
+        for state in states:
+            try:
+                entities.append(GroundedHomeEntity.from_state(state, observed_at))
+            except ValueError:
+                continue
+        if device_id:
+            device = next(
+                (
+                    item
+                    for item in roll_up_physical_devices(entities, observed_at=observed_at)
+                    if item.device_id == device_id
+                ),
+                None,
+            )
+            if device is None:
+                return f"I can't verify {name}'s current state from Home Assistant."
+            if device.availability is DeviceAvailability.AVAILABLE:
+                return f"Yes. {device.name} is back online."
+            if device.availability is DeviceAvailability.PARTIAL:
+                return (
+                    f"{device.name} is online, but one or more related features "
+                    "are still unavailable."
+                )
+            if device.availability is DeviceAvailability.UNAVAILABLE:
+                return f"No. {device.name} is still unavailable."
+            return f"I can't verify {device.name}'s current availability conclusively."
+        entity = next((item for item in entities if item.entity_id == entity_id), None)
+        if entity is None:
+            return f"I can't verify {name}'s current state from Home Assistant."
+        if entity.state == "unavailable":
+            return f"No. {entity.name} is still unavailable."
+        if entity.state in {"unknown", ""}:
+            return f"I can't verify {entity.name}'s current availability conclusively."
+        return f"Yes. {entity.name} is available."
+
     async def handle_reply(self, text: str, user: str) -> dict[str, Any] | None:
-        event = self.active_reply_event(user)
+        cleaned = " ".join(text.lower().strip(" .!?'").split())
+        words = set(re.findall(r"[a-z0-9]+", cleaned))
+        if "anything" in words and {"need", "know"} <= words:
+            return {
+                "handled": True,
+                "response": self.significant_brief(user),
+                "event": self.latest_reported_event(user) or {},
+            }
+        event = self.active_reply_event(user) or self.latest_reported_event(user)
         if event is None:
             return None
-        cleaned = " ".join(text.lower().strip(" .!?'").split())
+        if words & {"back", "online", "available"} and words & {"it", "device", "yet", "now"}:
+            return {
+                "handled": True,
+                "response": await self._grounded_subject_status(event),
+                "event": event,
+            }
+        if "why" in words and words & {"tell", "told", "notify", "notified", "alert"}:
+            evidence = [str(item) for item in event.get("evidence") or () if str(item)]
+            evidence_text = (
+                f" The grounded evidence includes {len(evidence)} Home Assistant "
+                f"entit{'y' if len(evidence) == 1 else 'ies'}."
+                if evidence
+                else ""
+            )
+            return {
+                "handled": True,
+                "response": str(event["reason"]).rstrip(".") + "." + evidence_text,
+                "event": event,
+            }
         feedback = ""
         response = ""
         if cleaned in {"thanks", "thank you", "i know", "okay", "ok", "no"}:
@@ -1431,7 +2018,7 @@ class ProactiveEngine:
             raise KeyError(proposal_id)
         return next(item for item in self.proposals(250) if item["id"] == proposal_id)
 
-    async def mobile_notify(self, target: str, event: dict[str, Any]) -> None:
+    async def mobile_notify(self, target: str, event: dict[str, Any]) -> Any:
         service = target.split(".", 1)[1]
         channel = {
             "security": "Jarvis Security",
@@ -1442,7 +2029,7 @@ class ProactiveEngine:
             "energy": "Jarvis Energy",
             "system": "Jarvis System",
         }.get(event["category"], "Jarvis")
-        await self.ha_service(
+        return await self.ha_service(
             "notify",
             service,
             {
@@ -1506,6 +2093,10 @@ class ProactiveEngine:
             raise RuntimeError(
                 f"Home Assistant HTTP {exc.response.status_code}: {detail[:250]}"
             ) from exc
+        except (httpx.ReadTimeout, httpx.WriteError) as exc:
+            raise NotificationOutcomeUnknown(
+                "Home Assistant notification outcome could not be determined"
+            ) from exc
         except httpx.HTTPError as exc:
             raise RuntimeError(f"Home Assistant request failed: {exc}") from exc
 
@@ -1523,6 +2114,8 @@ class ProactiveEngine:
     async def fetch_states(self) -> list[dict[str, Any]]:
         if self.state_provider is not None:
             states = self.state_provider()
+            if inspect.isawaitable(states):
+                states = await states
             if isinstance(states, (list, tuple)):
                 return [item for item in states if isinstance(item, dict)]
 
@@ -1547,7 +2140,9 @@ class ProactiveEngine:
             await asyncio.sleep(self.poll_seconds)
 
     async def process_states(self, states: list[dict[str, Any]]) -> None:
+        processing_started = time.monotonic()
         now = int(time.time())
+        await self._process_device_availability(states, now=now)
         current = {
             str(item.get("entity_id")): item
             for item in states
@@ -1558,8 +2153,17 @@ class ProactiveEngine:
                 owner = "amber" if "amber" in entity_id.lower() else "aaron"
                 self.presence[owner] = str(item.get("state") or "unknown").lower()
         if not self.states:
+            snapshot_started = time.monotonic()
             self.states = current
             self.first_seen = {key: now for key in current}
+            self.pipeline_timings_ms["snapshot_update"] = round(
+                (time.monotonic() - snapshot_started) * 1000,
+                3,
+            )
+            self.pipeline_timings_ms["end_to_end_decision"] = round(
+                (time.monotonic() - processing_started) * 1000,
+                3,
+            )
             logger.info("Proactive baseline loaded: %s states", len(current))
             return
         for index, (entity_id, item) in enumerate(
@@ -1583,7 +2187,16 @@ class ProactiveEngine:
             # asyncio event loop.
             if index % 32 == 0:
                 await asyncio.sleep(0)
+        snapshot_started = time.monotonic()
         self.states = current
+        self.pipeline_timings_ms["snapshot_update"] = round(
+            (time.monotonic() - snapshot_started) * 1000,
+            3,
+        )
+        self.pipeline_timings_ms["end_to_end_decision"] = round(
+            (time.monotonic() - processing_started) * 1000,
+            3,
+        )
 
     def update(self, event_id: str, **fields: Any) -> None:
         statements = {
@@ -1673,6 +2286,14 @@ async def status(_: None = Depends(authorise)) -> dict[str, Any]:
         "reply_window_seconds": engine.reply_window_seconds,
         "daily_speech_budget": engine.daily_speech_budget,
         "learning_threshold": engine.learning_threshold,
+        "device_unavailable_seconds": engine.device_unavailable_seconds,
+        "global_notification_limit_5m": engine.global_notification_limit,
+        "home_principal": engine.home_principal,
+        "pipeline_counts": dict(engine.pipeline_counts),
+        "pipeline": engine.pipeline_report(),
+        "active_conditions": sum(
+            1 for item in engine.conditions(500) if item.get("status") in {"observed", "qualified"}
+        ),
         "notification_modes": list(NOTIFICATION_MODES),
         "default_notification_mode": "important_only",
     }

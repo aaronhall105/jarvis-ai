@@ -2,6 +2,18 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha36 — proactive home intelligence
+
+Alpha36 rolls Home Assistant entity failures up to grounded physical devices,
+selects document evidence from the relevant attachment-bearing message rather
+than blindly preferring the newest reply, and adds a durable proactive pipeline
+with persistence filtering, deduplication, recovery, quiet-hours policy,
+delivery outcomes, and evidence-backed follow-up explanations.
+
+See [the complete alpha36 release notes](docs/releases/CHANGES_V19_0_0_ALPHA36.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha35 — whole-home intelligence and grounded measurements
 
 Alpha35 adds model-interpreted, deterministically grounded whole-home and room

@@ -47,6 +47,13 @@ class HomeAggregation(str, Enum):
     SUMMARY = "SUMMARY"
 
 
+class DeviceAvailability(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    PARTIAL = "PARTIAL"
+    UNAVAILABLE = "UNAVAILABLE"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
 _CATEGORY_DOMAINS: dict[str, frozenset[str]] = {
     "devices": frozenset(),
     "lights": frozenset({"light"}),
@@ -181,7 +188,9 @@ class GroundedHomeEntity:
     area_id: str | None = None
     area_name: str | None = None
     device_id: str | None = None
+    device_name: str | None = None
     device_class: str | None = None
+    entity_category: str | None = None
     unit: str | None = None
     display_value: str | None = None
     supported_features: int | None = None
@@ -203,7 +212,9 @@ class GroundedHomeEntity:
             area_id=str(state.get("area_id") or "") or None,
             area_name=str(state.get("area_name") or "") or None,
             device_id=str(state.get("device_id") or "") or None,
+            device_name=str(state.get("device_name") or "") or None,
             device_class=str(state.get("device_class") or "") or None,
+            entity_category=str(state.get("entity_category") or "") or None,
             unit=str(state.get("unit") or "") or None,
             display_value=str(state.get("display_value") or "") or None,
             supported_features=(
@@ -218,15 +229,166 @@ class GroundedHomeEntity:
         return asdict(self)
 
 
+_PRIMARY_DEVICE_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "camera",
+        "climate",
+        "cover",
+        "fan",
+        "humidifier",
+        "light",
+        "lock",
+        "media_player",
+        "siren",
+        "switch",
+        "vacuum",
+        "water_heater",
+    }
+)
+_PRIMARY_DOMAIN_PRIORITY = (
+    "camera",
+    "alarm_control_panel",
+    "lock",
+    "climate",
+    "media_player",
+    "vacuum",
+    "water_heater",
+    "light",
+    "cover",
+    "fan",
+    "humidifier",
+    "switch",
+    "siren",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GroundedDeviceStatus:
+    """A physical-device view derived only from authoritative HA identity links."""
+
+    device_key: str
+    device_id: str | None
+    name: str
+    area_id: str | None
+    area_name: str | None
+    availability: DeviceAvailability
+    member_entities: tuple[GroundedHomeEntity, ...]
+    unavailable_entity_count: int
+    observed_at: str
+    evidence_kind: str
+
+    @property
+    def physical_device(self) -> bool:
+        return self.device_id is not None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "device_key": self.device_key,
+            "device_id": self.device_id,
+            "name": self.name,
+            "area_id": self.area_id,
+            "area_name": self.area_name,
+            "availability": self.availability.value,
+            "available": self.availability is DeviceAvailability.AVAILABLE,
+            "physical_device": self.physical_device,
+            "unavailable_entity_count": self.unavailable_entity_count,
+            "member_entity_count": len(self.member_entities),
+            "member_entities": [item.as_dict() for item in self.member_entities],
+            "observed_at": self.observed_at,
+            "evidence_kind": self.evidence_kind,
+        }
+
+
+def roll_up_physical_devices(
+    entities: Sequence[GroundedHomeEntity],
+    *,
+    observed_at: str,
+) -> tuple[GroundedDeviceStatus, ...]:
+    """Roll entities up by registry ``device_id`` without name-based guessing.
+
+    A physical device is unavailable only when its primary entity surface is
+    unavailable. A diagnostic child failing while a primary entity remains
+    available is PARTIAL. Entities without a device link remain isolated so
+    the presentation never invents physical identity.
+    """
+
+    grouped: dict[str, list[GroundedHomeEntity]] = {}
+    for entity in entities:
+        key = f"device:{entity.device_id}" if entity.device_id else f"entity:{entity.entity_id}"
+        grouped.setdefault(key, []).append(entity)
+
+    result: list[GroundedDeviceStatus] = []
+    for key, members in grouped.items():
+        ordered = tuple(sorted(members, key=lambda item: (item.domain, item.name.casefold())))
+        unavailable = tuple(item for item in ordered if item.state == "unavailable")
+        primary = tuple(
+            item
+            for item in ordered
+            if item.domain in _PRIMARY_DEVICE_DOMAINS
+            and str(item.entity_category or "").casefold() not in {"config", "diagnostic"}
+        )
+        decisive: tuple[GroundedHomeEntity, ...] = ()
+        for primary_domain in _PRIMARY_DOMAIN_PRIORITY:
+            same_domain = tuple(item for item in primary if item.domain == primary_domain)
+            if same_domain:
+                decisive = same_domain
+                break
+        decisive = decisive or tuple(
+            item
+            for item in ordered
+            if str(item.entity_category or "").casefold() not in {"config", "diagnostic"}
+        )
+        if not decisive:
+            availability = DeviceAvailability.AMBIGUOUS
+        elif all(item.state == "unavailable" for item in decisive):
+            availability = DeviceAvailability.UNAVAILABLE
+        elif unavailable:
+            availability = DeviceAvailability.PARTIAL
+        else:
+            availability = DeviceAvailability.AVAILABLE
+        representative = next(
+            (item for item in primary if item.state == "unavailable"),
+            primary[0] if primary else ordered[0],
+        )
+        device_name = next((item.device_name for item in ordered if item.device_name), None)
+        result.append(
+            GroundedDeviceStatus(
+                device_key=key,
+                device_id=representative.device_id,
+                name=device_name or representative.name,
+                area_id=representative.area_id,
+                area_name=representative.area_name,
+                availability=availability,
+                member_entities=ordered,
+                unavailable_entity_count=len(unavailable),
+                observed_at=observed_at,
+                evidence_kind=(
+                    "home_assistant_device_registry"
+                    if representative.device_id
+                    else "ungrouped_entity_without_device_id"
+                ),
+            )
+        )
+    return tuple(
+        sorted(
+            result,
+            key=lambda item: ((item.area_name or "").casefold(), item.name.casefold()),
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class GroundedEntitySet:
     plan: HomeQueryPlan
     entities: tuple[GroundedHomeEntity, ...]
     observed_at: str
     area_name: str | None = None
+    devices: tuple[GroundedDeviceStatus, ...] = ()
 
     def as_result(self) -> dict[str, Any]:
         rows = [item.as_dict() for item in self.entities]
+        device_rows = [item.as_dict() for item in self.devices]
         local_ids = [item.entity_id for item in self.entities]
         return {
             "success": True,
@@ -237,8 +399,9 @@ class GroundedEntitySet:
             "aggregation": self.plan.aggregation.value,
             "area_id": self.plan.area_id,
             "area_name": self.area_name,
-            "count": len(rows),
+            "count": len(device_rows) if self.devices else len(rows),
             "entities": rows,
+            "devices": device_rows,
             "observed_at": self.observed_at,
             "complete": True,
             "context_projection": {
@@ -323,12 +486,23 @@ class HomeSnapshot:
             item for item in self.entities if item.domain in _CATEGORY_DOMAINS["security"]
         ]
         domains = Counter(item.domain for item in self.entities)
+        devices = roll_up_physical_devices(self.entities, observed_at=self.observed_at)
+        unavailable_devices = [
+            item for item in devices if item.availability is DeviceAvailability.UNAVAILABLE
+        ]
+        partially_unavailable_devices = [
+            item for item in devices if item.availability is DeviceAvailability.PARTIAL
+        ]
         return {
             "observed_at": self.observed_at,
             "entity_count": len(self.entities),
             "domain_counts": dict(sorted(domains.items())),
             "lights_on": [item.as_dict() for item in lights_on],
             "unavailable_entities": [item.as_dict() for item in unavailable],
+            "unavailable_devices": [item.as_dict() for item in unavailable_devices],
+            "partially_unavailable_devices": [
+                item.as_dict() for item in partially_unavailable_devices
+            ],
             "people_home": [item.as_dict() for item in people_home],
             "active_media": [item.as_dict() for item in active_media],
             "switches_on": [item.as_dict() for item in switches_on],
@@ -392,6 +566,7 @@ class HomeIntelligenceEngine:
         seen: set[str] = set()
         requested_ids = set(plan.entity_ids)
         observed_ids: set[str] = set()
+        all_device_entities: list[GroundedHomeEntity] = []
         for raw in await self._state_loader():
             item = GroundedHomeEntity.from_state(raw, observed_at)
             if item.entity_id in seen:
@@ -406,6 +581,9 @@ class HomeIntelligenceEngine:
                 continue
             if not domains and item.domain not in _USER_FACING_DEVICE_DOMAINS:
                 continue
+            if plan.category == "devices" and plan.predicate is HomePredicate.UNAVAILABLE:
+                all_device_entities.append(item)
+                continue
             if not self._matches_predicate(item, plan.predicate):
                 continue
             grounded.append(item)
@@ -413,11 +591,28 @@ class HomeIntelligenceEngine:
         if missing_ids:
             raise ValueError("One or more grounded Home Assistant entities no longer exists")
         grounded.sort(key=lambda item: ((item.area_name or "").casefold(), item.name.casefold()))
+        devices: tuple[GroundedDeviceStatus, ...] = ()
+        if plan.category == "devices" and plan.predicate is HomePredicate.UNAVAILABLE:
+            devices = tuple(
+                item
+                for item in roll_up_physical_devices(
+                    all_device_entities,
+                    observed_at=observed_at,
+                )
+                if item.availability is DeviceAvailability.UNAVAILABLE
+            )
+            grounded = [
+                entity
+                for device in devices
+                for entity in device.member_entities
+                if entity.state == "unavailable"
+            ]
         result = GroundedEntitySet(
             plan=plan,
             entities=tuple(grounded),
             observed_at=observed_at,
             area_name=areas.get(plan.area_id or "") or None,
+            devices=devices,
         )
         runtime_metrics.observe(
             "home_entity_set_resolution_ms", (time.monotonic() - started) * 1000
@@ -453,6 +648,8 @@ def _numeric_state(value: str) -> float | None:
 
 
 __all__ = [
+    "DeviceAvailability",
+    "GroundedDeviceStatus",
     "GroundedEntitySet",
     "GroundedHomeEntity",
     "HomeAggregation",
@@ -462,4 +659,5 @@ __all__ = [
     "HomeQueryPlan",
     "HomeQueryScope",
     "HomeSnapshot",
+    "roll_up_physical_devices",
 ]

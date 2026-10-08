@@ -286,7 +286,7 @@ def render_home_query_evidence(
         if not isinstance(snapshot, Mapping):
             return None
         unavailable = [
-            item for item in snapshot.get("unavailable_entities") or () if isinstance(item, Mapping)
+            item for item in snapshot.get("unavailable_devices") or () if isinstance(item, Mapping)
         ]
         people = [item for item in snapshot.get("people_home") or () if isinstance(item, Mapping)]
         lights = [item for item in snapshot.get("lights_on") or () if isinstance(item, Mapping)]
@@ -363,6 +363,9 @@ def render_home_query_evidence(
     predicate = str(result.get("predicate") or plan.get("predicate") or "ANY").upper()
     area_name = str(result.get("area_name") or "").strip()
     entities = [item for item in result.get("entities") or () if isinstance(item, Mapping)]
+    devices = [item for item in result.get("devices") or () if isinstance(item, Mapping)]
+    if category == "devices" and predicate == "UNAVAILABLE":
+        entities = devices
     location = f" in the {area_name.lower()}" if area_name else ""
     singular = {
         "lights": "light",

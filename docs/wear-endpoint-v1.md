@@ -1,6 +1,6 @@
 # Jarvis Wear OS endpoint
 
-The current Wear OS client is part of the unified `v19.0.0-alpha35` Android
+The current Wear OS client is part of the unified `v19.0.0-alpha36` Android
 project. It is a microphone, speaker, Tile, and assistant endpoint for the same
 Jarvis Brain and conversation system used by the Phone.
 

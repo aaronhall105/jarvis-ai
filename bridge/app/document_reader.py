@@ -17,6 +17,7 @@ import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,26 @@ _CURRENCY_SYMBOL_CODES = {"£": "GBP", "$": "USD", "€": "EUR"}
 _SUPPORTED_CURRENCY_CODES = frozenset(_CURRENCY_SYMBOL_CODES.values())
 _TEXT_MIME_TYPES = SUPPORTED_MIME_TYPES - {"application/pdf"}
 _MAX_PDF_DECOMPRESSED_BYTES = 32 * 1024 * 1024
+_EVIDENCE_STOP_WORDS = frozenset(
+    {
+        "about",
+        "could",
+        "document",
+        "email",
+        "from",
+        "have",
+        "much",
+        "please",
+        "show",
+        "that",
+        "this",
+        "what",
+        "when",
+        "which",
+        "with",
+        "would",
+    }
+)
 for _limit_name in (
     "ZLIB_MAX_OUTPUT_LENGTH",
     "LZW_MAX_OUTPUT_LENGTH",
@@ -152,6 +173,81 @@ def document_currency_evidence(
         "page_currencies": page_codes,
         "extraction_modes": sorted(modes),
     }
+
+
+def _evidence_terms(value: object) -> set[str]:
+    return {
+        item
+        for item in re.findall(r"[a-z0-9]+", str(value or "").casefold())
+        if len(item) > 2 and item not in _EVIDENCE_STOP_WORDS
+    }
+
+
+def _message_timestamp(value: Mapping[str, Any]) -> float:
+    raw_milliseconds = value.get("internal_date_ms")
+    if isinstance(raw_milliseconds, (int, float)) and not isinstance(raw_milliseconds, bool):
+        return float(raw_milliseconds) / 1000.0
+    raw = str(value.get("received_at") or value.get("date") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def rank_document_message_candidates(
+    question: str,
+    messages: Sequence[Mapping[str, Any]],
+    *,
+    preferred_message_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Rank grounded messages for document evidence without making newest win.
+
+    The result is only a bounded candidate order. Provider attachment metadata
+    and extracted text are verified later by :class:`DocumentConnector`.
+    """
+
+    wanted = _evidence_terms(question)
+    ranked: list[tuple[float, float, dict[str, Any]]] = []
+    for raw in messages[:100]:
+        message = dict(raw)
+        message_id = str(message.get("message_id") or "").strip()
+        if not message_id:
+            continue
+        subject = str(message.get("subject") or "")
+        body = str(message.get("body") or message.get("snippet") or "")
+        sender = str(message.get("from") or message.get("sender_name") or "")
+        subject_terms = _evidence_terms(subject)
+        body_terms = _evidence_terms(body)
+        sender_terms = _evidence_terms(sender)
+        overlap = len(wanted & (subject_terms | body_terms | sender_terms)) / max(1, len(wanted))
+        has_attachment = bool(message.get("has_attachments") or message.get("attachments"))
+        body_has_value = bool(
+            body
+            and re.search(
+                r"(?:[£$€]\s*)?\d[\d,]*(?:\.\d+)?(?:\s*(?:GBP|USD|EUR|%|kWh))?",
+                body,
+                flags=re.IGNORECASE,
+            )
+        )
+        score = overlap * 60.0
+        if wanted and wanted <= body_terms and body_has_value:
+            score += 45.0
+        elif body_has_value and wanted & body_terms:
+            score += 24.0
+        if has_attachment:
+            score += 30.0
+        if message_id == str(preferred_message_id or ""):
+            score += 8.0
+        message["evidence_candidate_score"] = round(score, 3)
+        message["body_has_requested_fact"] = body_has_value and bool(wanted & body_terms)
+        ranked.append((score, _message_timestamp(message), message))
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [item[2] for item in ranked]
 
 
 def _extract_text_document(
@@ -460,11 +556,11 @@ class DocumentConnector(Connector):
         )
 
     @staticmethod
-    def _provider_capabilities(provider: str) -> tuple[str, str]:
+    def _provider_capabilities(provider: str) -> tuple[str, str, str]:
         if provider in {"google", "google_gmail"}:
-            return "gmail.read", "gmail.attachment.read"
+            return "gmail.read", "gmail.attachment.read", "gmail.thread"
         if provider in {"microsoft", "microsoft_outlook"}:
-            return "outlook.attachments", "outlook.attachment.read"
+            return "outlook.attachments", "outlook.attachment.read", "outlook.thread"
         raise DocumentReadError(
             "unsupported_document_provider", "That attachment provider is not supported."
         )
@@ -518,6 +614,135 @@ class DocumentConnector(Connector):
             rows = result.get("attachments") or ()
         return [dict(item) for item in rows if isinstance(item, Mapping)][:100]
 
+    @staticmethod
+    def _readable_attachments(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            dict(item)
+            for item in rows
+            if _normalise_mime(str(item.get("mime_type") or "")) in SUPPORTED_MIME_TYPES
+            and item.get("is_inline") is not True
+            and str(item.get("attachment_id") or "").strip()
+        ]
+
+    async def _thread_messages(
+        self,
+        *,
+        capability_id: str,
+        thread_id: str,
+        request: CapabilityRequest,
+    ) -> list[dict[str, Any]]:
+        payload_key = "thread_id" if capability_id == "gmail.thread" else "conversation_id"
+        result = await self._run(
+            capability_id,
+            {payload_key: thread_id, "limit": 100},
+            request,
+        )
+        messages: list[dict[str, Any]] = []
+        for item in result.get("messages") or ():
+            if not isinstance(item, Mapping) or not item.get("message_id"):
+                continue
+            candidate_thread = str(
+                item.get("thread_id") or item.get("conversation_id") or ""
+            ).strip()
+            if candidate_thread and candidate_thread != thread_id:
+                continue
+            messages.append(dict(item))
+        return messages[:100]
+
+    async def _message_attachments(
+        self,
+        *,
+        provider: str,
+        metadata_capability: str,
+        message: Mapping[str, Any],
+        request: CapabilityRequest,
+    ) -> list[dict[str, Any]]:
+        embedded = self._readable_attachments(
+            [item for item in message.get("attachments") or () if isinstance(item, Mapping)]
+        )
+        if embedded:
+            return embedded
+        if not bool(message.get("has_attachments") or message.get("attachments")):
+            return []
+        result = await self._run(
+            metadata_capability,
+            {"message_id": str(message.get("message_id") or "")},
+            request,
+        )
+        return self._readable_attachments(self._attachments(provider, result))
+
+    async def _read_document_candidate(
+        self,
+        *,
+        provider: str,
+        read_capability: str,
+        principal: str,
+        message_id: str,
+        attachment: Mapping[str, Any],
+        request: CapabilityRequest,
+    ) -> tuple[dict[str, Any], bool]:
+        attachment_id = str(attachment.get("attachment_id") or "")
+        try:
+            size = int(attachment.get("size") or attachment.get("size_bytes") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > DocumentLimits().max_file_bytes:
+            raise DocumentReadError(
+                "document_too_large",
+                "The attachment exceeds the document size limit.",
+            )
+        source_key = self.cache.source_key(provider, message_id, attachment_id)
+        cached = await self.cache.get(principal_id=principal, source_key=source_key)
+        cached_document = cached.get("document") if isinstance(cached, Mapping) else None
+        currency_metadata = (
+            cached_document.get("currency_evidence")
+            if isinstance(cached_document, Mapping)
+            else None
+        )
+        if (
+            cached is not None
+            and isinstance(currency_metadata, Mapping)
+            and int(currency_metadata.get("version") or 0) >= 1
+        ):
+            return dict(cached), True
+        result = await self._run(
+            read_capability,
+            {"message_id": message_id, "attachment_id": attachment_id},
+            request,
+        )
+        document = result.get("document")
+        if not isinstance(document, Mapping):
+            raise DocumentReadError(
+                "malformed_document_result", "The provider returned invalid document evidence."
+            )
+        safe_result = {
+            "document": dict(document),
+            "attachment": dict(attachment),
+            "provider": provider,
+            "fingerprint_sha256": document.get("fingerprint_sha256"),
+            "message_id": message_id,
+            "cache_hit": False,
+        }
+        await self.cache.put(principal_id=principal, source_key=source_key, result=safe_result)
+        return safe_result, False
+
+    @staticmethod
+    def _body_document(message: Mapping[str, Any]) -> dict[str, Any] | None:
+        body = str(message.get("body") or message.get("snippet") or "").strip()
+        if not body:
+            return None
+        encoded = body.encode("utf-8")
+        limits = DocumentLimits()
+        if len(encoded) > limits.max_file_bytes:
+            return None
+        extraction = _extract_text_document(
+            encoded,
+            filename=(str(message.get("subject") or "Email message")[:220] + ".txt"),
+            mime_type="text/plain",
+            limits=limits,
+        )
+        return extraction.as_dict()
+
     async def execute(
         self, capability: CapabilityMetadata, request: CapabilityRequest
     ) -> ConnectorResult:
@@ -529,7 +754,9 @@ class DocumentConnector(Connector):
                 "A principal, provider, and grounded message identity are required."
             )
         try:
-            metadata_capability, read_capability = self._provider_capabilities(provider)
+            metadata_capability, read_capability, thread_capability = self._provider_capabilities(
+                provider
+            )
             if capability.capability_id == "document.metadata":
                 result = await self._run(metadata_capability, {"message_id": message_id}, request)
                 attachments = self._attachments(provider, result)
@@ -538,6 +765,8 @@ class DocumentConnector(Connector):
                 )
 
             attachment_id = str(request.payload.get("attachment_id") or "").strip()
+            thread_id = str(request.payload.get("thread_id") or "").strip()
+            question = str(request.payload.get("question") or "").strip()
             metadata = await self._run(metadata_capability, {"message_id": message_id}, request)
             attachments = self._attachments(provider, metadata)
             if attachment_id:
@@ -547,14 +776,9 @@ class DocumentConnector(Connector):
                     if str(item.get("attachment_id") or "") == attachment_id
                 ]
             else:
-                readable = [
-                    item
-                    for item in attachments
-                    if _normalise_mime(str(item.get("mime_type") or "")) in SUPPORTED_MIME_TYPES
-                    and item.get("is_inline") is not True
-                ]
+                readable = self._readable_attachments(attachments)
                 matches = readable if len(readable) == 1 else []
-                if len(readable) > 1:
+                if len(readable) > 1 and not thread_id:
                     return ConnectorResult.succeeded(
                         {
                             "selection_required": True,
@@ -562,11 +786,116 @@ class DocumentConnector(Connector):
                             "count": len(readable),
                         }
                     )
-                if attachments and not readable:
+                if attachments and not readable and not thread_id:
                     raise DocumentReadError(
                         "unsupported_document_type",
                         "That email has no attachment type the document reader supports.",
                     )
+            if not attachment_id and thread_id:
+                messages = await self._thread_messages(
+                    capability_id=thread_capability,
+                    thread_id=thread_id,
+                    request=request,
+                )
+                if not any(str(item.get("message_id") or "") == message_id for item in messages):
+                    return ConnectorResult.failed(
+                        "The grounded message does not belong to the supplied provider thread."
+                    )
+                ranked_messages = rank_document_message_candidates(
+                    question,
+                    messages,
+                    preferred_message_id=message_id,
+                )
+                extracted: list[tuple[int, float, dict[str, Any]]] = []
+                for message in ranked_messages[:8]:
+                    candidate_message_id = str(message.get("message_id") or "")
+                    body_document = self._body_document(message)
+                    if body_document is not None and message.get("body_has_requested_fact"):
+                        body_selection = exact_evidence_answer(question, body_document)
+                        extracted.append(
+                            (
+                                1 if body_selection is not None else 0,
+                                float(message.get("evidence_candidate_score") or 0),
+                                {
+                                    "document": body_document,
+                                    "attachment": {
+                                        "attachment_id": None,
+                                        "filename": body_document["filename"],
+                                        "mime_type": "text/plain",
+                                        "source_type": "message_body",
+                                    },
+                                    "provider": provider,
+                                    "message_id": candidate_message_id,
+                                    "selected_message": {
+                                        key: message.get(key)
+                                        for key in (
+                                            "message_id",
+                                            "thread_id",
+                                            "conversation_id",
+                                            "subject",
+                                            "from",
+                                            "sender_name",
+                                            "received_at",
+                                        )
+                                    },
+                                    "source_type": "message_body",
+                                    "cache_hit": False,
+                                },
+                            )
+                        )
+                    for attachment in (
+                        await self._message_attachments(
+                            provider=provider,
+                            metadata_capability=metadata_capability,
+                            message=message,
+                            request=request,
+                        )
+                    )[:3]:
+                        value, cache_hit = await self._read_document_candidate(
+                            provider=provider,
+                            read_capability=read_capability,
+                            principal=principal,
+                            message_id=candidate_message_id,
+                            attachment=attachment,
+                            request=request,
+                        )
+                        selection = exact_evidence_answer(question, value["document"])
+                        extracted.append(
+                            (
+                                1 if selection is not None else 0,
+                                float(message.get("evidence_candidate_score") or 0) + 20.0,
+                                {
+                                    **value,
+                                    "cache_hit": cache_hit,
+                                    "source_type": "attachment",
+                                    "selected_message": {
+                                        key: message.get(key)
+                                        for key in (
+                                            "message_id",
+                                            "thread_id",
+                                            "conversation_id",
+                                            "subject",
+                                            "from",
+                                            "sender_name",
+                                            "received_at",
+                                        )
+                                    },
+                                },
+                            )
+                        )
+                    if len(extracted) >= 8:
+                        break
+                if extracted:
+                    extracted.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                    selected_result = extracted[0][2]
+                    return ConnectorResult.succeeded(
+                        {
+                            **selected_result,
+                            "thread_evidence_selected": True,
+                            "candidate_count": len(extracted),
+                        }
+                    )
+
             if len(matches) != 1:
                 return ConnectorResult.failed("The requested attachment could not be grounded.")
             selected = matches[0]
@@ -577,42 +906,15 @@ class DocumentConnector(Connector):
                 raise DocumentReadError(
                     "document_too_large", "The attachment exceeds the document size limit."
                 )
-            source_key = self.cache.source_key(provider, message_id, attachment_id)
-            cached = await self.cache.get(principal_id=principal, source_key=source_key)
-            cached_document = cached.get("document") if isinstance(cached, Mapping) else None
-            currency_metadata = (
-                cached_document.get("currency_evidence")
-                if isinstance(cached_document, Mapping)
-                else None
+            safe_result, cache_hit = await self._read_document_candidate(
+                provider=provider,
+                read_capability=read_capability,
+                principal=principal,
+                message_id=message_id,
+                attachment=selected,
+                request=request,
             )
-            # Older cache rows predate glyph/layout currency extraction. Raw
-            # bytes are deliberately not cached, so one provider read upgrades
-            # that immutable extraction; subsequent reads remain cache hits.
-            if (
-                cached is not None
-                and isinstance(currency_metadata, Mapping)
-                and int(currency_metadata.get("version") or 0) >= 1
-            ):
-                return ConnectorResult.succeeded({**cached, "cache_hit": True})
-            result = await self._run(
-                read_capability,
-                {"message_id": message_id, "attachment_id": attachment_id},
-                request,
-            )
-            document = result.get("document")
-            if not isinstance(document, Mapping):
-                raise DocumentReadError(
-                    "malformed_document_result", "The provider returned invalid document evidence."
-                )
-            safe_result = {
-                "document": dict(document),
-                "attachment": selected,
-                "provider": provider,
-                "fingerprint_sha256": document.get("fingerprint_sha256"),
-                "cache_hit": False,
-            }
-            await self.cache.put(principal_id=principal, source_key=source_key, result=safe_result)
-            return ConnectorResult.succeeded(safe_result)
+            return ConnectorResult.succeeded({**safe_result, "cache_hit": cache_hit})
         except DocumentReadError as exc:
             return ConnectorResult.failed(f"{exc.code}: {exc}")
 
