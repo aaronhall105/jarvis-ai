@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
@@ -66,6 +67,94 @@ def _engine(tmp_path, *, principal_id: str = "aaron") -> ProactiveEngine:
         )
     )
     return engine
+
+
+@pytest.mark.asyncio
+async def test_alpha36_conditions_coexist_with_legacy_proactive_condition_schema(
+    tmp_path,
+) -> None:
+    database = tmp_path / "proactive.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE proactive_conditions("
+            "condition_key TEXT PRIMARY KEY,condition_type TEXT NOT NULL,"
+            "entity_id TEXT NOT NULL,source_event_id INTEGER,summary TEXT NOT NULL,"
+            "due_at TEXT,payload_json TEXT NOT NULL,created_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO proactive_conditions VALUES(?,?,?,?,?,?,?,?)",
+            (
+                "legacy:condition",
+                "legacy",
+                "sensor.legacy",
+                None,
+                "Legacy condition",
+                None,
+                "{}",
+                "2026-10-08T10:00:00+00:00",
+            ),
+        )
+    engine = ProactiveEngine(str(database), cooldown=30)
+    engine.device_unavailable_seconds = 60
+    engine.mobile_notify = AsyncMock(return_value={"accepted": True})
+    engine.initialise()
+
+    await engine._process_device_availability(_camera_states("unavailable"), now=100)
+
+    restarted = ProactiveEngine(str(database), cooldown=30)
+    restarted.device_unavailable_seconds = 60
+    restarted.mobile_notify = AsyncMock(return_value={"accepted": True})
+    restarted.initialise()
+    restarted.initialise()
+    await restarted._process_device_availability(_camera_states("unavailable"), now=130)
+
+    with sqlite3.connect(database) as connection:
+        legacy = connection.execute(
+            "SELECT condition_key,condition_type FROM proactive_conditions"
+        ).fetchall()
+        new_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(proactive_home_conditions)")
+        }
+        table_counts = {
+            name: connection.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (name,)
+            ).fetchone()[0]
+            for name in ("proactive_conditions", "proactive_home_conditions")
+        }
+        index_count = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' "
+            "AND name='idx_proactive_home_conditions_status'"
+        ).fetchone()[0]
+        durable_counts = {
+            "proactive_home_conditions": connection.execute(
+                "SELECT COUNT(*) FROM proactive_home_conditions"
+            ).fetchone()[0],
+            "proactive_events": connection.execute(
+                "SELECT COUNT(*) FROM proactive_events"
+            ).fetchone()[0],
+            "proactive_incidents": connection.execute(
+                "SELECT COUNT(*) FROM proactive_incidents"
+            ).fetchone()[0],
+        }
+        quick_check = connection.execute("PRAGMA quick_check").fetchone()[0]
+        integrity_check = connection.execute("PRAGMA integrity_check").fetchone()[0]
+    assert legacy == [("legacy:condition", "legacy")]
+    assert {"principal_id", "status", "first_seen", "evidence_json"} <= new_columns
+    assert table_counts == {"proactive_conditions": 1, "proactive_home_conditions": 1}
+    assert index_count == 1
+    assert durable_counts == {
+        "proactive_home_conditions": 1,
+        "proactive_events": 0,
+        "proactive_incidents": 0,
+    }
+    assert restarted.mobile_notify.await_count == 0
+    condition = restarted.conditions()[0]
+    assert condition["principal_id"] == "aaron"
+    assert condition["status"] == "observed"
+    assert condition["suppression_reason"] == "persistence_threshold_pending"
+    assert condition["first_seen"] == 100
+    assert quick_check == "ok"
+    assert integrity_check == "ok"
 
 
 @pytest.mark.asyncio
