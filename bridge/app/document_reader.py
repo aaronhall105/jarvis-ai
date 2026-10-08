@@ -16,7 +16,7 @@ import re
 import sqlite3
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -46,6 +46,8 @@ SUPPORTED_MIME_TYPES = frozenset(
         "text/tab-separated-values",
     }
 )
+_CURRENCY_SYMBOL_CODES = {"£": "GBP", "$": "USD", "€": "EUR"}
+_SUPPORTED_CURRENCY_CODES = frozenset(_CURRENCY_SYMBOL_CODES.values())
 _TEXT_MIME_TYPES = SUPPORTED_MIME_TYPES - {"application/pdf"}
 _MAX_PDF_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 for _limit_name in (
@@ -87,6 +89,7 @@ class DocumentExtraction:
     evidence_status: str = "verified"
     truncated: bool = False
     warnings: tuple[str, ...] = ()
+    currency_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,6 +110,48 @@ def _bounded_text(value: str, maximum: int) -> tuple[str, bool]:
     if len(cleaned) <= maximum:
         return cleaned, False
     return cleaned[:maximum].rstrip(), True
+
+
+def _currency_codes(value: str) -> set[str]:
+    text = str(value or "")
+    codes = {code for symbol, code in _CURRENCY_SYMBOL_CODES.items() if symbol in text}
+    for code in _SUPPORTED_CURRENCY_CODES:
+        if re.search(rf"(?i)\b{re.escape(code)}\b", text):
+            codes.add(code)
+    if re.search(r"(?i)\b(?:pounds?|sterling)\b", text):
+        codes.add("GBP")
+    return codes
+
+
+def document_currency_evidence(
+    page_modes: Sequence[Mapping[str, str]],
+) -> dict[str, Any]:
+    """Describe extracted markers without retaining duplicate document text."""
+
+    all_codes: set[str] = set()
+    page_codes: dict[str, list[str]] = {}
+    modes: set[str] = set()
+    for page_number, mode_text in enumerate(page_modes, start=1):
+        found: set[str] = set()
+        for mode, text in mode_text.items():
+            mode_codes = _currency_codes(text)
+            if mode_codes:
+                modes.add(mode)
+                found.update(mode_codes)
+        if found:
+            page_codes[str(page_number)] = sorted(found)
+            all_codes.update(found)
+    currency = next(iter(all_codes)) if len(all_codes) == 1 else None
+    return {
+        "version": 1,
+        "currency": currency,
+        "currencies": sorted(all_codes),
+        "source": "document" if currency else ("ambiguous" if all_codes else "unknown"),
+        "verified": currency is not None,
+        "ambiguous": len(all_codes) > 1,
+        "page_currencies": page_codes,
+        "extraction_modes": sorted(modes),
+    }
 
 
 def _extract_text_document(
@@ -145,6 +190,7 @@ def _extract_text_document(
         text_chunks=chunks,
         page_count=None,
         truncated=truncated or len(chunks) * 2_000 < len(text),
+        currency_evidence=document_currency_evidence(({"plain": text},)),
     )
 
 
@@ -171,14 +217,52 @@ def _extract_pdf_document(
     collected: list[str] = []
     character_count = 0
     truncated = page_count > page_limit
+    currency_pages: list[Mapping[str, str]] = []
     for page_number in range(page_limit):
+        text_fragments: list[str] = []
+
+        def collect_text_fragment(
+            text: Any,
+            _current_transformation_matrix: Any,
+            _text_matrix: Any,
+            _font_dictionary: Any,
+            _font_size: Any,
+        ) -> None:
+            fragment = str(text or "").strip()
+            if fragment:
+                text_fragments.append(fragment)
+
         try:
-            page_text = str(reader.pages[page_number].extract_text() or "").strip()
+            page = reader.pages[page_number]
+            page_text = str(
+                page.extract_text(
+                    extraction_mode="plain",
+                    visitor_text=collect_text_fragment,
+                )
+                or ""
+            ).strip()
         except Exception as exc:
             raise DocumentReadError(
                 "pdf_text_extraction_failed",
                 f"Text extraction failed on PDF page {page_number + 1}.",
             ) from exc
+        # Layout extraction can recover separately positioned glyphs (including
+        # currency symbols), but it is a supplementary evidence mode.  A font
+        # or content-stream feature unsupported by layout mode must not discard
+        # text already extracted successfully by the ordinary safe parser.
+        try:
+            layout_text = str(page.extract_text(extraction_mode="layout") or "").strip()
+        except Exception:
+            layout_text = ""
+        currency_pages.append(
+            {
+                "plain": page_text,
+                "layout": layout_text,
+                "fragments": " ".join(text_fragments),
+            }
+        )
+        if not page_text and layout_text:
+            page_text = layout_text
         if not page_text:
             continue
         remaining = limits.max_extracted_characters - character_count
@@ -219,6 +303,7 @@ def _extract_pdf_document(
         page_count=page_count,
         truncated=truncated or len(chunks) > limits.max_chunks,
         warnings=(("Only the bounded leading pages were read.",) if truncated else ()),
+        currency_evidence=document_currency_evidence(currency_pages),
     )
 
 
@@ -494,7 +579,20 @@ class DocumentConnector(Connector):
                 )
             source_key = self.cache.source_key(provider, message_id, attachment_id)
             cached = await self.cache.get(principal_id=principal, source_key=source_key)
-            if cached is not None:
+            cached_document = cached.get("document") if isinstance(cached, Mapping) else None
+            currency_metadata = (
+                cached_document.get("currency_evidence")
+                if isinstance(cached_document, Mapping)
+                else None
+            )
+            # Older cache rows predate glyph/layout currency extraction. Raw
+            # bytes are deliberately not cached, so one provider read upgrades
+            # that immutable extraction; subsequent reads remain cache hits.
+            if (
+                cached is not None
+                and isinstance(currency_metadata, Mapping)
+                and int(currency_metadata.get("version") or 0) >= 1
+            ):
                 return ConnectorResult.succeeded({**cached, "cache_hit": True})
             result = await self._run(
                 read_capability,

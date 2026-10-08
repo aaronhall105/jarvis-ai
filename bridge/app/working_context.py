@@ -98,8 +98,32 @@ _EVIDENCE_UNITS = {
     "hours": "hours",
     "minute": "minutes",
     "minutes": "minutes",
+    "second": "seconds",
+    "seconds": "seconds",
     "page": "pages",
     "pages": "pages",
+    "percent": "%",
+    "percentage": "%",
+    "kwh": "kWh",
+    "wh": "Wh",
+    "kw": "kW",
+    "kilowatt": "kW",
+    "kilowatts": "kW",
+    "celsius": "°C",
+    "fahrenheit": "°F",
+    "kg": "kg",
+    "kilogram": "kg",
+    "kilograms": "kg",
+    "gram": "g",
+    "grams": "g",
+    "lb": "lb",
+    "lbs": "lb",
+    "mile": "miles",
+    "miles": "miles",
+    "kilometre": "km",
+    "kilometres": "km",
+    "kilometer": "km",
+    "kilometers": "km",
 }
 
 
@@ -279,7 +303,7 @@ def reference_query(text: str, *, object_types: Sequence[str] = ()) -> Reference
         provider = "microsoft_outlook"
     elif "gmail" in word_set or "google" in word_set:
         provider = "google_gmail"
-    plural = bool(word_set & {"them", "those", "these", "both", "all"})
+    plural = bool(word_set & {"them", "those", "these", "both", "all", "rest", "others"})
     require_current = bool(word_set & {"still", "currently", "now"})
     relation_key = None
     for marker in ("her", "his", "their", "hers", "theirs", "its"):
@@ -338,6 +362,18 @@ def reference_query(text: str, *, object_types: Sequence[str] = ()) -> Reference
         metric_operator=metric_operator,
         metric_value=metric_value,
     )
+
+
+def grounded_set_reference_requested(text: str) -> bool:
+    """Return whether the user grammatically refers to an existing result set.
+
+    This is an authority guard, not an intent router: the model still proposes
+    the semantic action. Universal requests such as ``all lights`` deliberately
+    do not qualify without a deictic/relative reference to grounded context.
+    """
+
+    words = set(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
+    return bool(words & {"them", "those", "these", "both", "rest", "others", "ones"})
 
 
 def classify_context_followup(text: str) -> ContextFollowUp | None:
@@ -1412,13 +1448,63 @@ class WorkingContextService:
 
 
 @dataclass(frozen=True, slots=True)
+class CurrencyEvidence:
+    """Redaction-safe provenance for one grounded currency decision."""
+
+    currency: str | None
+    source: str
+    verified: bool
+    ambiguous: bool = False
+    currencies: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "currency": self.currency,
+            "source": self.source,
+            "verified": self.verified,
+            "ambiguous": self.ambiguous,
+            "currencies": list(self.currencies),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GroundedScalar:
+    """A measured value whose unit and source remain attached to its evidence."""
+
+    value: Decimal | str
+    display_value: str
+    semantic_type: str
+    evidence_status: str
+    evidence_quote: str | None = None
+    unit: str | None = None
+    currency: str | None = None
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        value = format(self.value, "f") if isinstance(self.value, Decimal) else self.value
+        return {
+            "value": value,
+            "display_value": self.display_value,
+            "semantic_type": self.semantic_type,
+            "evidence_status": self.evidence_status,
+            "evidence_quote": self.evidence_quote,
+            "unit": self.unit,
+            "currency": self.currency,
+            "provenance": _safe_value(self.provenance),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MoneyValue:
     """A grounded monetary amount with optional ISO currency evidence."""
 
     amount: Decimal
     currency: str | None = None
+    currency_evidence: CurrencyEvidence | None = None
 
-    def as_dict(self) -> dict[str, str | None]:
+    def as_dict(self) -> dict[str, Any]:
+        # Keep the established compact MoneyValue contract; provenance is
+        # persisted beside it as ``currency_evidence`` on the grounded scalar.
         return {"amount": format(self.amount, "f"), "currency": self.currency}
 
 
@@ -1440,32 +1526,105 @@ def _currency_codes(text: str) -> set[str]:
     for code in _CURRENCY_SYMBOLS:
         if re.search(rf"(?i)\b{re.escape(code)}\b", text):
             codes.add(code)
+    if re.search(r"(?i)\b(?:pounds?|sterling)\b", text):
+        codes.add("GBP")
     return codes
 
 
-def _grounded_currency(selection: Mapping[str, Any], document: Mapping[str, Any]) -> str | None:
+def _currency_result(codes: set[str], source: str) -> CurrencyEvidence | None:
+    if not codes:
+        return None
+    ordered = tuple(sorted(codes))
+    if len(ordered) == 1:
+        return CurrencyEvidence(ordered[0], source, True, currencies=ordered)
+    return CurrencyEvidence(None, "ambiguous", False, ambiguous=True, currencies=ordered)
+
+
+def _normalised_evidence_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _selection_chunks(
+    selection: Mapping[str, Any], document: Mapping[str, Any]
+) -> list[Mapping[str, Any]]:
+    chunks = [
+        item
+        for item in document.get("text_chunks") or ()
+        if isinstance(item, Mapping) and str(item.get("text") or "").strip()
+    ]
+    quote = _normalised_evidence_text(selection.get("evidence_quote"))
+    value = _normalised_evidence_text(selection.get("value"))
+    exact = [
+        item for item in chunks if quote and quote in _normalised_evidence_text(item.get("text"))
+    ]
+    if exact:
+        return exact
+    return [
+        item for item in chunks if value and value in _normalised_evidence_text(item.get("text"))
+    ]
+
+
+def _grounded_currency_evidence(
+    selection: Mapping[str, Any], document: Mapping[str, Any]
+) -> CurrencyEvidence:
     local_evidence = " ".join(str(selection.get(key) or "") for key in ("value", "evidence_quote"))
-    local_codes = _currency_codes(local_evidence)
-    if local_codes:
-        return next(iter(local_codes)) if len(local_codes) == 1 else None
+    resolved = _currency_result(_currency_codes(local_evidence), "field")
+    if resolved is not None:
+        return resolved
+
+    matching_chunks = _selection_chunks(selection, document)
+    nearby_codes: set[str] = set()
+    for chunk in matching_chunks:
+        lines = str(chunk.get("text") or "").splitlines()
+        value = _normalised_evidence_text(selection.get("value"))
+        for index, line in enumerate(lines):
+            if value and value in _normalised_evidence_text(line):
+                nearby_codes.update(
+                    _currency_codes("\n".join(lines[max(0, index - 1) : index + 2]))
+                )
+    resolved = _currency_result(nearby_codes, "nearby")
+    if resolved is not None:
+        return resolved
+
+    structured = document.get("currency_evidence")
+    if isinstance(structured, Mapping):
+        selected_pages = {
+            str(item.get("page")) for item in matching_chunks if item.get("page") is not None
+        }
+        page_map = structured.get("page_currencies")
+        if isinstance(page_map, Mapping) and selected_pages:
+            page_codes = {
+                str(code).upper()
+                for page in selected_pages
+                for code in (page_map.get(page) or ())
+                if str(code).upper() in _CURRENCY_SYMBOLS
+            }
+            resolved = _currency_result(page_codes, "page")
+            if resolved is not None:
+                return resolved
 
     metadata_codes = {
         str(document.get(key) or "").strip().upper()
         for key in ("currency", "currency_code")
         if str(document.get(key) or "").strip().upper() in _CURRENCY_SYMBOLS
     }
-    if metadata_codes:
-        return next(iter(metadata_codes)) if len(metadata_codes) == 1 else None
+    if isinstance(structured, Mapping):
+        metadata_codes.update(
+            str(item).upper()
+            for item in structured.get("currencies") or ()
+            if str(item).upper() in _CURRENCY_SYMBOLS
+        )
 
     chunks = "\n".join(
         str(item.get("text") or "")
         for item in document.get("text_chunks") or ()
         if isinstance(item, Mapping)
     )
-    document_codes = _currency_codes(chunks or str(document.get("text_content") or ""))
-    if len(document_codes) == 1:
-        return next(iter(document_codes))
-    return None
+    document_codes = metadata_codes | _currency_codes(
+        chunks or str(document.get("text_content") or "")
+    )
+    resolved = _currency_result(document_codes, "document")
+    return resolved or CurrencyEvidence(None, "unknown", False)
 
 
 def _semantic_document_field(selection: Mapping[str, Any], question: str) -> str:
@@ -1513,6 +1672,12 @@ def _document_unit(selection: Mapping[str, Any]) -> str | None:
     evidence = " ".join(
         str(selection.get(key) or "") for key in ("label", "value", "evidence_quote")
     ).casefold()
+    if "%" in evidence:
+        return "%"
+    if re.search(r"(?:°\s*c|\bdegrees?\s+c\b)", evidence):
+        return "°C"
+    if re.search(r"(?:°\s*f|\bdegrees?\s+f\b)", evidence):
+        return "°F"
     tokens = re.findall(r"[a-z]+", evidence)
     for token in tokens:
         if token in _EVIDENCE_UNITS:
@@ -1554,7 +1719,8 @@ class ResultIntelligence:
         label = " ".join(str(selection.get("label") or "The value").split()).rstrip(":")
         raw_value = " ".join(str(selection.get("value") or "").split())
         semantic_field = _semantic_document_field(selection, question)
-        currency = _grounded_currency(selection, document)
+        currency_evidence = _grounded_currency_evidence(selection, document)
+        currency = currency_evidence.currency if currency_evidence.verified else None
         amount = _decimal_value(raw_value)
         supplied_kind = str(selection.get("value_kind") or "").strip().casefold()
         if supplied_kind not in _VALUE_KINDS:
@@ -1572,7 +1738,7 @@ class ResultIntelligence:
         elif amount is not None:
             rendered_value = _format_decimal(amount)
             if unit:
-                rendered_value += f" {unit}"
+                rendered_value += unit if unit in {"%", "°C", "°F"} else f" {unit}"
         else:
             rendered_value = raw_value
 
@@ -1603,6 +1769,7 @@ class ResultIntelligence:
             "metric": metric,
             "evidence_quote": selection.get("evidence_quote"),
             "evidence_status": "verified",
+            "currency_evidence": currency_evidence.as_dict(),
         }
         if amount is not None:
             result["numeric_value"] = float(amount)
@@ -1611,7 +1778,25 @@ class ResultIntelligence:
         if unit:
             result["unit"] = unit
         if value_kind == "money" and amount is not None:
-            result["money"] = MoneyValue(amount=amount, currency=currency).as_dict()
+            result["money"] = MoneyValue(
+                amount=amount,
+                currency=currency,
+                currency_evidence=currency_evidence,
+            ).as_dict()
+        scalar_value: Decimal | str = amount if amount is not None else raw_value
+        result["scalar"] = GroundedScalar(
+            value=scalar_value,
+            display_value=rendered_value,
+            semantic_type=("money" if value_kind == "money" else semantic_field),
+            evidence_status="verified",
+            evidence_quote=str(selection.get("evidence_quote") or "") or None,
+            unit=unit,
+            currency=currency,
+            provenance={
+                "source_label": label,
+                "currency_evidence": currency_evidence.as_dict(),
+            },
+        ).as_dict()
         return result
 
     @staticmethod
@@ -1825,7 +2010,9 @@ class ResultIntelligence:
 __all__ = [
     "ContextObject",
     "ContextFollowUp",
+    "CurrencyEvidence",
     "EvidenceStatus",
+    "GroundedScalar",
     "MoneyValue",
     "ReferenceQuery",
     "ReferenceResolution",
@@ -1840,6 +2027,7 @@ __all__ = [
     "classify_context_followup",
     "common_numeric_metric",
     "format_money",
+    "grounded_set_reference_requested",
     "principal_from_conversation",
     "reference_query",
     "tool_call_projection",

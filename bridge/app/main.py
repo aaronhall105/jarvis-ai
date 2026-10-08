@@ -1491,6 +1491,10 @@ def _document_metric_metadata(fact: Mapping[str, Any]) -> dict[str, object]:
             output["unit"] = unit
     if isinstance(fact.get("money"), Mapping):
         output["money"] = dict(fact["money"])
+    if isinstance(fact.get("currency_evidence"), Mapping):
+        output["currency_evidence"] = dict(fact["currency_evidence"])
+    if isinstance(fact.get("scalar"), Mapping):
+        output["scalar"] = dict(fact["scalar"])
     return output
 
 
@@ -1706,6 +1710,7 @@ async def _read_grounded_document(
             "page_count": raw_document.get("page_count"),
             "truncated": raw_document.get("truncated"),
             "fingerprint_sha256": raw_document.get("fingerprint_sha256"),
+            "document_currency_evidence": raw_document.get("currency_evidence"),
             **fact_metadata,
         },
         relations={
@@ -1727,8 +1732,10 @@ async def _read_grounded_document(
                 "value_kind": fact.get("value_kind"),
                 "numeric_value": fact.get("numeric_value"),
                 "currency": fact.get("currency"),
+                "currency_evidence": fact.get("currency_evidence"),
                 "unit": fact.get("unit"),
                 "money": fact.get("money"),
+                "scalar": fact.get("scalar"),
                 "evidence_quote": selection.get("evidence_quote"),
                 "evidence_status": "verified",
                 "observed_at": datetime.now(timezone.utc).isoformat(),

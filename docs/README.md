@@ -27,6 +27,7 @@ release instructions apply only to `jarvis/unified-production`.
 - [Self-improvement](SELF_IMPROVEMENT.md)
 - [Proactive orchestrator](PROACTIVE_ORCHESTRATOR.md)
 - [Temporal action engine](TEMPORAL_ACTION_ENGINE.md)
+- [Whole-home intelligence](WHOLE_HOME_INTELLIGENCE.md)
 - [Subject-aware memory](SUBJECT_AWARE_MEMORY.md)
 - [Subject memory retrieval](SUBJECT_MEMORY_RETRIEVAL.md)
 - [Voice identity](VOICE_ID.md)

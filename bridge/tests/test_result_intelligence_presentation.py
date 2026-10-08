@@ -131,6 +131,77 @@ def test_unknown_currency_is_not_invented() -> None:
     assert fact["response"] == "Your net pay was 2,544.76."
     assert fact["money"] == {"amount": "2544.76", "currency": None}
     assert all(symbol not in str(fact["response"]) for symbol in "£$€")
+    assert fact["currency_evidence"]["source"] == "unknown"
+    assert fact["scalar"]["currency"] is None
+
+
+def test_page_extraction_currency_evidence_survives_split_glyph_text() -> None:
+    document = _document("NET PAY 2,544.76")
+    document["currency_evidence"] = {
+        "version": 1,
+        "currency": "GBP",
+        "currencies": ["GBP"],
+        "source": "document",
+        "verified": True,
+        "ambiguous": False,
+        "page_currencies": {"1": ["GBP"]},
+        "extraction_modes": ["layout"],
+    }
+    fact = ResultIntelligence.document_fact(
+        question="How much did I get?",
+        selection=_selection(
+            label="NET PAY",
+            value="2,544.76",
+            quote="NET PAY 2,544.76",
+            semantic_field="net_pay",
+            value_kind="money",
+        ),
+        document=document,
+    )
+
+    assert fact["response"] == "Your net pay was £2,544.76."
+    assert fact["currency_evidence"]["source"] == "page"
+    assert fact["scalar"]["currency"] == "GBP"
+
+
+def test_document_currency_conflict_stays_unknown_but_exact_field_wins() -> None:
+    document = _document("Currency GBP\nAmount 100.00\nTravel reimbursement USD 100.00")
+    document["currency_evidence"] = {
+        "version": 1,
+        "currency": None,
+        "currencies": ["GBP", "USD"],
+        "source": "ambiguous",
+        "verified": False,
+        "ambiguous": True,
+        "page_currencies": {"1": ["GBP", "USD"]},
+    }
+    ambiguous = ResultIntelligence.document_fact(
+        question="What was the amount?",
+        selection=_selection(
+            label="Amount",
+            value="100.00",
+            quote="Amount 100.00",
+            semantic_field="monetary_amount",
+            value_kind="money",
+        ),
+        document=document,
+    )
+    exact = ResultIntelligence.document_fact(
+        question="What was the reimbursement?",
+        selection=_selection(
+            label="Travel reimbursement",
+            value="USD 100.00",
+            quote="Travel reimbursement USD 100.00",
+            semantic_field="monetary_amount",
+            value_kind="money",
+        ),
+        document=document,
+    )
+
+    assert ambiguous["currency_evidence"]["ambiguous"] is True
+    assert ambiguous["money"]["currency"] is None
+    assert exact["money"]["currency"] == "USD"
+    assert exact["currency_evidence"]["source"] == "field"
 
 
 def test_usd_and_eur_are_grounded_from_local_evidence() -> None:
@@ -194,6 +265,41 @@ def test_non_money_measurement_does_not_gain_currency_formatting() -> None:
 
     assert fact["response"] == "Overtime Hours was 6.5 hours."
     assert all(symbol not in str(fact["response"]) for symbol in "£$€")
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "quote", "expected", "unit"),
+    (
+        ("Efficiency", "87", "Efficiency 87%", "Efficiency was 87%.", "%"),
+        ("Energy Used", "12.5", "Energy Used 12.5 kWh", "Energy Used was 12.5 kWh.", "kWh"),
+        ("Temperature", "21.5", "Temperature 21.5 °C", "Temperature was 21.5°C.", "°C"),
+        ("Distance", "3.2", "Distance 3.2 miles", "Distance was 3.2 miles.", "miles"),
+    ),
+)
+def test_grounded_scalar_preserves_generic_measurement_units(
+    label: str,
+    value: str,
+    quote: str,
+    expected: str,
+    unit: str,
+) -> None:
+    fact = ResultIntelligence.document_fact(
+        question=f"What was the {label}?",
+        selection=_selection(
+            label=label,
+            value=value,
+            quote=quote,
+            semantic_field="measurement",
+            value_kind="number",
+        ),
+        document=_document(quote),
+    )
+
+    assert fact["response"] == expected
+    assert fact["scalar"]["value"] == value
+    assert fact["scalar"]["display_value"] in expected
+    assert fact["scalar"]["unit"] == unit
+    assert fact["scalar"]["currency"] is None
 
 
 def _comparison(currency_a: str | None, currency_b: str | None) -> tuple[dict, list]:

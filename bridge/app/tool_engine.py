@@ -5,6 +5,7 @@ from typing import Any
 
 from app.device_resolver import DeviceResolver
 from app.home_assistant import HomeAssistantClient, HomeAssistantError
+from app.home_intelligence import HomeIntelligenceEngine, HomeQueryPlan
 from app.presence import PresenceResolver
 from app.registry import RegistryEngine
 from app.tools.lights import LightsTool
@@ -207,6 +208,7 @@ class ToolEngine:
         "preset_mode",
         "source",
         "state_class",
+        "supported_features",
         "swing_mode",
         "temperature",
         "tilt_position",
@@ -236,6 +238,26 @@ class ToolEngine:
             registry=registry,
         )
         self.presence = PresenceResolver(self)
+        self.home_intelligence = HomeIntelligenceEngine(
+            area_loader=self.registry.areas,
+            state_loader=lambda: self.readable_entity_states(refresh=True),
+        )
+
+    async def query_home(self, plan: dict[str, Any]) -> dict[str, Any]:
+        """Execute a validated semantic set query over complete fresh HA state."""
+
+        semantic_plan = HomeQueryPlan.from_mapping(plan)
+        if semantic_plan.operation.value == "SNAPSHOT":
+            snapshot = await self.home_intelligence.snapshot()
+            return {
+                "success": True,
+                "query_plan": semantic_plan.as_dict(),
+                "snapshot": snapshot.as_dict(),
+                "observed_at": snapshot.observed_at,
+                "complete": True,
+            }
+        grounded = await self.home_intelligence.query(semantic_plan)
+        return grounded.as_result()
 
     async def entities_in_area(
         self,
@@ -805,6 +827,7 @@ class ToolEngine:
                     "attributes": attributes,
                     "last_changed": state_object.get("last_changed"),
                     "last_updated": state_object.get("last_updated"),
+                    "supported_features": raw_attributes.get("supported_features"),
                     "search_text": search_text,
                 }
             )
