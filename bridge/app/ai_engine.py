@@ -53,6 +53,7 @@ from app.response_presentation import (
     render_gmail_message_action,
     render_gmail_reply_status,
     render_home_state_evidence,
+    render_home_query_evidence,
     render_presence_evidence,
     technical_output_requested,
 )
@@ -65,6 +66,7 @@ from app.working_context import (
     ReferenceStatus,
     WorkingContextService,
     classify_context_followup,
+    grounded_set_reference_requested,
     reference_query,
 )
 
@@ -78,6 +80,7 @@ logger = logging.getLogger("jarvis-core.ai")
 _AUTHORITATIVE_ACTION_TOOLS = {
     "control_area_lights",
     "control_device",
+    "control_referenced_set",
     "run_media_shortcut",
     "run_home_routine",
     "control_media_player",
@@ -1794,6 +1797,37 @@ class AIEngine:
     ) -> list[dict[str, Any]]:
         definitions: list[dict[str, Any]] = []
 
+        definitions.append(
+            {
+                "type": "function",
+                "name": "control_referenced_set",
+                "description": (
+                    "Turn on or off the exact grounded light/switch result set from the "
+                    "previous Home Assistant query. Use ALL for 'those/them'; use "
+                    "REST_EXCLUDING with natural names only when the user explicitly says "
+                    "to leave members out. This tool cannot target entities outside the "
+                    "principal's current conversation result set."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["turn_on", "turn_off"]},
+                        "selection": {
+                            "type": "string",
+                            "enum": ["ALL", "REST_EXCLUDING"],
+                        },
+                        "exclude_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["action", "selection", "exclude_names"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        )
+
         areas = await self._area_options()
         local_area = actor.area_id or ""
         if areas:
@@ -2071,6 +2105,76 @@ class AIEngine:
             nullable_area_schema["enum"] = [*area_ids, None]
 
         definitions: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "name": "query_home",
+                "description": (
+                    "Evaluate a complete grounded set of current Home Assistant entities. "
+                    "Use this instead of name search for whole-home or room-wide questions "
+                    "such as which lights are on, devices unavailable, who is home, what is "
+                    "running, or a concise house status. This is set-oriented: it never "
+                    "chooses one best entity. Use REFERENCED_ENTITY_SET for questions about "
+                    "the exact grounded set from the prior turn, such as which of those are "
+                    "still on; Core supplies and revalidates the identities. Use SNAPSHOT only "
+                    "for a house-status summary. For a household presence overview, query the "
+                    "people category with ANY so home and away states remain distinct. "
+                    f"Available areas: {area_descriptions or 'none configured'}."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string", "enum": ["QUERY", "SNAPSHOT"]},
+                        "scope": {
+                            "type": "string",
+                            "enum": ["HOME", "AREA", "REFERENCED_ENTITY_SET"],
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "devices",
+                                "lights",
+                                "switches",
+                                "cameras",
+                                "people",
+                                "media",
+                                "climate",
+                                "locks",
+                                "appliances",
+                                "battery",
+                                "security",
+                            ],
+                        },
+                        "predicate": {
+                            "type": "string",
+                            "enum": [
+                                "ANY",
+                                "ON",
+                                "OFF",
+                                "ACTIVE",
+                                "AVAILABLE",
+                                "UNAVAILABLE",
+                                "HOME",
+                                "AWAY",
+                            ],
+                        },
+                        "aggregation": {
+                            "type": "string",
+                            "enum": ["LIST", "COUNT", "SUMMARY"],
+                        },
+                        "area_id": nullable_area_schema,
+                    },
+                    "required": [
+                        "operation",
+                        "scope",
+                        "category",
+                        "predicate",
+                        "aggregation",
+                        "area_id",
+                    ],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
             {
                 "type": "function",
                 "name": "inspect_presence",
@@ -2832,6 +2936,202 @@ class AIEngine:
                     "result": result,
                 }
 
+            if name == "control_referenced_set":
+                if not grounded_set_reference_requested(user_text):
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "explicit_grounded_set_reference_required",
+                        (
+                            "That action is too broad for the current grounded set. "
+                            "Refer to the prior results explicitly or name a safe target."
+                        ),
+                    )
+                action = str(arguments.get("action") or "")
+                selection = str(arguments.get("selection") or "")
+                raw_exclusions = arguments.get("exclude_names")
+                exclusions = [
+                    _normalise_space(str(item))
+                    for item in (
+                        raw_exclusions
+                        if isinstance(raw_exclusions, Sequence)
+                        and not isinstance(raw_exclusions, (str, bytes))
+                        else ()
+                    )
+                    if _normalise_space(str(item))
+                ]
+                if action not in {"turn_on", "turn_off"} or selection not in {
+                    "ALL",
+                    "REST_EXCLUDING",
+                }:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_set_action",
+                        "That referenced-set action is not supported.",
+                    )
+                reference_started = time.monotonic()
+                resolution = await WorkingContextService(self.dialogue).resolve(
+                    principal_id=actor.user_key,
+                    conversation_id=conversation_id,
+                    query=reference_query("all those", object_types=("device",)),
+                )
+                runtime_metrics.observe(
+                    "home_reference_resolution_ms",
+                    (time.monotonic() - reference_started) * 1000,
+                )
+                if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "missing_grounded_set",
+                        "There is no current grounded device set to control.",
+                    )
+                selected = list(resolution.objects)
+                if selection == "REST_EXCLUDING":
+                    if not exclusions:
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "missing_set_exclusion",
+                            "The excluded member of the grounded set is required.",
+                        )
+                    excluded_ids: set[str] = set()
+                    for exclusion in exclusions:
+                        wanted = self._normalise_device_phrase(exclusion)
+                        matches = []
+                        for item in selected:
+                            metadata = item.metadata
+                            candidates = {
+                                self._normalise_device_phrase(item.display_name),
+                                self._normalise_device_phrase(str(metadata.get("area_name") or "")),
+                                *(self._normalise_device_phrase(alias) for alias in item.aliases),
+                            }
+                            if wanted and any(
+                                candidate
+                                and (
+                                    wanted == candidate
+                                    or wanted in candidate
+                                    or candidate in wanted
+                                )
+                                for candidate in candidates
+                            ):
+                                matches.append(item)
+                        if len(matches) != 1:
+                            return self._tool_failure(
+                                name,
+                                arguments,
+                                "ambiguous_set_exclusion",
+                                f"I couldn’t uniquely match {exclusion} within that grounded set.",
+                            )
+                        excluded_ids.add(str(matches[0].canonical_id or ""))
+                    selected = [
+                        item
+                        for item in selected
+                        if str(item.canonical_id or "") not in excluded_ids
+                    ]
+                frozen_ids = tuple(
+                    str(item.canonical_id or "")
+                    for item in selected
+                    if item.provider == "home_assistant" and item.canonical_id
+                )
+                if not frozen_ids or len(frozen_ids) != len(selected):
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_grounded_set",
+                        "The grounded set no longer has exact Home Assistant identities.",
+                    )
+                if len(frozen_ids) > 50:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "referenced_set_too_large",
+                        "That grounded set is too large for one safe control operation.",
+                    )
+                controllable = {
+                    str(item.get("entity_id") or ""): item
+                    for item in await self.tools.controllable_devices()
+                }
+                if any(
+                    entity_id not in controllable
+                    or str(controllable[entity_id].get("domain") or "")
+                    not in self.tools.SAFE_CONTROL_DOMAINS
+                    for entity_id in frozen_ids
+                ):
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "stale_or_unsupported_grounded_set",
+                        "One or more referenced devices no longer exists or is not safely controllable.",
+                    )
+                semaphore = asyncio.Semaphore(4)
+
+                async def execute_member(entity_id: str) -> dict[str, Any]:
+                    async with semaphore:
+                        return await self._execute_registered_home_action(
+                            capability_id="homeassistant.control",
+                            operation="control_device",
+                            arguments={"entity_id": entity_id, "action": action},
+                            conversation_id=conversation_id,
+                            actor=actor,
+                            request_id=request_id,
+                            target=entity_id,
+                        )
+
+                raw_results = await asyncio.gather(
+                    *(execute_member(entity_id) for entity_id in frozen_ids),
+                    return_exceptions=True,
+                )
+                outcomes: list[dict[str, Any]] = []
+                for entity_id, raw_result in zip(frozen_ids, raw_results):
+                    if isinstance(raw_result, BaseException):
+                        outcomes.append(
+                            {"entity_id": entity_id, "success": False, "verified": False}
+                        )
+                    else:
+                        outcomes.append(dict(raw_result))
+                verified = [item for item in outcomes if item.get("verified") is True]
+                unknown = [
+                    item
+                    for item in outcomes
+                    if item.get("verified") is not True
+                    and (
+                        str(item.get("execution_status") or "")
+                        in {"outcome_unknown", "accepted_unverified"}
+                        or (item.get("accepted") is True and item.get("success") is not True)
+                    )
+                ]
+                unknown_ids = {id(item) for item in unknown}
+                failed = [
+                    item
+                    for item in outcomes
+                    if item.get("verified") is not True and id(item) not in unknown_ids
+                ]
+                target_state = "on" if action == "turn_on" else "off"
+                if len(verified) == len(outcomes):
+                    response = f"I turned all {len(outcomes)} referenced devices {target_state}."
+                else:
+                    response = (
+                        f"I confirmed {len(verified)} of {len(outcomes)} devices {target_state}. "
+                        f"{len(failed)} failed and {len(unknown)} had an unknown outcome."
+                    )
+                result = {
+                    "success": len(verified) == len(outcomes),
+                    "verified": len(verified) == len(outcomes),
+                    "complete": len(verified) == len(outcomes),
+                    "target_state": target_state,
+                    "requested_count": len(frozen_ids),
+                    "attempted_count": len(outcomes),
+                    "verified_count": len(verified),
+                    "failed_count": len(failed),
+                    "unknown_count": len(unknown),
+                    "requested_entity_ids": list(frozen_ids),
+                    "outcomes": outcomes,
+                    "response_message": response,
+                }
+                return {"tool": name, "arguments": arguments, "result": result}
+
             if name == "control_area_lights":
                 area_id = str(arguments.get("area_id", ""))
                 action = str(arguments.get("action", ""))
@@ -3088,6 +3388,75 @@ class AIEngine:
                     actor=actor,
                     request_id=request_id,
                     target=target,
+                )
+                return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "query_home":
+                plan: dict[str, Any] = {
+                    "operation": str(arguments.get("operation") or "QUERY").upper(),
+                    "scope": str(arguments.get("scope") or "HOME").upper(),
+                    "category": str(arguments.get("category") or "devices").casefold(),
+                    "predicate": str(arguments.get("predicate") or "ANY").upper(),
+                    "aggregation": str(arguments.get("aggregation") or "LIST").upper(),
+                    "area_id": (str(arguments["area_id"]) if arguments.get("area_id") else None),
+                }
+                if plan["scope"] == "REFERENCED_ENTITY_SET":
+                    if not grounded_set_reference_requested(user_text):
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "explicit_grounded_set_reference_required",
+                            "That read did not explicitly refer to the prior grounded set.",
+                        )
+                    reference_started = time.monotonic()
+                    resolution = await WorkingContextService(self.dialogue).resolve(
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        query=reference_query(
+                            user_text,
+                            object_types=("device", "person"),
+                        ),
+                    )
+                    runtime_metrics.observe(
+                        "home_reference_resolution_ms",
+                        (time.monotonic() - reference_started) * 1000,
+                    )
+                    if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "missing_grounded_set",
+                            "There is no current grounded Home Assistant set to query.",
+                        )
+                    entity_ids = tuple(
+                        str(item.canonical_id or "")
+                        for item in resolution.objects
+                        if item.provider == "home_assistant" and item.canonical_id
+                    )
+                    if len(entity_ids) != len(resolution.objects):
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "invalid_grounded_set",
+                            "The referenced set no longer has exact Home Assistant identities.",
+                        )
+                    plan["entity_ids"] = entity_ids
+                    plan["reference_result_set_id"] = resolution.result_set_id
+                valid_area_ids = {area["area_id"] for area in await self._area_options()}
+                if plan["scope"] == "AREA" and plan["area_id"] not in valid_area_ids:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "unknown_area",
+                        f"Unknown Home Assistant area: {plan['area_id']}",
+                    )
+                result = await self._execute_registered_home_read(
+                    operation="query_home",
+                    arguments=plan,
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.query_home(plan),
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
@@ -3586,6 +3955,7 @@ class AIEngine:
                 for call in calls
                 if call.get("tool")
                 in {
+                    "query_home",
                     "search_entity_states",
                     "list_area_states",
                     "get_entity_state",
@@ -3613,7 +3983,7 @@ class AIEngine:
                 or "The requested action could not be completed."
             )
 
-        if name in {"search_entity_states", "list_area_states"}:
+        if name in {"query_home", "search_entity_states", "list_area_states"}:
             entities = result.get("entities", [])
             if not entities:
                 return "I couldn’t find a matching current Home Assistant state."
@@ -6188,6 +6558,7 @@ class AIEngine:
                 )
 
         interpretation_input = dialogue_resolution.rewritten_text or raw_user_text
+        semantic_routing_started = time.monotonic()
         understanding = await self.understanding.interpret(
             interpretation_input,
             history,
@@ -6636,6 +7007,63 @@ class AIEngine:
                 }
 
         decision = self.router.classify(user_text, history)
+
+        # The bounded understanding layer identifies the Home Assistant domain,
+        # while the model chooses a structured set plan.  A short room/category
+        # follow-up can continue only from the principal-scoped durable result
+        # set; a first-turn home question receives the same read-only semantic
+        # tool without adding a second model classification round trip.
+        if decision.intent is RequestIntent.GENERAL and understanding.house_relevant:
+            context = await WorkingContextService(self.dialogue).get(
+                principal_id=actor.user_key,
+                conversation_id=resolved_conversation_id,
+            )
+            result_sets = [
+                item for item in context.get("result_sets") or () if isinstance(item, Mapping)
+            ]
+            active_set_id = str(
+                (context.get("temporal_context") or {}).get("active_result_set_id") or ""
+            )
+            active_set = next(
+                (
+                    item
+                    for item in result_sets
+                    if str(item.get("result_set_id") or "") == active_set_id
+                ),
+                result_sets[0] if result_sets else None,
+            )
+            filters = active_set.get("filters") if isinstance(active_set, Mapping) else None
+            continuing_query = isinstance(filters, Mapping) and str(
+                filters.get("operation") or ""
+            ).upper() in {
+                "QUERY",
+                "SNAPSHOT",
+            }
+            decision = RoutingDecision(
+                intent=RequestIntent.STATE_QUERY,
+                allow_home_read=True,
+                model_instruction=(
+                    (
+                        "Continue the previous grounded Home Assistant set query. Preserve its "
+                        "semantic category, predicate and aggregation unless the user changes "
+                        "them, and change only the explicitly requested scope. Call query_home; "
+                        "do not infer state from history."
+                    )
+                    if continuing_query
+                    else (
+                        "Interpret this home-state request as a structured set query. Use "
+                        "query_home for whole-home, area, availability, presence, active-device "
+                        "or house-status semantics. Let Core ground every area and entity; do "
+                        "not turn a set question into a single name search."
+                    )
+                ),
+                use_long_term_memory=False,
+            )
+        if understanding.house_relevant:
+            runtime_metrics.observe(
+                "home_semantic_routing_ms",
+                (time.monotonic() - semantic_routing_started) * 1000,
+            )
 
         code_awareness_requested = bool(
             actor.can_admin
@@ -8099,7 +8527,13 @@ class AIEngine:
         if reply_status_reply is not None:
             final_reply = reply_status_reply
 
-        if decision.intent == RequestIntent.STATE_QUERY:
+        home_query_reply = render_home_query_evidence(
+            completed_calls,
+            request_text=raw_user_text,
+        )
+        if home_query_reply is not None:
+            final_reply = home_query_reply
+        elif decision.intent == RequestIntent.STATE_QUERY:
             home_state_reply = render_home_state_evidence(
                 completed_calls,
                 request_text=raw_user_text,

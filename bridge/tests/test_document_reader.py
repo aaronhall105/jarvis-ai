@@ -17,10 +17,42 @@ from app.document_reader import (
     DocumentExtractionCache,
     DocumentLimits,
     DocumentReadError,
+    document_currency_evidence,
     exact_evidence_answer,
     extract_document,
     validate_model_evidence,
 )
+
+
+def test_currency_evidence_combines_plain_and_layout_pdf_extraction_modes() -> None:
+    evidence = document_currency_evidence(
+        (
+            {
+                "plain": "NET PAY 2,544.76",
+                "layout": "NET PAY     £     2,544.76",
+            },
+        )
+    )
+
+    assert evidence == {
+        "version": 1,
+        "currency": "GBP",
+        "currencies": ["GBP"],
+        "source": "document",
+        "verified": True,
+        "ambiguous": False,
+        "page_currencies": {"1": ["GBP"]},
+        "extraction_modes": ["layout"],
+    }
+
+
+def test_currency_evidence_marks_multiple_document_currencies_ambiguous() -> None:
+    evidence = document_currency_evidence(
+        ({"plain": "Currency GBP\nTravel reimbursement USD 100.00"},)
+    )
+    assert evidence["currency"] is None
+    assert evidence["ambiguous"] is True
+    assert evidence["currencies"] == ["GBP", "USD"]
 
 
 class _FakeRegistry:
@@ -74,6 +106,16 @@ def _document() -> dict:
         "evidence_status": "verified",
         "truncated": False,
         "warnings": [],
+        "currency_evidence": {
+            "version": 1,
+            "currency": "GBP",
+            "currencies": ["GBP"],
+            "source": "document",
+            "verified": True,
+            "ambiguous": False,
+            "page_currencies": {},
+            "extraction_modes": ["plain"],
+        },
     }
 
 
@@ -98,7 +140,7 @@ async def test_pdf_pages_keep_provenance_and_respect_limits(monkeypatch) -> None
         def __init__(self, text: str) -> None:
             self.text = text
 
-        def extract_text(self) -> str:
+        def extract_text(self, **_kwargs) -> str:
             return self.text
 
     class Reader:
@@ -119,10 +161,56 @@ async def test_pdf_pages_keep_provenance_and_respect_limits(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_optional_layout_failure_does_not_discard_plain_pdf_text(monkeypatch) -> None:
+    class Page:
+        def extract_text(self, **kwargs) -> str:
+            if kwargs.get("extraction_mode") == "layout":
+                raise RuntimeError("unsupported font layout")
+            return "NET PAY 2,544.76"
+
+    reader = SimpleNamespace(is_encrypted=False, pages=[Page()])
+    monkeypatch.setattr("app.document_reader.PdfReader", lambda *_args, **_kwargs: reader)
+
+    extraction = await extract_document(
+        b"%PDF-plain-safe",
+        filename="statement.pdf",
+        mime_type="application/pdf",
+    )
+
+    assert extraction.text_content == "NET PAY 2,544.76"
+    assert extraction.currency_evidence["currency"] is None
+
+
+@pytest.mark.asyncio
+async def test_pdf_text_fragments_can_recover_a_separate_currency_glyph(monkeypatch) -> None:
+    class Page:
+        def extract_text(self, **kwargs) -> str:
+            visitor = kwargs.get("visitor_text")
+            if visitor is not None:
+                visitor("NET PAY", None, None, None, None)
+                visitor("£", None, None, None, None)
+                visitor("2,544.76", None, None, None, None)
+            return "NET PAY 2,544.76"
+
+    reader = SimpleNamespace(is_encrypted=False, pages=[Page()])
+    monkeypatch.setattr("app.document_reader.PdfReader", lambda *_args, **_kwargs: reader)
+
+    extraction = await extract_document(
+        b"%PDF-split-glyph",
+        filename="statement.pdf",
+        mime_type="application/pdf",
+    )
+
+    assert extraction.currency_evidence["currency"] == "GBP"
+    assert extraction.currency_evidence["page_currencies"] == {"1": ["GBP"]}
+    assert "fragments" in extraction.currency_evidence["extraction_modes"]
+
+
+@pytest.mark.asyncio
 async def test_image_only_pdf_and_unsupported_archive_fail_truthfully(monkeypatch) -> None:
     reader = SimpleNamespace(
         is_encrypted=False,
-        pages=[SimpleNamespace(extract_text=lambda: "")],
+        pages=[SimpleNamespace(extract_text=lambda **_kwargs: "")],
     )
     monkeypatch.setattr("app.document_reader.PdfReader", lambda *_args, **_kwargs: reader)
 
@@ -178,7 +266,11 @@ async def test_document_connector_requires_selection_and_caches_per_principal(tm
         },
     )
     first = await connector.execute(capability, request)
-    second = await connector.execute(capability, request)
+    restarted = DocumentConnector(
+        registry=registry,
+        cache=DocumentExtractionCache(tmp_path / "documents.db"),
+    )
+    second = await restarted.execute(restarted.capabilities[1], request)
     amber = await connector.execute(
         capability,
         CapabilityRequest(

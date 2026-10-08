@@ -31,6 +31,39 @@ def _home_connector(*, tools: object, admin: object) -> HomeAssistantConnector:
 
 
 @pytest.mark.asyncio
+async def test_home_query_set_uses_registered_read_capability() -> None:
+    tools = SimpleNamespace(
+        query_home=AsyncMock(
+            return_value={
+                "success": True,
+                "complete": True,
+                "entities": [{"entity_id": "light.office", "state": "on"}],
+            }
+        )
+    )
+    connector = _home_connector(tools=tools, admin=SimpleNamespace())
+    capability = _capability(connector, "homeassistant.read")
+    payload = {
+        "scope": "HOME",
+        "category": "lights",
+        "predicate": "ON",
+        "aggregation": "LIST",
+    }
+
+    result = await connector.execute(
+        capability,
+        CapabilityRequest(
+            capability_id=capability.capability_id,
+            operation="query_home",
+            payload=payload,
+        ),
+    )
+
+    assert result.status is ProviderResultStatus.SUCCEEDED
+    tools.query_home.assert_awaited_once_with(payload)
+
+
+@pytest.mark.asyncio
 async def test_home_control_preserves_provider_acceptance_when_state_is_unverified() -> None:
     tools = SimpleNamespace(
         control_device=AsyncMock(

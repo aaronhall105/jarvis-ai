@@ -14,6 +14,9 @@ logger = logging.getLogger("jarvis-core.understanding")
 
 
 _HOME_WORDS = {
+    "device",
+    "devices",
+    "house",
     "light",
     "lights",
     "lamp",
@@ -63,6 +66,10 @@ _HOME_WORDS = {
     "announcement",
     "sensor",
     "occupancy",
+    "offline",
+    "unavailable",
+    "running",
+    "status",
 }
 
 _ROUTER_WORDS = {

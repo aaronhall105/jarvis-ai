@@ -2,6 +2,18 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha35 — whole-home intelligence and grounded measurements
+
+Alpha35 adds model-interpreted, deterministically grounded whole-home and room
+queries that preserve zero/one/many entity sets, durable conversational
+references, safe exact-set actions, and a reusable HomeSnapshot. It also keeps
+evidence-backed currency and measurement units attached through document
+extraction, WorkingContext, comparisons, and natural result presentation.
+
+See [the complete alpha35 release notes](docs/releases/CHANGES_V19_0_0_ALPHA35.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha34 — premium shared shell and persistent chat input
 
 Alpha34 gives Chat and Tasks one stable visual shell, a lighter Smart Inbox

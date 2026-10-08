@@ -80,6 +80,17 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.interpreted_text, "I want to be Samba")
         self.assertFalse(result.house_relevant)
 
+    async def test_whole_home_semantic_categories_reach_home_planning(self):
+        for text in (
+            "Which devices are offline?",
+            "What's running?",
+            "Who is home?",
+            "Give me a house status.",
+        ):
+            with self.subTest(text=text):
+                result = await self.engine.interpret(text, [], self.actor)
+                self.assertTrue(result.house_relevant)
+
     async def test_private_activity_not_changed(self):
         result = await self.engine.interpret("is she having a poo?", [], self.actor)
         self.assertEqual(result.interpreted_text.casefold(), "is she having a poo?")

@@ -245,6 +245,184 @@ def _entity_name(entity: Mapping[str, Any]) -> str:
     return name or "That device"
 
 
+def _natural_join(values: Sequence[str]) -> str:
+    cleaned = [str(value).strip() for value in values if str(value).strip()]
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def render_home_query_evidence(
+    calls: Sequence[Mapping[str, Any]],
+    *,
+    request_text: str,
+) -> str | None:
+    """Render one complete grounded home query without model-added entities."""
+
+    if technical_output_requested(request_text):
+        return None
+    call = next(
+        (
+            item
+            for item in reversed(calls)
+            if item.get("tool") == "query_home"
+            and isinstance(item.get("result"), Mapping)
+            and item["result"].get("success") is True
+        ),
+        None,
+    )
+    if call is None:
+        return None
+    result = call["result"]
+    plan = result.get("query_plan")
+    plan = plan if isinstance(plan, Mapping) else {}
+    operation = str(plan.get("operation") or "QUERY").upper()
+    if operation == "SNAPSHOT":
+        snapshot = result.get("snapshot")
+        if not isinstance(snapshot, Mapping):
+            return None
+        unavailable = [
+            item for item in snapshot.get("unavailable_entities") or () if isinstance(item, Mapping)
+        ]
+        people = [item for item in snapshot.get("people_home") or () if isinstance(item, Mapping)]
+        lights = [item for item in snapshot.get("lights_on") or () if isinstance(item, Mapping)]
+        media = [item for item in snapshot.get("active_media") or () if isinstance(item, Mapping)]
+        appliances = [
+            item for item in snapshot.get("running_appliances") or () if isinstance(item, Mapping)
+        ]
+        low_batteries = [
+            item for item in snapshot.get("low_batteries") or () if isinstance(item, Mapping)
+        ]
+        unlocked_locks = [
+            item for item in snapshot.get("unlocked_locks") or () if isinstance(item, Mapping)
+        ]
+        facts: list[str] = []
+        if unavailable:
+            names = _natural_join([_entity_name(item) for item in unavailable[:5]])
+            facts.append(
+                f"{names} is unavailable"
+                if len(unavailable) == 1
+                else f"{len(unavailable)} devices are unavailable: {names}"
+            )
+        if low_batteries:
+            names = _natural_join([_entity_name(item) for item in low_batteries[:5]])
+            facts.append(
+                f"{names} has a low battery"
+                if len(low_batteries) == 1
+                else f"{len(low_batteries)} devices have low batteries: {names}"
+            )
+        if unlocked_locks:
+            names = _natural_join([_entity_name(item) for item in unlocked_locks[:5]])
+            facts.append(
+                f"{names} is unlocked"
+                if len(unlocked_locks) == 1
+                else f"{len(unlocked_locks)} locks are unlocked: {names}"
+            )
+        if people:
+            facts.append(
+                f"{_natural_join([_entity_name(item) for item in people])} "
+                f"{'is' if len(people) == 1 else 'are'} home"
+            )
+        facts.append(
+            "all lights are off"
+            if not lights
+            else f"{len(lights)} {'light is' if len(lights) == 1 else 'lights are'} on"
+        )
+        if media:
+            facts.append(
+                f"{len(media)} media {'device is' if len(media) == 1 else 'devices are'} active"
+            )
+        if appliances:
+            facts.append(
+                f"{len(appliances)} {'appliance is' if len(appliances) == 1 else 'appliances are'} "
+                "running"
+            )
+        if not facts:
+            return "I couldn’t find any user-facing Home Assistant state to summarise."
+        attention_count = len(unavailable) + len(low_batteries)
+        if attention_count:
+            first, *rest = facts
+            prefix = (
+                "One thing needs attention: "
+                if attention_count == 1
+                else "A few things need attention: "
+            )
+            suffix = (" " + ", and ".join(rest).capitalize() + ".") if rest else ""
+            return prefix + first + "." + suffix
+        if unlocked_locks:
+            first, *rest = facts
+            suffix = (" " + ", and ".join(rest).capitalize() + ".") if rest else ""
+            return "One thing to note: " + first + "." + suffix
+        return "Everything looks normal. " + ", and ".join(facts).capitalize() + "."
+
+    category = str(result.get("category") or plan.get("category") or "devices").casefold()
+    predicate = str(result.get("predicate") or plan.get("predicate") or "ANY").upper()
+    area_name = str(result.get("area_name") or "").strip()
+    entities = [item for item in result.get("entities") or () if isinstance(item, Mapping)]
+    location = f" in the {area_name.lower()}" if area_name else ""
+    singular = {
+        "lights": "light",
+        "switches": "switch",
+        "cameras": "camera",
+        "people": "person",
+        "media": "media device",
+        "climate": "climate device",
+        "locks": "lock",
+        "appliances": "appliance",
+        "battery": "battery sensor",
+        "security": "security device",
+        "devices": "device",
+    }.get(category, "entity")
+    plural = {
+        "media": "media devices",
+        "battery": "battery sensors",
+        "security": "security devices",
+    }.get(category, category)
+
+    if not entities:
+        if predicate == "ON" and category == "lights":
+            return (
+                f"All lights{location} are off."
+                if not area_name
+                else f"The {area_name} lights are off."
+            )
+        if predicate == "UNAVAILABLE":
+            return f"No {plural}{location} are unavailable."
+        if predicate == "HOME" and category == "people":
+            return "No one is currently shown as home."
+        if predicate == "ACTIVE":
+            return f"No {plural}{location} are active."
+        return f"I found no matching {plural}{location}."
+
+    count = len(entities)
+    shown_names = [_entity_name(item) for item in entities[:6]]
+    names = _natural_join(shown_names)
+    if count > len(shown_names):
+        names += f", and {count - len(shown_names)} more"
+    if category == "people":
+        if predicate == "HOME":
+            return f"{names} {'is' if count == 1 else 'are'} home."
+        if predicate == "AWAY":
+            return f"{names} {'is' if count == 1 else 'are'} away."
+        statements = [
+            f"{_entity_name(item)} is "
+            f"{'away' if str(item.get('state')) == 'not_home' else item.get('state', 'unknown')}"
+            for item in entities
+        ]
+        return ". ".join(statements) + "."
+    if predicate == "UNAVAILABLE":
+        return f"{count} {singular if count == 1 else plural} {'is' if count == 1 else 'are'} unavailable: {names}."
+    if predicate == "ON":
+        return f"{count} {singular if count == 1 else plural} {'is' if count == 1 else 'are'} on{location}: {names}."
+    if predicate == "ACTIVE":
+        return f"{count} {singular if count == 1 else plural} {'is' if count == 1 else 'are'} active{location}: {names}."
+    return f"{count} matching {singular if count == 1 else plural}{location}: {names}."
+
+
 def render_home_state_evidence(
     calls: Sequence[Mapping[str, Any]],
     *,
@@ -582,6 +760,7 @@ __all__ = [
     "present_user_response",
     "render_gmail_reply_status",
     "render_gmail_message_action",
+    "render_home_query_evidence",
     "render_home_state_evidence",
     "render_presence_evidence",
     "technical_output_requested",
