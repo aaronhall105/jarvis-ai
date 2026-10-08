@@ -633,15 +633,15 @@ class ProactiveEngine:
                 "ON proactive_incidents(incident_key,status,last_seen DESC);"
                 "CREATE INDEX IF NOT EXISTS idx_proactive_incidents_entity_status "
                 "ON proactive_incidents(entity_id,status,last_seen DESC);"
-                "CREATE TABLE IF NOT EXISTS proactive_conditions ("
+                "CREATE TABLE IF NOT EXISTS proactive_home_conditions ("
                 " condition_key TEXT PRIMARY KEY, principal_id TEXT NOT NULL,"
                 " kind TEXT NOT NULL, subject_key TEXT NOT NULL, status TEXT NOT NULL,"
                 " first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,"
                 " qualified_at INTEGER, recovered_at INTEGER,"
                 " suppression_reason TEXT, evidence_json TEXT NOT NULL DEFAULT '{}',"
                 " notified_event_id TEXT);"
-                "CREATE INDEX IF NOT EXISTS idx_proactive_conditions_status "
-                "ON proactive_conditions(status,last_seen DESC);"
+                "CREATE INDEX IF NOT EXISTS idx_proactive_home_conditions_status "
+                "ON proactive_home_conditions(status,last_seen DESC);"
             )
             incident_columns = {
                 str(row[1])
@@ -802,7 +802,7 @@ class ProactiveEngine:
         principal = normalise_user(principal_id or self.home_principal)
         with self.connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM proactive_conditions WHERE principal_id=? "
+                "SELECT * FROM proactive_home_conditions WHERE principal_id=? "
                 "ORDER BY last_seen DESC LIMIT ?",
                 (principal, max(1, min(500, int(limit)))),
             ).fetchall()
@@ -882,11 +882,11 @@ class ProactiveEngine:
         }
         with self.connection() as connection:
             existing = connection.execute(
-                "SELECT 1 FROM proactive_conditions WHERE condition_key=?",
+                "SELECT 1 FROM proactive_home_conditions WHERE condition_key=?",
                 (key,),
             ).fetchone()
             connection.execute(
-                "INSERT INTO proactive_conditions("
+                "INSERT INTO proactive_home_conditions("
                 "condition_key,principal_id,kind,subject_key,status,first_seen,last_seen,"
                 "evidence_json) VALUES(?,?,'device_unavailable',?,'observed',?,?,?) "
                 "ON CONFLICT(condition_key) DO UPDATE SET last_seen=excluded.last_seen,"
@@ -901,7 +901,7 @@ class ProactiveEngine:
                 ),
             )
             row = connection.execute(
-                "SELECT * FROM proactive_conditions WHERE condition_key=?",
+                "SELECT * FROM proactive_home_conditions WHERE condition_key=?",
                 (key,),
             ).fetchone()
         if row is None:
@@ -919,7 +919,7 @@ class ProactiveEngine:
     ) -> None:
         with self.connection() as connection:
             connection.execute(
-                "UPDATE proactive_conditions SET status=?,last_seen=?,"
+                "UPDATE proactive_home_conditions SET status=?,last_seen=?,"
                 "qualified_at=CASE WHEN ?='qualified' THEN COALESCE(qualified_at,?) "
                 "ELSE qualified_at END,"
                 "recovered_at=CASE WHEN ? IN ('recovered','suppressed') THEN ? "
@@ -1053,7 +1053,7 @@ class ProactiveEngine:
 
             with self.connection() as connection:
                 row = connection.execute(
-                    "SELECT * FROM proactive_conditions WHERE condition_key=? "
+                    "SELECT * FROM proactive_home_conditions WHERE condition_key=? "
                     "AND status IN ('observed','qualified')",
                     (key,),
                 ).fetchone()
