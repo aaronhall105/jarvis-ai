@@ -92,6 +92,15 @@ public final class RoomDetailActivity extends Activity {
         appShell.newChat.setVisibility(View.GONE);
         appShell.clearChat.setVisibility(View.GONE);
         root.addView(appShell.view, matchWrap());
+        Button back = pillButton("‹ Back");
+        back.setContentDescription("Back to Home");
+        back.setOnClickListener(view -> finish());
+        LinearLayout backRow = new LinearLayout(this);
+        backRow.setPadding(dp(16), 0, dp(16), dp(6));
+        backRow.addView(back, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        root.addView(backRow, matchWrap());
         freshness = text("Loading room…", 13, JarvisUi.MID);
         freshness.setPadding(dp(16), 0, dp(16), dp(8));
         root.addView(freshness, matchWrap());
@@ -125,36 +134,91 @@ public final class RoomDetailActivity extends Activity {
         }
         freshness.setText(
             stale
-                ? "Offline · Last updated " + sourceTime(home, receivedAt)
+                ? "Offline · Updated " + sourceTime(home, receivedAt)
                 : "Updated " + TasksActivity.relativeTimeMillis(receivedAt)
         );
-        TextView title = text(room.optString("name", "Room"), 26, JarvisUi.BLACK);
+        TextView title = text(safe(room, "name", "Room"), 26, JarvisUi.BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         content.addView(title, matchWrap(0, dp(12)));
 
         LinearLayout occupancy = section("Occupancy");
-        addValue(occupancy, room.optString("occupancy_summary", "Occupancy unknown"));
-        JSONArray evidence = room.optJSONArray("occupancy_evidence");
-        if (evidence != null) {
-            for (int index = 0; index < evidence.length(); index++) {
-                JSONObject item = evidence.optJSONObject(index);
-                if (item != null) addPair(
-                    occupancy,
-                    item.optString("name", "Sensor"),
-                    natural(item.optString("state", "unknown"))
-                );
-            }
-        }
+        addValue(occupancy, safe(room, "occupancy_summary", "Occupancy unknown"));
+        String occupancyDetail = safe(room, "occupancy_detail", "");
+        if (!occupancyDetail.isBlank()) addValue(occupancy, occupancyDetail);
         content.addView(occupancy, matchWrap(0, dp(12)));
-        addEntities("Lights", room.optJSONArray("lights"), "state", false, stale);
-        addEntities("Cameras", room.optJSONArray("cameras"), "availability", true, stale);
-        addEntities("Devices", room.optJSONArray("devices"), "availability", false, stale);
+        addLights(room, stale || !home.actionsAllowed());
+        addCameras(room.optJSONArray("cameras"), stale);
         addEntities("Appliances", room.optJSONArray("appliances"), "state_label", false, stale);
         addEntities("Media", room.optJSONArray("media"), "state", false, stale);
         addEntities("Climate", room.optJSONArray("climate"), "display_value", false, stale);
+        addDeviceSummary(room.optJSONArray("devices"));
         addEvents(room.optJSONArray("recent_events"), stale);
-        addAction(room.optJSONArray("quick_actions"), stale || !home.actionsAllowed());
         addDiagnostics(room);
+    }
+
+    private void addLights(JSONObject room, boolean disabled) {
+        JSONArray values = room.optJSONArray("lights");
+        if (values == null || values.length() == 0) return;
+        LinearLayout card = section("Lights");
+        for (int index = 0; index < values.length(); index++) {
+            JSONObject item = values.optJSONObject(index);
+            if (item != null) addPair(
+                card,
+                safe(item, "name", "Light"),
+                natural(safe(item, "state", "unknown"))
+            );
+        }
+        JSONArray actions = room.optJSONArray("quick_actions");
+        JSONObject action = actions == null ? null : actions.optJSONObject(0);
+        if (action != null) card.addView(actionButton(action, disabled), matchWrap(dp(10), 0));
+        content.addView(card, matchWrap(0, dp(12)));
+    }
+
+    private void addCameras(JSONArray values, boolean stale) {
+        if (values == null || values.length() == 0) return;
+        LinearLayout card = section("Camera");
+        for (int index = 0; index < values.length(); index++) {
+            JSONObject item = values.optJSONObject(index);
+            if (item == null) continue;
+            LinearLayout row = pair(
+                safe(item, "name", "Camera"),
+                natural(safe(item, "availability", "unknown"))
+            );
+            String entityId = safe(item, "entity_id", "");
+            row.setClickable(true);
+            row.setFocusable(true);
+            row.setMinimumHeight(dp(JarvisUi.TOUCH_TARGET));
+            row.setOnClickListener(view -> startActivity(
+                new Intent(this, HomeDetailActivity.class)
+                    .putExtra(HomeDetailActivity.EXTRA_KIND, "camera")
+                    .putExtra(HomeDetailActivity.EXTRA_ID, entityId)
+                    .putExtra(HomeDetailActivity.EXTRA_STALE, stale)
+            ));
+            card.addView(row, matchWrap(dp(7), 0));
+            String person = natural(safe(item, "person_status", "UNKNOWN"));
+            String motion = natural(safe(item, "motion_status", "UNKNOWN"));
+            addValue(card, "Person: " + person + " · Motion: " + motion);
+        }
+        content.addView(card, matchWrap(0, dp(12)));
+    }
+
+    private void addDeviceSummary(JSONArray devices) {
+        if (devices == null || devices.length() == 0) return;
+        int available = 0;
+        int unavailable = 0;
+        int partial = 0;
+        for (int index = 0; index < devices.length(); index++) {
+            JSONObject device = devices.optJSONObject(index);
+            String state = safe(device, "availability", "UNKNOWN");
+            if ("UNAVAILABLE".equals(state)) unavailable++;
+            else if ("PARTIAL".equals(state)) partial++;
+            else available++;
+        }
+        LinearLayout card = section("Devices");
+        addValue(card, available + " available"
+            + (unavailable > 0 ? " · " + unavailable + " unavailable" : "")
+            + (partial > 0 ? " · " + partial + " partial" : ""));
+        content.addView(card, matchWrap(0, dp(12)));
     }
 
     private void addEntities(
@@ -169,10 +233,10 @@ public final class RoomDetailActivity extends Activity {
         for (int index = 0; index < values.length(); index++) {
             JSONObject item = values.optJSONObject(index);
             if (item == null) continue;
-            String state = item.optString(stateKey, item.optString("state", "Unknown"));
-            LinearLayout row = pair(item.optString("name", heading), natural(state));
+            String state = safe(item, stateKey, safe(item, "state", "Unknown"));
+            LinearLayout row = pair(safe(item, "name", heading), natural(state));
             if (camera) {
-                String entityId = item.optString("entity_id");
+                String entityId = safe(item, "entity_id", "");
                 row.setClickable(true);
                 row.setFocusable(true);
                 row.setMinimumHeight(dp(JarvisUi.TOUCH_TARGET));
@@ -195,10 +259,10 @@ public final class RoomDetailActivity extends Activity {
             JSONObject event = events.optJSONObject(index);
             if (event == null) continue;
             LinearLayout row = pair(
-                event.optString("title", "Home activity"),
-                event.optString("message", "")
+                safe(event, "title", "Home activity"),
+                safe(event, "message", "")
             );
-            String eventId = event.optString("event_id");
+            String eventId = safe(event, "event_id", "");
             row.setClickable(true);
             row.setFocusable(true);
             row.setMinimumHeight(dp(JarvisUi.TOUCH_TARGET));
@@ -213,29 +277,20 @@ public final class RoomDetailActivity extends Activity {
         content.addView(card, matchWrap(0, dp(12)));
     }
 
-    private void addAction(JSONArray actions, boolean disabled) {
-        if (actions == null || actions.length() == 0) return;
-        JSONObject action = actions.optJSONObject(0);
-        if (action == null) return;
-        Button button = new Button(this);
-        button.setAllCaps(false);
-        button.setText(action.optString("label", "Room action"));
-        button.setMinHeight(dp(JarvisUi.TOUCH_TARGET));
-        button.setBackground(JarvisUi.rounded(
-            this, JarvisUi.SOFT, JarvisUi.RADIUS_PILL, 1, JarvisUi.LINE
-        ));
+    private Button actionButton(JSONObject action, boolean disabled) {
+        Button button = pillButton(safe(action, "label", "Room action"));
         boolean enabled = !disabled && action.optBoolean("enabled", false);
         button.setEnabled(enabled);
         button.setAlpha(enabled ? 1f : 0.48f);
-        String actionId = action.optString("action_id");
+        String actionId = safe(action, "action_id", "");
         button.setOnClickListener(view -> {
             button.setEnabled(false);
             button.setText("Working…");
             client.execute(actionId, new HomeClient.ActionCallback() {
                 @Override public void onSuccess(JSONObject result) {
                     button.setText(
-                        natural(result.optString("status", "UNKNOWN")) + " · "
-                            + result.optString("message", "Action finished")
+                        natural(safe(result, "status", "UNKNOWN")) + " · "
+                            + safe(result, "message", "Action finished")
                     );
                 }
                 @Override public void onError(String message) {
@@ -244,34 +299,50 @@ public final class RoomDetailActivity extends Activity {
                 }
             });
         });
-        content.addView(button, matchWrap(0, dp(12)));
+        return button;
     }
 
     private void addDiagnostics(JSONObject room) {
-        Button toggle = new Button(this);
-        toggle.setAllCaps(false);
-        toggle.setText("Diagnostics");
-        toggle.setMinHeight(dp(JarvisUi.TOUCH_TARGET));
+        Button toggle = pillButton("Diagnostics");
         LinearLayout details = section("Technical details");
         details.setVisibility(View.GONE);
-        JSONArray groups = new JSONArray();
-        groups.put(room.optJSONArray("lights"));
-        groups.put(room.optJSONArray("cameras"));
-        for (int group = 0; group < groups.length(); group++) {
-            JSONArray values = groups.optJSONArray(group);
-            if (values == null) continue;
-            for (int index = 0; index < values.length(); index++) {
-                JSONObject item = values.optJSONObject(index);
-                if (item != null && !item.optString("entity_id").isBlank()) {
-                    addValue(details, item.optString("entity_id"));
-                }
-            }
-        }
+        JSONObject diagnostics = room.optJSONObject("diagnostics");
+        addDiagnosticGroup(details, "Occupancy evidence", diagnostics, "occupancy_evidence");
+        addDiagnosticGroup(details, "Raw entities", diagnostics, "raw_entities");
+        addDiagnosticGroup(details, "Camera sources", diagnostics, "camera_sources");
+        addDiagnosticGroup(details, "Light sources", diagnostics, "light_sources");
+        addDiagnosticGroup(details, "Control paths", diagnostics, "media_control_paths");
         toggle.setOnClickListener(view -> details.setVisibility(
             details.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE
         ));
         content.addView(toggle, matchWrap(0, dp(8)));
         content.addView(details, matchWrap(0, dp(12)));
+    }
+
+    private void addDiagnosticGroup(
+        LinearLayout details, String heading, JSONObject diagnostics, String key
+    ) {
+        if (diagnostics == null) return;
+        JSONArray values = diagnostics.optJSONArray(key);
+        if (values == null || values.length() == 0) return;
+        addValue(details, heading);
+        for (int index = 0; index < values.length(); index++) {
+            JSONObject item = values.optJSONObject(index);
+            if (item == null) continue;
+            String value = safe(item, "entity_id", safe(item, "name", ""));
+            if (value.isBlank()) value = safe(item, "primary_entity_id", "");
+            if (!value.isBlank()) addValue(details, value);
+            addDiagnosticIds(details, item.optJSONArray("alternate_entity_ids"));
+            addDiagnosticIds(details, item.optJSONArray("diagnostic_entity_ids"));
+        }
+    }
+
+    private void addDiagnosticIds(LinearLayout details, JSONArray values) {
+        if (values == null) return;
+        for (int index = 0; index < values.length(); index++) {
+            String value = safe(values, index);
+            if (!value.isBlank()) addValue(details, value);
+        }
     }
 
     private LinearLayout section(String heading) {
@@ -321,6 +392,31 @@ public final class RoomDetailActivity extends Activity {
         if (value == null || value.isBlank()) return "Unknown";
         String lower = value.replace('_', ' ').toLowerCase(java.util.Locale.ROOT);
         return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
+    }
+
+    private static String safe(JSONObject value, String key, String fallback) {
+        return HomeExperience.text(value, key, fallback);
+    }
+
+    private static String safe(JSONArray values, int index) {
+        String value = values.optString(index, "").trim();
+        String lower = value.toLowerCase(java.util.Locale.ROOT);
+        return "null".equals(lower) || "none".equals(lower) || "undefined".equals(lower)
+            ? "" : value;
+    }
+
+    private Button pillButton(String label) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(label);
+        button.setTextSize(13);
+        button.setTextColor(JarvisUi.BLACK);
+        button.setMinHeight(dp(JarvisUi.TOUCH_TARGET));
+        button.setPadding(dp(14), dp(7), dp(14), dp(7));
+        button.setBackground(JarvisUi.rounded(
+            this, JarvisUi.SOFT, JarvisUi.RADIUS_PILL, 1, JarvisUi.LINE
+        ));
+        return button;
     }
 
     private static String sourceTime(HomeExperience home, long fallbackMillis) {

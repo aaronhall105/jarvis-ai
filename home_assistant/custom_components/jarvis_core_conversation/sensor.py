@@ -104,6 +104,7 @@ class JarvisRoomSensor(CoordinatorEntity[JarvisHomeCoordinator], SensorEntity):
             ],
             "important_incident_count": len(room.get("important_incidents", [])),
             "recent_events": room.get("recent_events", [])[:5],
+            "diagnostics": room.get("diagnostics", {}),
         }
 
 
@@ -123,6 +124,7 @@ async def async_setup_entry(
             ).lower(),
             attributes=lambda data: {
                 "headline": (data.get("overall_status") or {}).get("headline"),
+                "detail": (data.get("overall_status") or {}).get("detail"),
                 "attention_count": (data.get("overall_status") or {}).get("attention_count", 0),
                 "freshness": (data.get("source_freshness") or {}).get("status", "UNAVAILABLE"),
                 "observed_at": (data.get("source_freshness") or {}).get("observed_at"),

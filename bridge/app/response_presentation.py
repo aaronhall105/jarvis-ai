@@ -286,9 +286,11 @@ def render_home_query_evidence(
         if isinstance(experience, Mapping):
             overall = experience.get("overall_status")
             if isinstance(overall, Mapping):
-                headline = str(overall.get("headline") or "").strip()
-                if headline:
-                    return headline
+                summary = str(
+                    overall.get("spoken_summary") or overall.get("headline") or ""
+                ).strip()
+                if summary:
+                    return summary
         snapshot = result.get("snapshot")
         if not isinstance(snapshot, Mapping):
             return None

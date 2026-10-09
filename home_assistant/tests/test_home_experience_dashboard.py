@@ -15,8 +15,8 @@ ROOT = TEST_FILE.parents[1] if PACKAGED else TEST_FILE.parents[2]
 
 def _dashboard() -> Path:
     if PACKAGED:
-        return ROOT / "dashboard/jarvis_alpha37_dashboard.yaml"
-    return ROOT / "docs/configuration/jarvis_alpha37_dashboard.yaml"
+        return ROOT / "dashboard/jarvis_alpha38_dashboard.yaml"
+    return ROOT / "docs/configuration/jarvis_alpha38_dashboard.yaml"
 
 
 def _integration() -> Path:
@@ -29,9 +29,9 @@ def _integration() -> Path:
 
 def _installer() -> Path:
     return (
-        ROOT / "tools/install_jarvis_home_v1_6_0.sh"
+        ROOT / "tools/install_jarvis_home_v1_7_0.sh"
         if PACKAGED
-        else (ROOT / "home_assistant/tools/install_jarvis_home_v1_6_0.sh")
+        else (ROOT / "home_assistant/tools/install_jarvis_home_v1_7_0.sh")
     )
 
 
@@ -51,8 +51,10 @@ def test_dashboard_yaml_is_valid_and_keeps_diagnostics_off_home() -> None:
     assert "System / Diagnostics" in str(views["more"])
     assert "Showing last known state" in text
     assert "camera.living_room_clear" in str(views["cameras"])
-    assert "camera.living_room_fluent" in str(views["cameras"])
+    assert "camera.living_room_fluent" not in str(views["cameras"])
     assert "light.living_room_ceiling" in str(views["living-room"])
+    assert "binary_sensor.living_room_person" not in str(views["living-room"])
+    assert "binary_sensor.living_room_motion" not in str(views["living-room"])
 
 
 def test_sensor_bridge_uses_home_api_without_reconstructing_raw_ha_state() -> None:
@@ -92,7 +94,9 @@ def test_assist_package_carries_dashboard_without_auto_installing_it() -> None:
         return
     builder = (ROOT / "tools/build_assist_package.sh").read_text()
 
-    assert "jarvis_alpha37_dashboard.yaml" in builder
+    assert "jarvis_alpha38_dashboard.yaml" in builder
+    assert "install_jarvis_home_v1_7_0.sh" in builder
+    assert "install_jarvis_home_v1_6_0.sh" not in builder
     assert "INSTALL_DASHBOARD.md" in builder
     assert 'cp "$DASHBOARD" "$STAGE/dashboard/' in builder
 

@@ -19,35 +19,37 @@ final class HomeExperience {
     }
 
     JSONObject json() { return value; }
-    String revision() { return value.optString("revision", ""); }
-    String generatedAt() { return value.optString("generated_at", ""); }
+    String revision() { return text(value, "revision", ""); }
+    String generatedAt() { return text(value, "generated_at", ""); }
 
     String headline() {
         JSONObject status = value.optJSONObject("overall_status");
-        return status == null ? "Home state unavailable" : status.optString(
-            "headline", "Home state unavailable"
-        );
+        return text(status, "headline", "Home state unavailable");
+    }
+
+    String summaryDetail() {
+        return text(value.optJSONObject("overall_status"), "detail", "");
     }
 
     String overallStatus() {
         JSONObject status = value.optJSONObject("overall_status");
-        return status == null ? "UNAVAILABLE" : status.optString("status", "UNAVAILABLE");
+        return text(status, "status", "UNAVAILABLE");
     }
 
     String freshnessStatus() {
         JSONObject freshness = value.optJSONObject("source_freshness");
-        return freshness == null ? "UNAVAILABLE" : freshness.optString("status", "UNAVAILABLE");
+        return text(freshness, "status", "UNAVAILABLE");
     }
 
     String observedAt() {
         JSONObject freshness = value.optJSONObject("source_freshness");
-        return freshness == null ? "" : freshness.optString("observed_at", "");
+        return text(freshness, "observed_at", "");
     }
 
     boolean actionsAllowed() {
         JSONObject freshness = value.optJSONObject("source_freshness");
         return freshness != null
-            && "LIVE".equals(freshness.optString("status"))
+            && "LIVE".equals(text(freshness, "status", ""))
             && freshness.optBoolean("actions_allowed", false);
     }
 
@@ -69,6 +71,11 @@ final class HomeExperience {
     JSONObject devices() {
         JSONObject devices = value.optJSONObject("devices");
         return devices == null ? new JSONObject() : devices;
+    }
+
+    JSONObject diagnostics() {
+        JSONObject diagnostics = value.optJSONObject("diagnostics");
+        return diagnostics == null ? new JSONObject() : diagnostics;
     }
 
     JSONObject room(String areaId) {
@@ -109,8 +116,17 @@ final class HomeExperience {
         if (values == null || wanted == null) return null;
         for (int index = 0; index < values.length(); index++) {
             JSONObject item = values.optJSONObject(index);
-            if (item != null && wanted.equals(item.optString(key))) return item;
+            if (item != null && wanted.equals(text(item, key, ""))) return item;
         }
         return null;
+    }
+
+    static String text(JSONObject value, String key, String fallback) {
+        if (value == null || value.isNull(key)) return fallback;
+        String result = value.optString(key, "").trim();
+        if (result.isBlank()) return fallback;
+        String lower = result.toLowerCase(java.util.Locale.ROOT);
+        return "null".equals(lower) || "none".equals(lower) || "undefined".equals(lower)
+            ? fallback : result;
     }
 }

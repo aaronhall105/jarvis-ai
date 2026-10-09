@@ -6,10 +6,10 @@ PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$PACKAGE_ROOT/custom_components/jarvis_core_conversation"
 TARGET="$CONFIG_ROOT/custom_components/jarvis_core_conversation"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-BACKUP_ROOT="$CONFIG_ROOT/backups/jarvis-home-v1.6.0/$STAMP"
+BACKUP_ROOT="$CONFIG_ROOT/backups/jarvis-home-v1.7.0/$STAMP"
 RESTORE_REQUIRED=false
 
-log() { printf '[Jarvis Home v1.6.0] %s\n' "$*"; }
+log() { printf '[Jarvis Home v1.7.0] %s\n' "$*"; }
 
 rollback() {
   local exit_code=$?
@@ -63,7 +63,7 @@ import json
 from pathlib import Path
 root = Path("$TARGET")
 manifest = json.loads((root / "manifest.json").read_text())
-assert manifest.get("version") == "1.6.0", manifest
+assert manifest.get("version") == "1.7.0", manifest
 module = ast.parse((root / "config_flow.py").read_text())
 version = None
 for node in ast.walk(module):
@@ -91,5 +91,5 @@ if command -v ha >/dev/null 2>&1; then
   log "Restarting Home Assistant Core"
   ha core restart
 else
-  log "Restart Home Assistant Core to load v1.6.0"
+  log "Restart Home Assistant Core to load v1.7.0"
 fi

@@ -205,7 +205,7 @@ public final class HomeActivity extends Activity {
         content.removeAllViews();
         freshness.setText(
             stale
-                ? "Offline · Last updated " + sourceTime(home, receivedAtMillis)
+                ? "Offline · Updated " + sourceTime(home, receivedAtMillis)
                 : "Updated " + TasksActivity.relativeTimeMillis(receivedAtMillis)
         );
         content.addView(summaryCard(home, stale), matchWrap(0, dp(14)));
@@ -220,7 +220,8 @@ public final class HomeActivity extends Activity {
         if (home.appliances().length() > 0) addSimpleSection("Appliances", home.appliances());
         if (home.energy().length() > 0) addEnergy(home.energy());
         if (home.activeMedia().length() > 0) addSimpleSection("Active media", home.activeMedia());
-        if (home.incidents().length() + home.events().length() > 0) addActivity(home, stale);
+        if (home.incidents().length() > 0) addIncidents(home.incidents(), stale);
+        if (home.events().length() > 0) addRecentActivity(home.events(), stale);
         double elapsedMs = (SystemClock.elapsedRealtimeNanos() - started) / 1_000_000.0;
         Log.d(PERFORMANCE_TAG, String.format(java.util.Locale.ROOT, "render_ms=%.3f", elapsedMs));
     }
@@ -231,8 +232,10 @@ public final class HomeActivity extends Activity {
         headline.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         headline.setMaxLines(4);
         card.addView(headline, matchWrap());
-        if (stale) {
-            TextView marker = text("Last known state · Controls unavailable", 13, JarvisUi.MID);
+        String detail = home.summaryDetail();
+        if (!detail.isBlank()) {
+            TextView marker = text(detail, 14, JarvisUi.MID);
+            marker.setMaxLines(3);
             marker.setPadding(0, dp(8), 0, 0);
             card.addView(marker, matchWrap());
         }
@@ -246,8 +249,8 @@ public final class HomeActivity extends Activity {
             if (person == null) continue;
             addLabelValue(
                 card,
-                person.optString("name", "Person"),
-                naturalState(person.optString("presence", "UNKNOWN"))
+                safe(person, "name", "Person"),
+                naturalState(safe(person, "presence", "UNKNOWN"))
             );
         }
         content.addView(card, matchWrap(0, dp(12)));
@@ -258,14 +261,14 @@ public final class HomeActivity extends Activity {
         for (int index = 0; index < rooms.length(); index++) {
             JSONObject room = rooms.optJSONObject(index);
             if (room == null) continue;
-            String areaId = room.optString("area_id");
-            String detail = room.optString("occupancy_summary", "Occupancy unknown");
+            String areaId = safe(room, "area_id", "");
+            String detail = safe(room, "occupancy_summary", "Occupancy unknown");
             int lightsOn = room.optInt("lights_on_count", 0);
             int cameraCount = room.optJSONArray("cameras") == null
                 ? 0 : room.optJSONArray("cameras").length();
             if (lightsOn > 0) detail += " · " + lightsOn + " light" + (lightsOn == 1 ? " on" : "s on");
             if (cameraCount > 0) detail += " · " + cameraCount + " camera" + (cameraCount == 1 ? "" : "s");
-            View row = navigationRow(room.optString("name", "Room"), detail);
+            View row = navigationRow(safe(room, "name", "Room"), detail);
             row.setOnClickListener(view -> startActivity(
                 new Intent(this, RoomDetailActivity.class)
                     .putExtra(RoomDetailActivity.EXTRA_AREA_ID, areaId)
@@ -293,14 +296,14 @@ public final class HomeActivity extends Activity {
         card.addView(list, matchWrap(dp(4), 0));
         JSONObject action = firstAction(home.quickActions(), "TURN_OFF_EXACT_LIGHT_SET");
         if (action != null && on > 0) {
-            Button control = button(action.optString("label", "Turn displayed lights off"));
+            Button control = button(safe(action, "label", "Turn displayed lights off"));
             boolean enabled = !stale && home.actionsAllowed() && action.optBoolean("enabled", false);
             control.setEnabled(enabled);
             control.setAlpha(enabled ? 1f : 0.48f);
             control.setContentDescription(
                 enabled ? control.getText() : control.getText() + ", unavailable while offline"
             );
-            control.setOnClickListener(view -> executeAction(control, action.optString("action_id")));
+            control.setOnClickListener(view -> executeAction(control, safe(action, "action_id", "")));
             card.addView(control, matchWrap(dp(10), 0));
         }
         content.addView(card, matchWrap(0, dp(12)));
@@ -324,14 +327,28 @@ public final class HomeActivity extends Activity {
 
     private void addCameras(JSONArray cameras, boolean stale) {
         LinearLayout card = section("Cameras");
+        int unavailable = 0;
         for (int index = 0; index < cameras.length(); index++) {
             JSONObject camera = cameras.optJSONObject(index);
+            if (camera != null && "UNAVAILABLE".equals(safe(camera, "availability", ""))) {
+                unavailable++;
+            }
+        }
+        int online = cameras.length() - unavailable;
+        addLabelValue(
+            card,
+            online + (online == 1 ? " camera online" : " cameras online"),
+            unavailable == 0 ? "All available" : unavailable + " unavailable"
+        );
+        int shown = Math.min(3, cameras.length());
+        for (int index = 0; index < shown; index++) {
+            JSONObject camera = cameras.optJSONObject(index);
             if (camera == null) continue;
-            String detail = naturalState(camera.optString("availability", "UNKNOWN"));
-            String activity = camera.optString("recent_activity", "");
+            String detail = naturalState(safe(camera, "availability", "UNKNOWN"));
+            String activity = safe(camera, "recent_activity", "");
             if (!activity.isBlank()) detail += " · " + activity;
-            View row = navigationRow(camera.optString("name", "Camera"), detail);
-            String entityId = camera.optString("entity_id");
+            View row = navigationRow(safe(camera, "name", "Camera"), detail);
+            String entityId = safe(camera, "entity_id", "");
             row.setOnClickListener(view -> startActivity(
                 new Intent(this, HomeDetailActivity.class)
                     .putExtra(HomeDetailActivity.EXTRA_KIND, "camera")
@@ -352,17 +369,6 @@ public final class HomeActivity extends Activity {
             unavailable + (unavailable == 1 ? " device unavailable" : " devices unavailable"),
             "Needs attention"
         );
-        JSONArray values = devices.optJSONArray("unavailable");
-        if (values != null) {
-            for (int index = 0; index < values.length(); index++) {
-                JSONObject device = values.optJSONObject(index);
-                if (device != null) addLabelValue(
-                    card,
-                    device.optString("name", "Device"),
-                    device.optString("area_name", "Unavailable")
-                );
-            }
-        }
         if (partial > 0) addLabelValue(
             card,
             partial + (partial == 1 ? " device partly available" : " devices partly available"),
@@ -376,37 +382,36 @@ public final class HomeActivity extends Activity {
         for (int index = 0; index < values.length(); index++) {
             JSONObject item = values.optJSONObject(index);
             if (item == null) continue;
-            String state = item.optString("state_label", item.optString("state", "Active"));
-            addLabelValue(card, item.optString("name", heading), naturalState(state));
+            String state = safe(item, "state_label", safe(item, "state", "Active"));
+            addLabelValue(card, safe(item, "name", heading), naturalState(state));
         }
         content.addView(card, matchWrap(0, dp(12)));
     }
 
     private void addEnergy(JSONArray energy) {
         LinearLayout card = section("Energy");
-        for (int index = 0; index < energy.length(); index++) {
+        for (int index = 0; index < Math.min(6, energy.length()); index++) {
             JSONObject item = energy.optJSONObject(index);
             if (item == null) continue;
             addLabelValue(
                 card,
-                item.optString("name", "Energy"),
-                item.optString("display_value", item.optString("value", "Unknown"))
+                safe(item, "name", "Energy"),
+                safe(item, "display_value", safe(item, "value", "Unknown"))
             );
         }
         content.addView(card, matchWrap(0, dp(12)));
     }
 
-    private void addActivity(HomeExperience home, boolean stale) {
-        LinearLayout card = section("Recent activity");
-        JSONArray incidents = home.incidents();
-        for (int index = 0; index < incidents.length(); index++) {
+    private void addIncidents(JSONArray incidents, boolean stale) {
+        LinearLayout card = section("Needs attention");
+        for (int index = 0; index < Math.min(3, incidents.length()); index++) {
             JSONObject item = incidents.optJSONObject(index);
             if (item == null) continue;
             View row = navigationRow(
-                item.optString("title", "Needs attention"),
-                item.optString("message", naturalState(item.optString("status", "ACTIVE")))
+                safe(item, "title", "Needs attention"),
+                safe(item, "message", naturalState(safe(item, "status", "ACTIVE")))
             );
-            String incidentId = item.optString("incident_id");
+            String incidentId = safe(item, "incident_id", "");
             row.setOnClickListener(view -> startActivity(
                 new Intent(this, HomeDetailActivity.class)
                     .putExtra(HomeDetailActivity.EXTRA_KIND, "incident")
@@ -415,15 +420,19 @@ public final class HomeActivity extends Activity {
             ));
             card.addView(row, matchWrap(dp(4), 0));
         }
-        JSONArray events = home.events();
-        for (int index = 0; index < events.length(); index++) {
+        content.addView(card, matchWrap(0, dp(12)));
+    }
+
+    private void addRecentActivity(JSONArray events, boolean stale) {
+        LinearLayout card = section("Recent activity");
+        for (int index = 0; index < Math.min(3, events.length()); index++) {
             JSONObject event = events.optJSONObject(index);
             if (event == null) continue;
             View row = navigationRow(
-                event.optString("title", "Home activity"),
-                event.optString("message", "")
+                safe(event, "title", "Home activity"),
+                safe(event, "message", "")
             );
-            String eventId = event.optString("event_id");
+            String eventId = safe(event, "event_id", "");
             row.setOnClickListener(view -> startActivity(
                 new Intent(this, HomeDetailActivity.class)
                     .putExtra(HomeDetailActivity.EXTRA_KIND, "event")
@@ -511,13 +520,13 @@ public final class HomeActivity extends Activity {
     }
 
     static String actionOutcomeLabel(JSONObject result) {
-        String status = naturalState(result == null ? "UNKNOWN" : result.optString(
-            "status", "UNKNOWN"
-        ));
-        String message = result == null ? "Action outcome unknown" : result.optString(
-            "message", "Action finished"
-        );
+        String status = naturalState(safe(result, "status", "UNKNOWN"));
+        String message = safe(result, "message", "Action finished");
         return status + " · " + message;
+    }
+
+    private static String safe(JSONObject value, String key, String fallback) {
+        return HomeExperience.text(value, key, fallback);
     }
 
     private static String sourceTime(HomeExperience home, long fallbackMillis) {

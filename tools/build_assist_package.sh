@@ -5,11 +5,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INTEGRATION_ROOT="$ROOT_DIR/home_assistant"
 SOURCE="$INTEGRATION_ROOT/custom_components/jarvis_core_conversation"
 TESTS="$INTEGRATION_ROOT/tests"
-INSTALLER="$INTEGRATION_ROOT/tools/install_jarvis_home_v1_6_0.sh"
-DASHBOARD="$ROOT_DIR/docs/configuration/jarvis_alpha37_dashboard.yaml"
-DASHBOARD_GUIDE="$ROOT_DIR/docs/configuration/ALPHA37_HOME_ASSISTANT_DASHBOARD.md"
+INSTALLER="$INTEGRATION_ROOT/tools/install_jarvis_home_v1_7_0.sh"
+DASHBOARD="$ROOT_DIR/docs/configuration/jarvis_alpha38_dashboard.yaml"
+DASHBOARD_GUIDE="$ROOT_DIR/docs/configuration/ALPHA38_HOME_ASSISTANT_DASHBOARD.md"
 DIST_DIR="${1:-$ROOT_DIR/dist}"
-ASSET_NAME="jarvis-home-experience-v1.6.0.tar.gz"
+ASSET_NAME="jarvis-home-experience-v1.7.0.tar.gz"
 OUTPUT="$DIST_DIR/$ASSET_NAME"
 STAGE="$(mktemp -d)"
 cleanup() { rm -rf "$STAGE"; }
@@ -57,18 +57,18 @@ cp "$TESTS/test_streaming.py" "$STAGE/tests/test_streaming.py"
 cp "$TESTS/test_conversation_closure.py" "$STAGE/tests/test_conversation_closure.py"
 cp "$TESTS/test_release_integrity.py" "$STAGE/tests/test_release_integrity.py"
 cp "$TESTS/test_home_experience_dashboard.py" "$STAGE/tests/test_home_experience_dashboard.py"
-cp "$INSTALLER" "$STAGE/tools/install_jarvis_home_v1_6_0.sh"
-cp "$DASHBOARD" "$STAGE/dashboard/jarvis_alpha37_dashboard.yaml"
+cp "$INSTALLER" "$STAGE/tools/install_jarvis_home_v1_7_0.sh"
+cp "$DASHBOARD" "$STAGE/dashboard/jarvis_alpha38_dashboard.yaml"
 cp "$DASHBOARD_GUIDE" "$STAGE/dashboard/INSTALL_DASHBOARD.md"
-chmod +x "$STAGE/tools/install_jarvis_home_v1_6_0.sh"
+chmod +x "$STAGE/tools/install_jarvis_home_v1_7_0.sh"
 
 cat > "$STAGE/CHANGES.md" <<'CHANGES'
-# Jarvis Home v1.6.0 — Shared HomeExperience
+# Jarvis Home v1.7.0 — Canonical HomeExperience
 
 - Adds authenticated HomeExperience coordinator and presentation sensors.
 - Retains Smart Audio Gate, conversation closure, and streamed progress.
 - Uses conditional refresh and never reconstructs Jarvis semantics from raw HA state.
-- Carries the validated alpha37 dashboard YAML and backup-first manual install guide.
+- Carries the validated alpha38 canonical dashboard YAML and backup-first manual install guide.
 - Keeps config-entry version 2.
 CHANGES
 
@@ -76,8 +76,8 @@ cat > "$STAGE/INSTALL.md" <<'INSTALL'
 Run inside the Home Assistant Terminal:
 
 ```bash
-chmod +x tools/install_jarvis_home_v1_6_0.sh
-./tools/install_jarvis_home_v1_6_0.sh /config
+chmod +x tools/install_jarvis_home_v1_7_0.sh
+./tools/install_jarvis_home_v1_7_0.sh /config
 ```
 INSTALL
 

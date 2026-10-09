@@ -92,8 +92,8 @@ public final class HomeExperienceUiTest {
         HomeActivity activity = Robolectric.buildActivity(HomeActivity.class).create().get();
         View root = activity.findViewById(android.R.id.content);
 
-        assertTrue(flatten(root).stream().anyMatch(value -> value.contains("Offline")));
-        assertNotNull(findText(root, "Last known state · Controls unavailable"));
+        assertTrue(flatten(root).stream().anyMatch(value -> value.contains("Offline · Updated")));
+        assertNull(findText(root, "Last known state · Controls unavailable"));
         Button action = findButtonContaining(root, "Turn all displayed lights off");
         assertNotNull(action);
         assertFalse(action.isEnabled());
@@ -104,7 +104,8 @@ public final class HomeExperienceUiTest {
         JSONObject value = fixture();
         value.getJSONArray("rooms").getJSONObject(0)
             .put("occupancy_state", "UNKNOWN")
-            .put("occupancy_summary", "No current occupancy evidence")
+            .put("occupancy_summary", "No current person detection")
+            .put("occupancy_detail", "Occupancy remains unknown")
             .put("occupancy_evidence", new JSONArray().put(new JSONObject()
                 .put("name", "Living Room Person")
                 .put("state", "not_detected")));
@@ -116,10 +117,47 @@ public final class HomeExperienceUiTest {
             .create().get();
         View root = activity.findViewById(android.R.id.content);
 
-        assertNotNull(findText(root, "No current occupancy evidence"));
+        assertNotNull(findText(root, "No current person detection"));
+        assertNotNull(findText(root, "Occupancy remains unknown"));
         assertNull(findText(root, "Clear"));
+        assertNull(findText(root, "Living Room Person"));
         assertNotNull(findText(root, "Living Room Ceiling"));
         assertNotNull(findText(root, "Living Room Camera"));
+        assertNotNull(findText(root, "‹ Back"));
+        activity.onDestroy();
+    }
+
+    @Test public void roomPlacesVerifiedLightActionInsideLightsBeforeCamera() throws Exception {
+        new HomeSnapshotStore(RuntimeEnvironment.getApplication(), "aaron")
+            .save(fixture(), "etag", System.currentTimeMillis());
+        Intent intent = new Intent(RuntimeEnvironment.getApplication(), RoomDetailActivity.class)
+            .putExtra(RoomDetailActivity.EXTRA_AREA_ID, "living_room");
+        RoomDetailActivity activity = Robolectric.buildActivity(RoomDetailActivity.class, intent)
+            .create().get();
+        List<String> copy = flatten(activity.findViewById(android.R.id.content));
+
+        int lights = copy.indexOf("Lights");
+        int action = copy.indexOf("Turn all displayed lights off");
+        int camera = copy.indexOf("Camera");
+        assertTrue(lights >= 0 && action > lights && camera > action);
+        activity.onDestroy();
+    }
+
+    @Test public void normalHomeNeverRendersSerializedNullWords() throws Exception {
+        JSONObject value = fixture();
+        value.getJSONArray("cameras").getJSONObject(0)
+            .put("recent_activity", JSONObject.NULL)
+            .put("area_name", JSONObject.NULL);
+        value.getJSONObject("devices").getJSONArray("unavailable").getJSONObject(0)
+            .put("area_name", JSONObject.NULL);
+        HomeActivity activity = Robolectric.buildActivity(HomeActivity.class).create().get();
+        render(activity, value, false);
+
+        assertTrue(flatten(activity.findViewById(android.R.id.content)).stream().noneMatch(text -> {
+            String lower = text.trim().toLowerCase(java.util.Locale.ROOT);
+            return lower.equals("null") || lower.equals("none") || lower.equals("undefined")
+                || lower.contains("· null");
+        }));
         activity.onDestroy();
     }
 
@@ -134,6 +172,7 @@ public final class HomeExperienceUiTest {
         View root = activity.findViewById(android.R.id.content);
 
         assertNotNull(findText(root, "Why Jarvis surfaced it"));
+        assertNotNull(findText(root, "‹ Back"));
         assertNotNull(findText(root, "Validated running-to-finished transition."));
         assertNotNull(findText(root, "Washing machine changed from running to finished"));
         controller.destroy();
@@ -218,7 +257,7 @@ public final class HomeExperienceUiTest {
 
         System.out.printf(
             java.util.Locale.ROOT,
-            "alpha37_home_parse_ms=%.3f alpha37_home_first_render_ms=%.3f%n",
+            "alpha38_home_parse_ms=%.3f alpha38_home_first_render_ms=%.3f%n",
             parseMs,
             renderMs
         );
@@ -255,7 +294,9 @@ public final class HomeExperienceUiTest {
             .put("area_id", "living_room")
             .put("area_name", "Living Room")
             .put("availability", "ONLINE")
-            .put("recent_activity", "Person detected");
+            .put("recent_activity", "Person detected")
+            .put("person_status", "DETECTED")
+            .put("motion_status", "NOT_DETECTED");
         JSONObject action = new JSONObject()
             .put("action_id", actionId)
             .put("kind", "TURN_OFF_EXACT_LIGHT_SET")
@@ -277,6 +318,7 @@ public final class HomeExperienceUiTest {
             .put("name", "Living Room")
             .put("occupancy_state", "OCCUPIED")
             .put("occupancy_summary", "Person detected")
+            .put("occupancy_detail", "Grounded person-detection evidence")
             .put("occupancy_evidence", new JSONArray())
             .put("lights_on_count", 1)
             .put("lights_total", 1)
@@ -287,7 +329,12 @@ public final class HomeExperienceUiTest {
             .put("climate", new JSONArray())
             .put("media", new JSONArray())
             .put("recent_events", new JSONArray().put(event))
-            .put("quick_actions", new JSONArray().put(action));
+            .put("quick_actions", new JSONArray().put(action))
+            .put("diagnostics", new JSONObject()
+                .put("occupancy_evidence", new JSONArray())
+                .put("raw_entities", new JSONArray())
+                .put("camera_sources", new JSONArray())
+                .put("media_control_paths", new JSONArray()));
         return new JSONObject()
             .put("schema_version", 1)
             .put("generated_at", "2026-10-08T12:00:00Z")
@@ -298,7 +345,8 @@ public final class HomeExperienceUiTest {
                 .put("observed_at", "2026-10-08T12:00:00Z"))
             .put("overall_status", new JSONObject()
                 .put("status", "ATTENTION")
-                .put("headline", "1 thing needs attention: Hallway Camera is unavailable. 1 light is on."))
+                .put("headline", "1 thing needs attention")
+                .put("detail", "Hallway Camera unavailable · Aaron is home · 1 light on"))
             .put("people", new JSONArray()
                 .put(new JSONObject().put("name", "Aaron").put("presence", "HOME"))
                 .put(new JSONObject().put("name", "Amber").put("presence", "AWAY")))
