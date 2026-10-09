@@ -461,6 +461,40 @@ def test_semantic_revision_and_counts_refresh_after_state_change() -> None:
     assert len(after.quick_actions[0]["target_entity_ids"]) == 2
 
 
+def test_semantic_revision_ignores_refresh_time_when_ha_state_is_unchanged() -> None:
+    snapshot = _snapshot()
+    sourced_entities = tuple(
+        replace(item, source_last_updated=OBSERVED) for item in snapshot.entities
+    )
+    sourced_presentation = tuple(
+        replace(item, source_last_updated=OBSERVED) for item in snapshot.presentation_entities
+    )
+    before = project_home_experience(
+        replace(
+            snapshot,
+            entities=sourced_entities,
+            presentation_entities=sourced_presentation,
+        ),
+        principal_id="aaron",
+    )
+    refreshed_at = "2026-10-08T12:00:01+00:00"
+    after = project_home_experience(
+        replace(
+            snapshot,
+            observed_at=refreshed_at,
+            entities=tuple(replace(item, observed_at=refreshed_at) for item in sourced_entities),
+            presentation_entities=tuple(
+                replace(item, observed_at=refreshed_at) for item in sourced_presentation
+            ),
+        ),
+        principal_id="aaron",
+    )
+
+    assert before.revision == after.revision
+    assert before.lights == after.lights
+    assert before.devices == after.devices
+
+
 def test_conversation_house_status_uses_shared_home_experience_summary() -> None:
     home = project_home_experience(
         _snapshot(),
