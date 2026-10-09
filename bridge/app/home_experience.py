@@ -293,12 +293,15 @@ def _entity_ref(entity: GroundedHomeEntity) -> dict[str, Any]:
         "device_class": entity.device_class,
         "display_value": entity.display_value,
         "unit": entity.unit,
-        "observed_at": entity.observed_at,
+        "observed_at": entity.source_last_updated or entity.observed_at,
         "source_last_updated": entity.source_last_updated,
     }
 
 
 def _device_ref(device: GroundedDeviceStatus) -> dict[str, Any]:
+    source_observations = tuple(
+        item.source_last_updated for item in device.member_entities if item.source_last_updated
+    )
     return {
         "device_key": device.device_key,
         "device_id": device.device_id,
@@ -308,7 +311,7 @@ def _device_ref(device: GroundedDeviceStatus) -> dict[str, Any]:
         "availability": device.availability.value,
         "unavailable_entity_count": device.unavailable_entity_count,
         "member_entity_count": len(device.member_entities),
-        "observed_at": device.observed_at,
+        "observed_at": max(source_observations, default=device.observed_at),
         "evidence_kind": device.evidence_kind,
         "diagnostic_entity_ids": [item.entity_id for item in device.member_entities],
     }
