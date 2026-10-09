@@ -8372,7 +8372,7 @@ app.include_router(proactive_router)
 home_experience_service = HomeExperienceService(
     snapshot_loader=tools.home_intelligence.snapshot,
     event_loader=lambda principal: proactive_engine.feed(principal, 50),
-    incident_loader=lambda: proactive_engine.incidents(100),
+    incident_loader=lambda: proactive_engine.active_incidents(100),
 )
 tools.set_home_experience_projector(home_experience_service.project)
 

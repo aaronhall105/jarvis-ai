@@ -1599,6 +1599,26 @@ class ProactiveEngine:
             result.append(item)
         return result
 
+    def active_incidents(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return current incidents without letting recent recoveries displace them."""
+
+        self.initialise()
+        with self.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM proactive_incidents WHERE status='active' "
+                "ORDER BY last_seen DESC LIMIT ?",
+                (max(1, min(250, int(limit))),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["last_decision"] = json.loads(item.pop("last_decision_json"))
+            except (json.JSONDecodeError, TypeError):
+                item["last_decision"] = {}
+            result.append(item)
+        return result
+
     def incident(self, incident_id: str) -> dict[str, Any] | None:
         self.initialise()
         with self.connection() as connection:
