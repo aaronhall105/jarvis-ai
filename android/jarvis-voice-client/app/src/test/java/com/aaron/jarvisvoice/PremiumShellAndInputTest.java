@@ -53,8 +53,10 @@ public final class PremiumShellAndInputTest {
         ShadowInputMethodManager.reset();
     }
 
-    @Test public void chatAndTasksUseIdenticalSharedHeaderGeometry() {
+    @Test public void homeChatAndTasksUseIdenticalSharedHeaderGeometry() {
         preferences.edit().putString("assistant_mode_v190210", "JARVIS").commit();
+        ActivityController<HomeActivity> homeController = Robolectric.buildActivity(HomeActivity.class)
+            .create().start().visible();
         ActivityController<MainActivity> chatController = Robolectric.buildActivity(MainActivity.class)
             .create().start().resume().visible();
         ActivityController<TasksActivity> tasksController = Robolectric.buildActivity(TasksActivity.class)
@@ -62,11 +64,15 @@ public final class PremiumShellAndInputTest {
         View chatHeader = findDescription(
             chatController.get().findViewById(android.R.id.content), "Jarvis app header"
         );
+        View homeHeader = findDescription(
+            homeController.get().findViewById(android.R.id.content), "Jarvis app header"
+        );
         View taskHeader = findDescription(
             tasksController.get().findViewById(android.R.id.content), "Jarvis app header"
         );
         View chatNavigation = findDescription(chatHeader, "Primary navigation");
         View taskNavigation = findDescription(taskHeader, "Primary navigation");
+        assertNotNull(homeHeader);
         assertNotNull(chatHeader);
         assertNotNull(taskHeader);
 
@@ -74,6 +80,8 @@ public final class PremiumShellAndInputTest {
             int width = JarvisUi.dp(chatController.get(), widthDp);
             measureAtWidth(chatHeader, width);
             measureAtWidth(taskHeader, width);
+            measureAtWidth(homeHeader, width);
+            assertEquals(homeHeader.getMeasuredHeight(), chatHeader.getMeasuredHeight());
             assertEquals(chatHeader.getMeasuredWidth(), taskHeader.getMeasuredWidth());
             assertEquals(chatHeader.getMeasuredHeight(), taskHeader.getMeasuredHeight());
             assertEquals(chatNavigation.getMeasuredHeight(), taskNavigation.getMeasuredHeight());
@@ -94,6 +102,10 @@ public final class PremiumShellAndInputTest {
             );
         }
         assertNotNull(findText(chatHeader, "J A R V I S"));
+        assertNotNull(findText(homeHeader, "J A R V I S"));
+        assertNotNull(findText(homeHeader, "Home"));
+        assertNotNull(findText(homeHeader, "Chat"));
+        assertNotNull(findText(homeHeader, "Tasks"));
         assertNotNull(findText(taskHeader, "J A R V I S"));
         assertNotNull(findDescription(chatHeader, "House activity"));
         assertNotNull(findDescription(taskHeader, "House activity"));
@@ -105,6 +117,7 @@ public final class PremiumShellAndInputTest {
             JarvisUi.dp(chatController.get(), JarvisUi.TOUCH_TARGET),
             findDescription(chatHeader, "Settings").getMeasuredWidth()
         );
+        homeController.destroy();
         chatController.destroy();
         tasksController.destroy();
     }

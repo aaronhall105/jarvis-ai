@@ -1,8 +1,8 @@
 # Jarvis Android Phone and Wear OS clients
 
-This Gradle project builds the current `v19.0.0-alpha36` Phone and Watch
+This Gradle project builds the current `v19.0.0-alpha37` Phone and Watch
 clients for the unified Jarvis Brain/Core. Both clients use package
-`com.aaron.jarvisvoice`, versionCode `190380`, realtime protocol `2`, and one
+`com.aaron.jarvisvoice`, versionCode `190390`, realtime protocol `2`, and one
 approved product source revision.
 
 ## Modules
@@ -20,6 +20,9 @@ Jarvis brains or create separate server-side conversation truth.
 
 The Phone client provides:
 
+- a Core-owned Home destination with grounded people, rooms, lights, cameras,
+  physical-device availability, energy, proactive activity, and offline-safe
+  room/details views
 - the current Jarvis chat interface, persistent local history mirror, streamed
   responses, conversation selection, and safe deletion of only the current chat
 - typed, Standard voice, and Live voice interaction

@@ -32,7 +32,7 @@
         android:usesCleartextTraffic="true">
 
         <activity
-            android:name=".MainActivity"
+            android:name=".HomeActivity"
             android:exported="true"
             android:screenOrientation="portrait">
             <intent-filter>
@@ -40,6 +40,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
 
         <activity
             android:name=".SettingsActivity"
@@ -98,6 +103,16 @@
 
         <activity
             android:name=".TaskDetailActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".RoomDetailActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
+            android:name=".HomeDetailActivity"
             android:exported="false"
             android:screenOrientation="portrait" />
 

@@ -2686,6 +2686,116 @@ class AIEngine:
             result["response_message"] = str(execution["error"])
         return result
 
+    async def execute_frozen_home_entity_set(
+        self,
+        *,
+        entity_ids: Sequence[str],
+        action: str,
+        conversation_id: str,
+        actor: UserContext,
+        request_id: str,
+        allowed_domains: frozenset[str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute one immutable HA set through the verified action architecture."""
+
+        frozen_ids = tuple(
+            dict.fromkeys(str(item).strip() for item in entity_ids if str(item).strip())
+        )
+        if not frozen_ids:
+            raise ValueError("The grounded set is empty.")
+        if len(frozen_ids) > 50:
+            raise ValueError("That grounded set is too large for one safe control operation.")
+        if action not in {"turn_on", "turn_off"}:
+            raise ValueError("That grounded set action is not supported.")
+        safe_domains = allowed_domains or self.tools.SAFE_CONTROL_DOMAINS
+        controllable = {
+            str(item.get("entity_id") or ""): item
+            for item in await self.tools.controllable_devices()
+        }
+        if any(
+            entity_id not in controllable
+            or str(controllable[entity_id].get("domain") or "") not in safe_domains
+            for entity_id in frozen_ids
+        ):
+            raise ValueError(
+                "One or more referenced devices no longer exists or is not safely controllable."
+            )
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def execute_member(entity_id: str, index: int) -> dict[str, Any]:
+            async with semaphore:
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="control_device",
+                    arguments={"entity_id": entity_id, "action": action},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=f"{request_id}:{index}",
+                    target=entity_id,
+                )
+                result["entity_id"] = entity_id
+                return result
+
+        raw_results = await asyncio.gather(
+            *(execute_member(entity_id, index) for index, entity_id in enumerate(frozen_ids)),
+            return_exceptions=True,
+        )
+        outcomes: list[dict[str, Any]] = []
+        for entity_id, raw_result in zip(frozen_ids, raw_results, strict=True):
+            if isinstance(raw_result, BaseException):
+                outcomes.append({"entity_id": entity_id, "success": False, "verified": False})
+            else:
+                outcomes.append(dict(raw_result))
+        verified = [item for item in outcomes if item.get("verified") is True]
+        unknown = [
+            item
+            for item in outcomes
+            if item.get("verified") is not True
+            and (
+                str(item.get("execution_status") or "")
+                in {"outcome_unknown", "accepted_unverified"}
+                or (item.get("accepted") is True and item.get("success") is not True)
+            )
+        ]
+        unknown_ids = {id(item) for item in unknown}
+        failed = [
+            item
+            for item in outcomes
+            if item.get("verified") is not True and id(item) not in unknown_ids
+        ]
+        target_state = "on" if action == "turn_on" else "off"
+        if len(verified) == len(outcomes):
+            response = f"I turned all {len(outcomes)} referenced devices {target_state}."
+            outcome_status = "VERIFIED"
+        elif verified:
+            response = (
+                f"I confirmed {len(verified)} of {len(outcomes)} devices {target_state}. "
+                f"{len(failed)} failed and {len(unknown)} had an unknown outcome."
+            )
+            outcome_status = "PARTIAL"
+        elif unknown:
+            response = f"I could not confirm whether the referenced devices are {target_state}."
+            outcome_status = "UNKNOWN"
+        else:
+            response = f"I could not turn the referenced devices {target_state}."
+            outcome_status = "FAILED"
+        return {
+            "success": len(verified) == len(outcomes),
+            "verified": len(verified) == len(outcomes),
+            "complete": len(verified) == len(outcomes),
+            "outcome_status": outcome_status,
+            "target_state": target_state,
+            "requested_count": len(frozen_ids),
+            "attempted_count": len(outcomes),
+            "verified_count": len(verified),
+            "failed_count": len(failed),
+            "unknown_count": len(unknown),
+            "requested_entity_ids": list(frozen_ids),
+            "outcomes": outcomes,
+            "response_message": response,
+        }
+
     async def _execute_registered_home_read(
         self,
         *,
@@ -3049,87 +3159,21 @@ class AIEngine:
                         "referenced_set_too_large",
                         "That grounded set is too large for one safe control operation.",
                     )
-                controllable = {
-                    str(item.get("entity_id") or ""): item
-                    for item in await self.tools.controllable_devices()
-                }
-                if any(
-                    entity_id not in controllable
-                    or str(controllable[entity_id].get("domain") or "")
-                    not in self.tools.SAFE_CONTROL_DOMAINS
-                    for entity_id in frozen_ids
-                ):
+                try:
+                    result = await self.execute_frozen_home_entity_set(
+                        entity_ids=frozen_ids,
+                        action=action,
+                        conversation_id=conversation_id,
+                        actor=actor,
+                        request_id=request_id,
+                    )
+                except ValueError:
                     return self._tool_failure(
                         name,
                         arguments,
                         "stale_or_unsupported_grounded_set",
                         "One or more referenced devices no longer exists or is not safely controllable.",
                     )
-                semaphore = asyncio.Semaphore(4)
-
-                async def execute_member(entity_id: str) -> dict[str, Any]:
-                    async with semaphore:
-                        return await self._execute_registered_home_action(
-                            capability_id="homeassistant.control",
-                            operation="control_device",
-                            arguments={"entity_id": entity_id, "action": action},
-                            conversation_id=conversation_id,
-                            actor=actor,
-                            request_id=request_id,
-                            target=entity_id,
-                        )
-
-                raw_results = await asyncio.gather(
-                    *(execute_member(entity_id) for entity_id in frozen_ids),
-                    return_exceptions=True,
-                )
-                outcomes: list[dict[str, Any]] = []
-                for entity_id, raw_result in zip(frozen_ids, raw_results):
-                    if isinstance(raw_result, BaseException):
-                        outcomes.append(
-                            {"entity_id": entity_id, "success": False, "verified": False}
-                        )
-                    else:
-                        outcomes.append(dict(raw_result))
-                verified = [item for item in outcomes if item.get("verified") is True]
-                unknown = [
-                    item
-                    for item in outcomes
-                    if item.get("verified") is not True
-                    and (
-                        str(item.get("execution_status") or "")
-                        in {"outcome_unknown", "accepted_unverified"}
-                        or (item.get("accepted") is True and item.get("success") is not True)
-                    )
-                ]
-                unknown_ids = {id(item) for item in unknown}
-                failed = [
-                    item
-                    for item in outcomes
-                    if item.get("verified") is not True and id(item) not in unknown_ids
-                ]
-                target_state = "on" if action == "turn_on" else "off"
-                if len(verified) == len(outcomes):
-                    response = f"I turned all {len(outcomes)} referenced devices {target_state}."
-                else:
-                    response = (
-                        f"I confirmed {len(verified)} of {len(outcomes)} devices {target_state}. "
-                        f"{len(failed)} failed and {len(unknown)} had an unknown outcome."
-                    )
-                result = {
-                    "success": len(verified) == len(outcomes),
-                    "verified": len(verified) == len(outcomes),
-                    "complete": len(verified) == len(outcomes),
-                    "target_state": target_state,
-                    "requested_count": len(frozen_ids),
-                    "attempted_count": len(outcomes),
-                    "verified_count": len(verified),
-                    "failed_count": len(failed),
-                    "unknown_count": len(unknown),
-                    "requested_entity_ids": list(frozen_ids),
-                    "outcomes": outcomes,
-                    "response_message": response,
-                }
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "control_area_lights":
@@ -3456,7 +3500,10 @@ class AIEngine:
                     conversation_id=conversation_id,
                     actor=actor,
                     request_id=request_id,
-                    fallback=lambda: self.tools.query_home(plan),
+                    fallback=lambda: self.tools.query_home(
+                        plan,
+                        principal_id=actor.user_key,
+                    ),
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 

@@ -62,6 +62,8 @@ MOBILE_ACCOUNT_ROUTES = {
     ("post", "/api/tasks/{task_id}/decline"),
     ("post", "/api/tasks/{task_id}/reschedule"),
     ("post", "/api/tasks/{task_id}/steer"),
+    ("get", "/api/home"),
+    ("post", "/api/home/actions/{action_id:path}"),
 }
 
 

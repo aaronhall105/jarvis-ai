@@ -244,7 +244,10 @@ class HomeAssistantConnector(Connector):
     ) -> Mapping[str, Any]:
         if capability_id == "homeassistant.read":
             if operation == "query_home":
-                return await self.tools.query_home(payload)
+                return await self.tools.query_home(
+                    payload,
+                    principal_id=str(request.principal_id or "aaron"),
+                )
             if operation == "search_entity_states":
                 return await self.tools.search_entity_states(
                     query=str(payload.get("query") or ""),

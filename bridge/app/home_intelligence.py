@@ -436,6 +436,11 @@ class GroundedEntitySet:
 class HomeSnapshot:
     observed_at: str
     entities: tuple[GroundedHomeEntity, ...]
+    # Presentation-only sensors (energy, appliance enum sensors, and similar)
+    # are retained separately so richer clients can use their grounded values
+    # without changing the alpha36 physical-device availability population.
+    presentation_entities: tuple[GroundedHomeEntity, ...] = ()
+    areas: tuple[Mapping[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         unavailable = [item for item in self.entities if item.state == "unavailable"]
@@ -512,6 +517,7 @@ class HomeSnapshot:
             "active_climate": [item.as_dict() for item in active_climate],
             "unlocked_locks": [item.as_dict() for item in unlocked_locks],
             "security_entities": [item.as_dict() for item in security_entities],
+            "areas": [dict(item) for item in self.areas],
         }
 
 
@@ -623,17 +629,27 @@ class HomeIntelligenceEngine:
         started = time.monotonic()
         observed_at = datetime.now(timezone.utc).isoformat()
         entities: list[GroundedHomeEntity] = []
+        presentation_entities: list[GroundedHomeEntity] = []
         seen: set[str] = set()
         for raw in await self._state_loader():
             item = GroundedHomeEntity.from_state(raw, observed_at)
             if item.entity_id in seen or item.domain not in _USER_FACING_DEVICE_DOMAINS:
                 continue
-            if item.domain == "sensor" and item.device_class != "battery":
-                continue
             seen.add(item.entity_id)
-            entities.append(item)
+            presentation_entities.append(item)
+            if item.domain != "sensor" or item.device_class == "battery":
+                entities.append(item)
         entities.sort(key=lambda item: ((item.area_name or "").casefold(), item.name.casefold()))
-        result = HomeSnapshot(observed_at=observed_at, entities=tuple(entities))
+        presentation_entities.sort(
+            key=lambda item: ((item.area_name or "").casefold(), item.name.casefold())
+        )
+        areas = tuple(dict(item) for item in await self._area_loader())
+        result = HomeSnapshot(
+            observed_at=observed_at,
+            entities=tuple(entities),
+            presentation_entities=tuple(presentation_entities),
+            areas=areas,
+        )
         runtime_metrics.observe(
             "home_snapshot_construction_ms", (time.monotonic() - started) * 1000
         )

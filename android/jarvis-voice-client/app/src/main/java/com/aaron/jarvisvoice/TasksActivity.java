@@ -164,6 +164,7 @@ public final class TasksActivity extends Activity {
             @Override public void onSettings() {
                 startActivity(new Intent(TasksActivity.this, SettingsActivity.class));
             }
+            @Override public void onHome() { openHome(); }
             @Override public void onChat() { openChat(null); }
             @Override public void onTasks() { }
         };
@@ -174,6 +175,14 @@ public final class TasksActivity extends Activity {
             .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
         if (extra != null) intent.putExtra(extra, true);
         startActivity(intent);
+        finish();
+        overridePendingTransition(0, 0);
+    }
+
+    private void openHome() {
+        startActivity(
+            new Intent(this, HomeActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        );
         finish();
         overridePendingTransition(0, 0);
     }
