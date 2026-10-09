@@ -195,6 +195,15 @@ class GroundedHomeEntity:
     display_value: str | None = None
     supported_features: int | None = None
     source_last_updated: str | None = None
+    platform: str | None = None
+    registry_name: str | None = None
+    registry_original_name: str | None = None
+    device_name_by_user: str | None = None
+    device_manufacturer: str | None = None
+    device_model: str | None = None
+    device_identifiers: tuple[tuple[str, str], ...] = ()
+    device_connections: tuple[tuple[str, str], ...] = ()
+    via_device_id: str | None = None
 
     @classmethod
     def from_state(cls, state: Mapping[str, Any], observed_at: str) -> GroundedHomeEntity:
@@ -223,10 +232,32 @@ class GroundedHomeEntity:
                 else None
             ),
             source_last_updated=str(state.get("last_updated") or "") or None,
+            platform=str(state.get("platform") or "") or None,
+            registry_name=str(state.get("registry_name") or "") or None,
+            registry_original_name=(str(state.get("registry_original_name") or "") or None),
+            device_name_by_user=str(state.get("device_name_by_user") or "") or None,
+            device_manufacturer=str(state.get("device_manufacturer") or "") or None,
+            device_model=str(state.get("device_model") or "") or None,
+            device_identifiers=_registry_pairs(state.get("device_identifiers")),
+            device_connections=_registry_pairs(state.get("device_connections")),
+            via_device_id=str(state.get("via_device_id") or "") or None,
         )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _registry_pairs(value: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for item in value:
+        if not isinstance(item, Sequence) or isinstance(item, (str, bytes, bytearray)):
+            continue
+        parts = tuple(str(part).strip() for part in item)
+        if len(parts) == 2 and all(parts):
+            pairs.append((parts[0], parts[1]))
+    return tuple(sorted(set(pairs)))
 
 
 _PRIMARY_DEVICE_DOMAINS = frozenset(

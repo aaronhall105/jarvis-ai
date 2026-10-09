@@ -6,13 +6,13 @@ device evidence.
 
 ## Validated source and release
 
-- Current release candidate: `v19.0.0-alpha37`
+- Current release candidate: `v19.0.0-alpha38`
 - Release source: the immutable tag, product manifest, and OTA manifest must
   record the exact approved `jarvis/unified-production` revision
 - Authoritative branch: `jarvis/unified-production`
 - Core application version: `3.7.0`
 - Realtime protocol: `2`
-- Android Phone and Wear versionCode: `190390`
+- Android Phone and Wear versionCode: `190400`
 
 The tag-triggered workflow fails closed unless the tag equals the current
 authoritative branch head. It builds Phone and Watch from that one revision,
@@ -22,7 +22,7 @@ from the exact published bytes.
 
 ## Core and repository checks
 
-The alpha37 release candidate adds one Core-owned HomeExperience projection,
+The alpha38 release candidate refines the Core-owned HomeExperience projection,
 authenticated Home API, Android Home/room/detail UI, read-only offline cache,
 and a Home Assistant presentation bridge/dashboard. It retains alpha36
 physical-device/proactive behavior, alpha35 whole-home grounding and verified
@@ -31,7 +31,7 @@ failover, and realtime voice.
 Its complete test and release-gate evidence is recorded in the release PR and
 immutable OTA workflow run rather than inferred here.
 
-The protected release PR and post-merge alpha37 head must repeat the applicable
+The protected release PR and post-merge alpha38 head must repeat the applicable
 checks before the immutable release tag is created.
 
 ## Google Personal Integrations v1
@@ -60,7 +60,7 @@ closed without inventing addresses.
 
 ## Android Phone and Wear OS
 
-The alpha37 source retains the approved Phone/Watch lineage, shared protocol,
+The alpha38 source retains the approved Phone/Watch lineage, shared protocol,
 Integrations activity and OAuth deep link, Developer capability,
 delete-current-chat, realtime recovery, assistant/overlay/wake support, Wear
 bridge, Tile, voice, and current branding. The Android connected-provider
@@ -70,7 +70,7 @@ literal text `null`; tests cover both empty detail and verified account email.
 Alpha36 keeps first-class Chat/Tasks navigation, shared Core routing, offline
 cached task state, and a generic bounded/continuous progress renderer. Package, version, versionCode,
 production signature, resources, manifest, and compiled markers are verified
-again from the final signed alpha37 APKs during publication.
+again from the final signed alpha38 APKs during publication.
 
 ## Persistence and runtime
 
@@ -80,7 +80,7 @@ mounts and all Core/speaker stores passed `PRAGMA quick_check`. Conversations,
 messages, memory, durable jobs, receipts, integration accounts, OAuth sessions,
 and encrypted credentials remained intact.
 
-Core and Developer report the deployed source revision. If exact alpha37
+Core and Developer report the deployed source revision. If exact alpha38
 provenance requires redeployment after the release-only merge, the guarded
 deployment path must preserve those stores and recheck provider health.
 
@@ -90,8 +90,8 @@ The alpha26 Phone completed an earlier in-place OTA with data preservation and
 serves as the physical rollback baseline. Publishing alpha28 does not by itself
 prove an alpha28 install.
 
-- Phone alpha37: pending in-place user OTA validation.
-- Watch alpha37: pending in-place user validation.
+- Phone alpha38: pending in-place user OTA validation.
+- Watch alpha38: pending in-place user validation.
 
 Neither application should be uninstalled or have its data cleared during
 validation.

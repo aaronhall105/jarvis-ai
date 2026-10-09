@@ -1,7 +1,7 @@
-# Alpha37 Home Assistant dashboard
+# Alpha38 Home Assistant dashboard
 
-Alpha37 does not overwrite the live Lovelace database. The repository contains
-the production dashboard source at `docs/configuration/jarvis_alpha37_dashboard.yaml`.
+Alpha38 does not overwrite the live Lovelace database. The repository contains
+the production dashboard source at `docs/configuration/jarvis_alpha38_dashboard.yaml`.
 It renders the same authenticated Core `HomeExperience` used by Android and
 conversation; only camera streams and explicit controls remain native HA cards.
 
@@ -10,9 +10,9 @@ conversation; only camera streams and explicit controls remain native HA cards.
 1. Back up the Home Assistant configuration directory and the current dashboard
    before changing anything.
 2. From the extracted release package, run
-   `tools/install_jarvis_home_v1_6_0.sh <HA_CONFIG>`. The installer requires an
+   `tools/install_jarvis_home_v1_7_0.sh <HA_CONFIG>`. The installer requires an
    existing Jarvis integration, backs it up under
-   `<HA_CONFIG>/backups/jarvis-home-v1.6.0/<timestamp>`, validates the package,
+   `<HA_CONFIG>/backups/jarvis-home-v1.7.0/<timestamp>`, validates the package,
    restores the backup on installation failure, and runs `ha core check` when
    the HA CLI is available.
 3. Restart Home Assistant and open **Settings → Devices & services → Jarvis Core
@@ -28,7 +28,7 @@ conversation; only camera streams and explicit controls remain native HA cards.
 1. Open **Settings → Dashboards → Add dashboard** and create a new dashboard
    titled `Jarvis` with URL `lovelace-jarvis`.
 2. Open that dashboard, choose **Edit dashboard → Raw configuration editor**,
-   and paste the contents of `jarvis_alpha37_dashboard.yaml`.
+   and paste the contents of `jarvis_alpha38_dashboard.yaml`.
 3. Save, then verify Home, Rooms, Living Room, Cameras, Energy, People, and More.
 4. Confirm the existing `button-card` and `card-mod` resources load. The file
    adds no new frontend dependency.

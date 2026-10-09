@@ -2,6 +2,18 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha38 — home experience canonicalization and UX polish
+
+Alpha38 canonicalizes grounded HomeExperience presentation around physical
+items, keeping alternate streams, raw entities, and detailed evidence under
+Diagnostics. Android now presents compact rooms, cameras, energy, activity,
+offline status, and detail navigation without weakening verified action
+targets or alpha37 freshness and cache semantics.
+
+See [the complete alpha38 release notes](docs/releases/CHANGES_V19_0_0_ALPHA38.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha37 — unified home experience
 
 Alpha37 projects grounded Home Assistant state, physical-device roll-ups, and

@@ -93,7 +93,7 @@ views:
             name: Living Room
         card_mod: *surface
       - type: entities
-        title: Important
+        title: Needs attention
         show_header_toggle: false
         entities:
           - entity: sensor.jarvis_active_incidents
@@ -138,24 +138,12 @@ views:
         show_header_toggle: false
         entities:
           - entity: sensor.jarvis_living_room
-            name: Occupancy evidence
+            name: Occupancy
           - entity: light.living_room_ceiling
             name: Ceiling light
-          - entity: binary_sensor.living_room_person
-            name: Person detection
-          - entity: binary_sensor.living_room_motion
-            name: Motion
         card_mod: *surface
       - type: picture-entity
         entity: camera.living_room_clear
-        camera_view: live
-        show_name: false
-        show_state: false
-        tap_action:
-          action: more-info
-        card_mod: *surface
-      - type: picture-entity
-        entity: camera.living_room_fluent
         camera_view: live
         show_name: false
         show_state: false
@@ -177,14 +165,6 @@ views:
         card_mod: *surface
       - type: picture-entity
         entity: camera.living_room_clear
-        camera_view: live
-        show_name: false
-        show_state: false
-        tap_action:
-          action: more-info
-        card_mod: *surface
-      - type: picture-entity
-        entity: camera.living_room_fluent
         camera_view: live
         show_name: false
         show_state: false

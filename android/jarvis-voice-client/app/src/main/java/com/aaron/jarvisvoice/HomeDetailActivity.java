@@ -88,6 +88,15 @@ public final class HomeDetailActivity extends Activity {
         appShell.newChat.setVisibility(View.GONE);
         appShell.clearChat.setVisibility(View.GONE);
         root.addView(appShell.view, matchWrap());
+        Button back = pillButton("‹ Back");
+        back.setContentDescription("Back");
+        back.setOnClickListener(view -> finish());
+        LinearLayout backRow = new LinearLayout(this);
+        backRow.setPadding(dp(16), 0, dp(16), dp(6));
+        backRow.addView(back, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        root.addView(backRow, matchWrap());
         ScrollView scroll = new ScrollView(this);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -102,29 +111,29 @@ public final class HomeDetailActivity extends Activity {
     }
 
     private void renderEvent(JSONObject event) {
-        addTitle(event.optString("title", "Home activity"));
-        addCard("What happened", event.optString("message", "Home activity was recorded."));
+        addTitle(safe(event, "title", "Home activity"));
+        addCard("What happened", safe(event, "message", "Home activity was recorded."));
         String occurred = TasksActivity.relativeTime(
-            event.optString("occurred_at", event.optString("last_seen"))
+            safe(event, "occurred_at", safe(event, "last_seen", ""))
         );
         if (!occurred.isBlank()) addCard("When", occurred);
-        addCard("Current status", natural(event.optString("status", "Recorded")));
-        String why = event.optString("why", "");
+        addCard("Current status", natural(safe(event, "status", "Recorded")));
+        String why = safe(event, "why", "");
         if (!why.isBlank()) addCard("Why Jarvis surfaced it", why);
-        String area = event.optString("area_name", "");
+        String area = safe(event, "area_name", "");
         if (!area.isBlank()) addCard("Room", area);
-        String device = event.optString("device_name", "");
+        String device = safe(event, "device_name", "");
         if (!device.isBlank()) addCard("Device", device);
         JSONArray evidence = event.optJSONArray("evidence_summary");
         if (evidence != null && evidence.length() > 0) {
             LinearLayout card = section("Evidence");
             for (int index = 0; index < evidence.length(); index++) {
-                String item = evidence.optString(index, "");
+                String item = safe(evidence, index);
                 if (!item.isBlank()) card.addView(body(item), matchWrap(dp(7), 0));
             }
             content.addView(card, matchWrap(0, dp(12)));
         }
-        String resolved = TasksActivity.relativeTime(event.optString("resolved_at", ""));
+        String resolved = TasksActivity.relativeTime(safe(event, "resolved_at", ""));
         if (event.optBoolean("recovery", false) || !resolved.isBlank()) {
             addCard(
                 "Recovery",
@@ -135,7 +144,7 @@ public final class HomeDetailActivity extends Activity {
         if (actions != null && actions.length() > 0) {
             LinearLayout card = section("Safe actions");
             for (int index = 0; index < actions.length(); index++) {
-                String action = actions.optString(index, "");
+                String action = safe(actions, index);
                 if (!action.isBlank()) card.addView(body(natural(action)), matchWrap(dp(7), 0));
             }
             content.addView(card, matchWrap(0, dp(12)));
@@ -144,20 +153,23 @@ public final class HomeDetailActivity extends Activity {
     }
 
     private void renderCamera(JSONObject camera) {
-        addTitle(camera.optString("name", "Camera"));
-        addCard("Availability", natural(camera.optString("availability", "Unknown")));
-        String area = camera.optString("area_name", "");
+        addTitle(safe(camera, "name", "Camera"));
+        addCard("Availability", natural(safe(camera, "availability", "Unknown")));
+        String area = safe(camera, "area_name", "");
         if (!area.isBlank()) addCard("Room", area);
-        String activity = camera.optString("recent_activity", "");
+        String activity = safe(camera, "recent_activity", "");
         if (!activity.isBlank()) addCard("Recent activity", activity);
-        String observed = TasksActivity.relativeTime(camera.optString("observed_at", ""));
+        String observed = TasksActivity.relativeTime(safe(camera, "observed_at", ""));
         if (!observed.isBlank()) addCard("Observed", observed);
         addCard(
             "Live view",
             "Open this camera from Home Assistant for the existing authenticated live stream."
         );
         JSONObject diagnostic = new JSONObject();
-        try { diagnostic.put("entity_id", camera.optString("entity_id")); }
+        try { diagnostic.put("entity_id", safe(camera, "entity_id", "")); }
+        catch (Exception ignored) { }
+        JSONObject sources = camera.optJSONObject("diagnostics");
+        if (sources != null) try { diagnostic.put("sources", sources); }
         catch (Exception ignored) { }
         addDiagnostics(diagnostic);
     }
@@ -171,18 +183,18 @@ public final class HomeDetailActivity extends Activity {
             if (room == null) continue;
             JSONArray lights = room.optJSONArray("lights");
             if (lights == null || lights.length() == 0) continue;
-            LinearLayout card = section(room.optString("name", "Room"));
+            LinearLayout card = section(safe(room, "name", "Room"));
             for (int index = 0; index < lights.length(); index++) {
                 JSONObject light = lights.optJSONObject(index);
                 if (light == null) continue;
                 LinearLayout row = new LinearLayout(this);
                 row.setOrientation(LinearLayout.HORIZONTAL);
-                TextView name = text(light.optString("name", "Light"), 14, JarvisUi.BLACK);
+                TextView name = text(safe(light, "name", "Light"), 14, JarvisUi.BLACK);
                 name.setMaxLines(2);
                 row.addView(name, new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
                 ));
-                TextView state = body(natural(light.optString("state", "Unknown")));
+                TextView state = body(natural(safe(light, "state", "Unknown")));
                 row.addView(state, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ));
@@ -217,12 +229,15 @@ public final class HomeDetailActivity extends Activity {
 
     private void addDiagnostics(JSONObject diagnostic) {
         if (diagnostic == null || diagnostic.optString("entity_id", "").isBlank()) return;
-        Button toggle = new Button(this);
-        toggle.setAllCaps(false);
-        toggle.setText("Diagnostics");
-        toggle.setMinHeight(dp(JarvisUi.TOUCH_TARGET));
+        Button toggle = pillButton("Diagnostics");
         LinearLayout details = section("Technical details");
-        details.addView(body(diagnostic.optString("entity_id")), matchWrap(dp(7), 0));
+        String entityId = safe(diagnostic, "entity_id", "");
+        if (!entityId.isBlank()) details.addView(body(entityId), matchWrap(dp(7), 0));
+        JSONObject sources = diagnostic.optJSONObject("sources");
+        if (sources != null) {
+            addSourceIds(details, sources.optJSONArray("alternate_entity_ids"));
+            addSourceIds(details, sources.optJSONArray("diagnostic_entity_ids"));
+        }
         details.setVisibility(View.GONE);
         toggle.setOnClickListener(view -> details.setVisibility(
             details.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE
@@ -255,6 +270,39 @@ public final class HomeDetailActivity extends Activity {
         if (value == null || value.isBlank()) return "Unknown";
         String lower = value.replace('_', ' ').toLowerCase(java.util.Locale.ROOT);
         return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
+    }
+
+    private void addSourceIds(LinearLayout details, JSONArray values) {
+        if (values == null) return;
+        for (int index = 0; index < values.length(); index++) {
+            String value = safe(values, index);
+            if (!value.isBlank()) details.addView(body(value), matchWrap(dp(7), 0));
+        }
+    }
+
+    private static String safe(JSONObject value, String key, String fallback) {
+        return HomeExperience.text(value, key, fallback);
+    }
+
+    private static String safe(JSONArray values, int index) {
+        String value = values.optString(index, "").trim();
+        String lower = value.toLowerCase(java.util.Locale.ROOT);
+        return "null".equals(lower) || "none".equals(lower) || "undefined".equals(lower)
+            ? "" : value;
+    }
+
+    private Button pillButton(String label) {
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(label);
+        button.setTextSize(13);
+        button.setTextColor(JarvisUi.BLACK);
+        button.setMinHeight(dp(JarvisUi.TOUCH_TARGET));
+        button.setPadding(dp(14), dp(7), dp(14), dp(7));
+        button.setBackground(JarvisUi.rounded(
+            this, JarvisUi.SOFT, JarvisUi.RADIUS_PILL, 1, JarvisUi.LINE
+        ));
+        return button;
     }
 
     private TextView body(String value) { return text(value, 14, JarvisUi.MID); }
