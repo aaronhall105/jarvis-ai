@@ -2,6 +2,19 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha37 — unified home experience
+
+Alpha37 projects grounded Home Assistant state, physical-device roll-ups, and
+durable proactive evidence into one authenticated `HomeExperience` contract.
+Android, conversation, and a Home Assistant dashboard bridge now present the
+same people, rooms, lights, availability, incidents, activity, and freshness
+semantics. Explicit light actions retain exact-set verification, while cached
+mobile state is visibly offline and read-only.
+
+See [the complete alpha37 release notes](docs/releases/CHANGES_V19_0_0_ALPHA37.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha36 — proactive home intelligence
 
 Alpha36 rolls Home Assistant entity failures up to grounded physical devices,

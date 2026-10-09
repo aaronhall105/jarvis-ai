@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from app.device_resolver import DeviceResolver
@@ -242,20 +242,38 @@ class ToolEngine:
             area_loader=self.registry.areas,
             state_loader=lambda: self.readable_entity_states(refresh=True),
         )
+        self._home_experience_projector: Callable[[Any, str], Any] | None = None
 
-    async def query_home(self, plan: dict[str, Any]) -> dict[str, Any]:
+    def set_home_experience_projector(
+        self,
+        projector: Callable[[Any, str], Any],
+    ) -> None:
+        """Attach the shared presentation projection without changing HA authority."""
+
+        self._home_experience_projector = projector
+
+    async def query_home(
+        self,
+        plan: dict[str, Any],
+        *,
+        principal_id: str = "aaron",
+    ) -> dict[str, Any]:
         """Execute a validated semantic set query over complete fresh HA state."""
 
         semantic_plan = HomeQueryPlan.from_mapping(plan)
         if semantic_plan.operation.value == "SNAPSHOT":
             snapshot = await self.home_intelligence.snapshot()
-            return {
+            result = {
                 "success": True,
                 "query_plan": semantic_plan.as_dict(),
                 "snapshot": snapshot.as_dict(),
                 "observed_at": snapshot.observed_at,
                 "complete": True,
             }
+            if self._home_experience_projector is not None:
+                experience = self._home_experience_projector(snapshot, principal_id)
+                result["home_experience"] = experience.as_dict()
+            return result
         grounded = await self.home_intelligence.query(semantic_plan)
         return grounded.as_result()
 

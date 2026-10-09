@@ -13,9 +13,11 @@ from .const import (
     DEFAULT_FOLLOW_UP_WINDOW,
     FOLLOW_UP_ALWAYS,
     FOLLOW_UP_SMART,
+    DOMAIN,
 )
+from .coordinator import JarvisHomeCoordinator
 
-PLATFORMS: list[Platform] = [Platform.CONVERSATION]
+PLATFORMS: list[Platform] = [Platform.CONVERSATION, Platform.SENSOR]
 
 
 async def async_setup_entry(
@@ -36,6 +38,10 @@ async def async_setup_entry(
         options[CONF_AUDIO_GATE_MIGRATED] = True
         hass.config_entries.async_update_entry(entry, options=options)
 
+    coordinator = JarvisHomeCoordinator(hass, entry)
+    await coordinator.async_refresh()
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -46,4 +52,7 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a Jarvis Core Conversation config entry."""
 
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return unloaded

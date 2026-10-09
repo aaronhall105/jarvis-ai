@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Header, HTTPException, Query, WebSocket
+from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
+    Response,
     StreamingResponse,
 )
 from pydantic import BaseModel, Field
@@ -58,6 +59,7 @@ from app.home_assistant import (
     HomeAssistantClient,
     connection_test_with_timeout,
 )
+from app.home_experience import HomeExperienceService
 from app.logging_config import configure_logging
 from app.memory_engine import MemoryEngine
 from app.person_room_context import (
@@ -560,6 +562,10 @@ class PersonalTaskRescheduleRequest(PersonalTaskMutationRequest):
 class TaskNotificationPreferenceRequest(BaseModel):
     notify_on_completion: bool = False
     notify_on_failure: bool = False
+
+
+class HomeActionRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=255)
 
 
 class TaskSteerRequest(BaseModel):
@@ -8362,6 +8368,111 @@ from app.proactive_intelligence import (
 )
 
 app.include_router(proactive_router)
+
+home_experience_service = HomeExperienceService(
+    snapshot_loader=tools.home_intelligence.snapshot,
+    event_loader=lambda principal: proactive_engine.feed(principal, 50),
+    incident_loader=lambda: proactive_engine.active_incidents(100),
+)
+tools.set_home_experience_projector(home_experience_service.project)
+
+
+@app.get("/api/home")
+async def get_home_experience(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> Response:
+    """Return the authenticated, shared presentation projection for one principal."""
+
+    principal_id = _require_mobile_integration_principal(authorization)
+    started = time.monotonic()
+    experience = await home_experience_service.get(principal_id)
+    payload = experience.as_dict()
+    freshness_status = str(experience.source_freshness.get("status") or "UNAVAILABLE")
+    etag = f'"{experience.revision}-{freshness_status}"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "private, no-cache",
+        "Vary": "Authorization",
+        "X-Jarvis-Home-Generated-At": experience.generated_at,
+    }
+    runtime_metrics.observe(
+        "home_api_response_ms",
+        (time.monotonic() - started) * 1000,
+    )
+    if request.headers.get("if-none-match", "").strip() == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(payload, headers=headers)
+
+
+async def _execute_frozen_home_action(
+    *,
+    principal_id: str,
+    action_id: str,
+    request_id: str,
+) -> dict[str, object]:
+    action = home_experience_service.resolve_action(principal_id, action_id)
+    if action.kind != "TURN_OFF_EXACT_LIGHT_SET":
+        raise ValueError("That Home action is not supported.")
+    actor = UserContext(
+        user_id=principal_id,
+        user_key=principal_id,
+        display_name=principal_id.title(),
+        is_admin=False,
+    )
+    result = await ai.execute_frozen_home_entity_set(
+        entity_ids=action.target_entity_ids,
+        action="turn_off",
+        conversation_id=f"usr:{principal_id}:home",
+        actor=actor,
+        request_id=request_id,
+        allowed_domains=frozenset({"light"}),
+    )
+    status = str(result["outcome_status"])
+    verified_count = int(result["verified_count"])
+    failed_count = int(result["failed_count"])
+    unknown_count = int(result["unknown_count"])
+    if status == "VERIFIED":
+        message = f"{verified_count} {'light' if verified_count == 1 else 'lights'} turned off."
+    elif status == "PARTIAL":
+        message = (
+            f"{verified_count} turned off. "
+            f"{failed_count + unknown_count} failed or could not be confirmed."
+        )
+    elif status == "UNKNOWN":
+        message = "The light action could not be confirmed."
+    else:
+        message = "The displayed lights could not be turned off."
+    return {
+        "action_id": action.action_id,
+        "revision": action.revision,
+        "status": status,
+        "verified": status == "VERIFIED",
+        "requested_count": result["requested_count"],
+        "verified_count": verified_count,
+        "failed_count": failed_count,
+        "unknown_count": unknown_count,
+        "outcomes": result["outcomes"],
+        "message": message,
+    }
+
+
+@app.post("/api/home/actions/{action_id:path}")
+async def execute_home_action(
+    action_id: str,
+    body: HomeActionRequest,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    principal_id = _require_mobile_integration_principal(authorization)
+    try:
+        return await _execute_frozen_home_action(
+            principal_id=principal_id,
+            action_id=action_id,
+            request_id=body.request_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
 
 # Jarvis v19 alpha9 Core-first vision intelligence
 from app.vision_intelligence import engine as vision_engine

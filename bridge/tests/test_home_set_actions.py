@@ -26,7 +26,8 @@ class _Tools:
             for entity_id in self.entity_ids
         ]
 
-    async def query_home(self, plan):
+    async def query_home(self, plan, *, principal_id="aaron"):
+        assert principal_id == "aaron"
         return {"success": True, "query_plan": dict(plan), "entities": []}
 
 

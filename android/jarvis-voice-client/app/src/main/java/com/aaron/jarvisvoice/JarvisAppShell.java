@@ -10,9 +10,9 @@ import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** One visual header and primary navigation shell shared by Chat and Tasks. */
+/** One visual header and primary navigation shell shared by Home, Chat and Tasks. */
 final class JarvisAppShell {
-    enum Destination { CHAT, TASKS }
+    enum Destination { HOME, CHAT, TASKS }
 
     interface Actions {
         void onMode();
@@ -20,6 +20,7 @@ final class JarvisAppShell {
         void onNewChat();
         void onClearChat();
         void onSettings();
+        default void onHome() {}
         void onChat();
         void onTasks();
     }
@@ -30,6 +31,7 @@ final class JarvisAppShell {
         final LinearLayout navigationFrame;
         final TextView mode;
         final TextView context;
+        final TextView homeTab;
         final TextView chatTab;
         final TextView tasksTab;
         final ImageButton notifications;
@@ -43,6 +45,7 @@ final class JarvisAppShell {
             LinearLayout navigationFrame,
             TextView mode,
             TextView context,
+            TextView homeTab,
             TextView chatTab,
             TextView tasksTab,
             ImageButton notifications,
@@ -55,6 +58,7 @@ final class JarvisAppShell {
             this.navigationFrame = navigationFrame;
             this.mode = mode;
             this.context = context;
+            this.homeTab = homeTab;
             this.chatTab = chatTab;
             this.tasksTab = tasksTab;
             this.notifications = notifications;
@@ -164,6 +168,13 @@ final class JarvisAppShell {
         navigation.setBackground(JarvisUi.rounded(
             activity, JarvisUi.SOFT, JarvisUi.RADIUS_LARGE, 1, JarvisUi.LINE
         ));
+        TextView home = JarvisUi.segmentedItem(activity, "Home", destination == Destination.HOME);
+        home.setOnClickListener(view -> actions.onHome());
+        navigation.addView(home, new LinearLayout.LayoutParams(
+            0,
+            JarvisUi.dp(activity, JarvisUi.PRIMARY_NAV_HEIGHT - 6),
+            1f
+        ));
         TextView chat = JarvisUi.segmentedItem(activity, "Chat", destination == Destination.CHAT);
         chat.setOnClickListener(view -> actions.onChat());
         navigation.addView(chat, new LinearLayout.LayoutParams(
@@ -190,6 +201,7 @@ final class JarvisAppShell {
             navigationFrame,
             mode,
             context,
+            home,
             chat,
             tasks,
             notifications,

@@ -15,6 +15,7 @@ from .const import (
     CONF_SHOW_PROGRESS_TEXT,
     CONF_SPOKEN_PROGRESS,
     CONF_TIMEOUT,
+    CONF_TOKEN,
     CONF_URL,
     DEFAULT_AUDIO_GATE_ENABLED,
     DEFAULT_FOLLOW_UP_MODE,
@@ -90,6 +91,7 @@ class JarvisCoreConfigFlow(
                         CONF_TIMEOUT,
                         default=DEFAULT_TIMEOUT,
                     ): int,
+                    vol.Optional(CONF_TOKEN, default=""): str,
                 }
             ),
             errors=errors,
@@ -130,6 +132,10 @@ class JarvisCoreOptionsFlow(config_entries.OptionsFlowWithReload):
             CONF_SHOW_PROGRESS_TEXT,
             DEFAULT_SHOW_PROGRESS_TEXT,
         )
+        token = self.config_entry.options.get(
+            CONF_TOKEN,
+            self.config_entry.data.get(CONF_TOKEN, ""),
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -155,6 +161,7 @@ class JarvisCoreOptionsFlow(config_entries.OptionsFlowWithReload):
                         CONF_SHOW_PROGRESS_TEXT,
                         default=show_progress_text,
                     ): bool,
+                    vol.Optional(CONF_TOKEN, default=token): str,
                 }
             ),
         )

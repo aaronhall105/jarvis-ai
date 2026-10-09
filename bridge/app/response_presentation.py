@@ -282,6 +282,13 @@ def render_home_query_evidence(
     plan = plan if isinstance(plan, Mapping) else {}
     operation = str(plan.get("operation") or "QUERY").upper()
     if operation == "SNAPSHOT":
+        experience = result.get("home_experience")
+        if isinstance(experience, Mapping):
+            overall = experience.get("overall_status")
+            if isinstance(overall, Mapping):
+                headline = str(overall.get("headline") or "").strip()
+                if headline:
+                    return headline
         snapshot = result.get("snapshot")
         if not isinstance(snapshot, Mapping):
             return None

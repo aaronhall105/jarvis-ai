@@ -110,6 +110,7 @@ final class JarvisUi {
             Color.TRANSPARENT
         ));
         tab.setContentDescription(label + (selected ? ", selected" : ""));
+        tab.setSelected(selected);
         tab.setElevation(0f);
         tab.setStateListAnimator(null);
         return tab;

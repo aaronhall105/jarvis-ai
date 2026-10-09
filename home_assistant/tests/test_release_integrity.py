@@ -22,7 +22,7 @@ def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parents[1])
     integration = root / "custom_components" / "jarvis_core_conversation"
     manifest = json.loads((integration / "manifest.json").read_text())
-    assert manifest["version"] == "1.5.4", manifest
+    assert manifest["version"] == "1.6.0", manifest
 
     major_version = _config_entry_version(integration / "config_flow.py")
     init_text = (integration / "__init__.py").read_text()
@@ -39,9 +39,11 @@ def main() -> int:
         "audio_gate.py",
         "closure.py",
         "const.py",
+        "coordinator.py",
         "conversation.py",
         "manifest.json",
         "streaming.py",
+        "sensor.py",
         "translations/en.json",
     }
     found = {

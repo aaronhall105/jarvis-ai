@@ -340,6 +340,55 @@ def test_quiet_hours_suppress_noncritical_qualified_event() -> None:
     assert decision.reason_code == "quiet_hours"
 
 
+def test_active_incidents_are_not_displaced_by_more_recent_recoveries(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    with engine.connection() as connection:
+        for index in range(110):
+            connection.execute(
+                "INSERT INTO proactive_incidents(incident_id,incident_key,category,kind,"
+                "entity_id,target_user,status,first_seen,last_seen,resolved_at,"
+                "last_decision_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"resolved-{index}",
+                    f"resolved-key-{index}",
+                    "cameras",
+                    "device_unavailable",
+                    f"camera.resolved_{index}",
+                    "aaron",
+                    "resolved",
+                    1000 + index,
+                    1000 + index,
+                    1000 + index,
+                    "{}",
+                ),
+            )
+        for index in range(3):
+            connection.execute(
+                "INSERT INTO proactive_incidents(incident_id,incident_key,category,kind,"
+                "entity_id,target_user,status,first_seen,last_seen,last_decision_json) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    f"active-{index}",
+                    f"active-key-{index}",
+                    "cameras",
+                    "device_unavailable",
+                    f"camera.active_{index}",
+                    "aaron",
+                    "active",
+                    100 + index,
+                    100 + index,
+                    "{}",
+                ),
+            )
+
+    assert not any(item["status"] == "active" for item in engine.incidents(100))
+    assert {item["incident_id"] for item in engine.active_incidents(100)} == {
+        "active-0",
+        "active-1",
+        "active-2",
+    }
+
+
 @pytest.mark.asyncio
 async def test_followups_use_persisted_evidence_and_live_grounded_state(tmp_path) -> None:
     engine = _engine(tmp_path)

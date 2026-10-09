@@ -60,7 +60,7 @@ async def test_home_query_set_uses_registered_read_capability() -> None:
     )
 
     assert result.status is ProviderResultStatus.SUCCEEDED
-    tools.query_home.assert_awaited_once_with(payload)
+    tools.query_home.assert_awaited_once_with(payload, principal_id="aaron")
 
 
 @pytest.mark.asyncio

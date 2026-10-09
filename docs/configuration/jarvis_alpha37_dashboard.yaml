@@ -1,0 +1,245 @@
+title: Jarvis
+views:
+  - title: Home
+    path: home
+    icon: mdi:home-outline
+    background: "#000000"
+    cards:
+      - type: custom:button-card
+        entity: sensor.jarvis_home_status
+        show_icon: false
+        show_name: false
+        show_state: false
+        styles:
+          card:
+            - background: "#111111"
+            - border: 1px solid "#2b2b2b"
+            - border-radius: 24px
+            - padding: 22px
+          grid:
+            - grid-template-areas: '"brand" "headline" "freshness"'
+          custom_fields:
+            brand:
+              - color: "#ffffff"
+              - font-size: 17px
+              - font-weight: 600
+              - letter-spacing: 0.28em
+              - justify-self: start
+            headline:
+              - color: "#ffffff"
+              - font-size: 22px
+              - line-height: 1.25
+              - padding-top: 14px
+              - white-space: normal
+              - justify-self: start
+            freshness:
+              - color: "#a8a8a8"
+              - font-size: 13px
+              - padding-top: 10px
+              - justify-self: start
+        custom_fields:
+          brand: J A R V I S
+          headline: >-
+            [[[
+              if (!entity || entity.state === 'unavailable') return 'Home state unavailable';
+              return entity.attributes?.headline || 'Home state unavailable';
+            ]]]
+          freshness: >-
+            [[[
+              if (!entity || entity.state === 'unavailable') return 'Showing last known state';
+              const value = entity?.attributes?.freshness || 'UNAVAILABLE';
+              return value === 'LIVE' ? 'Current' : 'Last known state · ' + value.toLowerCase().replace('_', ' ');
+            ]]]
+      - type: horizontal-stack
+        cards:
+          - type: custom:button-card
+            entity: sensor.jarvis_lights_on
+            name: Lights on
+            icon: mdi:lightbulb-outline
+            show_state: true
+            styles:
+              card: &compact_card
+                - background: "#151515"
+                - border: 1px solid "#2b2b2b"
+                - border-radius: 18px
+                - color: "#ffffff"
+                - padding: 14px
+          - type: custom:button-card
+            entity: sensor.jarvis_unavailable_devices
+            name: Unavailable
+            icon: mdi:alert-circle-outline
+            show_state: true
+            styles:
+              card: *compact_card
+      - type: markdown
+        title: People
+        content: >-
+          {% set people = state_attr('sensor.jarvis_people_home', 'people') or [] %}
+          {% if people %}
+          {% for person in people %}
+          **{{ person.name }}** — {{ person.presence | replace('_', ' ') | title }}<br>
+          {% endfor %}
+          {% else %}
+          Presence unavailable
+          {% endif %}
+        card_mod: &surface
+          style: |
+            ha-card { background: #151515; color: #fff; border: 1px solid #2b2b2b; border-radius: 18px; }
+      - type: entities
+        title: Rooms
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_living_room
+            name: Living Room
+        card_mod: *surface
+      - type: entities
+        title: Important
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_active_incidents
+            name: Active incidents
+          - entity: sensor.jarvis_camera_status
+            name: Unavailable cameras
+          - entity: sensor.jarvis_recent_activity
+            name: Recent activity
+        card_mod: *surface
+      - type: entities
+        title: Energy
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_energy_summary
+            name: Current energy
+        card_mod: *surface
+
+  - title: Rooms
+    path: rooms
+    icon: mdi:floor-plan
+    background: "#000000"
+    cards:
+      - type: custom:button-card
+        entity: sensor.jarvis_living_room
+        name: Living Room
+        show_state: true
+        icon: mdi:sofa-outline
+        tap_action:
+          action: navigate
+          navigation_path: /lovelace-jarvis/living-room
+        styles:
+          card: *compact_card
+
+  - title: Living Room
+    path: living-room
+    subview: true
+    icon: mdi:sofa-outline
+    background: "#000000"
+    cards:
+      - type: entities
+        title: Living Room
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_living_room
+            name: Occupancy evidence
+          - entity: light.living_room_ceiling
+            name: Ceiling light
+          - entity: binary_sensor.living_room_person
+            name: Person detection
+          - entity: binary_sensor.living_room_motion
+            name: Motion
+        card_mod: *surface
+      - type: picture-entity
+        entity: camera.living_room_clear
+        camera_view: live
+        show_name: false
+        show_state: false
+        tap_action:
+          action: more-info
+        card_mod: *surface
+      - type: picture-entity
+        entity: camera.living_room_fluent
+        camera_view: live
+        show_name: false
+        show_state: false
+        tap_action:
+          action: more-info
+        card_mod: *surface
+
+  - title: Cameras
+    path: cameras
+    icon: mdi:cctv
+    background: "#000000"
+    cards:
+      - type: entities
+        title: Camera status
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_camera_status
+            name: Unavailable cameras
+        card_mod: *surface
+      - type: picture-entity
+        entity: camera.living_room_clear
+        camera_view: live
+        show_name: false
+        show_state: false
+        tap_action:
+          action: more-info
+        card_mod: *surface
+      - type: picture-entity
+        entity: camera.living_room_fluent
+        camera_view: live
+        show_name: false
+        show_state: false
+        tap_action:
+          action: more-info
+        card_mod: *surface
+
+  - title: Energy
+    path: energy
+    icon: mdi:flash-outline
+    background: "#000000"
+    cards:
+      - type: entities
+        title: Energy
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_energy_summary
+        card_mod: *surface
+
+  - title: People
+    path: people
+    icon: mdi:account-multiple-outline
+    background: "#000000"
+    cards:
+      - type: markdown
+        content: >-
+          {% set people = state_attr('sensor.jarvis_people_home', 'people') or [] %}
+          {% if people %}
+          {% for person in people %}
+          **{{ person.name }}** — {{ person.presence | replace('_', ' ') | title }}<br>
+          {% endfor %}
+          {% else %}
+          Presence unavailable
+          {% endif %}
+        card_mod: *surface
+
+  - title: More
+    path: more
+    icon: mdi:dots-horizontal
+    background: "#000000"
+    cards:
+      - type: entities
+        title: System / Diagnostics
+        show_header_toggle: false
+        entities:
+          - entity: sensor.jarvis_home_status
+          - entity: sensor.jarvis_unavailable_devices
+          - entity: sensor.jarvis_active_incidents
+          - entity: sensor.jarvis_recent_activity
+        card_mod: *surface
+      - type: markdown
+        title: Jarvis integration
+        content: >-
+          Raw entity state, integration configuration, and developer tools belong
+          here rather than on the Home view. Use Developer Tools → States for deep
+          inspection of the `sensor.jarvis_*` projection. Room sensors are generated
+          from configured areas; add their entity IDs to the Rooms view when needed.
+        card_mod: *surface

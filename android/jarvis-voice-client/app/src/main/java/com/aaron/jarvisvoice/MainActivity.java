@@ -346,6 +346,7 @@ public final class MainActivity extends Activity {
                 @Override public void onSettings() {
                     startActivity(new Intent(MainActivity.this, SettingsActivity.class));
                 }
+                @Override public void onHome() { openHome(); }
                 @Override public void onChat() { }
                 @Override public void onTasks() { openTasks(); }
             }
@@ -734,6 +735,15 @@ public final class MainActivity extends Activity {
     private void openTasks() {
         dismissComposerKeyboard();
         startActivity(new Intent(this, TasksActivity.class));
+        overridePendingTransition(0, 0);
+    }
+
+    private void openHome() {
+        dismissComposerKeyboard();
+        startActivity(
+            new Intent(this, HomeActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        );
+        finish();
         overridePendingTransition(0, 0);
     }
 

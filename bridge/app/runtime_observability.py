@@ -15,6 +15,8 @@ PERFORMANCE_BUDGETS_MS: dict[str, int] = {
     "model_request_to_first_token": 1400,
     "speech_end_to_first_audio": 2200,
     "home_assistant_command": 1200,
+    "home_experience_construction_ms": 100,
+    "home_api_response_ms": 250,
     "jarvis_request_total_ms": 3500,
 }
 

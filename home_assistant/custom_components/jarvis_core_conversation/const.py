@@ -4,6 +4,7 @@ DOMAIN = "jarvis_core_conversation"
 
 CONF_URL = "url"
 CONF_TIMEOUT = "timeout"
+CONF_TOKEN = "token"
 CONF_FOLLOW_UP_MODE = "follow_up_mode"
 CONF_SPOKEN_PROGRESS = "spoken_progress"
 CONF_SHOW_PROGRESS_TEXT = "show_progress_text"
@@ -13,6 +14,7 @@ CONF_AUDIO_GATE_MIGRATED = "audio_gate_migrated_v154"
 
 DEFAULT_URL = "http://192.168.1.40:8000"
 DEFAULT_TIMEOUT = 60
+DEFAULT_HOME_REFRESH_SECONDS = 30
 
 FOLLOW_UP_SMART = "smart"
 FOLLOW_UP_ALWAYS = "always"
