@@ -232,8 +232,8 @@ Home Assistant tools:
   returned short-lived handle. If more than one plausible canonical candidate
   remains, ask which one in a single concise question.
 - When a follow-up keeps or pronominally refers to the single canonical object
-  grounded in WorkingContext, set use_current_reference=true. Do not reconstruct
-  its identity from remembered words or invent its area; Core will revalidate the
+  grounded in WorkingContext, set scope=CURRENT_REFERENCE. Do not reconstruct its
+  identity from remembered words or invent its area; Core will revalidate the
   stored canonical ID against the live inventory.
 - Use a Home Assistant control tool only for an explicit action the user wants
   performed now. Do not operate devices for hypothetical questions, explanations,
@@ -2150,23 +2150,26 @@ class AIEngine:
                     "contains physical objects and capabilities, not every child entity. Use "
                     "this for named things, arbitrary device kinds, counts, lists, state "
                     "questions, and as the mandatory discovery step before execute_home_action. "
-                    "Infer the semantic operation from meaning, not exact wording. Put a concise "
+                    "Infer the semantic operation from meaning, not exact wording. "
                     "A telegraphic target plus an achievable desired end state is CONTROL even "
                     "when the user omits a verb; QUERY is only for retrieving information. "
-                    "Put a concise "
-                    "normalised concept in query and add a few genuinely equivalent concepts in "
+                    "Put a concise normalised target concept in semantic_target and add a few "
+                    "genuinely equivalent concepts in "
                     "semantic_terms when useful; this lets semantic language such as colloquial "
                     "names ground against structured names, domains, device classes, models and "
                     "capabilities without a phrase catalogue. For CONTROL, supply the exact "
-                    "requested action and capability. Use use_current_reference only when the "
+                    "requested action and capability. Use scope CURRENT_REFERENCE only when the "
                     "conversation's grounded canonical object is the intended referent; this "
                     "is mandatory for a follow-up that keeps that object while omitting its "
                     "scope. Do not reconstruct its identity from prior text. Raw "
                     "diagnostic and observation entities are excluded by default. Use "
                     "inventory_kind ROOM only for derived room occupancy and HOME_SUMMARY "
                     "only for a whole-home overview; otherwise use PHYSICAL_DEVICE. A "
-                    "dwelling-wide scope uses area_id null; choose an area only when the user "
-                    "means that actual configured room."
+                    "dwelling-wide scope is HOME even if its ordinary-language description "
+                    "resembles a configured area label. AREA means one actual configured room. "
+                    "CURRENT_REFERENCE means the exact canonical object already grounded in "
+                    "WorkingContext. semantic_target contains only the target concept, without "
+                    "scope, operation, or state words. area_id is set only for AREA."
                 ),
                 "parameters": {
                     "type": "object",
@@ -2184,11 +2187,25 @@ class AIEngine:
                             "type": "string",
                             "enum": ["PHYSICAL_DEVICE", "ROOM", "HOME_SUMMARY"],
                         },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["HOME", "AREA", "CURRENT_REFERENCE"],
+                            "description": (
+                                "HOME is the whole residence; AREA is one configured room; "
+                                "CURRENT_REFERENCE reuses one grounded canonical object."
+                            ),
+                        },
                         "aggregation": {
                             "type": "string",
                             "enum": ["COUNT", "LIST", "STATE", "SUMMARY", "COMPARE"],
                         },
-                        "query": {"type": "string"},
+                        "semantic_target": {
+                            "type": "string",
+                            "description": (
+                                "A concise target concept only; exclude location, operation, "
+                                "aggregation and requested state."
+                            ),
+                        },
                         "semantic_terms": {
                             "type": "array",
                             "items": {"type": "string"},
@@ -2250,15 +2267,15 @@ class AIEngine:
                                 None,
                             ],
                         },
-                        "use_current_reference": {"type": "boolean"},
                         "include_diagnostics": {"type": "boolean"},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
                     "required": [
                         "semantic_operation",
                         "inventory_kind",
+                        "scope",
                         "aggregation",
-                        "query",
+                        "semantic_target",
                         "semantic_terms",
                         "area_id",
                         "capability",
@@ -2266,7 +2283,6 @@ class AIEngine:
                         "state",
                         "occupancy_state",
                         "requested_action",
-                        "use_current_reference",
                         "include_diagnostics",
                         "limit",
                     ],
@@ -3634,7 +3650,7 @@ class AIEngine:
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "search_home":
-                query = _normalise_space(str(arguments.get("query") or ""))
+                query = _normalise_space(str(arguments.get("semantic_target") or ""))
                 raw_terms = arguments.get("semantic_terms") or ()
                 semantic_terms = [
                     _normalise_space(str(item))
@@ -3657,8 +3673,37 @@ class AIEngine:
                         "unknown_area",
                         f"Unknown Home Assistant area: {semantic_area_id}",
                     )
+                semantic_scope = str(arguments.get("scope") or "HOME").upper()
+                if semantic_scope not in {"HOME", "AREA", "CURRENT_REFERENCE"}:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_scope",
+                        "Semantic home scope must be HOME, AREA, or CURRENT_REFERENCE.",
+                    )
+                if semantic_scope == "HOME" and semantic_area_id is not None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "scope_area_conflict",
+                        "Whole-home scope cannot also select one area.",
+                    )
+                if semantic_scope == "AREA" and semantic_area_id is None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "area_required",
+                        "Area scope requires one configured area.",
+                    )
+                if semantic_scope == "CURRENT_REFERENCE" and semantic_area_id is not None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "reference_area_conflict",
+                        "A grounded current reference cannot also select an area.",
+                    )
                 restrict_ids: tuple[str, ...] = ()
-                if bool(arguments.get("use_current_reference")):
+                if semantic_scope == "CURRENT_REFERENCE":
                     resolution = await WorkingContextService(self.dialogue).resolve(
                         principal_id=actor.user_key,
                         conversation_id=conversation_id,
@@ -3676,12 +3721,12 @@ class AIEngine:
                         for item in resolution.objects
                         if item.provider == "home_assistant" and item.canonical_id
                     )
-                    if len(restrict_ids) != len(resolution.objects):
+                    if len(restrict_ids) != 1 or len(resolution.objects) != 1:
                         return self._tool_failure(
                             name,
                             arguments,
                             "invalid_grounded_reference",
-                            "The current reference is not a canonical Home Assistant object.",
+                            "The current reference is not one canonical Home Assistant object.",
                         )
                 semantic_aggregation = str(arguments.get("aggregation") or "LIST").upper()
                 semantic_operation = str(arguments.get("semantic_operation") or "QUERY").upper()
@@ -3696,6 +3741,7 @@ class AIEngine:
                 read_arguments: dict[str, Any] = {
                     "query": query,
                     "semantic_terms": semantic_terms,
+                    "scope": semantic_scope,
                     "inventory_kind": inventory_kind,
                     "occupancy_state": occupancy_state,
                     "area_id": semantic_area_id,
@@ -3718,6 +3764,7 @@ class AIEngine:
                     fallback=lambda: self.tools.search_home(
                         query=query,
                         semantic_terms=semantic_terms,
+                        scope=semantic_scope,
                         inventory_kind=inventory_kind,
                         occupancy_state=occupancy_state,
                         area_id=semantic_area_id,
@@ -8433,6 +8480,7 @@ class AIEngine:
         final_reply = ""
         last_response: Any | None = None
         streamed_live = False
+        semantic_grounding_retry_used = False
         # External/provider turns must be validated against actual tool or task
         # evidence before any model prose reaches realtime clients. Otherwise a
         # fluent future-tense promise can be spoken before the final guards run.
@@ -8553,6 +8601,22 @@ class AIEngine:
 
             function_calls = self._function_calls(response)
             if not function_calls:
+                semantic_grounding_required = bool(
+                    executive_task_id is None
+                    and not completed_calls
+                    and understanding.house_relevant
+                    and decision.allow_home_read
+                    and "search_home" in authorised_tools
+                    and not code_awareness_requested
+                )
+                if semantic_grounding_required and not semantic_grounding_retry_used:
+                    # A forced tool choice can occasionally return no function call at the
+                    # provider boundary. Retry the same grounded planning round once rather
+                    # than accepting ungrounded prose or falling back to raw entity matching.
+                    semantic_grounding_retry_used = True
+                    fallback_count += 1
+                    runtime_metrics.increment("home_semantic_grounding_retries")
+                    continue
                 final_reply = str(getattr(response, "output_text", "") or "").strip()
                 break
 

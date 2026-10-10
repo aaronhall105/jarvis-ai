@@ -334,6 +334,7 @@ class ToolEngine:
         *,
         query: str,
         semantic_terms: list[str],
+        scope: str,
         inventory_kind: str,
         occupancy_state: str | None,
         area_id: str | None,
@@ -352,6 +353,17 @@ class ToolEngine:
     ) -> dict[str, Any]:
         """Search compact canonical physical objects, never the raw entity list."""
 
+        semantic_scope = str(scope or "HOME").upper()
+        if semantic_scope not in {"HOME", "AREA", "CURRENT_REFERENCE"}:
+            raise ValueError("Unsupported semantic home scope")
+        if semantic_scope == "HOME" and area_id is not None:
+            raise ValueError("Whole-home scope cannot select one area")
+        if semantic_scope == "AREA" and area_id is None:
+            raise ValueError("Area scope requires an area")
+        if semantic_scope == "CURRENT_REFERENCE" and (
+            area_id is not None or len(restrict_ids) != 1
+        ):
+            raise ValueError("Current-reference scope requires one grounded reference")
         kind = str(inventory_kind or "PHYSICAL_DEVICE").upper()
         if kind in {"ROOM", "HOME_SUMMARY"}:
             if operation.upper() == "CONTROL":
@@ -419,6 +431,7 @@ class ToolEngine:
                     "operation": "QUERY",
                     "aggregation": aggregation.upper(),
                     "query": query,
+                    "scope": semantic_scope,
                     "occupancy_state": predicate,
                     "count": len(rooms),
                     "items": [
@@ -464,6 +477,7 @@ class ToolEngine:
                 "operation": "QUERY",
                 "aggregation": "SUMMARY",
                 "query": query,
+                "scope": semantic_scope,
                 "count": 1 if summary else 0,
                 "items": [],
                 "summary": summary,
