@@ -6,13 +6,13 @@ device evidence.
 
 ## Validated source and release
 
-- Current release candidate: `v19.0.0-alpha38`
+- Current release candidate: `v19.0.0-alpha39`
 - Release source: the immutable tag, product manifest, and OTA manifest must
   record the exact approved `jarvis/unified-production` revision
 - Authoritative branch: `jarvis/unified-production`
 - Core application version: `3.7.0`
 - Realtime protocol: `2`
-- Android Phone and Wear versionCode: `190400`
+- Android Phone and Wear versionCode: `190410`
 
 The tag-triggered workflow fails closed unless the tag equals the current
 authoritative branch head. It builds Phone and Watch from that one revision,
@@ -22,7 +22,8 @@ from the exact published bytes.
 
 ## Core and repository checks
 
-The alpha38 release candidate refines the Core-owned HomeExperience projection,
+The alpha39 release candidate adds deterministic durable room occupancy to the
+Core-owned HomeExperience projection,
 authenticated Home API, Android Home/room/detail UI, read-only offline cache,
 and a Home Assistant presentation bridge/dashboard. It retains alpha36
 physical-device/proactive behavior, alpha35 whole-home grounding and verified
@@ -31,7 +32,7 @@ failover, and realtime voice.
 Its complete test and release-gate evidence is recorded in the release PR and
 immutable OTA workflow run rather than inferred here.
 
-The protected release PR and post-merge alpha38 head must repeat the applicable
+The protected release PR and post-merge alpha39 head must repeat the applicable
 checks before the immutable release tag is created.
 
 ## Google Personal Integrations v1

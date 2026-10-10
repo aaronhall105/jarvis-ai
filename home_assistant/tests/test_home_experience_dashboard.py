@@ -29,9 +29,9 @@ def _integration() -> Path:
 
 def _installer() -> Path:
     return (
-        ROOT / "tools/install_jarvis_home_v1_7_0.sh"
+        ROOT / "tools/install_jarvis_home_v1_8_0.sh"
         if PACKAGED
-        else (ROOT / "home_assistant/tools/install_jarvis_home_v1_7_0.sh")
+        else (ROOT / "home_assistant/tools/install_jarvis_home_v1_8_0.sh")
     )
 
 
@@ -70,6 +70,9 @@ def test_sensor_bridge_uses_home_api_without_reconstructing_raw_ha_state() -> No
     assert "state_changed" not in sensor
     assert "entity_registry" not in sensor
     assert "occupancy_state" in sensor
+    assert 'casefold()' in sensor
+    assert "source_health" in sensor
+    assert '"diagnostics"' not in sensor
     assert "unavailable_count" in sensor
 
 
@@ -95,10 +98,36 @@ def test_assist_package_carries_dashboard_without_auto_installing_it() -> None:
     builder = (ROOT / "tools/build_assist_package.sh").read_text()
 
     assert "jarvis_alpha38_dashboard.yaml" in builder
-    assert "install_jarvis_home_v1_7_0.sh" in builder
+    assert "install_jarvis_home_v1_8_0.sh" in builder
+    assert "alpha39_living_room_occupancy_automation.yaml" in builder
     assert "install_jarvis_home_v1_6_0.sh" not in builder
     assert "INSTALL_DASHBOARD.md" in builder
     assert 'cp "$DASHBOARD" "$STAGE/dashboard/' in builder
+
+
+def test_living_room_automation_is_opt_in_and_unknown_never_turns_off() -> None:
+    path = (
+        ROOT / "dashboard/alpha39_living_room_occupancy_automation.yaml"
+        if PACKAGED
+        else ROOT / "home_assistant/config/alpha39_living_room_occupancy_automation.yaml"
+    )
+    automations = yaml.safe_load(path.read_text())
+
+    assert len(automations) == 2
+    assert all(item["initial_state"] is False for item in automations)
+    turn_off = next(
+        item
+        for item in automations
+        if item["actions"][0]["action"] == "light.turn_off"
+    )
+    assert turn_off["triggers"][0]["to"] == "probably_clear"
+    assert turn_off["conditions"][0]["state"] == "probably_clear"
+    configured_states = {
+        turn_off["triggers"][0]["to"],
+        turn_off["conditions"][0]["state"],
+    }
+    assert "unknown" not in configured_states
+    assert "likely_occupied" not in configured_states
 
 
 def test_installer_restores_existing_integration_when_ha_check_fails(tmp_path: Path) -> None:

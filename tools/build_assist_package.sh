@@ -5,11 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INTEGRATION_ROOT="$ROOT_DIR/home_assistant"
 SOURCE="$INTEGRATION_ROOT/custom_components/jarvis_core_conversation"
 TESTS="$INTEGRATION_ROOT/tests"
-INSTALLER="$INTEGRATION_ROOT/tools/install_jarvis_home_v1_7_0.sh"
+INSTALLER="$INTEGRATION_ROOT/tools/install_jarvis_home_v1_8_0.sh"
+OCCUPANCY_AUTOMATION="$INTEGRATION_ROOT/config/alpha39_living_room_occupancy_automation.yaml"
 DASHBOARD="$ROOT_DIR/docs/configuration/jarvis_alpha38_dashboard.yaml"
 DASHBOARD_GUIDE="$ROOT_DIR/docs/configuration/ALPHA38_HOME_ASSISTANT_DASHBOARD.md"
 DIST_DIR="${1:-$ROOT_DIR/dist}"
-ASSET_NAME="jarvis-home-experience-v1.7.0.tar.gz"
+ASSET_NAME="jarvis-home-experience-v1.8.0.tar.gz"
 OUTPUT="$DIST_DIR/$ASSET_NAME"
 STAGE="$(mktemp -d)"
 cleanup() { rm -rf "$STAGE"; }
@@ -23,7 +24,7 @@ required=(
   "$TESTS/test_audio_gate.py" "$TESTS/test_streaming.py"
   "$TESTS/test_conversation_closure.py" "$TESTS/test_release_integrity.py"
   "$TESTS/test_home_experience_dashboard.py" "$INSTALLER"
-  "$DASHBOARD" "$DASHBOARD_GUIDE"
+  "$DASHBOARD" "$DASHBOARD_GUIDE" "$OCCUPANCY_AUTOMATION"
 )
 for path in "${required[@]}"; do
   [[ -f "$path" ]] || { echo "Missing required file: $path" >&2; exit 1; }
@@ -57,18 +58,20 @@ cp "$TESTS/test_streaming.py" "$STAGE/tests/test_streaming.py"
 cp "$TESTS/test_conversation_closure.py" "$STAGE/tests/test_conversation_closure.py"
 cp "$TESTS/test_release_integrity.py" "$STAGE/tests/test_release_integrity.py"
 cp "$TESTS/test_home_experience_dashboard.py" "$STAGE/tests/test_home_experience_dashboard.py"
-cp "$INSTALLER" "$STAGE/tools/install_jarvis_home_v1_7_0.sh"
+cp "$INSTALLER" "$STAGE/tools/install_jarvis_home_v1_8_0.sh"
+cp "$OCCUPANCY_AUTOMATION" "$STAGE/dashboard/alpha39_living_room_occupancy_automation.yaml"
 cp "$DASHBOARD" "$STAGE/dashboard/jarvis_alpha38_dashboard.yaml"
 cp "$DASHBOARD_GUIDE" "$STAGE/dashboard/INSTALL_DASHBOARD.md"
-chmod +x "$STAGE/tools/install_jarvis_home_v1_7_0.sh"
+chmod +x "$STAGE/tools/install_jarvis_home_v1_8_0.sh"
 
 cat > "$STAGE/CHANGES.md" <<'CHANGES'
-# Jarvis Home v1.7.0 — Canonical HomeExperience
+# Jarvis Home v1.8.0 — Room occupancy intelligence
 
 - Adds authenticated HomeExperience coordinator and presentation sensors.
 - Retains Smart Audio Gate, conversation closure, and streamed progress.
 - Uses conditional refresh and never reconstructs Jarvis semantics from raw HA state.
-- Carries the validated alpha38 canonical dashboard YAML and backup-first manual install guide.
+- Exposes stable per-room occupancy states and safe automation attributes.
+- Carries a disabled, opt-in Living Room lighting example; it is never auto-installed.
 - Keeps config-entry version 2.
 CHANGES
 
@@ -76,8 +79,8 @@ cat > "$STAGE/INSTALL.md" <<'INSTALL'
 Run inside the Home Assistant Terminal:
 
 ```bash
-chmod +x tools/install_jarvis_home_v1_7_0.sh
-./tools/install_jarvis_home_v1_7_0.sh /config
+chmod +x tools/install_jarvis_home_v1_8_0.sh
+./tools/install_jarvis_home_v1_8_0.sh /config
 ```
 INSTALL
 

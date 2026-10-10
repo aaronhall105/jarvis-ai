@@ -18,6 +18,9 @@ PERFORMANCE_BUDGETS_MS: dict[str, int] = {
     "home_experience_construction_ms": 100,
     "home_experience_canonicalization_ms": 25,
     "home_api_response_ms": 250,
+    "room_occupancy_evidence_update_ms": 10,
+    "room_occupancy_reconciliation_ms": 50,
+    "room_occupancy_persistence_ms": 25,
     "jarvis_request_total_ms": 3500,
 }
 

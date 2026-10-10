@@ -2118,6 +2118,10 @@ class AIEngine:
                     "still on; Core supplies and revalidates the identities. Use SNAPSHOT only "
                     "for a house-status summary. For a household presence overview, query the "
                     "people category with ANY so home and away states remain distinct. "
+                    "Use the rooms category for derived room occupancy, whether a room is "
+                    "occupied or clear, and evidence-backed occupancy follow-ups. OCCUPIED "
+                    "includes likely occupied with uncertainty retained; CLEAR includes only "
+                    "probably-clear rooms, never unknown rooms. "
                     f"Available areas: {area_descriptions or 'none configured'}."
                 ),
                 "parameters": {
@@ -2142,6 +2146,7 @@ class AIEngine:
                                 "appliances",
                                 "battery",
                                 "security",
+                                "rooms",
                             ],
                         },
                         "predicate": {
@@ -2155,6 +2160,9 @@ class AIEngine:
                                 "UNAVAILABLE",
                                 "HOME",
                                 "AWAY",
+                                "OCCUPIED",
+                                "CLEAR",
+                                "UNKNOWN",
                             ],
                         },
                         "aggregation": {

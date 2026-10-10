@@ -104,8 +104,9 @@ public final class HomeExperienceUiTest {
         JSONObject value = fixture();
         value.getJSONArray("rooms").getJSONObject(0)
             .put("occupancy_state", "UNKNOWN")
-            .put("occupancy_summary", "No current person detection")
-            .put("occupancy_detail", "Occupancy remains unknown")
+            .put("occupancy_summary", "Occupancy unknown")
+            .put("occupancy_detail", "Evidence is insufficient to claim the room is clear")
+            .put("occupancy_source_health", "HEALTHY")
             .put("occupancy_evidence", new JSONArray().put(new JSONObject()
                 .put("name", "Living Room Person")
                 .put("state", "not_detected")));
@@ -117,13 +118,19 @@ public final class HomeExperienceUiTest {
             .create().get();
         View root = activity.findViewById(android.R.id.content);
 
-        assertNotNull(findText(root, "No current person detection"));
-        assertNotNull(findText(root, "Occupancy remains unknown"));
+        assertNotNull(findText(root, "Occupancy unknown"));
+        assertNotNull(findText(root, "Evidence is insufficient to claim the room is clear"));
+        assertNotNull(findText(root, "View evidence"));
         assertNull(findText(root, "Clear"));
         assertNull(findText(root, "Living Room Person"));
         assertNotNull(findText(root, "Living Room Ceiling"));
         assertNotNull(findText(root, "Living Room Camera"));
         assertNotNull(findText(root, "‹ Back"));
+        Button viewEvidence = findButtonContaining(root, "View evidence");
+        assertNotNull(viewEvidence);
+        viewEvidence.performClick();
+        assertNotNull(findText(root, "Living Room Person · Not detected"));
+        assertNotNull(findText(root, "Source health · Healthy"));
         activity.onDestroy();
     }
 
@@ -317,8 +324,11 @@ public final class HomeExperienceUiTest {
             .put("area_id", "living_room")
             .put("name", "Living Room")
             .put("occupancy_state", "OCCUPIED")
-            .put("occupancy_summary", "Person detected")
-            .put("occupancy_detail", "Grounded person-detection evidence")
+            .put("occupancy_summary", "Occupied")
+            .put("occupancy_detail", "Person detected by Living Room Camera")
+            .put("occupancy_confidence", 0.95)
+            .put("occupancy_freshness", "CURRENT")
+            .put("occupancy_source_health", "HEALTHY")
             .put("occupancy_evidence", new JSONArray())
             .put("lights_on_count", 1)
             .put("lights_total", 1)

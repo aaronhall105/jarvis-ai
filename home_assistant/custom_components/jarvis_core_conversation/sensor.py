@@ -8,6 +8,7 @@ from typing import Any
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -67,8 +68,19 @@ class JarvisRoomSensor(CoordinatorEntity[JarvisHomeCoordinator], SensorEntity):
     def __init__(self, coordinator: JarvisHomeCoordinator, area_id: str, name: str) -> None:
         super().__init__(coordinator)
         self.area_id = area_id
-        self._attr_name = f"Jarvis {name}"
+        self._attr_name = f"Jarvis {name} Occupancy"
         self._attr_unique_id = f"{coordinator.entry.entry_id}_room_{area_id}"
+        # Preserve alpha37/38 entity IDs so existing dashboards and explicit
+        # automations are not silently broken by the richer state semantics.
+        self._attr_suggested_object_id = f"jarvis_{area_id}"
+        self._attr_icon = "mdi:account-group"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, f"room:{area_id}")},
+            name=f"Jarvis {name} Occupancy",
+            manufacturer="Jarvis",
+            model="Room Occupancy Intelligence",
+            suggested_area=name,
+        )
 
     def _room(self) -> dict[str, Any]:
         return next(
@@ -82,15 +94,29 @@ class JarvisRoomSensor(CoordinatorEntity[JarvisHomeCoordinator], SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return str(self._room().get("occupancy_summary") or "Occupancy unknown")
+        return str(self._room().get("occupancy_state") or "UNKNOWN").casefold()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         room = self._room()
+        evidence = [
+            item for item in room.get("occupancy_evidence", []) if isinstance(item, dict)
+        ]
+        person = next((item for item in evidence if item.get("kind") == "person_presence"), {})
+        motion = next((item for item in evidence if item.get("kind") == "motion"), {})
         return {
             "area_id": self.area_id,
             "occupancy_state": room.get("occupancy_state", "UNKNOWN"),
-            "occupancy_evidence": room.get("occupancy_evidence", [])[:8],
+            "confidence": room.get("occupancy_confidence", 0),
+            "last_changed": room.get("occupancy_last_changed_at"),
+            "last_strong_evidence": room.get("occupancy_last_strong_evidence_at"),
+            "clear_candidate_since": room.get("occupancy_clear_candidate_since"),
+            "freshness": room.get("occupancy_freshness", "UNAVAILABLE"),
+            "source_health": room.get("occupancy_source_health", "MISSING"),
+            "reason_code": room.get("occupancy_reason_code", "NO_OCCUPANCY_SOURCES"),
+            "last_person_detection": person.get("observed_at"),
+            "last_motion": motion.get("observed_at"),
+            "evidence_count": len(evidence),
             "lights_on_count": room.get("lights_on_count", 0),
             "lights_total": room.get("lights_total", 0),
             "cameras": [
@@ -104,7 +130,6 @@ class JarvisRoomSensor(CoordinatorEntity[JarvisHomeCoordinator], SensorEntity):
             ],
             "important_incident_count": len(room.get("important_incidents", [])),
             "recent_events": room.get("recent_events", [])[:5],
-            "diagnostics": room.get("diagnostics", {}),
         }
 
 

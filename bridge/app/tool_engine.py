@@ -261,7 +261,7 @@ class ToolEngine:
         """Execute a validated semantic set query over complete fresh HA state."""
 
         semantic_plan = HomeQueryPlan.from_mapping(plan)
-        if semantic_plan.operation.value == "SNAPSHOT":
+        if semantic_plan.operation.value == "SNAPSHOT" or semantic_plan.category == "rooms":
             snapshot = await self.home_intelligence.snapshot()
             result = {
                 "success": True,
@@ -273,6 +273,53 @@ class ToolEngine:
             if self._home_experience_projector is not None:
                 experience = self._home_experience_projector(snapshot, principal_id)
                 result["home_experience"] = experience.as_dict()
+                if semantic_plan.category == "rooms":
+                    rooms = [item.as_dict() for item in experience.rooms]
+                    if semantic_plan.scope.value == "AREA":
+                        rooms = [
+                            item for item in rooms if item.get("area_id") == semantic_plan.area_id
+                        ]
+                    predicate = semantic_plan.predicate.value
+                    if predicate == "OCCUPIED":
+                        rooms = [
+                            item
+                            for item in rooms
+                            if item.get("occupancy_state") in {"OCCUPIED", "LIKELY_OCCUPIED"}
+                        ]
+                    elif predicate == "CLEAR":
+                        rooms = [
+                            item
+                            for item in rooms
+                            if item.get("occupancy_state") == "PROBABLY_CLEAR"
+                        ]
+                    elif predicate == "UNKNOWN":
+                        rooms = [item for item in rooms if item.get("occupancy_state") == "UNKNOWN"]
+                    result["rooms"] = rooms
+                    result["context_projection"] = {
+                        "objects": [
+                            {
+                                "reference_id": f"room:{item['area_id']}",
+                                "object_type": "room",
+                                "display_name": item.get("name") or "Room",
+                                "source": "jarvis_room_occupancy",
+                                "canonical_id": str(item["area_id"]),
+                                "provider": "home_assistant",
+                                "capability": "homeassistant.read",
+                                "evidence_status": "verified",
+                                "freshness_seconds": 30,
+                                "immutable": False,
+                                "metadata": item,
+                                "aliases": [item.get("name"), item.get("area_id")],
+                            }
+                            for item in rooms
+                        ],
+                        "result_set": {
+                            "object_refs": [f"room:{item['area_id']}" for item in rooms],
+                            "ordering": "room_name",
+                            "observed_at": snapshot.observed_at,
+                            "filters": semantic_plan.as_dict(),
+                        },
+                    }
             return result
         grounded = await self.home_intelligence.query(semantic_plan)
         return grounded.as_result()

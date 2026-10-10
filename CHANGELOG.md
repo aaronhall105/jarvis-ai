@@ -2,6 +2,18 @@
 
 ## Current prerelease
 
+### v19.0.0-alpha39 — room occupancy intelligence
+
+Alpha39 adds one deterministic, durable room occupancy state machine shared by
+conversation, HomeExperience, Android, and Home Assistant. Strong, supporting,
+and diagnostic evidence retain uncertainty; detector-off never means empty,
+`UNKNOWN` never authorizes lights-off, and persisted state is reconciled with
+live Home Assistant evidence after restart.
+
+See [the complete alpha39 release notes](docs/releases/CHANGES_V19_0_0_ALPHA39.md).
+
+Core application version remains `3.7.0`; realtime protocol remains `2`.
+
 ### v19.0.0-alpha38 — home experience canonicalization and UX polish
 
 Alpha38 canonicalizes grounded HomeExperience presentation around physical

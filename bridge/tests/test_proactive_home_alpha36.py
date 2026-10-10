@@ -619,3 +619,77 @@ async def test_house_awareness_direct_delivery_can_be_disabled_for_single_author
     await awareness._maybe_deliver_proactive(1, event)
 
     awareness.tools.announce_message.assert_not_awaited()
+
+
+def test_inactive_person_signal_is_not_labelled_room_clear() -> None:
+    awareness = HouseAwarenessEngine.__new__(HouseAwarenessEngine)
+    awareness._entity_meta = {
+        "binary_sensor.living_room_person": {
+            "device_id": "camera-device-1",
+            "area_id": "living_room",
+            "platform": "frigate",
+        }
+    }
+    awareness._device_meta = {
+        "camera-device-1": {"name": "Living Room Camera", "area_id": "living_room"}
+    }
+    awareness._area_names = {"living_room": "Living Room"}
+    awareness.proactive_min_importance = 80
+
+    event = awareness._classify_event(
+        "binary_sensor.living_room_person",
+        {
+            "state": "on",
+            "attributes": {
+                "friendly_name": "Living Room Person",
+                "device_class": "occupancy",
+            },
+        },
+        {
+            "state": "off",
+            "last_changed": "2026-10-10T12:00:00+00:00",
+            "attributes": {
+                "friendly_name": "Living Room Person",
+                "device_class": "occupancy",
+            },
+        },
+        {"time_fired": "2026-10-10T12:00:00+00:00"},
+    )
+
+    assert event is not None
+    assert event.event_type == "occupancy_signal_inactive"
+    assert event.user_visible is False
+    assert "cleared" not in event.summary.casefold()
+
+
+@pytest.mark.asyncio
+async def test_house_awareness_forwards_one_grounded_state_to_occupancy_observer() -> None:
+    observer = AsyncMock()
+    awareness = HouseAwarenessEngine.__new__(HouseAwarenessEngine)
+    awareness.state_observer = observer
+    awareness._entity_meta = {
+        "binary_sensor.living_room_person": {
+            "device_id": "camera-device-1",
+            "area_id": "living_room",
+            "platform": "frigate",
+        }
+    }
+    awareness._device_meta = {
+        "camera-device-1": {"name": "Living Room Camera", "area_id": "living_room"}
+    }
+    awareness._area_names = {"living_room": "Living Room"}
+    state = {
+        "state": "on",
+        "last_changed": "2026-10-10T12:00:00+00:00",
+        "attributes": {
+            "friendly_name": "Living Room Person",
+            "device_class": "occupancy",
+        },
+    }
+
+    await awareness._notify_state_observer("binary_sensor.living_room_person", state)
+
+    row = observer.await_args.args[0]
+    assert row["area_id"] == "living_room"
+    assert row["device_id"] == "camera-device-1"
+    assert row["state"] == "on"

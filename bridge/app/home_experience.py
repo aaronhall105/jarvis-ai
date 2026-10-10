@@ -36,6 +36,12 @@ from app.home_intelligence import (
     roll_up_physical_devices,
 )
 from app.runtime_observability import runtime_metrics
+from app.room_occupancy import (
+    EvidenceStrength,
+    RoomOccupancyEngine,
+    RoomOccupancyState,
+    RoomOccupancyValue,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +57,7 @@ class SourceFreshness(str, Enum):
 class OccupancyState(str, Enum):
     OCCUPIED = "OCCUPIED"
     LIKELY_OCCUPIED = "LIKELY_OCCUPIED"
-    CLEAR = "CLEAR"
+    PROBABLY_CLEAR = "PROBABLY_CLEAR"
     UNKNOWN = "UNKNOWN"
 
 
@@ -63,6 +69,14 @@ class RoomStatus:
     occupancy_summary: str
     occupancy_detail: str
     occupancy_evidence: tuple[dict[str, Any], ...]
+    occupancy_confidence: float
+    occupancy_observed_at: str
+    occupancy_last_changed_at: str
+    occupancy_last_strong_evidence_at: str | None
+    occupancy_clear_candidate_since: str | None
+    occupancy_freshness: str
+    occupancy_reason_code: str
+    occupancy_source_health: str
     lights_on_count: int
     lights_total: int
     lights: tuple[dict[str, Any], ...]
@@ -143,11 +157,13 @@ class HomeExperienceService:
         snapshot_loader: Callable[[], Awaitable[HomeSnapshot]],
         event_loader: Callable[[str], Sequence[Mapping[str, Any]]],
         incident_loader: Callable[[], Sequence[Mapping[str, Any]]],
+        occupancy_engine: RoomOccupancyEngine | None = None,
         action_ttl_seconds: float = 600.0,
     ) -> None:
         self._snapshot_loader = snapshot_loader
         self._event_loader = event_loader
         self._incident_loader = incident_loader
+        self._occupancy_engine = occupancy_engine
         self._action_ttl_seconds = max(30.0, action_ttl_seconds)
         self._cached: dict[str, tuple[HomeExperience, float]] = {}
         self._actions: dict[tuple[str, str], FrozenHomeAction] = {}
@@ -174,6 +190,11 @@ class HomeExperienceService:
             principal_id=principal,
             proactive_events=events,
             proactive_incidents=incidents,
+            occupancy_states=(
+                self._occupancy_engine.reconcile(snapshot)
+                if self._occupancy_engine is not None
+                else None
+            ),
         )
         if not evidence_available:
             experience = replace(
@@ -216,6 +237,8 @@ class HomeExperienceService:
             disabled_rooms = tuple(
                 replace(
                     room,
+                    occupancy_freshness=state.value,
+                    occupancy_source_health="CACHED",
                     quick_actions=tuple(
                         {
                             **item,
@@ -506,8 +529,30 @@ def _incident_projection(incident: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _occupancy(
-    entities: Sequence[GroundedHomeEntity],
+def _relative_evidence_age(value: str | None, observed_at: str) -> str:
+    try:
+        source = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return "recently"
+    if source.tzinfo is None:
+        source = source.replace(tzinfo=timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    seconds = max(0, int((observed - source).total_seconds()))
+    if seconds < 10:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds} sec ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    return f"{hours} hr ago"
+
+
+def _occupancy_presentation(
+    state: RoomOccupancyState,
 ) -> tuple[
     OccupancyState,
     str,
@@ -515,57 +560,62 @@ def _occupancy(
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
 ]:
-    evidence: list[dict[str, Any]] = []
-    strongest = OccupancyState.UNKNOWN
-    for entity in entities:
-        if entity.domain != "binary_sensor" or not entity.available:
+    selected: dict[str, Any] = {}
+    for item in state.evidence:
+        if item.strength not in {EvidenceStrength.STRONG, EvidenceStrength.SUPPORTING}:
             continue
-        evidence_class = occupancy_evidence_class(entity)
-        if evidence_class == "diagnostic_observation":
-            continue
-        active = entity.state in {"on", "detected", "true", "person"}
-        evidence.append(
-            {
-                "kind": evidence_class,
-                "name": entity.name,
-                "state": "detected" if active else "not_detected",
-                "observed_at": entity.source_last_updated or entity.observed_at,
-                "entity_id": entity.entity_id,
-            }
-        )
-        if active and evidence_class == "person_presence":
-            strongest = OccupancyState.OCCUPIED
-        elif (
-            active
-            and evidence_class in {"presence", "motion"}
-            and strongest is not OccupancyState.OCCUPIED
+        existing = selected.get(item.source_type)
+        if existing is None or (item.active, item.observed_at) > (
+            existing.active,
+            existing.observed_at,
         ):
-            strongest = OccupancyState.LIKELY_OCCUPIED
-    normal = [
-        item for item in evidence if item["kind"] in {"person_presence", "presence", "motion"}
-    ]
-    normal.sort(
-        key=lambda item: (
-            0 if item["state"] == "detected" else 1,
-            0 if item["kind"] == "person_presence" else 1,
-            str(item["name"]).casefold(),
-        )
+            selected[item.source_type] = item
+    evidence_order = {"person_presence": 0, "presence": 1, "motion": 2, "media_activity": 3}
+    normal_items = sorted(
+        selected.values(),
+        key=lambda item: (evidence_order.get(item.source_type, 9), item.display_name.casefold()),
     )
-    if strongest is OccupancyState.OCCUPIED:
-        summary = "Person detected"
-        detail = "Grounded person-detection evidence"
-    elif strongest is OccupancyState.LIKELY_OCCUPIED:
-        summary = "Activity detected"
-        detail = "Motion or presence evidence only"
-    elif any(item["kind"] == "person_presence" for item in normal):
-        # An inactive camera/person/motion binary is only absence of a current
-        # detection. It is never promoted into proof that the room is empty.
-        summary = "No current person detection"
-        detail = "Occupancy remains unknown"
+    normal_evidence = tuple(
+        {
+            "kind": item.source_type,
+            "name": item.display_name,
+            "state": "detected" if item.active else "not_detected",
+            "observed_at": item.observed_at,
+            "strength": item.strength.value,
+            "freshness": item.freshness.value,
+            "available": item.available,
+        }
+        for item in normal_items
+    )[:3]
+    raw_evidence = tuple(item.as_dict(diagnostics=True) for item in state.evidence)
+    if state.state is RoomOccupancyValue.OCCUPIED:
+        summary = "Occupied"
+        source = next((item for item in state.evidence if item.active), None)
+        detail = (
+            f"Person detected by {source.display_name}"
+            if source is not None and source.source_type == "person_presence"
+            else "Strong current occupancy evidence"
+        )
+    elif state.state is RoomOccupancyValue.LIKELY_OCCUPIED:
+        summary = "Likely occupied"
+        detail = (
+            "Person last detected "
+            + _relative_evidence_age(state.last_strong_evidence_at, state.observed_at)
+            if state.last_strong_evidence_at
+            else "Recent supporting occupancy evidence"
+        )
+    elif state.state is RoomOccupancyValue.PROBABLY_CLEAR:
+        summary = "Probably clear"
+        age = _relative_evidence_age(state.last_changed_at, state.observed_at)
+        detail = f"No qualifying occupancy evidence; probably clear since {age}"
     else:
         summary = "Occupancy unknown"
-        detail = "No reliable occupancy evidence"
-    return strongest, summary, detail, tuple(normal[:3]), tuple(evidence)
+        detail = (
+            "Occupancy sources are unavailable"
+            if state.source_health in {"UNAVAILABLE", "MISSING"}
+            else "Evidence is insufficient to claim the room is clear"
+        )
+    return OccupancyState(state.state.value), summary, detail, normal_evidence, raw_evidence
 
 
 def _appliance(entity: GroundedHomeEntity) -> dict[str, Any] | None:
@@ -730,9 +780,12 @@ def project_home_experience(
     freshness: SourceFreshness = SourceFreshness.LIVE,
     age_seconds: float = 0.0,
     generated_at: str | None = None,
+    occupancy_states: Mapping[str, RoomOccupancyState] | None = None,
 ) -> HomeExperience:
     """Build a deterministic presentation model from existing grounded truth."""
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    if occupancy_states is None:
+        occupancy_states = RoomOccupancyEngine().reconcile(snapshot)
     entities = snapshot.presentation_entities or snapshot.entities
     presentable_entities = tuple(
         item
@@ -994,13 +1047,22 @@ def project_home_experience(
             for item in meaningful
             if item.domain in {"climate", "fan", "humidifier", "water_heater"}
         )
+        derived_occupancy = occupancy_states.get(area_id)
+        if derived_occupancy is None:
+            derived_occupancy = RoomOccupancyEngine().reconcile(
+                HomeSnapshot(
+                    observed_at=snapshot.observed_at,
+                    entities=area_entities,
+                    areas=({"area_id": area_id, "name": name},),
+                )
+            )[area_id]
         (
             occupancy_state,
             occupancy_summary,
             occupancy_detail,
             occupancy_evidence,
             raw_occupancy_evidence,
-        ) = _occupancy(area_entities)
+        ) = _occupancy_presentation(derived_occupancy)
         room_incidents = tuple(
             item
             for item in current_incidents
@@ -1040,6 +1102,14 @@ def project_home_experience(
                 occupancy_summary=occupancy_summary,
                 occupancy_detail=occupancy_detail,
                 occupancy_evidence=occupancy_evidence,
+                occupancy_confidence=derived_occupancy.confidence,
+                occupancy_observed_at=derived_occupancy.observed_at,
+                occupancy_last_changed_at=derived_occupancy.last_changed_at,
+                occupancy_last_strong_evidence_at=(derived_occupancy.last_strong_evidence_at),
+                occupancy_clear_candidate_since=derived_occupancy.clear_candidate_since,
+                occupancy_freshness=derived_occupancy.freshness.value,
+                occupancy_reason_code=derived_occupancy.reason_code,
+                occupancy_source_health=derived_occupancy.source_health,
                 lights_on_count=len(room_lights_on),
                 lights_total=len(room_light_items),
                 lights=tuple(_canonical_ref(item) for item in room_light_items),
@@ -1053,6 +1123,7 @@ def project_home_experience(
                 quick_actions=tuple(room_actions),
                 diagnostics={
                     "occupancy_evidence": list(raw_occupancy_evidence),
+                    "occupancy_state": derived_occupancy.as_dict(diagnostics=True),
                     "raw_entities": [_entity_ref(item) for item in area_entities],
                     "camera_sources": [item.diagnostics() for item in room_camera_items],
                     "light_sources": [item.diagnostics() for item in room_light_items],
@@ -1139,9 +1210,21 @@ def project_home_experience(
             "attention_count": 0,
         }
 
+    semantic_rooms = []
+    for room in rooms:
+        room_value = room.as_dict()
+        # Observation time advances on every live refresh even when the
+        # semantic room state is unchanged; it must not churn the ETag.
+        room_value.pop("occupancy_observed_at", None)
+        room_value.pop("occupancy_last_changed_at", None)
+        # Diagnostics retains raw timestamps and source details for explicit
+        # inspection, but normal presentation semantics already include every
+        # state that should invalidate a client cache.
+        room_value.pop("diagnostics", None)
+        semantic_rooms.append(room_value)
     semantic = {
         "people": people,
-        "rooms": [item.as_dict() for item in rooms],
+        "rooms": semantic_rooms,
         "lights_on": [item.primary_entity.entity_id for item in lights_on],
         "unavailable_devices": canonical_unavailable,
         "partial_devices": canonical_partial,

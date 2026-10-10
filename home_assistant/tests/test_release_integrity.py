@@ -22,7 +22,7 @@ def main() -> int:
     root = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parents[1])
     integration = root / "custom_components" / "jarvis_core_conversation"
     manifest = json.loads((integration / "manifest.json").read_text())
-    assert manifest["version"] == "1.7.0", manifest
+    assert manifest["version"] == "1.8.0", manifest
 
     major_version = _config_entry_version(integration / "config_flow.py")
     init_text = (integration / "__init__.py").read_text()
