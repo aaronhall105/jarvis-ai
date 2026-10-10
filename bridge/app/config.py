@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     jarvis_proactive_target: str = "living_room"
     jarvis_proactive_cooldown_seconds: int = 300
 
+    # Deterministic room occupancy hysteresis. These values apply uniformly;
+    # alpha39 does not embed per-room entity IDs or assumptions.
+    jarvis_occupancy_strong_persistence_seconds: int = 300
+    jarvis_occupancy_motion_persistence_seconds: int = 120
+    jarvis_occupancy_clear_confirmation_seconds: int = 300
+    jarvis_occupancy_disconnected_stale_seconds: int = 120
+
     jarvis_self_improvement_enabled: bool = True
     jarvis_self_improvement_auto_prepare: bool = True
     jarvis_self_improvement_repeat_threshold: int = 2

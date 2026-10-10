@@ -1,7 +1,7 @@
 {
   "domain": "jarvis_core_conversation",
   "name": "Jarvis Core Conversation",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "documentation": "https://github.com/aaronhall105/jarvis-ai",
   "codeowners": [
     "@aaronhall105"

@@ -145,6 +145,34 @@ public final class RoomDetailActivity extends Activity {
         addValue(occupancy, safe(room, "occupancy_summary", "Occupancy unknown"));
         String occupancyDetail = safe(room, "occupancy_detail", "");
         if (!occupancyDetail.isBlank()) addValue(occupancy, occupancyDetail);
+        JSONArray occupancyEvidence = room.optJSONArray("occupancy_evidence");
+        if (occupancyEvidence != null && occupancyEvidence.length() > 0) {
+            LinearLayout evidenceDetails = new LinearLayout(this);
+            evidenceDetails.setOrientation(LinearLayout.VERTICAL);
+            evidenceDetails.setVisibility(View.GONE);
+            String sourceHealth = natural(safe(room, "occupancy_source_health", "unknown"));
+            addValue(evidenceDetails, "Source health · " + sourceHealth);
+            Button viewEvidence = pillButton("View evidence");
+            viewEvidence.setOnClickListener(view -> {
+                boolean show = evidenceDetails.getVisibility() != View.VISIBLE;
+                if (show && evidenceDetails.getChildCount() == 1) {
+                    int shown = Math.min(occupancyEvidence.length(), 3);
+                    for (int index = 0; index < shown; index++) {
+                        JSONObject evidence = occupancyEvidence.optJSONObject(index);
+                        if (evidence == null) continue;
+                        addValue(
+                            evidenceDetails,
+                            safe(evidence, "name", "Occupancy evidence") + " · "
+                                + natural(safe(evidence, "state", "unknown"))
+                        );
+                    }
+                }
+                evidenceDetails.setVisibility(show ? View.VISIBLE : View.GONE);
+                viewEvidence.setText(show ? "Hide evidence" : "View evidence");
+            });
+            occupancy.addView(viewEvidence, matchWrap(dp(10), 0));
+            occupancy.addView(evidenceDetails, matchWrap(dp(6), 0));
+        }
         content.addView(occupancy, matchWrap(0, dp(12)));
         addLights(room, stale || !home.actionsAllowed());
         addCameras(room.optJSONArray("cameras"), stale);

@@ -1,6 +1,6 @@
-# Alpha38 Home Assistant dashboard
+# Alpha39 Home Assistant dashboard and occupancy output
 
-Alpha38 does not overwrite the live Lovelace database. The repository contains
+Alpha39 does not overwrite the live Lovelace database. The repository contains
 the production dashboard source at `docs/configuration/jarvis_alpha38_dashboard.yaml`.
 It renders the same authenticated Core `HomeExperience` used by Android and
 conversation; only camera streams and explicit controls remain native HA cards.
@@ -10,9 +10,9 @@ conversation; only camera streams and explicit controls remain native HA cards.
 1. Back up the Home Assistant configuration directory and the current dashboard
    before changing anything.
 2. From the extracted release package, run
-   `tools/install_jarvis_home_v1_7_0.sh <HA_CONFIG>`. The installer requires an
+   `tools/install_jarvis_home_v1_8_0.sh <HA_CONFIG>`. The installer requires an
    existing Jarvis integration, backs it up under
-   `<HA_CONFIG>/backups/jarvis-home-v1.7.0/<timestamp>`, validates the package,
+   `<HA_CONFIG>/backups/jarvis-home-v1.8.0/<timestamp>`, validates the package,
    restores the backup on installation failure, and runs `ha core check` when
    the HA CLI is available.
 3. Restart Home Assistant and open **Settings → Devices & services → Jarvis Core
@@ -21,7 +21,12 @@ conversation; only camera streams and explicit controls remain native HA cards.
    mobile token (for Home status)**. Do not place the token in dashboard YAML.
 5. Confirm that `sensor.jarvis_home_status`, `sensor.jarvis_lights_on`,
    `sensor.jarvis_unavailable_devices`, and `sensor.jarvis_living_room` are
-   available before installing the dashboard.
+available before installing the dashboard.
+
+The room sensor state is the Core-owned automation contract: `occupied`,
+`likely_occupied`, `probably_clear`, or `unknown`. Its attributes retain
+confidence, freshness, source health, last strong evidence, and evidence count.
+Never interpret `unknown` as clear.
 
 ## Install the dashboard without replacing an existing one
 
@@ -47,3 +52,9 @@ automations, the existing default dashboard, or Jarvis Core state.
 The integration installer intentionally does not edit `.storage/lovelace*`,
 `ui-lovelace.yaml`, or any existing dashboard. Dashboard installation remains a
 separate, visible user action after the integration and its sensors are healthy.
+
+The package also carries
+`alpha39_living_room_occupancy_automation.yaml`. Both automations are disabled
+by default and are not copied into the live HA configuration. Review the local
+entity IDs and the documented manual-override limitation before explicitly
+importing and enabling them.

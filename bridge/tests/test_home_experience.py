@@ -223,13 +223,14 @@ def test_room_person_detection_is_occupied_but_inactive_camera_is_not_clear() ->
     occupied = project_home_experience(_snapshot(), principal_id="aaron")
     living = next(room for room in occupied.rooms if room.area_id == "living_room")
     assert living.occupancy_state is OccupancyState.OCCUPIED
-    assert living.occupancy_summary == "Person detected"
+    assert living.occupancy_summary == "Occupied"
+    assert living.occupancy_detail.startswith("Person detected by")
 
     inactive = project_home_experience(_snapshot(person_detected="off"), principal_id="aaron")
     living = next(room for room in inactive.rooms if room.area_id == "living_room")
     assert living.occupancy_state is OccupancyState.UNKNOWN
-    assert living.occupancy_summary == "No current person detection"
-    assert living.occupancy_detail == "Occupancy remains unknown"
+    assert living.occupancy_summary == "Occupancy unknown"
+    assert living.occupancy_detail == "Evidence is insufficient to claim the room is clear"
 
 
 def test_action_targets_are_exact_revisioned_and_principal_scoped() -> None:
@@ -280,6 +281,11 @@ async def test_cached_projection_is_marked_degraded_and_actions_are_disabled() -
     assert cached.source_freshness["status"] == SourceFreshness.RECENT_CACHED.value
     assert cached.source_freshness["actions_allowed"] is False
     assert all(item["enabled"] is False for item in cached.quick_actions)
+    assert all(
+        room.occupancy_freshness == SourceFreshness.RECENT_CACHED.value
+        and room.occupancy_source_health == "CACHED"
+        for room in cached.rooms
+    )
     with pytest.raises(ValueError, match="no longer available"):
         service.resolve_action("aaron", str(live.quick_actions[0]["action_id"]))
 
@@ -808,8 +814,9 @@ def test_occupancy_normal_view_is_concise_and_diagnostics_retain_raw_evidence() 
     room = home.rooms[0]
 
     assert room.occupancy_state is OccupancyState.UNKNOWN
-    assert room.occupancy_summary == "No current person detection"
+    assert room.occupancy_summary == "Occupancy unknown"
     assert len(room.occupancy_evidence) <= 3
+    assert len({item["kind"] for item in room.occupancy_evidence}) == len(room.occupancy_evidence)
     assert {item["name"] for item in room.occupancy_evidence} <= {
         "Living Room Person",
         "Living Room Motion",

@@ -39,6 +39,9 @@ class HomePredicate(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"
     HOME = "HOME"
     AWAY = "AWAY"
+    OCCUPIED = "OCCUPIED"
+    CLEAR = "CLEAR"
+    UNKNOWN = "UNKNOWN"
 
 
 class HomeAggregation(str, Enum):
@@ -66,6 +69,7 @@ _CATEGORY_DOMAINS: dict[str, frozenset[str]] = {
     "appliances": frozenset({"fan", "humidifier", "vacuum", "water_heater"}),
     "battery": frozenset({"sensor"}),
     "security": frozenset({"alarm_control_panel", "binary_sensor", "lock", "siren"}),
+    "rooms": frozenset(),
 }
 
 _ACTIVE_STATES: dict[str, frozenset[str]] = {
@@ -152,6 +156,15 @@ class HomeQueryPlan:
             raise ValueError("A result-set reference is allowed only for referenced scope")
         if predicate in {HomePredicate.HOME, HomePredicate.AWAY} and category != "people":
             raise ValueError("Home and away predicates apply only to people")
+        occupancy_predicates = {
+            HomePredicate.OCCUPIED,
+            HomePredicate.CLEAR,
+            HomePredicate.UNKNOWN,
+        }
+        if predicate in occupancy_predicates and category != "rooms":
+            raise ValueError("Occupancy predicates apply only to rooms")
+        if category == "rooms" and predicate not in occupancy_predicates | {HomePredicate.ANY}:
+            raise ValueError("Rooms support only occupancy predicates")
         if operation is HomeQueryOperation.SNAPSHOT and scope is not HomeQueryScope.HOME:
             raise ValueError("A home snapshot must use whole-home scope")
         return cls(
@@ -194,6 +207,7 @@ class GroundedHomeEntity:
     unit: str | None = None
     display_value: str | None = None
     supported_features: int | None = None
+    source_last_changed: str | None = None
     source_last_updated: str | None = None
     platform: str | None = None
     registry_name: str | None = None
@@ -231,6 +245,7 @@ class GroundedHomeEntity:
                 if isinstance(state.get("supported_features"), int)
                 else None
             ),
+            source_last_changed=str(state.get("last_changed") or "") or None,
             source_last_updated=str(state.get("last_updated") or "") or None,
             platform=str(state.get("platform") or "") or None,
             registry_name=str(state.get("registry_name") or "") or None,

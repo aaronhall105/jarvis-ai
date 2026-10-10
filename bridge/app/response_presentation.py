@@ -371,6 +371,29 @@ def render_home_query_evidence(
     category = str(result.get("category") or plan.get("category") or "devices").casefold()
     predicate = str(result.get("predicate") or plan.get("predicate") or "ANY").upper()
     area_name = str(result.get("area_name") or "").strip()
+    if category == "rooms":
+        rooms = [item for item in result.get("rooms") or () if isinstance(item, Mapping)]
+        if not rooms:
+            if predicate == "OCCUPIED":
+                return "No rooms are currently shown as occupied."
+            if predicate == "CLEAR":
+                return "No rooms have enough evidence to be called probably clear."
+            if predicate == "UNKNOWN":
+                return "No rooms currently have unknown occupancy."
+            return "I found no matching rooms."
+        statements: list[str] = []
+        for room in rooms:
+            name = str(room.get("name") or "That room")
+            state = str(room.get("occupancy_state") or "UNKNOWN")
+            label = {
+                "OCCUPIED": "occupied",
+                "LIKELY_OCCUPIED": "likely occupied",
+                "PROBABLY_CLEAR": "probably clear",
+                "UNKNOWN": "unknown",
+            }.get(state, "unknown")
+            detail = str(room.get("occupancy_detail") or "").strip()
+            statements.append(f"{name} is {label}" + (f": {detail}" if detail else ""))
+        return ". ".join(statements) + "."
     entities = [item for item in result.get("entities") or () if isinstance(item, Mapping)]
     devices = [item for item in result.get("devices") or () if isinstance(item, Mapping)]
     if category == "devices" and predicate == "UNAVAILABLE":

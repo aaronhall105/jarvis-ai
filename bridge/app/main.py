@@ -60,6 +60,7 @@ from app.home_assistant import (
     connection_test_with_timeout,
 )
 from app.home_experience import HomeExperienceService
+from app.room_occupancy import RoomOccupancyEngine, RoomOccupancyPolicy
 from app.logging_config import configure_logging
 from app.memory_engine import MemoryEngine
 from app.person_room_context import (
@@ -123,6 +124,15 @@ home_assistant = HomeAssistantClient(
 
 registry = RegistryEngine(home_assistant)
 tools = ToolEngine(home_assistant, registry)
+occupancy_engine = RoomOccupancyEngine(
+    database_path=str(data_directory / "jarvis_room_occupancy.db"),
+    policy=RoomOccupancyPolicy(
+        strong_persistence_seconds=settings.jarvis_occupancy_strong_persistence_seconds,
+        motion_persistence_seconds=settings.jarvis_occupancy_motion_persistence_seconds,
+        clear_confirmation_seconds=settings.jarvis_occupancy_clear_confirmation_seconds,
+        disconnected_stale_seconds=settings.jarvis_occupancy_disconnected_stale_seconds,
+    ),
+)
 code_awareness = CodeAwarenessEngine.from_environment()
 tone_engine = ToneEngine()
 memory = MemoryEngine(
@@ -157,6 +167,8 @@ awareness = HouseAwarenessEngine(
     # v19 ProactiveEngine is the sole notification authority. House Awareness
     # remains the grounded event/state substrate and never delivers in parallel.
     direct_proactive_delivery=False,
+    state_observer=occupancy_engine.observe_mapping,
+    source_health_observer=occupancy_engine.set_source_connected,
 )
 admin = AdminEngine(
     client=home_assistant,
@@ -5537,6 +5549,8 @@ async def lifespan(_: FastAPI):
 
         try:
             await awareness.start()
+            occupancy_engine.reconcile(await tools.home_intelligence.snapshot())
+            await occupancy_engine.start()
 
             proactive_engine.set_state_provider(awareness.grounded_state_snapshot)
             vision_engine.set_state_provider(awareness.state_snapshot)
@@ -5565,6 +5579,7 @@ async def lifespan(_: FastAPI):
         await followups.stop()
         await vision_engine.stop()
         await proactive_engine.stop()
+        await occupancy_engine.stop()
         await awareness.stop()
         await external_agent.aclose()
         logger.info("%s stopping", settings.jarvis_name)
@@ -7119,6 +7134,13 @@ async def awareness_status() -> dict[str, object]:
     return await awareness.status()
 
 
+@app.get("/api/occupancy/status")
+async def occupancy_status() -> dict[str, object]:
+    """Return redacted room-engine readiness without raw household evidence."""
+
+    return occupancy_engine.status()
+
+
 @app.get("/api/awareness/events")
 async def awareness_events(
     minutes: int = 60,
@@ -8373,6 +8395,7 @@ home_experience_service = HomeExperienceService(
     snapshot_loader=tools.home_intelligence.snapshot,
     event_loader=lambda principal: proactive_engine.feed(principal, 50),
     incident_loader=lambda: proactive_engine.active_incidents(100),
+    occupancy_engine=occupancy_engine,
 )
 tools.set_home_experience_projector(home_experience_service.project)
 

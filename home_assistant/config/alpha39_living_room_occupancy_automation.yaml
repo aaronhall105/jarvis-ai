@@ -1,0 +1,39 @@
+# Alpha39 opt-in example. This file is never installed or enabled automatically.
+# Review the entity IDs against the local HA registry, then explicitly import it.
+- id: jarvis_alpha39_living_room_occupied_light_on
+  alias: Jarvis - Living Room occupied - ceiling light on
+  description: >-
+    Turns on the explicitly scoped Living Room ceiling light only when Jarvis
+    reaches the strong OCCUPIED state. Manual override policy is intentionally
+    outside alpha39; leave disabled unless this behaviour is authorized.
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.jarvis_living_room
+      to: occupied
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.living_room_ceiling
+
+- id: jarvis_alpha39_living_room_probably_clear_light_off
+  alias: Jarvis - Living Room probably clear - ceiling light off
+  description: >-
+    Turns off only after Jarvis remains PROBABLY_CLEAR for two additional
+    minutes. UNKNOWN and LIKELY_OCCUPIED can never authorize this action.
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id: sensor.jarvis_living_room
+      to: probably_clear
+      for: "00:02:00"
+  conditions:
+    - condition: state
+      entity_id: sensor.jarvis_living_room
+      state: probably_clear
+  actions:
+    - action: light.turn_off
+      target:
+        entity_id: light.living_room_ceiling

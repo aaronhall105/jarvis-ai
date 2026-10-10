@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable, Mapping
+import inspect
 import json
 import logging
 import re
@@ -107,6 +109,8 @@ class HouseAwarenessEngine:
         proactive_target: str = "living_room",
         proactive_cooldown_seconds: int = 300,
         direct_proactive_delivery: bool = True,
+        state_observer: Callable[[Mapping[str, Any]], Any] | None = None,
+        source_health_observer: Callable[[bool], Any] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -120,6 +124,8 @@ class HouseAwarenessEngine:
         self.proactive_target = str(proactive_target or "living_room").strip() or "living_room"
         self.proactive_cooldown_seconds = max(30, min(int(proactive_cooldown_seconds), 3600))
         self.direct_proactive_delivery = bool(direct_proactive_delivery)
+        self.state_observer = state_observer
+        self.source_health_observer = source_health_observer
 
         self._last_proactive_at: datetime | None = None
         self._task: asyncio.Task[None] | None = None
@@ -333,6 +339,7 @@ class HouseAwarenessEngine:
                     if self._stop_event.is_set():
                         break
                     self._connected = True
+                    await self._notify_source_health(True)
                     self._last_error = None
                     backoff = 1.0
                     await self._handle_state_changed(event)
@@ -340,6 +347,7 @@ class HouseAwarenessEngine:
                 raise
             except Exception as exc:
                 self._connected = False
+                await self._notify_source_health(False)
                 self._last_error = str(exc)
                 logger.exception("House Awareness event stream disconnected")
                 try:
@@ -364,6 +372,12 @@ class HouseAwarenessEngine:
 
         previous = old_state if isinstance(old_state, dict) else self._state_cache.get(entity_id)
         self._state_cache[entity_id] = new_state
+        try:
+            await self._notify_state_observer(entity_id, new_state)
+        except Exception:
+            # Occupancy derivation is fail-closed and separately observable;
+            # it must not tear down the authoritative HA event stream.
+            logger.exception("Room occupancy state observer failed entity=%s", entity_id)
         event_record = self._classify_event(entity_id, previous, new_state, event)
         if event_record is None:
             return
@@ -390,6 +404,41 @@ class HouseAwarenessEngine:
             event_record.importance,
             event_record.summary,
         )
+
+    async def _notify_source_health(self, connected: bool) -> None:
+        if self.source_health_observer is None:
+            return
+        result = self.source_health_observer(connected)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _notify_state_observer(self, entity_id: str, state: Mapping[str, Any]) -> None:
+        if self.state_observer is None:
+            return
+        meta = self._effective_metadata(entity_id, dict(state))
+        attributes = state.get("attributes")
+        attributes = dict(attributes) if isinstance(attributes, Mapping) else {}
+        state_value = str(state.get("state") or "unknown")
+        unit = str(attributes.get("unit_of_measurement") or "") or None
+        row = {
+            **state,
+            "entity_id": entity_id,
+            "domain": entity_id.partition(".")[0],
+            "name": meta.get("friendly_name") or entity_id,
+            "area_id": meta.get("area_id"),
+            "area_name": meta.get("area_name"),
+            "device_id": meta.get("device_id"),
+            "device_name": meta.get("device_name"),
+            "device_class": meta.get("device_class"),
+            "entity_category": meta.get("entity_category"),
+            "platform": meta.get("platform"),
+            "available": state_value not in {"unavailable", "unknown", ""},
+            "unit": unit,
+            "display_value": f"{state_value} {unit}" if unit else state_value,
+        }
+        result = self.state_observer(row)
+        if inspect.isawaitable(result):
+            await result
 
     def _someone_is_home(self) -> bool:
         for entity_id, state in self._state_cache.items():
@@ -631,10 +680,13 @@ class HouseAwarenessEngine:
                     summary = f"Occupancy was detected in {place}."
                     importance = 30
                 elif new_key == "off" and old_key != "off":
-                    event_type = "occupancy_cleared"
+                    # A detector becoming inactive is not evidence that the
+                    # room is clear. The derived RoomOccupancyEngine owns that
+                    # decision after hysteresis and source-health checks.
+                    event_type = "occupancy_signal_inactive"
                     place = area_name or name
-                    summary = f"Occupancy cleared in {place}."
-                    importance = 15
+                    summary = f"An occupancy signal became inactive in {place}."
+                    importance = 10
             elif device_class in {"door", "window", "opening", "garage_door"}:
                 category = "access"
                 if new_key == "on" and old_key != "on":
@@ -734,7 +786,7 @@ class HouseAwarenessEngine:
             area_name=meta.get("area_name"),
             person_key=person_key,
             importance=importance,
-            user_visible=True,
+            user_visible=event_type != "occupancy_signal_inactive",
             proactive_candidate=proactive_candidate,
             context_user_id=str(context.get("user_id") or "") or None,
             payload=payload,
