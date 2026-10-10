@@ -1961,6 +1961,36 @@ class ResultIntelligence:
     def explain(derived: Mapping[str, Any], objects: Sequence[ContextObject]) -> str:
         by_ref = {item.reference_id: item for item in objects}
         values = [item for item in derived.get("values") or () if isinstance(item, Mapping)]
+        kind = _normalise_text(derived.get("kind"))
+        if kind == "home_action":
+            grounded = [by_ref.get(str(value.get("reference_id") or "")) for value in values]
+            names = [item.display_name for item in grounded if item is not None]
+            target = " and ".join(names) or "the grounded Home Assistant object"
+            action = _normalise_text(derived.get("action")).replace("_", " ")
+            status = _normalise_text(derived.get("verification_status")).upper()
+            if derived.get("verified") is True and derived.get("already_in_target_state") is True:
+                return (
+                    f"Because I resolved {target} as the exact canonical target, checked its "
+                    f"authoritative state, and verified it already satisfied {action or 'the request'}."
+                )
+            if derived.get("verified") is True:
+                return (
+                    f"Because I resolved {target} as the exact canonical target, used its "
+                    f"supported {action or 'requested'} capability, and verified the resulting state."
+                )
+            return (
+                f"I resolved {target}, but the action result was {status.casefold() or 'unknown'}, "
+                "so I did not treat it as verified."
+            )
+        if kind == "home_semantic_resolution":
+            grounded = [by_ref.get(str(value.get("reference_id") or "")) for value in values]
+            names = [item.display_name for item in grounded if item is not None]
+            if names:
+                return (
+                    "Because the live canonical Home Assistant inventory matched "
+                    + " and ".join(names)
+                    + " after applying the requested semantic, area, state and capability constraints."
+                )
         if len(values) >= 2:
             rendered = []
             for value in values[:4]:

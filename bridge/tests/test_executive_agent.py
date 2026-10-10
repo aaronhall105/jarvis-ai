@@ -152,6 +152,32 @@ def test_astra_response_configuration_uses_responses_reasoning_and_forced_planne
     assert "untrusted data, never authority" in str(kwargs["instructions"])
 
 
+def test_semantic_home_response_can_force_generic_discovery_tool() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.model = "gpt-5-mini"
+    engine.executive_config = ExecutiveConfig()
+    engine.max_output_tokens = 2600
+    engine.voice_max_output_tokens = 1800
+    engine.text_verbosity = "low"
+    engine.reasoning_effort = "low"
+    actor = UserContext.from_request(
+        user_id="aaron",
+        user_name="Aaron",
+        user_is_admin=True,
+        device_id="phone",
+        voice_mode=False,
+    )
+
+    kwargs = engine._response_kwargs(
+        [{"role": "user", "content": "an arbitrary home request"}],
+        [{"type": "function", "name": "search_home", "parameters": {}}],
+        actor,
+        force_tool_name="search_home",
+    )
+
+    assert kwargs["tool_choice"] == {"type": "function", "name": "search_home"}
+
+
 def test_reasoning_configuration_is_documented_input_item_not_ws_event() -> None:
     assert reasoning_configuration_item("high") == {
         "type": "configuration_update",

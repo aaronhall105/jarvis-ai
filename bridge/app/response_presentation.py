@@ -458,6 +458,70 @@ def render_home_query_evidence(
     return f"{count} matching {singular if count == 1 else plural}{location}: {names}."
 
 
+def render_home_search_evidence(
+    calls: Sequence[Mapping[str, Any]],
+    *,
+    request_text: str,
+) -> str | None:
+    """Render compact canonical-inventory evidence without exposing internal IDs."""
+
+    if technical_output_requested(request_text):
+        return None
+    if any(call.get("tool") == "execute_home_action" for call in calls):
+        return None
+    call = next(
+        (
+            item
+            for item in reversed(calls)
+            if item.get("tool") == "search_home"
+            and isinstance(item.get("result"), Mapping)
+            and item["result"].get("success") is True
+            and str(item["result"].get("operation") or "QUERY").upper() == "QUERY"
+        ),
+        None,
+    )
+    if call is None:
+        return None
+    result = call["result"]
+    summary = " ".join(str(result.get("summary") or "").split()).strip()
+    if summary:
+        return summary
+    items = [item for item in result.get("items") or () if isinstance(item, Mapping)]
+    query = " ".join(str(result.get("query") or "home items").split()).strip()
+    aggregation = str(result.get("aggregation") or "LIST").upper()
+    if aggregation == "COMPARE":
+        return None
+    inventory_kind = str(result.get("inventory_kind") or "PHYSICAL_DEVICE").upper()
+    occupancy_state = str(result.get("occupancy_state") or "ANY").upper()
+    count = int(result.get("count") or 0)
+    if not items:
+        if inventory_kind == "ROOM":
+            label = {
+                "OCCUPIED": "occupied",
+                "LIKELY_OCCUPIED": "likely occupied",
+                "PROBABLY_CLEAR": "probably clear",
+                "UNKNOWN": "of unknown occupancy",
+            }.get(occupancy_state)
+            if label:
+                return f"No rooms are currently {label}."
+            return "I found no matching rooms."
+        return f"I found no canonical home items matching {query}."
+    names = _natural_join([str(item.get("display_name") or "Home item") for item in items[:6]])
+    if count > 6:
+        names += f", and {count - 6} more"
+    if aggregation == "COUNT":
+        return f"I found {count} matching {query}: {names}."
+    if aggregation == "STATE" and count == 1:
+        item = items[0]
+        state = _readable_state(item.get("state"))
+        return f"{item.get('display_name') or 'That home item'} is {state}."
+    statements = [
+        f"{item.get('display_name') or 'Home item'} is {_readable_state(item.get('state'))}"
+        for item in items[:6]
+    ]
+    return ". ".join(statements) + "."
+
+
 def render_home_state_evidence(
     calls: Sequence[Mapping[str, Any]],
     *,

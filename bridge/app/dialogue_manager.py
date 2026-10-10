@@ -921,6 +921,69 @@ class DialogueManager:
         if principal_id:
             context_objects, result_set = tool_call_projection(intent=intent, calls=calls)
             if context_objects:
+                derived_results: list[dict[str, Any]] = []
+                action_objects = [
+                    item
+                    for item in context_objects
+                    if item.provider == "home_assistant"
+                    and isinstance(item.metadata, Mapping)
+                    and item.metadata.get("verification_status")
+                ]
+                if action_objects:
+                    metadata = action_objects[-1].metadata
+                    derived_results.append(
+                        {
+                            "kind": "home_action",
+                            "action": metadata.get("action"),
+                            "verification_status": metadata.get("verification_status"),
+                            "verified": metadata.get("verified"),
+                            "already_in_target_state": metadata.get("already_in_target_state"),
+                            "changed": metadata.get("changed"),
+                            "values": [
+                                {
+                                    "reference_id": item.reference_id,
+                                    "state": item.metadata.get("state"),
+                                    "area_name": item.metadata.get("area_name"),
+                                    "kind": item.metadata.get("kind"),
+                                }
+                                for item in action_objects
+                            ],
+                        }
+                    )
+                else:
+                    semantic_call = next(
+                        (
+                            call
+                            for call in reversed(calls)
+                            if call.get("tool") == "search_home"
+                            and isinstance(call.get("result"), Mapping)
+                            and call["result"].get("success") is True
+                        ),
+                        None,
+                    )
+                    if semantic_call is not None:
+                        semantic_result = semantic_call["result"]
+                        derived_results.append(
+                            {
+                                "kind": "home_semantic_resolution",
+                                "operation": semantic_result.get("operation"),
+                                "aggregation": semantic_result.get("aggregation"),
+                                "query": semantic_result.get("query"),
+                                "count": semantic_result.get("count"),
+                                "resolution": semantic_result.get("resolution"),
+                                "values": [
+                                    {
+                                        "reference_id": item.reference_id,
+                                        "state": item.metadata.get("state"),
+                                        "area_name": item.metadata.get("area_name"),
+                                        "kind": item.metadata.get("kind"),
+                                        "capabilities": item.metadata.get("capabilities"),
+                                    }
+                                    for item in context_objects
+                                    if item.provider == "home_assistant"
+                                ],
+                            }
+                        )
                 state.working_context = merge_projection(
                     state.working_context,
                     principal_id=principal_id,
@@ -929,6 +992,7 @@ class DialogueManager:
                     intent=intent,
                     result_set=result_set,
                     focus_refs=[item.reference_id for item in context_objects[:1]],
+                    derived_results=derived_results,
                 )
 
         return await self.save(

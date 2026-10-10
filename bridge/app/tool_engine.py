@@ -6,6 +6,7 @@ from typing import Any
 from app.device_resolver import DeviceResolver
 from app.home_assistant import HomeAssistantClient, HomeAssistantError
 from app.home_intelligence import HomeIntelligenceEngine, HomeQueryPlan
+from app.home_semantic import HomeSemanticEngine
 from app.presence import PresenceResolver
 from app.registry import RegistryEngine
 from app.tools.lights import LightsTool
@@ -242,6 +243,10 @@ class ToolEngine:
             area_loader=self.registry.areas,
             state_loader=lambda: self.readable_entity_states(refresh=True),
         )
+        self.home_semantic = HomeSemanticEngine(
+            state_loader=lambda: self.readable_entity_states(refresh=True),
+            service_caller=self.client.call_service,
+        )
         self._home_experience_projector: Callable[[Any, str], Any] | None = None
 
     def set_home_experience_projector(
@@ -323,6 +328,190 @@ class ToolEngine:
             return result
         grounded = await self.home_intelligence.query(semantic_plan)
         return grounded.as_result()
+
+    async def search_home(
+        self,
+        *,
+        query: str,
+        semantic_terms: list[str],
+        inventory_kind: str,
+        occupancy_state: str | None,
+        area_id: str | None,
+        capability: str | None,
+        domain: str | None,
+        state: str | None,
+        aggregation: str,
+        operation: str,
+        requested_action: str | None,
+        include_diagnostics: bool,
+        limit: int,
+        restrict_ids: tuple[str, ...] = (),
+        principal_id: str = "",
+        conversation_id: str = "",
+        request_id: str = "",
+    ) -> dict[str, Any]:
+        """Search compact canonical physical objects, never the raw entity list."""
+
+        kind = str(inventory_kind or "PHYSICAL_DEVICE").upper()
+        if kind in {"ROOM", "HOME_SUMMARY"}:
+            if operation.upper() == "CONTROL":
+                raise ValueError("Room and home summaries are read-only")
+            if kind == "ROOM":
+                predicate = str(occupancy_state or "ANY").upper()
+                if predicate not in {
+                    "ANY",
+                    "OCCUPIED",
+                    "LIKELY_OCCUPIED",
+                    "PROBABLY_CLEAR",
+                    "UNKNOWN",
+                }:
+                    raise ValueError("Unsupported room occupancy state")
+                plan = {
+                    "operation": "QUERY",
+                    "scope": "AREA" if area_id else "HOME",
+                    "category": "rooms",
+                    # HomeQueryPlan's legacy predicates intentionally group
+                    # uncertain occupancy. Fetch every room here, then apply
+                    # the exact alpha39 state requested by the semantic plan.
+                    "predicate": "ANY",
+                    "aggregation": aggregation,
+                    "area_id": area_id,
+                }
+                grounded = await self.query_home(plan, principal_id=principal_id or "aaron")
+                rooms = [item for item in grounded.get("rooms") or () if isinstance(item, Mapping)]
+                if predicate != "ANY":
+                    rooms = [
+                        item
+                        for item in rooms
+                        if str(item.get("occupancy_state") or "UNKNOWN") == predicate
+                    ]
+                context_projection = {
+                    "objects": [
+                        {
+                            "reference_id": f"room:{item['area_id']}",
+                            "object_type": "room",
+                            "display_name": item.get("name") or "Room",
+                            "source": "jarvis_room_occupancy",
+                            "canonical_id": str(item["area_id"]),
+                            "provider": "home_assistant",
+                            "capability": "homeassistant.read",
+                            "evidence_status": "verified",
+                            "freshness_seconds": 30,
+                            "immutable": False,
+                            "metadata": item,
+                            "aliases": [item.get("name"), item.get("area_id")],
+                        }
+                        for item in rooms
+                    ],
+                    "result_set": {
+                        "object_refs": [f"room:{item['area_id']}" for item in rooms],
+                        "ordering": "room_name",
+                        "observed_at": grounded.get("observed_at"),
+                        "filters": {
+                            **plan,
+                            "occupancy_state": predicate,
+                        },
+                    },
+                }
+                return {
+                    "success": True,
+                    "inventory_kind": kind,
+                    "operation": "QUERY",
+                    "aggregation": aggregation.upper(),
+                    "query": query,
+                    "occupancy_state": predicate,
+                    "count": len(rooms),
+                    "items": [
+                        {
+                            "canonical_id": f"room:{item.get('area_id')}",
+                            "display_name": item.get("name") or "Room",
+                            "area_id": item.get("area_id"),
+                            "area_name": item.get("name"),
+                            "kind": "room",
+                            "domains": [],
+                            "capabilities": ["state"],
+                            "state": item.get("occupancy_state") or "UNKNOWN",
+                            "available": item.get("occupancy_state") != "UNKNOWN",
+                            "evidence": item.get("occupancy_evidence") or [],
+                        }
+                        for item in rooms
+                    ],
+                    "complete": True,
+                    "observed_at": grounded.get("observed_at"),
+                    "context_projection": context_projection,
+                }
+            grounded = await self.query_home(
+                {
+                    "operation": "SNAPSHOT",
+                    "scope": "HOME",
+                    "category": "devices",
+                    "predicate": "ANY",
+                    "aggregation": "SUMMARY",
+                    "area_id": None,
+                },
+                principal_id=principal_id or "aaron",
+            )
+            experience = grounded.get("home_experience")
+            overall = experience.get("overall_status") if isinstance(experience, Mapping) else None
+            summary = (
+                str(overall.get("spoken_summary") or overall.get("headline") or "")
+                if isinstance(overall, Mapping)
+                else ""
+            )
+            return {
+                "success": True,
+                "inventory_kind": kind,
+                "operation": "QUERY",
+                "aggregation": "SUMMARY",
+                "query": query,
+                "count": 1 if summary else 0,
+                "items": [],
+                "summary": summary,
+                "complete": True,
+                "observed_at": grounded.get("observed_at"),
+            }
+
+        return await self.home_semantic.search(
+            query=query,
+            semantic_terms=semantic_terms,
+            area_id=area_id,
+            capability=capability,
+            domain=domain,
+            state=state,
+            aggregation=aggregation,
+            operation=operation,
+            requested_action=requested_action,
+            include_diagnostics=include_diagnostics,
+            limit=limit,
+            restrict_ids=restrict_ids,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            request_id=request_id,
+        )
+
+    async def inspect_home_item(self, canonical_id: str) -> dict[str, Any]:
+        return await self.home_semantic.inspect(canonical_id)
+
+    async def execute_home_action(
+        self,
+        *,
+        handle: str,
+        canonical_ids: list[str],
+        action: str,
+        principal_id: str,
+        conversation_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Execute only a short-lived action plan produced by canonical search."""
+
+        return await self.home_semantic.execute(
+            handle=handle,
+            canonical_ids=canonical_ids,
+            action=action,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            request_id=request_id,
+        )
 
     async def entities_in_area(
         self,

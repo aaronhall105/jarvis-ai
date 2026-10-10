@@ -707,9 +707,18 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     engine.registry = Registry()
     engine.tools = Tools()
     definitions = await engine._home_read_tools(type("Actor", (), {"area_id": None})())
-    query_home = next(item for item in definitions if item["name"] == "query_home")
-    properties = query_home["parameters"]["properties"]
+    search_home = next(item for item in definitions if item["name"] == "search_home")
+    properties = search_home["parameters"]["properties"]
 
-    assert "REFERENCED_ENTITY_SET" in properties["scope"]["enum"]
+    assert {"PHYSICAL_DEVICE", "ROOM", "HOME_SUMMARY"} == set(properties["inventory_kind"]["enum"])
+    assert {
+        "OCCUPIED",
+        "LIKELY_OCCUPIED",
+        "PROBABLY_CLEAR",
+        "UNKNOWN",
+        "ANY",
+        None,
+    } == set(properties["occupancy_state"]["enum"])
+    assert "query_home" not in {item["name"] for item in definitions}
     assert "entity_ids" not in properties
     assert "area_id" in properties
