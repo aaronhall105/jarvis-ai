@@ -53,6 +53,7 @@ from app.response_presentation import (
     render_gmail_message_action,
     render_gmail_reply_status,
     render_home_state_evidence,
+    render_home_search_evidence,
     render_home_query_evidence,
     render_presence_evidence,
     technical_output_requested,
@@ -89,6 +90,7 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "announce_message",
     "propose_admin_change",
     "prepare_gmail_message",
+    "execute_home_action",
 }
 
 
@@ -213,6 +215,26 @@ Scope and accuracy:
 - Say clearly when information is unknown or an action cannot be completed.
 
 Home Assistant tools:
+- Infer whether the user wants a count, list, state, summary, comparison,
+  explanation or control operation
+  from the meaning and conversational context; do not force every noun through a
+  single-device resolver.
+- Treat a natural elliptical object-plus-desired-state command as CONTROL when its
+  ordinary conversational reading is imperative. Reserve STATE for questions about
+  current state. This applies generically to every discovered capability and object.
+- For arbitrary named home objects, use search_home. Search canonical physical
+  objects first and filter by area and required capability. Do not use raw entity
+  search merely because a canonical search returns several child surfaces.
+- Normalise genuine semantic equivalents in search_home semantic_terms using your
+  language understanding. Do not invent Home Assistant names or IDs.
+- Before a canonical action, call search_home with semantic_operation CONTROL and
+  the requested capability. Execute only an exact canonical candidate using the
+  returned short-lived handle. If more than one plausible canonical candidate
+  remains, ask which one in a single concise question.
+- When a follow-up keeps or pronominally refers to the single canonical object
+  grounded in WorkingContext, set use_current_reference=true. Do not reconstruct
+  its identity from remembered words or invent its area; Core will revalidate the
+  stored canonical ID against the live inventory.
 - Use a Home Assistant control tool only for an explicit action the user wants
   performed now. Do not operate devices for hypothetical questions, explanations,
   future plans or reminders.
@@ -231,7 +253,9 @@ Home Assistant tools:
 - Read-only state questions must not operate any device.
 - Treat tool results as authoritative. Never claim an action succeeded unless the
   result confirms success.
-- If a tool says a device was already in the requested state, say that plainly.
+- Say a device was already in the requested state only when execute_home_action
+  identifies the exact canonical object and returns verified=true with
+  already_in_target_state=true.
 - For an explicit request to run an existing safe script, automation or routine,
   use run_home_routine immediately.
 - Use mobile notification and announcement tools only when explicitly requested.
@@ -1459,6 +1483,7 @@ class RequestRouter:
                 return RoutingDecision(
                     intent=RequestIntent.CONTROL_FOLLOW_UP,
                     allow_home_control=True,
+                    allow_home_read=True,
                     model_instruction=(
                         "This is an immediate follow-up Home Assistant action. "
                         "Resolve the pronoun from recent conversation and use an "
@@ -1481,6 +1506,7 @@ class RequestRouter:
                 intent=RequestIntent.CONTROL_NOW,
                 allow_home_control=True,
                 allow_routine_run=True,
+                allow_home_read=True,
                 model_instruction=(
                     "This is an explicit request to run an existing Home Assistant "
                     "script or automation now. Resolve the exact routine and call "
@@ -1494,6 +1520,7 @@ class RequestRouter:
             return RoutingDecision(
                 intent=RequestIntent.CONTROL_NOW,
                 allow_home_control=True,
+                allow_home_read=True,
                 model_instruction=(
                     "This is an immediate Home Assistant action. Use an authorised "
                     "control tool. Do not explain how the current user could do it."
@@ -1800,6 +1827,51 @@ class AIEngine:
         definitions.append(
             {
                 "type": "function",
+                "name": "execute_home_action",
+                "description": (
+                    "Execute and verify an action on one or more canonical Home Assistant "
+                    "objects returned by search_home in this turn. You must pass the opaque "
+                    "action-plan handle and only canonical IDs from that search result. Never "
+                    "invent an ID, entity, service, or capability. If several plausible "
+                    "canonical objects remain, ask a concise clarification instead of acting."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "handle": {"type": "string"},
+                        "canonical_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 20,
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "turn_on",
+                                "turn_off",
+                                "play",
+                                "pause",
+                                "stop",
+                                "mute",
+                                "unmute",
+                                "next",
+                                "previous",
+                                "volume_up",
+                                "volume_down",
+                            ],
+                        },
+                    },
+                    "required": ["handle", "canonical_ids", "action"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        )
+
+        definitions.append(
+            {
+                "type": "function",
                 "name": "control_referenced_set",
                 "description": (
                     "Turn on or off the exact grounded light/switch result set from the "
@@ -1868,45 +1940,6 @@ class AIEngine:
                 }
             )
 
-        devices = await self.tools.controllable_devices()
-        valid_devices = [
-            device for device in devices if device.get("entity_id") and device.get("name")
-        ]
-        if valid_devices:
-            entity_ids = [str(device["entity_id"]) for device in valid_devices]
-            device_descriptions = "; ".join(
-                (f"{device['name']} ({device.get('area_name') or 'No area'})={device['entity_id']}")
-                for device in valid_devices
-            )
-            definitions.append(
-                {
-                    "type": "function",
-                    "name": "control_device",
-                    "description": (
-                        "Turn one exact exposed Home Assistant light or switch "
-                        "on or off. Use this for a specifically named device, "
-                        "not an entire room. Available devices: "
-                        f"{device_descriptions}"
-                    ),
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "entity_id": {
-                                "type": "string",
-                                "enum": entity_ids,
-                            },
-                            "action": {
-                                "type": "string",
-                                "enum": ["turn_on", "turn_off"],
-                            },
-                        },
-                        "required": ["entity_id", "action"],
-                        "additionalProperties": False,
-                    },
-                    "strict": True,
-                }
-            )
-
         routines = await self.tools.runnable_routines(limit=120) if include_routines else []
         if routines:
             routine_ids = [str(item["entity_id"]) for item in routines]
@@ -1938,7 +1971,11 @@ class AIEngine:
                 }
             )
 
-        media_shortcuts = self.tools.MEDIA_SHORTCUTS
+        media_shortcuts = {
+            key: value
+            for key, value in self.tools.MEDIA_SHORTCUTS.items()
+            if not value.get("target_state")
+        }
         if media_shortcuts:
             shortcut_descriptions = "; ".join(
                 f"{key}={value['name']}" for key, value in media_shortcuts.items()
@@ -2107,6 +2144,154 @@ class AIEngine:
         definitions: list[dict[str, Any]] = [
             {
                 "type": "function",
+                "name": "search_home",
+                "description": (
+                    "Search the compact live canonical Home Assistant inventory. The result "
+                    "contains physical objects and capabilities, not every child entity. Use "
+                    "this for named things, arbitrary device kinds, counts, lists, state "
+                    "questions, and as the mandatory discovery step before execute_home_action. "
+                    "Infer the semantic operation from meaning, not exact wording. Put a concise "
+                    "A telegraphic target plus an achievable desired end state is CONTROL even "
+                    "when the user omits a verb; QUERY is only for retrieving information. "
+                    "Put a concise "
+                    "normalised concept in query and add a few genuinely equivalent concepts in "
+                    "semantic_terms when useful; this lets semantic language such as colloquial "
+                    "names ground against structured names, domains, device classes, models and "
+                    "capabilities without a phrase catalogue. For CONTROL, supply the exact "
+                    "requested action and capability. Use use_current_reference only when the "
+                    "conversation's grounded canonical object is the intended referent; this "
+                    "is mandatory for a follow-up that keeps that object while omitting its "
+                    "scope. Do not reconstruct its identity from prior text. Raw "
+                    "diagnostic and observation entities are excluded by default. Use "
+                    "inventory_kind ROOM only for derived room occupancy and HOME_SUMMARY "
+                    "only for a whole-home overview; otherwise use PHYSICAL_DEVICE. A "
+                    "dwelling-wide scope uses area_id null; choose an area only when the user "
+                    "means that actual configured room."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "semantic_operation": {
+                            "type": "string",
+                            "enum": ["QUERY", "CONTROL", "EXPLAIN"],
+                            "description": (
+                                "CONTROL means the user wants a supported state change now, "
+                                "including terse target-plus-state commands. QUERY only reads; "
+                                "EXPLAIN grounds a follow-up explanation."
+                            ),
+                        },
+                        "inventory_kind": {
+                            "type": "string",
+                            "enum": ["PHYSICAL_DEVICE", "ROOM", "HOME_SUMMARY"],
+                        },
+                        "aggregation": {
+                            "type": "string",
+                            "enum": ["COUNT", "LIST", "STATE", "SUMMARY", "COMPARE"],
+                        },
+                        "query": {"type": "string"},
+                        "semantic_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 8,
+                        },
+                        "area_id": nullable_area_schema,
+                        "capability": {
+                            "type": ["string", "null"],
+                            "enum": [
+                                "state",
+                                "view",
+                                "turn_on",
+                                "turn_off",
+                                "play",
+                                "pause",
+                                "stop",
+                                "mute",
+                                "unmute",
+                                "next",
+                                "previous",
+                                "volume_up",
+                                "volume_down",
+                                None,
+                            ],
+                        },
+                        "domain": {
+                            "type": ["string", "null"],
+                            "enum": [*domains, None],
+                        },
+                        "state": {"type": ["string", "null"]},
+                        "occupancy_state": {
+                            "type": ["string", "null"],
+                            "enum": [
+                                "OCCUPIED",
+                                "LIKELY_OCCUPIED",
+                                "PROBABLY_CLEAR",
+                                "UNKNOWN",
+                                "ANY",
+                                None,
+                            ],
+                        },
+                        "requested_action": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "The desired capability action for CONTROL; null for reads."
+                            ),
+                            "enum": [
+                                "turn_on",
+                                "turn_off",
+                                "play",
+                                "pause",
+                                "stop",
+                                "mute",
+                                "unmute",
+                                "next",
+                                "previous",
+                                "volume_up",
+                                "volume_down",
+                                None,
+                            ],
+                        },
+                        "use_current_reference": {"type": "boolean"},
+                        "include_diagnostics": {"type": "boolean"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    },
+                    "required": [
+                        "semantic_operation",
+                        "inventory_kind",
+                        "aggregation",
+                        "query",
+                        "semantic_terms",
+                        "area_id",
+                        "capability",
+                        "domain",
+                        "state",
+                        "occupancy_state",
+                        "requested_action",
+                        "use_current_reference",
+                        "include_diagnostics",
+                        "limit",
+                    ],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
+                "name": "inspect_home_item",
+                "description": (
+                    "Inspect one exact canonical object returned by search_home when its compact "
+                    "summary is insufficient. This reveals bounded control/evidence surfaces; "
+                    "the canonical ID must come from a tool result, never be invented."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {"canonical_id": {"type": "string"}},
+                    "required": ["canonical_id"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
                 "name": "query_home",
                 "description": (
                     "Evaluate a complete grounded set of current Home Assistant entities. "
@@ -2203,10 +2388,12 @@ class AIEngine:
                 "type": "function",
                 "name": "search_entity_states",
                 "description": (
-                    "Search fresh Home Assistant entity states by natural device, "
-                    "sensor or person name. Use this for phone battery, whether a "
-                    "named TV is on, where a person is, or which entities match a "
-                    "state. Available areas: "
+                    "Search raw fresh Home Assistant entity states only when the user "
+                    "explicitly needs a sensor, person, entity, or diagnostic surface. "
+                    "Never use this as fallback discovery for a physical object, action "
+                    "target, collection count, or ordinary named-device state; use "
+                    "search_home for those so observational child entities cannot become "
+                    "physical candidates. Available areas: "
                     f"{area_descriptions or 'none configured'}. "
                     + (
                         f"The current voice endpoint is in area_id {local_area}; "
@@ -2223,8 +2410,8 @@ class AIEngine:
                         "query": {
                             "type": "string",
                             "description": (
-                                "Short identifying words from the current user's request, such "
-                                "as 'Aaron phone battery', 'TV' or 'living room light'."
+                                "Short identifying words for the explicitly requested raw "
+                                "entity, sensor, person, or diagnostic surface."
                             ),
                         },
                         "domain": {
@@ -2317,7 +2504,10 @@ class AIEngine:
                 },
             )
 
-        return definitions
+        # search_home is the single LLM-facing semantic inventory primitive.
+        # Keep the older query_home implementation for internal compatibility,
+        # but do not expose its broad raw-entity categories to new model plans.
+        return [item for item in definitions if item.get("name") != "query_home"]
 
     @staticmethod
     def _save_memory_tool() -> dict[str, Any]:
@@ -3443,6 +3633,157 @@ class AIEngine:
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
 
+            if name == "search_home":
+                query = _normalise_space(str(arguments.get("query") or ""))
+                raw_terms = arguments.get("semantic_terms") or ()
+                semantic_terms = [
+                    _normalise_space(str(item))
+                    for item in (
+                        raw_terms
+                        if isinstance(raw_terms, Sequence)
+                        and not isinstance(raw_terms, (str, bytes, bytearray))
+                        else ()
+                    )
+                    if _normalise_space(str(item))
+                ][:8]
+                semantic_area_id: str | None = (
+                    str(arguments["area_id"]) if arguments.get("area_id") else None
+                )
+                valid_area_ids = {area["area_id"] for area in await self._area_options()}
+                if semantic_area_id and semantic_area_id not in valid_area_ids:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "unknown_area",
+                        f"Unknown Home Assistant area: {semantic_area_id}",
+                    )
+                restrict_ids: tuple[str, ...] = ()
+                if bool(arguments.get("use_current_reference")):
+                    resolution = await WorkingContextService(self.dialogue).resolve(
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        query=reference_query("it", object_types=("device",)),
+                    )
+                    if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "missing_grounded_reference",
+                            "There is no single current canonical home object to reuse.",
+                        )
+                    restrict_ids = tuple(
+                        str(item.canonical_id or "")
+                        for item in resolution.objects
+                        if item.provider == "home_assistant" and item.canonical_id
+                    )
+                    if len(restrict_ids) != len(resolution.objects):
+                        return self._tool_failure(
+                            name,
+                            arguments,
+                            "invalid_grounded_reference",
+                            "The current reference is not a canonical Home Assistant object.",
+                        )
+                semantic_aggregation = str(arguments.get("aggregation") or "LIST").upper()
+                semantic_operation = str(arguments.get("semantic_operation") or "QUERY").upper()
+                inventory_kind = str(arguments.get("inventory_kind") or "PHYSICAL_DEVICE").upper()
+                occupancy_state = (
+                    str(arguments["occupancy_state"]).upper()
+                    if arguments.get("occupancy_state")
+                    else None
+                )
+                include_diagnostics = bool(arguments.get("include_diagnostics"))
+                semantic_limit = max(1, min(int(arguments.get("limit", 12)), 50))
+                read_arguments: dict[str, Any] = {
+                    "query": query,
+                    "semantic_terms": semantic_terms,
+                    "inventory_kind": inventory_kind,
+                    "occupancy_state": occupancy_state,
+                    "area_id": semantic_area_id,
+                    "capability": arguments.get("capability"),
+                    "domain": arguments.get("domain"),
+                    "state": arguments.get("state"),
+                    "aggregation": semantic_aggregation,
+                    "semantic_operation": semantic_operation,
+                    "requested_action": arguments.get("requested_action"),
+                    "include_diagnostics": include_diagnostics,
+                    "limit": semantic_limit,
+                    "restrict_ids": list(restrict_ids),
+                }
+                result = await self._execute_registered_home_read(
+                    operation="search_home",
+                    arguments=read_arguments,
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.search_home(
+                        query=query,
+                        semantic_terms=semantic_terms,
+                        inventory_kind=inventory_kind,
+                        occupancy_state=occupancy_state,
+                        area_id=semantic_area_id,
+                        capability=(
+                            str(arguments["capability"]) if arguments.get("capability") else None
+                        ),
+                        domain=(str(arguments["domain"]) if arguments.get("domain") else None),
+                        state=str(arguments["state"]) if arguments.get("state") else None,
+                        aggregation=semantic_aggregation,
+                        operation=semantic_operation,
+                        requested_action=(
+                            str(arguments["requested_action"])
+                            if arguments.get("requested_action")
+                            else None
+                        ),
+                        include_diagnostics=include_diagnostics,
+                        limit=semantic_limit,
+                        restrict_ids=restrict_ids,
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        request_id=request_id,
+                    ),
+                )
+                return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "inspect_home_item":
+                canonical_id = _normalise_space(str(arguments.get("canonical_id") or ""))
+                result = await self._execute_registered_home_read(
+                    operation="inspect_home_item",
+                    arguments={"canonical_id": canonical_id},
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    fallback=lambda: self.tools.inspect_home_item(canonical_id),
+                )
+                return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "execute_home_action":
+                handle = _normalise_space(str(arguments.get("handle") or ""))
+                action = _normalise_space(str(arguments.get("action") or ""))
+                raw_ids = arguments.get("canonical_ids") or ()
+                canonical_ids = [
+                    _normalise_space(str(item))
+                    for item in (
+                        raw_ids
+                        if isinstance(raw_ids, Sequence)
+                        and not isinstance(raw_ids, (str, bytes, bytearray))
+                        else ()
+                    )
+                    if _normalise_space(str(item))
+                ]
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="execute_home_action",
+                    arguments={
+                        "handle": handle,
+                        "canonical_ids": canonical_ids,
+                        "action": action,
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=canonical_ids,
+                )
+                return {"tool": name, "arguments": arguments, "result": result}
+
             if name == "query_home":
                 plan: dict[str, Any] = {
                     "operation": str(arguments.get("operation") or "QUERY").upper(),
@@ -4010,6 +4351,7 @@ class AIEngine:
                 for call in calls
                 if call.get("tool")
                 in {
+                    "search_home",
                     "query_home",
                     "search_entity_states",
                     "list_area_states",
@@ -4037,6 +4379,10 @@ class AIEngine:
                 or error.get("message")
                 or "The requested action could not be completed."
             )
+
+        if name == "search_home":
+            rendered = render_home_search_evidence([call], request_text="")
+            return rendered or "I couldn’t find a matching canonical home item."
 
         if name in {"query_home", "search_entity_states", "list_area_states"}:
             entities = result.get("entities", [])
@@ -4839,6 +5185,7 @@ class AIEngine:
         reasoning_effort: str | None = None,
         instructions: str | None = None,
         force_plan: bool = False,
+        force_tool_name: str | None = None,
     ) -> dict[str, Any]:
         request_text = ReplyBudgetPolicy.latest_user_text(input_items)
         max_output_tokens = ReplyBudgetPolicy.output_tokens(
@@ -4865,9 +5212,13 @@ class AIEngine:
                 {
                     "tools": tool_definitions,
                     "tool_choice": (
-                        {"type": "function", "name": "create_personal_plan"}
-                        if force_plan
-                        else "auto"
+                        {"type": "function", "name": force_tool_name}
+                        if force_tool_name
+                        else (
+                            {"type": "function", "name": "create_personal_plan"}
+                            if force_plan
+                            else "auto"
+                        )
                     ),
                     "parallel_tool_calls": selected_model == self.executive_config.model,
                 }
@@ -4896,6 +5247,7 @@ class AIEngine:
         reasoning_effort: str | None = None,
         instructions: str | None = None,
         force_plan: bool = False,
+        force_tool_name: str | None = None,
         executive_task_id: str | None = None,
     ) -> Any:
         try:
@@ -4907,6 +5259,7 @@ class AIEngine:
                 reasoning_effort=reasoning_effort,
                 instructions=instructions,
                 force_plan=force_plan,
+                force_tool_name=force_tool_name,
             )
 
             if executive_task_id and self.executive_transport is not None:
@@ -7095,21 +7448,30 @@ class AIEngine:
                 "SNAPSHOT",
             }
             decision = RoutingDecision(
-                intent=RequestIntent.STATE_QUERY,
+                intent=RequestIntent.GENERAL,
+                allow_home_control=True,
                 allow_home_read=True,
                 model_instruction=(
                     (
-                        "Continue the previous grounded Home Assistant set query. Preserve its "
-                        "semantic category, predicate and aggregation unless the user changes "
-                        "them, and change only the explicitly requested scope. Call query_home; "
-                        "do not infer state from history."
+                        "Continue the previous grounded Home Assistant semantic query. Preserve "
+                        "its free-form target, inventory kind, state constraint and aggregation "
+                        "unless the user changes them, and change only the explicitly requested "
+                        "scope. Call search_home; do not infer current state from history."
                     )
                     if continuing_query
                     else (
-                        "Interpret this home-state request as a structured set query. Use "
-                        "query_home for whole-home, area, availability, presence, active-device "
-                        "or house-status semantics. Let Core ground every area and entity; do "
-                        "not turn a set question into a single name search."
+                        "Infer the semantic home goal from the user's meaning: count or list a "
+                        "set, inspect state, compare, explain a prior grounded result, search for "
+                        "a physical object, or perform an explicit action. Use search_home for "
+                        "every semantic home query: PHYSICAL_DEVICE "
+                        "for canonical objects, ROOM for exact alpha39 occupancy states, and "
+                        "HOME_SUMMARY for the existing whole-home projection. "
+                        "Telegraphic target-plus-end-state language is an explicit CONTROL, not "
+                        "a state query, even when no command verb is present. "
+                        "For an action, search with semantic_operation CONTROL and the required "
+                        "capability, then pass its grounded action handle and exact canonical ID "
+                        "to execute_home_action. Never turn a question into a write. Let Core "
+                        "ground every identity and capability."
                     )
                 ),
                 use_long_term_memory=False,
@@ -7716,61 +8078,6 @@ class AIEngine:
                     "usage": {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0},
                 }
 
-        if decision.intent in {
-            RequestIntent.CONTROL_NOW,
-            RequestIntent.CONTROL_FOLLOW_UP,
-        }:
-            direct_control = await self._try_direct_power_control(
-                user_text,
-                conversation_id=resolved_conversation_id,
-                actor=actor,
-                request_id=resolved_request_id,
-            )
-            if direct_control is not None:
-                final_reply, direct_calls = direct_control
-                final_reply = _clean_reply(final_reply)
-                await self.conversations.add_assistant_message(
-                    conversation_id=resolved_conversation_id,
-                    content=final_reply,
-                )
-                latency_ms = round((time.monotonic() - started) * 1000)
-                success = all(
-                    call.get("result", {}).get("success") is True for call in direct_calls
-                )
-                logger.info(
-                    "AI direct-control complete conversation=%s latency_ms=%s "
-                    "tool_calls=%s success=%s",
-                    resolved_conversation_id[-12:],
-                    latency_ms,
-                    len(direct_calls),
-                    success,
-                )
-                await self.dialogue.record_result(
-                    resolved_conversation_id,
-                    intent=decision.intent.value,
-                    success=success,
-                    response=final_reply,
-                    calls=direct_calls,
-                )
-                return {
-                    "success": success,
-                    "response": final_reply,
-                    "model": self.model,
-                    "intent": decision.intent.value,
-                    "deterministic": True,
-                    "tool_called": True,
-                    "tool_rounds": 1,
-                    "calls": direct_calls,
-                    "memory_used": False,
-                    "conversation_id": resolved_conversation_id,
-                    "understanding": understanding.as_dict(),
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cached_tokens": 0,
-                    },
-                }
-
         if decision.intent == RequestIntent.STATE_QUERY:
             direct_state = await self._try_direct_state_reply(
                 user_text,
@@ -8141,6 +8448,16 @@ class AIEngine:
                 is_executive_round = executive_task_id is not None
                 response_input = working_input
                 response_reasoning = self.reasoning_effort
+                if (
+                    not is_executive_round
+                    and tool_rounds == 0
+                    and understanding.house_relevant
+                    and decision.allow_home_read
+                ):
+                    # The first home round performs semantic planning over
+                    # free-form language; medium reasoning materially improves
+                    # terse-command interpretation without expanding HA data.
+                    response_reasoning = "medium"
                 if is_executive_round:
                     response_reasoning = self.executive_config.reasoning
                     if executive_decision.reasoning_effort != self.executive_config.reasoning:
@@ -8166,6 +8483,16 @@ class AIEngine:
                         else JARVIS_INSTRUCTIONS
                     ),
                     force_plan=is_executive_round and tool_rounds == 0,
+                    force_tool_name=(
+                        "search_home"
+                        if not is_executive_round
+                        and tool_rounds == 0
+                        and understanding.house_relevant
+                        and decision.allow_home_read
+                        and "search_home" in authorised_tools
+                        and not code_awareness_requested
+                        else None
+                    ),
                     executive_task_id=(
                         executive_task_id if is_executive_round and tool_rounds == 0 else None
                     ),
@@ -8198,6 +8525,14 @@ class AIEngine:
                         tool_definitions=tool_definitions,
                         actor=actor,
                         on_text_delta=None,
+                        force_tool_name=(
+                            "search_home"
+                            if understanding.house_relevant
+                            and decision.allow_home_read
+                            and "search_home" in authorised_tools
+                            and not code_awareness_requested
+                            else None
+                        ),
                     )
                     model_rounds += 1
                 elif completed_calls:
@@ -8582,11 +8917,17 @@ class AIEngine:
         if reply_status_reply is not None:
             final_reply = reply_status_reply
 
+        home_search_reply = render_home_search_evidence(
+            completed_calls,
+            request_text=raw_user_text,
+        )
         home_query_reply = render_home_query_evidence(
             completed_calls,
             request_text=raw_user_text,
         )
-        if home_query_reply is not None:
+        if home_search_reply is not None:
+            final_reply = home_search_reply
+        elif home_query_reply is not None:
             final_reply = home_query_reply
         elif decision.intent == RequestIntent.STATE_QUERY:
             home_state_reply = render_home_state_evidence(

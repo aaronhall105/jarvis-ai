@@ -1236,6 +1236,7 @@ def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
 
 QUIET_CONTROL_TOOLS = {
     "control_device",
+    "execute_home_action",
     "control_area_lights",
     "control_area_switches",
     "run_media_shortcut",

@@ -243,6 +243,40 @@ class HomeAssistantConnector(Connector):
         request: CapabilityRequest,
     ) -> Mapping[str, Any]:
         if capability_id == "homeassistant.read":
+            if operation == "search_home":
+                raw_terms = payload.get("semantic_terms") or ()
+                semantic_terms = (
+                    [str(item) for item in raw_terms]
+                    if isinstance(raw_terms, (list, tuple))
+                    else []
+                )
+                return await self.tools.search_home(
+                    query=str(payload.get("query") or ""),
+                    semantic_terms=semantic_terms,
+                    inventory_kind=str(payload.get("inventory_kind") or "PHYSICAL_DEVICE"),
+                    occupancy_state=(
+                        str(payload["occupancy_state"]) if payload.get("occupancy_state") else None
+                    ),
+                    area_id=str(payload["area_id"]) if payload.get("area_id") else None,
+                    capability=(str(payload["capability"]) if payload.get("capability") else None),
+                    domain=str(payload["domain"]) if payload.get("domain") else None,
+                    state=str(payload["state"]) if payload.get("state") else None,
+                    aggregation=str(payload.get("aggregation") or "LIST"),
+                    operation=str(payload.get("semantic_operation") or "QUERY"),
+                    requested_action=(
+                        str(payload["requested_action"])
+                        if payload.get("requested_action")
+                        else None
+                    ),
+                    include_diagnostics=bool(payload.get("include_diagnostics")),
+                    limit=max(1, min(int(payload.get("limit", 12)), 50)),
+                    restrict_ids=tuple(str(item) for item in payload.get("restrict_ids") or ()),
+                    principal_id=str(request.principal_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    request_id=str(request.request_id),
+                )
+            if operation == "inspect_home_item":
+                return await self.tools.inspect_home_item(str(payload.get("canonical_id") or ""))
             if operation == "query_home":
                 return await self.tools.query_home(
                     payload,
@@ -276,6 +310,18 @@ class HomeAssistantConnector(Connector):
             if operation == "inspect_presence":
                 return await self.tools.inspect_presence(str(payload.get("reference") or ""))
         elif capability_id == "homeassistant.control":
+            if operation == "execute_home_action":
+                raw_ids = payload.get("canonical_ids") or ()
+                if not isinstance(raw_ids, (list, tuple)):
+                    raise ValueError("Canonical home targets must be a list")
+                return await self.tools.execute_home_action(
+                    handle=str(payload.get("handle") or ""),
+                    canonical_ids=[str(item) for item in raw_ids],
+                    action=str(payload.get("action") or ""),
+                    principal_id=str(request.principal_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    request_id=str(request.request_id),
+                )
             action = str(payload.get("action") or "")
             if action not in {"turn_on", "turn_off", "on", "off"}:
                 raise ValueError("Unsupported Home Assistant power action")
@@ -406,6 +452,9 @@ class HomeAssistantConnector(Connector):
                         "current_state",
                         "proposal_id",
                         "config_key",
+                        "canonical_ids",
+                        "action",
+                        "verification_status",
                     )
                     if key in data
                 }
