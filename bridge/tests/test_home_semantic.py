@@ -32,6 +32,10 @@ def entity(
     manufacturer: str = "Synthetic",
     model: str = "Fixture",
     connection: str | None = None,
+    entity_category: str | None = None,
+    platform: str = "fixture",
+    via_device_id: str | None = None,
+    attributes: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "entity_id": entity_id,
@@ -45,13 +49,15 @@ def entity(
         "device_name": device_name,
         "device_name_by_user": device_name,
         "device_class": device_class,
-        "entity_category": None,
+        "entity_category": entity_category,
         "device_manufacturer": manufacturer,
         "device_model": model,
         "device_connections": ([["mac", connection]] if connection else []),
         "device_identifiers": [["fixture", device_id]],
         "supported_features": supported_features,
-        "attributes": {},
+        "platform": platform,
+        "via_device_id": via_device_id,
+        "attributes": attributes or {},
     }
 
 
@@ -101,6 +107,9 @@ async def search(
     aggregation: str = "LIST",
     operation: str = "QUERY",
     action: str | None = None,
+    inventory_kind: str = "PHYSICAL_DEVICE",
+    state: str | None = None,
+    include_virtual: bool = False,
 ) -> dict[str, Any]:
     return await fixture.engine.search(
         query=query,
@@ -108,7 +117,9 @@ async def search(
         area_id=area_id,
         capability=capability,
         domain=None,
-        state=None,
+        state=state,
+        inventory_kind=inventory_kind,
+        include_virtual=include_virtual,
         aggregation=aggregation,
         operation=operation,
         requested_action=action,
@@ -485,6 +496,396 @@ async def test_shared_physical_connection_collapses_multiple_control_surfaces() 
 
 
 @pytest.mark.asyncio
+async def test_similar_names_without_grounded_identity_remain_distinct() -> None:
+    fixture = SemanticFixture(
+        [
+            entity(
+                "switch.first_surface",
+                "Shared Label",
+                domain="switch",
+                state="on",
+                area_id="studio",
+                area_name="Studio",
+                device_id="first-identity",
+                device_name="Shared Label",
+            ),
+            entity(
+                "switch.second_surface",
+                "Shared Label",
+                domain="switch",
+                state="off",
+                area_id="studio",
+                area_name="Studio",
+                device_id="second-identity",
+                device_name="Shared Label",
+            ),
+        ]
+    )
+
+    result = await search(fixture, "Shared Label", terms=["Shared Label"], aggregation="COUNT")
+    assert result["count"] == 2
+    assert len({item["canonical_id"] for item in result["items"]}) == 2
+
+
+@pytest.mark.asyncio
+async def test_one_device_exposes_independent_capabilities_without_count_inflation() -> None:
+    fixture = SemanticFixture(
+        [
+            entity(
+                "light.workshop_main",
+                "Workshop Main",
+                domain="light",
+                state="on",
+                area_id="workshop",
+                area_name="Workshop",
+                device_id="multi-surface-controller",
+                device_name="Dimming Controller",
+            ),
+            entity(
+                "sensor.workshop_power",
+                "Workshop Power",
+                domain="sensor",
+                state="12.4",
+                area_id="workshop",
+                area_name="Workshop",
+                device_id="multi-surface-controller",
+                device_name="Dimming Controller",
+                device_class="power",
+            ),
+            entity(
+                "sensor.workshop_energy",
+                "Workshop Energy",
+                domain="sensor",
+                state="3.2",
+                area_id="workshop",
+                area_name="Workshop",
+                device_id="multi-surface-controller",
+                device_name="Dimming Controller",
+                device_class="energy",
+            ),
+            entity(
+                "event.workshop_input",
+                "Workshop Input",
+                domain="event",
+                state="2026-10-11T00:00:00Z",
+                area_id="workshop",
+                area_name="Workshop",
+                device_id="multi-surface-controller",
+                device_name="Dimming Controller",
+            ),
+            entity(
+                "update.workshop_firmware",
+                "Workshop Firmware",
+                domain="update",
+                state="off",
+                area_id="workshop",
+                area_name="Workshop",
+                device_id="multi-surface-controller",
+                device_name="Dimming Controller",
+                entity_category="config",
+            ),
+        ]
+    )
+
+    graph = await fixture.engine.graph()
+    assert len(graph.physical_objects) == 1
+    assert {item.capability_kind for item in graph.capabilities} == {"energy", "light", "power"}
+    inspected = graph.physical_objects[0].inspected()
+    assert {item["role"] for item in inspected["member_entities"]} == {
+        "PRIMARY_CONTROL",
+        "MEASUREMENT",
+        "EVENT",
+        "CONFIGURATION",
+    }
+
+    lights = await search(
+        fixture,
+        "light",
+        terms=["light"],
+        inventory_kind="CAPABILITY",
+        state="on",
+    )
+    assert lights["count"] == 1
+    assert lights["items"][0]["capability_kind"] == "light"
+    assert lights["items"][0]["parent_canonical_id"] == graph.physical_objects[0].canonical_id
+
+
+@pytest.mark.asyncio
+async def test_camera_streams_roll_up_once_while_attached_light_remains_a_capability() -> None:
+    common = {
+        "device_name": "Observatory",
+    }
+    fixture = SemanticFixture(
+        [
+            entity(
+                "camera.observatory_clear",
+                "Observatory Clear",
+                domain="camera",
+                state="idle",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+            entity(
+                "camera.observatory_fluent",
+                "Observatory Fluent",
+                domain="camera",
+                state="idle",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+            entity(
+                "camera.observatory_snapshots_clear",
+                "Observatory Snapshots Clear",
+                domain="camera",
+                state="idle",
+                area_id="aggregate",
+                area_name="Aggregate",
+                device_id="analytics-device",
+                via_device_id="analytics-gateway",
+                **common,
+            ),
+            entity(
+                "camera.observatory_snapshots_fluent",
+                "Observatory Snapshots Fluent",
+                domain="camera",
+                state="idle",
+                area_id="aggregate",
+                area_name="Aggregate",
+                device_id="analytics-device",
+                via_device_id="analytics-gateway",
+                **common,
+            ),
+            entity(
+                "binary_sensor.observatory_person",
+                "Observatory Person",
+                domain="binary_sensor",
+                state="off",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                device_class="occupancy",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+            entity(
+                "binary_sensor.observatory_motion",
+                "Observatory Motion",
+                domain="binary_sensor",
+                state="off",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                device_class="motion",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+            entity(
+                "light.observatory_flood",
+                "Observatory Flood",
+                domain="light",
+                state="on",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+            entity(
+                "sensor.observatory_signal",
+                "Observatory Signal",
+                domain="sensor",
+                state="-54",
+                area_id="observatory",
+                area_name="Observatory",
+                device_id="camera-device",
+                entity_category="diagnostic",
+                connection="00:00:00:00:00:42",
+                **common,
+            ),
+        ]
+    )
+
+    cameras = await search(fixture, "camera", terms=["camera"], aggregation="COUNT")
+    assert cameras["count"] == 1
+    assert cameras["items"][0]["kind"] == "camera"
+    assert cameras["items"][0]["area_id"] == "observatory"
+    inspected = await fixture.engine.inspect(cameras["items"][0]["canonical_id"])
+    assert len(inspected["item"]["member_entities"]) == 8
+
+    lights = await search(
+        fixture,
+        "light",
+        terms=["light"],
+        inventory_kind="CAPABILITY",
+        state="on",
+    )
+    assert lights["count"] == 1
+    assert lights["items"][0]["capability_kind"] == "light"
+
+
+@pytest.mark.asyncio
+async def test_physical_counts_exclude_groups_while_virtual_targets_remain_searchable() -> None:
+    media_features = 1 | 4096 | 16384
+    fixture = SemanticFixture(
+        [
+            entity(
+                "media_player.kitchen_endpoint",
+                "Kitchen Sound",
+                domain="media_player",
+                state="idle",
+                area_id="kitchen",
+                area_name="Kitchen",
+                device_id="kitchen-endpoint",
+                device_name="Kitchen Sound",
+                device_class="speaker",
+                supported_features=media_features,
+            ),
+            entity(
+                "media_player.lounge_endpoint",
+                "Lounge Sound",
+                domain="media_player",
+                state="idle",
+                area_id="lounge",
+                area_name="Lounge",
+                device_id="lounge-endpoint",
+                device_name="Lounge Sound",
+                device_class="speaker",
+                supported_features=media_features,
+            ),
+            entity(
+                "media_player.whole_home",
+                "Whole Home Audio",
+                domain="media_player",
+                state="idle",
+                area_id="home",
+                area_name="Home",
+                device_id="",
+                device_name="Speaker Group",
+                device_class="speaker",
+                supported_features=media_features,
+                attributes={
+                    "entity_id": [
+                        "media_player.kitchen_endpoint",
+                        "media_player.lounge_endpoint",
+                    ]
+                },
+            ),
+        ]
+    )
+
+    physical = await search(fixture, "speaker", terms=["speaker"], aggregation="COUNT")
+    assert physical["count"] == 2
+    assert all(item["object_role"] == "PHYSICAL" for item in physical["items"])
+
+    groups = await search(
+        fixture,
+        "speaker group",
+        terms=["speaker group"],
+        inventory_kind="VIRTUAL_TARGET",
+    )
+    assert groups["count"] == 1
+    assert groups["items"][0]["object_role"] == "GROUP"
+
+    group_action = await search(
+        fixture,
+        "speaker group",
+        terms=["speaker group"],
+        capability="play",
+        operation="CONTROL",
+        action="play",
+        inventory_kind="VIRTUAL_TARGET",
+    )
+    assert group_action["resolution"] == "unique"
+    assert group_action["action_plan"]["candidate_ids"] == [groups["items"][0]["canonical_id"]]
+
+
+@pytest.mark.asyncio
+async def test_broad_area_device_query_resets_prior_semantic_constraints() -> None:
+    fixture = television_fixture()
+    fixture.rows.append(
+        entity(
+            "media_player.bedroom_audio",
+            "Bedroom Audio",
+            domain="media_player",
+            state="idle",
+            area_id="bedroom",
+            area_name="Bedroom",
+            device_id="bedroom-audio",
+            device_name="Bedroom Audio",
+            device_class="speaker",
+            supported_features=1 | 4096 | 16384,
+        )
+    )
+
+    result = await search(
+        fixture,
+        "*",
+        terms=[],
+        area_id="bedroom",
+        capability=None,
+    )
+    assert result["count"] == 3
+    assert {item["display_name"] for item in result["items"]} == {
+        "Bedroom Audio",
+        "Bedroom Bed Observer",
+        "Bedroom TV",
+    }
+
+
+@pytest.mark.asyncio
+async def test_observation_name_does_not_reclassify_observer_as_observed_object() -> None:
+    fixture = television_fixture()
+    graph = await fixture.engine.graph()
+    observer = next(item for item in graph.physical_objects if "Observer" in item.display_name)
+    assert observer.kind == "occupancy"
+    assert {role for _, role in observer.entity_roles} == {"OBSERVATION", "MEASUREMENT"}
+
+    result = await search(fixture, "television", terms=["tv"])
+    assert "Bed Observer" not in {item["display_name"] for item in result["items"]}
+
+
+@pytest.mark.asyncio
+async def test_observation_only_device_name_cannot_inflate_structural_category_count() -> None:
+    fixture = SemanticFixture(
+        [
+            entity(
+                "camera.primary_view",
+                "Primary View",
+                domain="camera",
+                state="idle",
+                area_id="hall",
+                area_name="Hall",
+                device_id="view-device",
+                device_name="Primary View",
+            ),
+            entity(
+                "binary_sensor.observer_motion",
+                "Observer Motion",
+                domain="binary_sensor",
+                state="off",
+                area_id="hall",
+                area_name="Hall",
+                device_id="observer-device",
+                device_name="Camera",
+                device_class="motion",
+                manufacturer="Synthetic",
+                model="Camera observer",
+            ),
+        ]
+    )
+
+    result = await search(fixture, "camera", terms=["camera"], aggregation="COUNT")
+    assert result["count"] == 1
+    assert result["items"][0]["kind"] == "camera"
+
+
+@pytest.mark.asyncio
 async def test_multiple_plausible_physical_targets_require_clarification() -> None:
     fixture = television_fixture()
     result = await search(
@@ -592,6 +993,27 @@ async def test_count_presentation_uses_only_canonical_results() -> None:
     assert "Bedroom TV" in response
     assert "Lounge Screen" in response
     assert "occupancy" not in response.casefold()
+
+
+def test_state_presentation_deduplicates_identical_canonical_statements() -> None:
+    result = {
+        "success": True,
+        "operation": "QUERY",
+        "aggregation": "STATE",
+        "query": "display",
+        "count": 2,
+        "items": [
+            {"canonical_id": "home:first", "display_name": "Lounge Display", "state": "off"},
+            {"canonical_id": "home:second", "display_name": "Lounge Display", "state": "off"},
+        ],
+    }
+
+    response = render_home_search_evidence(
+        [{"tool": "search_home", "arguments": {}, "result": result}],
+        request_text="What about the lounge display?",
+    )
+
+    assert response == "Lounge Display is off."
 
 
 @pytest.mark.asyncio

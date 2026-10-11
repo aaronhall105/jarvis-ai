@@ -91,6 +91,15 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.engine.interpret(text, [], self.actor)
                 self.assertTrue(result.house_relevant)
 
+    async def test_registry_device_plurals_reach_home_planning_without_noun_routes(self):
+        for text in (
+            "How many TVs are in the flat?",
+            "Which TVs are they?",
+        ):
+            with self.subTest(text=text):
+                result = await self.engine.interpret(text, [], self.actor)
+                self.assertTrue(result.house_relevant)
+
     async def test_private_activity_not_changed(self):
         result = await self.engine.interpret("is she having a poo?", [], self.actor)
         self.assertEqual(result.interpreted_text.casefold(), "is she having a poo?")

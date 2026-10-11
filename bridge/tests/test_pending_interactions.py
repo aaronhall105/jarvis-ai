@@ -122,6 +122,44 @@ async def test_selection_is_scoped_and_duplicate_safe(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unrelated_grounded_home_request_does_not_resume_mail_selection(tmp_path):
+    pending, _, _ = service(tmp_path)
+    handler = AsyncMock(return_value={"success": True, "response": "Selected a mailbox."})
+    pending.register_handler("select_provider", handler)
+    await pending.begin(
+        principal_id="aaron",
+        conversation_id="usr:aaron:domain-isolation",
+        kind=PendingInteractionKind.SELECTION,
+        goal="Choose a mailbox",
+        prompt="Which mailbox — Gmail or Outlook?",
+        unresolved_slot="provider",
+        handler_id="select_provider",
+        options=(
+            {"option_id": "gmail", "label": "Gmail", "value": "google_gmail"},
+            {"option_id": "outlook", "label": "Outlook", "value": "microsoft_outlook"},
+        ),
+    )
+
+    resolution = await pending.resolve(
+        principal_id="aaron",
+        conversation_id="usr:aaron:domain-isolation",
+        answer="Which displays are they?",
+        request_id="home-follow-up",
+        allow_unstructured_answer=False,
+    )
+
+    assert resolution is None
+    handler.assert_not_awaited()
+    assert (
+        await pending.current(
+            principal_id="aaron",
+            conversation_id="usr:aaron:domain-isolation",
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
 async def test_negative_declines_without_calling_handler(tmp_path):
     pending, _, _ = service(tmp_path)
     handler = AsyncMock()

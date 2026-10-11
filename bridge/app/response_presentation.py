@@ -506,7 +506,10 @@ def render_home_search_evidence(
                 return f"No rooms are currently {label}."
             return "I found no matching rooms."
         return f"I found no canonical home items matching {query}."
-    names = _natural_join([str(item.get("display_name") or "Home item") for item in items[:6]])
+    presented_names = list(
+        dict.fromkeys(str(item.get("display_name") or "Home item") for item in items[:6])
+    )
+    names = _natural_join(presented_names)
     if count > 6:
         names += f", and {count - 6} more"
     if aggregation == "COUNT":
@@ -515,10 +518,12 @@ def render_home_search_evidence(
         item = items[0]
         state = _readable_state(item.get("state"))
         return f"{item.get('display_name') or 'That home item'} is {state}."
-    statements = [
-        f"{item.get('display_name') or 'Home item'} is {_readable_state(item.get('state'))}"
-        for item in items[:6]
-    ]
+    statements = list(
+        dict.fromkeys(
+            f"{item.get('display_name') or 'Home item'} is {_readable_state(item.get('state'))}"
+            for item in items[:6]
+        )
+    )
     return ". ".join(statements) + "."
 
 

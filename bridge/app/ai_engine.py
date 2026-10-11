@@ -2149,7 +2149,12 @@ class AIEngine:
                 "name": "search_home",
                 "description": (
                     "Search the compact live canonical Home Assistant inventory. The result "
-                    "contains physical objects and capabilities, not every child entity. Use "
+                    "contains physical objects, canonical capability surfaces, or intentional "
+                    "virtual targets, not every child entity. Home Assistant devices are not "
+                    "entities: many entities may represent one physical object, one device may "
+                    "expose several independent capabilities, observation entities are evidence "
+                    "rather than the objects they mention, and groups do not count as physical "
+                    "endpoints. Use "
                     "this for named things, arbitrary device kinds, counts, lists, state "
                     "questions, and as the mandatory discovery step before execute_home_action. "
                     "Infer the semantic operation from meaning, not exact wording. "
@@ -2165,8 +2170,12 @@ class AIEngine:
                     "is mandatory for a follow-up that keeps that object while omitting its "
                     "scope. Do not reconstruct its identity from prior text. Raw "
                     "diagnostic and observation entities are excluded by default. Use "
-                    "inventory_kind ROOM only for derived room occupancy and HOME_SUMMARY "
-                    "only for a whole-home overview; otherwise use PHYSICAL_DEVICE. A "
+                    "inventory_kind PHYSICAL_DEVICE for endpoint/device identity, CAPABILITY for "
+                    "a user-facing surface such as lighting or measurement even when its parent "
+                    "device has another product kind, VIRTUAL_TARGET for an explicitly requested "
+                    "group/helper, ROOM only for derived room occupancy, and HOME_SUMMARY only "
+                    "for a whole-home overview. Use semantic_target='*' for an intentionally broad "
+                    "inventory collection rather than inheriting an earlier noun. A "
                     "dwelling-wide scope is HOME even if its ordinary-language description "
                     "resembles a configured area label. AREA means one actual configured room. "
                     "CURRENT_REFERENCE means the exact canonical object already grounded in "
@@ -2187,14 +2196,26 @@ class AIEngine:
                         },
                         "inventory_kind": {
                             "type": "string",
-                            "enum": ["PHYSICAL_DEVICE", "ROOM", "HOME_SUMMARY"],
+                            "enum": [
+                                "PHYSICAL_DEVICE",
+                                "CAPABILITY",
+                                "VIRTUAL_TARGET",
+                                "ROOM",
+                                "HOME_SUMMARY",
+                            ],
                         },
                         "scope": {
                             "type": "string",
-                            "enum": ["HOME", "AREA", "CURRENT_REFERENCE"],
+                            "enum": [
+                                "HOME",
+                                "AREA",
+                                "CURRENT_REFERENCE",
+                                "CURRENT_RESULT_SET",
+                            ],
                             "description": (
                                 "HOME is the whole residence; AREA is one configured room; "
-                                "CURRENT_REFERENCE reuses one grounded canonical object."
+                                "CURRENT_REFERENCE reuses one grounded canonical object; "
+                                "CURRENT_RESULT_SET filters the latest grounded collection."
                             ),
                         },
                         "aggregation": {
@@ -2277,6 +2298,13 @@ class AIEngine:
                             ],
                         },
                         "include_diagnostics": {"type": "boolean"},
+                        "include_virtual": {
+                            "type": "boolean",
+                            "description": (
+                                "Include groups/helpers/proxies with physical or capability "
+                                "inventory only when the user explicitly asks for them."
+                            ),
+                        },
                         "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
                     "required": [
@@ -2293,6 +2321,7 @@ class AIEngine:
                         "occupancy_state",
                         "requested_action",
                         "include_diagnostics",
+                        "include_virtual",
                         "limit",
                     ],
                     "additionalProperties": False,
@@ -3683,12 +3712,18 @@ class AIEngine:
                         f"Unknown Home Assistant area: {semantic_area_id}",
                     )
                 semantic_scope = str(arguments.get("scope") or "HOME").upper()
-                if semantic_scope not in {"HOME", "AREA", "CURRENT_REFERENCE"}:
+                if semantic_scope not in {
+                    "HOME",
+                    "AREA",
+                    "CURRENT_REFERENCE",
+                    "CURRENT_RESULT_SET",
+                }:
                     return self._tool_failure(
                         name,
                         arguments,
                         "invalid_scope",
-                        "Semantic home scope must be HOME, AREA, or CURRENT_REFERENCE.",
+                        "Semantic home scope must be HOME, AREA, CURRENT_REFERENCE, or "
+                        "CURRENT_RESULT_SET.",
                     )
                 if semantic_scope == "HOME" and semantic_area_id is not None:
                     return self._tool_failure(
@@ -3704,7 +3739,9 @@ class AIEngine:
                         "area_required",
                         "Area scope requires one configured area.",
                     )
-                if semantic_scope == "CURRENT_REFERENCE" and semantic_area_id is not None:
+                if semantic_scope in {"CURRENT_REFERENCE", "CURRENT_RESULT_SET"} and (
+                    semantic_area_id is not None
+                ):
                     return self._tool_failure(
                         name,
                         arguments,
@@ -3712,25 +3749,30 @@ class AIEngine:
                         "A grounded current reference cannot also select an area.",
                     )
                 restrict_ids: tuple[str, ...] = ()
-                if semantic_scope == "CURRENT_REFERENCE":
+                if semantic_scope in {"CURRENT_REFERENCE", "CURRENT_RESULT_SET"}:
                     resolution = await WorkingContextService(self.dialogue).resolve(
                         principal_id=actor.user_key,
                         conversation_id=conversation_id,
-                        query=reference_query("it", object_types=("device",)),
+                        query=reference_query(
+                            "them" if semantic_scope == "CURRENT_RESULT_SET" else "it",
+                            object_types=("device", "capability", "virtual_target"),
+                        ),
                     )
                     if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
                         return self._tool_failure(
                             name,
                             arguments,
                             "missing_grounded_reference",
-                            "There is no single current canonical home object to reuse.",
+                            "There is no current canonical home reference to reuse.",
                         )
                     restrict_ids = tuple(
                         str(item.canonical_id or "")
                         for item in resolution.objects
                         if item.provider == "home_assistant" and item.canonical_id
                     )
-                    if len(restrict_ids) != 1 or len(resolution.objects) != 1:
+                    if semantic_scope == "CURRENT_REFERENCE" and (
+                        len(restrict_ids) != 1 or len(resolution.objects) != 1
+                    ):
                         return self._tool_failure(
                             name,
                             arguments,
@@ -3746,6 +3788,7 @@ class AIEngine:
                     else None
                 )
                 include_diagnostics = bool(arguments.get("include_diagnostics"))
+                include_virtual = bool(arguments.get("include_virtual"))
                 semantic_limit = max(1, min(int(arguments.get("limit", 12)), 50))
                 read_arguments: dict[str, Any] = {
                     "query": query,
@@ -3761,6 +3804,7 @@ class AIEngine:
                     "semantic_operation": semantic_operation,
                     "requested_action": arguments.get("requested_action"),
                     "include_diagnostics": include_diagnostics,
+                    "include_virtual": include_virtual,
                     "limit": semantic_limit,
                     "restrict_ids": list(restrict_ids),
                 }
@@ -3791,6 +3835,7 @@ class AIEngine:
                         ),
                         include_diagnostics=include_diagnostics,
                         limit=semantic_limit,
+                        include_virtual=include_virtual,
                         restrict_ids=restrict_ids,
                         principal_id=actor.user_key,
                         conversation_id=conversation_id,
@@ -7517,22 +7562,26 @@ class AIEngine:
                 result_sets[0] if result_sets else None,
             )
             filters = active_set.get("filters") if isinstance(active_set, Mapping) else None
-            continuing_query = isinstance(filters, Mapping) and str(
-                filters.get("operation") or ""
-            ).upper() in {
-                "QUERY",
-                "SNAPSHOT",
-            }
+            continuing_query = (
+                grounded_set_reference_requested(user_text)
+                and isinstance(filters, Mapping)
+                and str(filters.get("operation") or "").upper()
+                in {
+                    "QUERY",
+                    "SNAPSHOT",
+                }
+            )
             decision = RoutingDecision(
                 intent=RequestIntent.GENERAL,
                 allow_home_control=True,
                 allow_home_read=True,
                 model_instruction=(
                     (
-                        "Continue the previous grounded Home Assistant semantic query. Preserve "
-                        "its free-form target, inventory kind, state constraint and aggregation "
-                        "unless the user changes them, and change only the explicitly requested "
-                        "scope. Call search_home; do not infer current state from history."
+                        "Continue the explicitly referenced grounded Home Assistant result set. "
+                        "Use scope CURRENT_RESULT_SET so Core supplies its canonical IDs; preserve "
+                        "its free-form target and inventory kind unless the user changes them, "
+                        "and apply only filters requested now. Call search_home; never reconstruct "
+                        "the set from prior answer text."
                     )
                     if continuing_query
                     else (
@@ -7540,11 +7589,16 @@ class AIEngine:
                         "set, inspect state, compare, explain a prior grounded result, search for "
                         "a physical object, or perform an explicit action. Use search_home for "
                         "every semantic home query: PHYSICAL_DEVICE "
-                        "for canonical objects, ROOM for exact alpha39 occupancy states, and "
-                        "HOME_SUMMARY for the existing whole-home projection. "
+                        "for canonical objects, CAPABILITY for user-facing control or measurement "
+                        "surfaces, VIRTUAL_TARGET only for an explicitly intended group/helper, "
+                        "ROOM for exact alpha39 occupancy states, and HOME_SUMMARY for the existing "
+                        "whole-home projection. "
                         "Telegraphic target-plus-end-state language is an explicit CONTROL, not "
                         "a state query, even when no command verb is present. "
-                        "For an action, search with semantic_operation CONTROL and the required "
+                        "Every independent request starts with fresh transient constraints: do not "
+                        "inherit a previous target, domain, capability, state, area, or inventory "
+                        "kind unless the user explicitly references that object or set. For an "
+                        "action, search with semantic_operation CONTROL and the required "
                         "capability, then pass its grounded action handle and exact canonical ID "
                         "to execute_home_action. Never turn a question into a write. Let Core "
                         "ground every identity and capability."

@@ -373,7 +373,20 @@ def grounded_set_reference_requested(text: str) -> bool:
     """
 
     words = set(re.findall(r"[a-z0-9]+", str(text or "").casefold()))
-    return bool(words & {"them", "those", "these", "both", "rest", "others", "ones"})
+    return bool(
+        words
+        & {
+            "them",
+            "they",
+            "their",
+            "those",
+            "these",
+            "both",
+            "rest",
+            "others",
+            "ones",
+        }
+    )
 
 
 def classify_context_followup(text: str) -> ContextFollowUp | None:
@@ -528,7 +541,14 @@ def _default_freshness(object_type: str) -> tuple[int | None, bool]:
         return None, True
     if object_type == "calendar_event":
         return 300, False
-    if object_type in {"device", "room", "person", "measurement"}:
+    if object_type in {
+        "device",
+        "capability",
+        "virtual_target",
+        "room",
+        "person",
+        "measurement",
+    }:
         return 30, False
     if object_type == "task":
         return 10, False

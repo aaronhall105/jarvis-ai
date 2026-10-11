@@ -19,7 +19,7 @@ import time
 from typing import Any
 import uuid
 
-from app.home_canonicalization import physical_identity
+from app.home_canonicalization import canonicalize_cameras, physical_identity
 from app.home_intelligence import GroundedHomeEntity
 from app.runtime_observability import runtime_metrics
 
@@ -29,18 +29,46 @@ _CANONICAL_OBJECT_DOMAINS = frozenset(
     {
         "alarm_control_panel",
         "binary_sensor",
+        "button",
         "camera",
         "climate",
         "cover",
         "device_tracker",
+        "event",
         "fan",
         "humidifier",
         "light",
         "lock",
         "media_player",
+        "number",
         "person",
         "remote",
+        "select",
         "sensor",
+        "siren",
+        "switch",
+        "update",
+        "vacuum",
+        "valve",
+        "water_heater",
+    }
+)
+_NON_USER_ENTITY_CATEGORIES = frozenset({"config", "diagnostic"})
+_CONTROL_DOMAINS = frozenset(
+    {
+        "alarm_control_panel",
+        "button",
+        "camera",
+        "climate",
+        "cover",
+        "fan",
+        "humidifier",
+        "light",
+        "lock",
+        "media_player",
+        "number",
+        "remote",
+        "select",
         "siren",
         "switch",
         "vacuum",
@@ -48,7 +76,6 @@ _CANONICAL_OBJECT_DOMAINS = frozenset(
         "water_heater",
     }
 )
-_NON_USER_ENTITY_CATEGORIES = frozenset({"config", "diagnostic"})
 _UNKNOWN_STATES = frozenset({"", "unknown", "unavailable"})
 _ACTIVE_STATES = frozenset(
     {
@@ -178,6 +205,67 @@ def _matches_state(entity: Mapping[str, Any], wanted: str | None) -> bool:
     return expected in {state, effective}
 
 
+def _entity_role(entity: Mapping[str, Any]) -> str:
+    """Classify a registry entity by structural HA metadata, never its target noun."""
+
+    category = str(entity.get("entity_category") or "").casefold()
+    domain = str(entity.get("domain") or "").casefold()
+    if category == "diagnostic":
+        return "DIAGNOSTIC"
+    if category == "config":
+        return "CONFIGURATION"
+    if domain == "update":
+        return "UPDATE"
+    if domain in _OBSERVATION_DOMAINS:
+        return "OBSERVATION" if domain == "binary_sensor" else "MEASUREMENT"
+    if domain in {"event", "device_tracker", "person"}:
+        return "EVENT" if domain == "event" else "OBSERVATION"
+    if domain in _CONTROL_DOMAINS:
+        return "PRIMARY_CONTROL"
+    return "SECONDARY_CONTROL"
+
+
+def _structural_object_role(members: Sequence[Mapping[str, Any]]) -> str:
+    """Return PHYSICAL, GROUP, AGGREGATE, or VIRTUAL from registry structure."""
+
+    structural_values: list[str] = []
+    group_relationship = False
+    for item in members:
+        structural_values.extend(
+            str(item.get(key) or "") for key in ("device_class", "device_name", "device_model")
+        )
+        attributes = item.get("attributes")
+        if isinstance(attributes, Mapping):
+            group_relationship = group_relationship or any(
+                isinstance(attributes.get(key), Sequence)
+                and not isinstance(attributes.get(key), (str, bytes, bytearray))
+                and bool(attributes.get(key))
+                for key in ("entity_id", "group_members")
+            )
+    structural_tokens = set(_normalise(" ".join(structural_values)).split())
+    if group_relationship or "group" in structural_tokens:
+        return "GROUP"
+    camera_members = [item for item in members if item.get("domain") == "camera"]
+    if camera_members and all(
+        item.get("via_device_id") and not _pairs(item.get("device_connections"))
+        for item in camera_members
+    ):
+        return "AGGREGATE"
+    if any(item.get("device_id") for item in members):
+        return "PHYSICAL"
+    return "VIRTUAL"
+
+
+def _capability_kind(entity: Mapping[str, Any]) -> str:
+    """Derive a capability vocabulary from HA domain and device class metadata."""
+
+    domain = str(entity.get("domain") or "entity").casefold()
+    device_class = _normalise(entity.get("device_class")).replace(" ", "_")
+    if domain in _OBSERVATION_DOMAINS and device_class:
+        return device_class
+    return domain
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalHomeObject:
     canonical_id: str
@@ -196,6 +284,10 @@ class CanonicalHomeObject:
     semantic_text: str
     entities: tuple[Mapping[str, Any], ...]
     evidence: tuple[str, ...]
+    object_role: str = "PHYSICAL"
+    capability_kind: str | None = None
+    parent_canonical_id: str | None = None
+    entity_roles: tuple[tuple[str, str], ...] = ()
 
     def compact(self, *, confidence: float | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -208,6 +300,10 @@ class CanonicalHomeObject:
             "capabilities": list(self.capabilities),
             "state": self.state,
             "available": self.available,
+            "object_role": self.object_role,
+            "capability_kind": self.capability_kind,
+            "parent_canonical_id": self.parent_canonical_id,
+            "entity_roles": {entity_id: role for entity_id, role in self.entity_roles},
             "evidence": list(self.evidence),
         }
         if confidence is not None:
@@ -235,9 +331,41 @@ class CanonicalHomeObject:
                         "supported_features",
                     )
                 }
+                | {"role": _entity_role(entity)}
                 for entity in self.entities
             ],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticHomeGraph:
+    """Compact indexes over live registry-backed objects and capability surfaces."""
+
+    physical_objects: tuple[CanonicalHomeObject, ...]
+    virtual_targets: tuple[CanonicalHomeObject, ...]
+    capabilities: tuple[CanonicalHomeObject, ...]
+
+    @property
+    def all_items(self) -> tuple[CanonicalHomeObject, ...]:
+        return (*self.physical_objects, *self.virtual_targets, *self.capabilities)
+
+    def inventory(
+        self, kind: str, *, include_virtual: bool = False
+    ) -> tuple[CanonicalHomeObject, ...]:
+        normalized = str(kind or "PHYSICAL_DEVICE").upper()
+        if normalized == "CAPABILITY":
+            return tuple(
+                item
+                for item in self.capabilities
+                if include_virtual or item.object_role not in {"GROUP", "VIRTUAL", "AGGREGATE"}
+            )
+        if normalized == "VIRTUAL_TARGET":
+            return self.virtual_targets
+        if normalized != "PHYSICAL_DEVICE":
+            raise ValueError("Unsupported semantic inventory kind")
+        if include_virtual:
+            return (*self.physical_objects, *self.virtual_targets)
+        return self.physical_objects
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,108 +476,312 @@ class HomeSemanticEngine:
         return name
 
     @classmethod
-    def _inventory_from(cls, rows: Sequence[Mapping[str, Any]]) -> tuple[CanonicalHomeObject, ...]:
-        enabled = [
-            dict(item)
-            for item in rows
-            if item.get("entity_id")
-            and str(item.get("domain") or "") in _CANONICAL_OBJECT_DOMAINS
-            and str(item.get("entity_category") or "").casefold() != "config"
-        ]
-        objects: list[CanonicalHomeObject] = []
-        for members in cls._groups(enabled):
-            ordered = tuple(sorted(members, key=cls._entity_rank))
-            primary = ordered[0]
-            identities = sorted({value for item in ordered for value in cls._identity_tokens(item)})
-            digest = hashlib.sha256("\n".join(identities).encode()).hexdigest()[:24]
-            canonical_id = f"home:{digest}"
-            display_name = cls._display_name(ordered, primary)
-            capabilities = tuple(
-                sorted({value for item in ordered for value in _capabilities(item)})
+    def _object_from_members(
+        cls,
+        members: Sequence[Mapping[str, Any]],
+        *,
+        identity_seed: str | None = None,
+        primary_entity_id: str | None = None,
+        display_name: str | None = None,
+        kind: str | None = None,
+        object_role: str | None = None,
+        evidence: Sequence[str] = (),
+    ) -> CanonicalHomeObject:
+        ordered = tuple(sorted((dict(item) for item in members), key=cls._entity_rank))
+        if not ordered:
+            raise ValueError("A canonical home object requires at least one entity")
+        primary = next(
+            (
+                item
+                for item in ordered
+                if primary_entity_id and str(item.get("entity_id") or "") == primary_entity_id
+            ),
+            ordered[0],
+        )
+        identities = sorted({value for item in ordered for value in cls._identity_tokens(item)})
+        seed = identity_seed or "\n".join(identities)
+        digest = hashlib.sha256(seed.encode()).hexdigest()[:24]
+        canonical_id = f"home:{digest}"
+        resolved_name = display_name or cls._display_name(ordered, primary)
+        capabilities = tuple(sorted({value for item in ordered for value in _capabilities(item)}))
+        domains = tuple(
+            sorted({str(item.get("domain") or "") for item in ordered if item.get("domain")})
+        )
+        resolved_kind = str(
+            kind or primary.get("device_class") or primary.get("domain") or "device"
+        ).strip()
+        physical_ids = tuple(
+            sorted({str(item.get("device_id")) for item in ordered if item.get("device_id")})
+        )
+        aliases: set[str] = {resolved_name, resolved_kind, *domains}
+        for item in ordered:
+            aliases.update(
+                str(item.get(key) or "").strip()
+                for key in (
+                    "device_name_by_user",
+                    "device_name",
+                    "device_manufacturer",
+                    "device_model",
+                    "device_class",
+                )
             )
-            domains = tuple(
-                sorted({str(item.get("domain") or "") for item in ordered if item.get("domain")})
-            )
-            kind = str(primary.get("device_class") or primary.get("domain") or "device").strip()
-            physical_ids = tuple(
-                sorted({str(item.get("device_id")) for item in ordered if item.get("device_id")})
-            )
-            aliases: set[str] = {display_name, kind, *domains}
-            for item in ordered:
+            # Observation/measurement names describe evidence, not physical identity.
+            if _entity_role(item) not in {"OBSERVATION", "MEASUREMENT"} or not physical_ids:
                 aliases.update(
                     str(item.get(key) or "").strip()
-                    for key in (
-                        "device_name_by_user",
-                        "device_name",
-                        "device_manufacturer",
-                        "device_model",
-                        "device_class",
-                    )
+                    for key in ("registry_name", "registry_original_name", "name")
                 )
-                # Names of observation entities describe what was observed, not
-                # the physical thing. They are available only through inspection.
-                if str(item.get("domain") or "") not in _OBSERVATION_DOMAINS or not physical_ids:
+        aliases.discard("")
+        available = str(primary.get("state") or "").casefold() not in _UNKNOWN_STATES
+        return CanonicalHomeObject(
+            canonical_id=canonical_id,
+            display_name=resolved_name,
+            area_id=str(primary.get("area_id") or "") or None,
+            area_name=str(primary.get("area_name") or "") or None,
+            kind=resolved_kind,
+            domains=domains,
+            capabilities=capabilities,
+            state=str(primary.get("state") or "unknown").casefold(),
+            available=available,
+            primary_entity_id=str(primary.get("entity_id") or ""),
+            member_entity_ids=tuple(sorted(str(item.get("entity_id")) for item in ordered)),
+            physical_device_ids=physical_ids,
+            aliases=tuple(sorted(aliases, key=str.casefold)),
+            semantic_text=_normalise(" ".join(sorted(aliases))),
+            entities=ordered,
+            evidence=tuple(dict.fromkeys([*evidence, *identities]))[:12],
+            object_role=object_role or _structural_object_role(ordered),
+            entity_roles=tuple(
+                sorted((str(item.get("entity_id") or ""), _entity_role(item)) for item in ordered)
+            ),
+        )
+
+    @classmethod
+    def _capability_nodes(
+        cls, parents: Sequence[CanonicalHomeObject]
+    ) -> tuple[CanonicalHomeObject, ...]:
+        nodes: list[CanonicalHomeObject] = []
+        for parent in parents:
+            grouped: dict[str, list[Mapping[str, Any]]] = {}
+            for entity in parent.entities:
+                if _entity_role(entity) in {"CONFIGURATION", "DIAGNOSTIC", "UPDATE", "EVENT"}:
+                    continue
+                grouped.setdefault(_capability_kind(entity), []).append(entity)
+            for capability_kind, members in grouped.items():
+                ordered = tuple(sorted(members, key=cls._entity_rank))
+                primary = ordered[0]
+                entity_ids = tuple(sorted(str(item.get("entity_id") or "") for item in ordered))
+                digest = hashlib.sha256(
+                    "\n".join((parent.canonical_id, capability_kind, *entity_ids)).encode()
+                ).hexdigest()[:24]
+                aliases: set[str] = {
+                    capability_kind,
+                    parent.display_name,
+                    str(primary.get("domain") or ""),
+                    str(primary.get("device_class") or ""),
+                }
+                for item in ordered:
                     aliases.update(
                         str(item.get(key) or "").strip()
-                        for key in ("registry_name", "registry_original_name", "name")
+                        for key in (
+                            "name",
+                            "registry_name",
+                            "registry_original_name",
+                            "device_class",
+                        )
                     )
-            aliases.discard("")
-            available = str(primary.get("state") or "").casefold() not in _UNKNOWN_STATES
-            objects.append(
-                CanonicalHomeObject(
-                    canonical_id=canonical_id,
-                    display_name=display_name,
-                    area_id=str(primary.get("area_id") or "") or None,
-                    area_name=str(primary.get("area_name") or "") or None,
-                    kind=kind,
-                    domains=domains,
-                    capabilities=capabilities,
-                    state=str(primary.get("state") or "unknown").casefold(),
-                    available=available,
-                    primary_entity_id=str(primary.get("entity_id") or ""),
-                    member_entity_ids=tuple(sorted(str(item.get("entity_id")) for item in ordered)),
-                    physical_device_ids=physical_ids,
-                    aliases=tuple(sorted(aliases, key=str.casefold)),
-                    semantic_text=_normalise(" ".join(sorted(aliases))),
-                    entities=ordered,
-                    evidence=tuple(identities[:12]),
+                aliases.discard("")
+                display_name = cls._display_name(ordered, primary)
+                nodes.append(
+                    CanonicalHomeObject(
+                        canonical_id=f"capability:{digest}",
+                        display_name=display_name,
+                        area_id=parent.area_id,
+                        area_name=parent.area_name,
+                        kind=capability_kind,
+                        domains=tuple(
+                            sorted(
+                                {
+                                    str(item.get("domain") or "")
+                                    for item in ordered
+                                    if item.get("domain")
+                                }
+                            )
+                        ),
+                        capabilities=tuple(
+                            sorted({value for item in ordered for value in _capabilities(item)})
+                        ),
+                        state=str(primary.get("state") or "unknown").casefold(),
+                        available=str(primary.get("state") or "").casefold() not in _UNKNOWN_STATES,
+                        primary_entity_id=str(primary.get("entity_id") or ""),
+                        member_entity_ids=entity_ids,
+                        physical_device_ids=parent.physical_device_ids,
+                        aliases=tuple(sorted(aliases, key=str.casefold)),
+                        semantic_text=_normalise(" ".join(sorted(aliases))),
+                        entities=ordered,
+                        evidence=(parent.canonical_id, *entity_ids),
+                        object_role=parent.object_role,
+                        capability_kind=capability_kind,
+                        parent_canonical_id=parent.canonical_id,
+                        entity_roles=tuple(
+                            sorted(
+                                (str(item.get("entity_id") or ""), _entity_role(item))
+                                for item in ordered
+                            )
+                        ),
+                    )
                 )
-            )
         return tuple(
             sorted(
-                objects,
-                key=lambda item: ((item.area_name or "").casefold(), item.display_name.casefold()),
+                nodes,
+                key=lambda item: (
+                    (item.area_name or "").casefold(),
+                    item.display_name.casefold(),
+                    item.kind,
+                ),
             )
         )
 
-    async def inventory(self) -> tuple[CanonicalHomeObject, ...]:
+    @classmethod
+    def _graph_from(cls, rows: Sequence[Mapping[str, Any]]) -> SemanticHomeGraph:
+        enabled = [
+            dict(item)
+            for item in rows
+            if item.get("entity_id") and str(item.get("domain") or "") in _CANONICAL_OBJECT_DOMAINS
+        ]
+        observed_at = next(
+            (str(item.get("observed_at")) for item in enabled if item.get("observed_at")),
+            datetime.now(timezone.utc).isoformat(),
+        )
+        grounded = tuple(GroundedHomeEntity.from_state(item, observed_at) for item in enabled)
+        camera_items = canonicalize_cameras(grounded)
+        camera_entity_ids = {
+            entity.entity_id for item in camera_items for entity in item.all_entities
+        }
+        camera_primary_device_ids = {
+            str(item.primary_entity.device_id)
+            for item in camera_items
+            if item.primary_entity.device_id
+        }
+        aggregate_device_ids = {
+            str(entity.device_id)
+            for item in camera_items
+            for entity in item.diagnostic_entities
+            if entity.device_id
+        }
+
+        regular_rows = [
+            item
+            for item in enabled
+            if str(item.get("device_id") or "") not in camera_primary_device_ids
+            and str(item.get("entity_id") or "") not in camera_entity_ids
+        ]
+        objects: list[CanonicalHomeObject] = []
+        for members in cls._groups(regular_rows):
+            physical_ids = {str(item.get("device_id") or "") for item in members}
+            role = "AGGREGATE" if physical_ids & aggregate_device_ids else None
+            objects.append(cls._object_from_members(members, object_role=role))
+
+        by_entity_id = {str(item.get("entity_id") or ""): item for item in enabled}
+        for item in camera_items:
+            primary_device_id = str(item.primary_entity.device_id or "")
+            members_by_id: dict[str, Mapping[str, Any]] = {
+                str(row.get("entity_id") or ""): row
+                for row in enabled
+                if primary_device_id and str(row.get("device_id") or "") == primary_device_id
+            }
+            for entity in item.all_entities:
+                row = by_entity_id.get(entity.entity_id)
+                if row is not None:
+                    members_by_id[entity.entity_id] = row
+            if not members_by_id:
+                continue
+            objects.append(
+                cls._object_from_members(
+                    tuple(members_by_id.values()),
+                    identity_seed=item.canonical_id,
+                    primary_entity_id=item.primary_entity.entity_id,
+                    display_name=item.display_name,
+                    kind="camera",
+                    object_role="PHYSICAL",
+                    evidence=item.evidence,
+                )
+            )
+
+        physical = tuple(
+            sorted(
+                (item for item in objects if item.object_role == "PHYSICAL"),
+                key=lambda item: ((item.area_name or "").casefold(), item.display_name.casefold()),
+            )
+        )
+        virtual = tuple(
+            sorted(
+                (item for item in objects if item.object_role != "PHYSICAL"),
+                key=lambda item: ((item.area_name or "").casefold(), item.display_name.casefold()),
+            )
+        )
+        return SemanticHomeGraph(
+            physical_objects=physical,
+            virtual_targets=virtual,
+            capabilities=cls._capability_nodes((*physical, *virtual)),
+        )
+
+    @classmethod
+    def _inventory_from(cls, rows: Sequence[Mapping[str, Any]]) -> tuple[CanonicalHomeObject, ...]:
+        return cls._graph_from(rows).physical_objects
+
+    async def graph(self) -> SemanticHomeGraph:
         started = time.monotonic()
-        result = self._inventory_from(await self._state_loader())
+        result = self._graph_from(await self._state_loader())
         runtime_metrics.observe("home_semantic_inventory_ms", (time.monotonic() - started) * 1000)
         return result
 
+    async def inventory(self) -> tuple[CanonicalHomeObject, ...]:
+        return (await self.graph()).physical_objects
+
     @staticmethod
-    def _score(item: CanonicalHomeObject, concepts: Sequence[str]) -> float:
+    def _score_values(values: Sequence[str], concepts: Sequence[str]) -> float:
         phrases = [_normalise(value) for value in concepts if _normalise(value)]
         if not phrases:
             return 1.0
-        alias_values = {_normalise(value) for value in item.aliases}
-        alias_tokens = (
-            set().union(*(_tokens(value) for value in alias_values)) if alias_values else set()
+        normalised_values = {_normalise(value) for value in values if _normalise(value)}
+        value_tokens = (
+            set().union(*(_tokens(value) for value in normalised_values))
+            if normalised_values
+            else set()
         )
         best = 0.0
         for phrase in phrases:
             phrase_tokens = _tokens(phrase)
-            if phrase in alias_values:
+            if phrase in normalised_values:
                 best = max(best, 1.0)
             elif any(
-                phrase in alias or alias in phrase for alias in alias_values if len(alias) >= 3
+                phrase in value or value in phrase for value in normalised_values if len(value) >= 3
             ):
                 best = max(best, 0.9)
             elif phrase_tokens:
-                coverage = len(phrase_tokens & alias_tokens) / len(phrase_tokens)
+                coverage = len(phrase_tokens & value_tokens) / len(phrase_tokens)
                 best = max(best, 0.78 * coverage)
         return best
+
+    @classmethod
+    def _score(cls, item: CanonicalHomeObject, concepts: Sequence[str]) -> float:
+        return cls._score_values(item.aliases, concepts)
+
+    @classmethod
+    def _structural_score(cls, item: CanonicalHomeObject, concepts: Sequence[str]) -> float:
+        values = {
+            item.kind,
+            item.capability_kind or "",
+            *item.domains,
+            *(str(entity.get("device_class") or "") for entity in item.entities),
+        }
+        return cls._score_values(tuple(values), concepts)
+
+    @staticmethod
+    def _observation_only(item: CanonicalHomeObject) -> bool:
+        roles = {role for _entity_id, role in item.entity_roles}
+        return bool(roles) and roles <= {"OBSERVATION", "MEASUREMENT"}
 
     @staticmethod
     def _context_projection(
@@ -460,7 +792,13 @@ class HomeSemanticEngine:
             "objects": [
                 {
                     "reference_id": item.canonical_id,
-                    "object_type": "device",
+                    "object_type": (
+                        "capability"
+                        if item.capability_kind
+                        else "device"
+                        if item.object_role == "PHYSICAL"
+                        else "virtual_target"
+                    ),
                     "display_name": item.display_name,
                     "source": "home_assistant_canonical_inventory",
                     "canonical_id": item.canonical_id,
@@ -491,6 +829,8 @@ class HomeSemanticEngine:
         capability: str | None = None,
         domain: str | None = None,
         state: str | None = None,
+        inventory_kind: str = "PHYSICAL_DEVICE",
+        include_virtual: bool = False,
         include_diagnostics: bool = False,
         aggregation: str = "LIST",
         operation: str = "QUERY",
@@ -515,7 +855,10 @@ class HomeSemanticEngine:
             wanted_capability = action_capability
 
         allowed_ids = {str(value) for value in restrict_ids if str(value)}
-        inventory = await self.inventory()
+        inventory = (await self.graph()).inventory(
+            inventory_kind,
+            include_virtual=include_virtual,
+        )
         scope_tokens: set[str] = set()
         if area_id:
             scope_tokens.update(_tokens(area_id))
@@ -531,6 +874,7 @@ class HomeSemanticEngine:
             for value in (wanted_domain, wanted_capability, action, state)
             if (normalised := _normalise(value))
         }
+        structural_concepts.update(_normalise(value) for value in _CANONICAL_OBJECT_DOMAINS)
         concept_list: list[str] = []
         for index, value in enumerate((query, *semantic_terms)):
             cleaned = " ".join(
@@ -544,7 +888,7 @@ class HomeSemanticEngine:
             if index > 0 and cleaned in structural_concepts:
                 continue
             concept_list.append(cleaned)
-        concepts = tuple(concept_list)
+        concepts = tuple(value for value in concept_list if value not in {"*", "any", "all"})
         eligible: list[CanonicalHomeObject] = []
         for item in inventory:
             if allowed_ids and item.canonical_id not in allowed_ids:
@@ -559,23 +903,29 @@ class HomeSemanticEngine:
                 continue
             eligible.append(item)
 
-        primary_concept = concepts[:1]
-        expansion_concepts = concepts[1:]
-        primary_has_matches = bool(
-            primary_concept and any(self._score(item, primary_concept) > 0 for item in eligible)
+        structural_modes = tuple(
+            (
+                concept,
+                any(self._structural_score(item, (concept,)) > 0 for item in eligible),
+            )
+            for concept in concepts
         )
         ranked: list[tuple[float, CanonicalHomeObject]] = []
         for item in eligible:
-            primary_score = self._score(item, primary_concept) if primary_concept else 0.0
-            expansion_score = self._score(item, expansion_concepts) if expansion_concepts else 0.0
-            # semantic_terms broaden genuine equivalence when the normalised
-            # target has no lexical match. When query already grounds targets,
-            # terms are supporting evidence and cannot let a broader structural
-            # concept (for example a domain name) outrank the target itself.
-            score = max(
-                primary_score,
-                expansion_score * (0.7 if primary_has_matches else 1.0),
-            )
+            if not structural_modes:
+                score = 1.0
+            else:
+                scores: list[float] = []
+                for concept, has_structural_matches in structural_modes:
+                    candidate_score = (
+                        self._structural_score(item, (concept,))
+                        if has_structural_matches
+                        else self._score(item, (concept,))
+                    )
+                    if not has_structural_matches and self._observation_only(item):
+                        candidate_score *= 0.7
+                    scores.append(candidate_score)
+                score = max(scores, default=0.0)
             if score <= 0:
                 continue
             ranked.append((score, item))
@@ -600,11 +950,15 @@ class HomeSemanticEngine:
             "capability": wanted_capability,
             "domain": wanted_domain,
             "state": state,
+            "inventory_kind": inventory_kind.upper(),
+            "include_virtual": include_virtual,
             "aggregation": aggregation.upper(),
             "operation": operation.upper(),
         }
         result: dict[str, Any] = {
             "success": True,
+            "inventory_kind": inventory_kind.upper(),
+            "include_virtual": include_virtual,
             "operation": operation.upper(),
             "aggregation": aggregation.upper(),
             "query": query,
@@ -638,7 +992,12 @@ class HomeSemanticEngine:
 
     async def inspect(self, canonical_id: str) -> dict[str, Any]:
         item = next(
-            (value for value in await self.inventory() if value.canonical_id == canonical_id), None
+            (
+                value
+                for value in (await self.graph()).all_items
+                if value.canonical_id == canonical_id
+            ),
+            None,
         )
         if item is None:
             raise ValueError("The canonical home item no longer exists")
@@ -701,7 +1060,7 @@ class HomeSemanticEngine:
         if not selected_ids or not set(selected_ids) <= plan.canonical_ids:
             raise ValueError("The requested canonical target was not in the grounded action plan")
 
-        inventory = {item.canonical_id: item for item in await self.inventory()}
+        inventory = {item.canonical_id: item for item in (await self.graph()).all_items}
         selected: list[CanonicalHomeObject] = []
         paths: list[tuple[CanonicalHomeObject, Mapping[str, Any]]] = []
         for canonical_id in selected_ids:
@@ -770,7 +1129,7 @@ class HomeSemanticEngine:
         verified_ids: set[str] = set()
         for delay in self.VERIFY_DELAYS:
             await asyncio.sleep(delay)
-            refreshed = {item.canonical_id: item for item in await self.inventory()}
+            refreshed = {item.canonical_id: item for item in (await self.graph()).all_items}
             for item, _entity in pending:
                 current = refreshed.get(item.canonical_id)
                 if current is None:
@@ -835,4 +1194,4 @@ class HomeSemanticEngine:
         }
 
 
-__all__ = ["CanonicalHomeObject", "HomeSemanticEngine"]
+__all__ = ["CanonicalHomeObject", "HomeSemanticEngine", "SemanticHomeGraph"]
