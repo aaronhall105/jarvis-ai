@@ -888,7 +888,20 @@ class HomeSemanticEngine:
             if index > 0 and cleaned in structural_concepts:
                 continue
             concept_list.append(cleaned)
-        concepts = tuple(value for value in concept_list if value not in {"*", "any", "all"})
+        inventory_tokens = _tokens(inventory_kind)
+        concepts = tuple(
+            value
+            for value in concept_list
+            if value not in {"*", "any", "all"}
+            and not (
+                _tokens(value)
+                and {
+                    token[:-1] if len(token) > 3 and token.endswith("s") else token
+                    for token in _normalise(value).split()
+                }
+                <= inventory_tokens
+            )
+        )
         eligible: list[CanonicalHomeObject] = []
         for item in inventory:
             if allowed_ids and item.canonical_id not in allowed_ids:
@@ -903,27 +916,18 @@ class HomeSemanticEngine:
                 continue
             eligible.append(item)
 
-        structural_modes = tuple(
-            (
-                concept,
-                any(self._structural_score(item, (concept,)) > 0 for item in eligible),
-            )
-            for concept in concepts
-        )
         ranked: list[tuple[float, CanonicalHomeObject]] = []
         for item in eligible:
-            if not structural_modes:
+            if not concepts:
                 score = 1.0
             else:
                 scores: list[float] = []
-                for concept, has_structural_matches in structural_modes:
-                    candidate_score = (
-                        self._structural_score(item, (concept,))
-                        if has_structural_matches
-                        else self._score(item, (concept,))
+                for concept in concepts:
+                    structural_score = self._structural_score(item, (concept,))
+                    alias_score = (
+                        0.0 if self._observation_only(item) else self._score(item, (concept,))
                     )
-                    if not has_structural_matches and self._observation_only(item):
-                        candidate_score *= 0.7
+                    candidate_score = max(structural_score, alias_score)
                     scores.append(candidate_score)
                 score = max(scores, default=0.0)
             if score <= 0:

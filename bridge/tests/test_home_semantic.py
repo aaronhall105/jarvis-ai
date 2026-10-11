@@ -837,6 +837,57 @@ async def test_broad_area_device_query_resets_prior_semantic_constraints() -> No
         "Bedroom TV",
     }
 
+    structural_label = await search(
+        fixture,
+        "devices",
+        terms=[],
+        area_id="bedroom",
+        capability=None,
+    )
+    assert {item["canonical_id"] for item in structural_label["items"]} == {
+        item["canonical_id"] for item in result["items"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_and_metadata_named_endpoints_share_one_physical_collection() -> None:
+    media_features = 1 | 4096 | 16384
+    fixture = SemanticFixture(
+        [
+            entity(
+                "media_player.voice_satellite",
+                "Voice Satellite",
+                domain="media_player",
+                state="idle",
+                area_id="lounge",
+                area_name="Lounge",
+                device_id="voice-satellite",
+                device_name="Voice Satellite",
+                device_class="speaker",
+                supported_features=media_features,
+            ),
+            entity(
+                "media_player.echo_endpoint",
+                "Kitchen Speaker",
+                domain="media_player",
+                state="idle",
+                area_id="kitchen",
+                area_name="Kitchen",
+                device_id="echo-endpoint",
+                device_name="Kitchen Speaker",
+                supported_features=media_features,
+            ),
+        ]
+    )
+
+    result = await search(fixture, "speaker", terms=["speaker"], aggregation="COUNT")
+
+    assert result["count"] == 2
+    assert {item["display_name"] for item in result["items"]} == {
+        "Kitchen Speaker",
+        "Lounge Voice Satellite",
+    }
+
 
 @pytest.mark.asyncio
 async def test_observation_name_does_not_reclassify_observer_as_observed_object() -> None:

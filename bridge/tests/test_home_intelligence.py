@@ -709,6 +709,7 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     definitions = await engine._home_read_tools(type("Actor", (), {"area_id": None})())
     search_home = next(item for item in definitions if item["name"] == "search_home")
     properties = search_home["parameters"]["properties"]
+    description = search_home["description"]
 
     assert {
         "PHYSICAL_DEVICE",
@@ -738,5 +739,7 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     assert "query" not in properties
     assert "use_current_reference" not in properties
     assert "include_virtual" in properties
+    assert "actually present in the supplied live Home context" in description
+    assert "preserve that predicate in state" in description
     assert "explicitly required" in properties["capability"]["description"]
     assert AIEngine.MAX_SEMANTIC_GROUNDING_RETRIES == 2
