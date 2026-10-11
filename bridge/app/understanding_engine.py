@@ -49,7 +49,6 @@ _HOME_WORDS = {
     "kitchen",
     "hallway",
     "phone",
-    "watch",
     "washing",
     "machine",
     "oven",
@@ -213,6 +212,7 @@ class UnderstandingResult:
     confidence: float
     corrections: tuple[str, ...]
     house_relevant: bool
+    home_grounding_required: bool = False
     needs_clarification: bool = False
     clarification: str | None = None
 
@@ -474,13 +474,77 @@ class UnderstandingEngine:
         current_words = _word_forms(re.findall(r"[a-z]+", lowered))
         recent_words = _word_forms(re.findall(r"[a-z]+", recent))
         registry_words = _word_forms(device_tokens)
-        house_relevant = bool(
-            current_words & _HOME_WORDS
-            or current_words & registry_words
-            or any(phrase in lowered for phrase in phrase_keys if len(phrase) >= 4)
-            or (
-                re.search(r"\b(?:it|them|that|those|there|she|he)\b", lowered)
-                and bool(recent_words & (_HOME_WORDS | registry_words))
+        current_reference = bool(
+            re.search(r"\b(?:it|them|they|that|those|these|there|one|ones)\b", lowered)
+        )
+        recent_home = bool(recent_words & (_HOME_WORDS | registry_words))
+        structural_home = bool(current_words & _HOME_WORDS)
+        matching_phrases = {
+            phrase for phrase in phrase_keys if len(phrase) >= 4 and phrase in lowered
+        }
+        function_words = {
+            "a",
+            "an",
+            "the",
+            "my",
+            "our",
+            "in",
+            "at",
+            "of",
+            "for",
+            "please",
+        }
+        target_vocabulary = _word_forms(
+            (*_HOME_WORDS, *registry_words, *anchor_tokens, *(" ".join(matching_phrases).split()))
+        )
+        meaningful_words = current_words - function_words
+        target_only = bool(meaningful_words) and meaningful_words <= target_vocabulary
+        semantic_operation = bool(
+            write_action
+            or current_words
+            & {
+                "count",
+                "many",
+                "list",
+                "which",
+                "where",
+                "state",
+                "status",
+                "available",
+                "unavailable",
+                "running",
+                "occupied",
+                "clear",
+            }
+        )
+        grounded_registry_subject = bool(
+            current_words & (registry_words | anchor_tokens)
+            and (
+                semantic_operation
+                or target_only
+                or any(len(phrase.split()) > 1 for phrase in matching_phrases)
+            )
+        )
+        reference_home = current_reference and recent_home
+        house_relevant = structural_home or grounded_registry_subject or reference_home
+        state_predicate = bool(
+            re.search(
+                r"\b(?:is|are|was|were)\b.{0,80}"
+                r"\b(?:on|off|available|unavailable|running|idle|open|closed)\b\s*[?.!]*$",
+                lowered,
+            )
+        )
+        # Context can make a Home tool relevant without making it mandatory. A mixed
+        # request may mention a grounded object yet still primarily ask for ordinary
+        # reasoning. Force exact Home grounding only for a current Home operation or
+        # a referential state/control continuation.
+        home_grounding_required = bool(
+            house_relevant
+            and (
+                semantic_operation
+                or state_predicate
+                or target_only
+                or (reference_home and write_action)
             )
         )
 
@@ -504,12 +568,13 @@ class UnderstandingEngine:
 
         logger.info(
             "Understanding original=%r interpreted=%r confidence=%.3f corrections=%s "
-            "house_relevant=%s user=%s",
+            "house_relevant=%s home_grounding_required=%s user=%s",
             original,
             interpreted,
             confidence,
             len(corrections),
             house_relevant,
+            home_grounding_required,
             actor.user_key,
         )
 
@@ -519,6 +584,7 @@ class UnderstandingEngine:
             confidence=round(confidence, 3),
             corrections=tuple(corrections),
             house_relevant=house_relevant,
+            home_grounding_required=home_grounding_required,
             needs_clarification=needs_clarification,
             clarification=clarification,
         )

@@ -971,6 +971,10 @@ class DialogueManager:
                                 "query": semantic_result.get("query"),
                                 "count": semantic_result.get("count"),
                                 "resolution": semantic_result.get("resolution"),
+                                "reference_dependency": semantic_result.get("reference_dependency"),
+                                "capability_role_filter": semantic_result.get(
+                                    "capability_role_filter"
+                                ),
                                 "values": [
                                     {
                                         "reference_id": item.reference_id,
@@ -978,6 +982,8 @@ class DialogueManager:
                                         "area_name": item.metadata.get("area_name"),
                                         "kind": item.metadata.get("kind"),
                                         "capabilities": item.metadata.get("capabilities"),
+                                        "capability_role": item.metadata.get("capability_role"),
+                                        "primary_purposes": item.metadata.get("primary_purposes"),
                                     }
                                     for item in context_objects
                                     if item.provider == "home_assistant"
@@ -993,6 +999,18 @@ class DialogueManager:
                     result_set=result_set,
                     focus_refs=[item.reference_id for item in context_objects[:1]],
                     derived_results=derived_results,
+                )
+            else:
+                # Task focus and remembered entity focus are intentionally separate.
+                # A new independent turn updates the active task intent while leaving
+                # grounded object/result-set history available for later explicit use.
+                state.working_context = merge_projection(
+                    state.working_context,
+                    principal_id=principal_id,
+                    conversation_id=conversation_id,
+                    objects=(),
+                    intent=intent,
+                    goal="",
                 )
 
         return await self.save(

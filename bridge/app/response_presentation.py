@@ -492,6 +492,7 @@ def render_home_search_evidence(
     if aggregation == "COMPARE":
         return None
     inventory_kind = str(result.get("inventory_kind") or "PHYSICAL_DEVICE").upper()
+    capability_role_filter = str(result.get("capability_role_filter") or "ANY").upper()
     occupancy_state = str(result.get("occupancy_state") or "ANY").upper()
     count = int(result.get("count") or 0)
     if not items:
@@ -513,7 +514,13 @@ def render_home_search_evidence(
     if count > 6:
         names += f", and {count - 6} more"
     if aggregation == "COUNT":
-        return f"I found {count} matching {query}: {names}."
+        primary_label = query if count == 1 or query.casefold().endswith("s") else f"{query}s"
+        collection = (
+            f"main {primary_label}"
+            if inventory_kind == "CAPABILITY" and capability_role_filter == "PRIMARY_ONLY"
+            else f"matching {query}"
+        )
+        return f"I found {count} {collection}: {names}."
     if aggregation == "STATE" and count == 1:
         item = items[0]
         state = _readable_state(item.get("state"))

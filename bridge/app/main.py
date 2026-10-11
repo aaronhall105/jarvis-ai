@@ -7466,17 +7466,18 @@ async def _execute_ai_request(
     # continuations are not forced through an extra registry read.
     preflight_home_request = False
     preflight_complete = False
+    preflight_history: list[dict[str, str]] = []
 
     async def ensure_home_preflight() -> bool:
-        nonlocal preflight_complete, preflight_home_request
+        nonlocal preflight_complete, preflight_home_request, preflight_history
         if not preflight_complete:
-            history = await conversations.get_ai_history(
+            preflight_history = await conversations.get_ai_history(
                 conversation_id=storage_conversation_id,
                 limit=12,
             )
             understanding = await ai.understanding.interpret(
                 request.text,
-                history,
+                preflight_history,
                 actor,
             )
             preflight_home_request = understanding.house_relevant
@@ -7491,12 +7492,20 @@ async def _execute_ai_request(
     if active_interaction is not None and confirmation is None:
         await ensure_home_preflight()
 
+    allow_pending_unstructured = False
+    if active_interaction is not None and confirmation is None and not preflight_home_request:
+        allow_pending_unstructured = await ai.pending_interaction_relevant(
+            answer=request.text,
+            interaction=active_interaction,
+            history=preflight_history,
+        )
+
     interaction_resolution = await pending_interactions.resolve(
         principal_id=actor.user_key,
         conversation_id=storage_conversation_id,
         answer=request.text,
         request_id=request.request_id or str(uuid.uuid4()),
-        allow_unstructured_answer=not preflight_home_request,
+        allow_unstructured_answer=allow_pending_unstructured,
     )
     memory_result: dict[str, object] | None = None
     if interaction_resolution is not None and interaction_resolution.handled:

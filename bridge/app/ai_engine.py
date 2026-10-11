@@ -7,7 +7,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -167,6 +167,10 @@ Conversation, understanding and identity:
   and verified references. Use recent conversation history as supporting context.
 - Use recent conversation history to resolve follow-up references such as it, that,
   they, them, those, this and there.
+- A remembered object or result set is evidence, not the current task. Reuse it only
+  when the current request is semantically dependent on that exact referent. Topical
+  similarity alone is not coreference, and an independently understandable request
+  starts a fresh task without inheriting Home target, area, state or capability filters.
 - Do not ask again for information already present in structured dialogue slots.
 - Ask one brief clarification question only when the intended meaning cannot be
   determined safely from the available context.
@@ -2189,7 +2193,9 @@ class AIEngine:
                     "dwelling-wide scope is HOME even if its ordinary-language description "
                     "resembles a configured area label. AREA means one actual configured room. "
                     "CURRENT_REFERENCE means the exact canonical object already grounded in "
-                    "WorkingContext. semantic_target contains only the target concept, without "
+                    "WorkingContext. reference_dependency declares whether the current meaning "
+                    "actually needs stored context; never select a current object or set merely "
+                    "because it exists or shares a topic. semantic_target contains only the target concept, without "
                     "scope, operation, or state words. area_id is set only for AREA."
                 ),
                 "parameters": {
@@ -2226,6 +2232,20 @@ class AIEngine:
                                 "HOME is the whole residence; AREA is one configured room; "
                                 "CURRENT_REFERENCE reuses one grounded canonical object; "
                                 "CURRENT_RESULT_SET filters the latest grounded collection."
+                            ),
+                        },
+                        "reference_dependency": {
+                            "type": "string",
+                            "enum": [
+                                "NONE",
+                                "CURRENT_OBJECT",
+                                "CURRENT_RESULT_SET",
+                                "CURRENT_AREA",
+                            ],
+                            "description": (
+                                "Whether correct interpretation requires grounded context. "
+                                "Use NONE for an independently understandable new task even when "
+                                "it is topically related to prior Home results."
                             ),
                         },
                         "aggregation": {
@@ -2291,6 +2311,22 @@ class AIEngine:
                                 None,
                             ],
                         },
+                        "capability_role_filter": {
+                            "type": "string",
+                            "enum": [
+                                "PRIMARY_ONLY",
+                                "PRIMARY_OR_AUXILIARY",
+                                "AUXILIARY_ONLY",
+                                "ANY",
+                            ],
+                            "description": (
+                                "For CAPABILITY inventory, distinguish a device's ordinary "
+                                "primary purpose from useful attached capabilities. Ordinary "
+                                "collections of things use PRIMARY_ONLY; explicit questions "
+                                "about devices having a capability may include auxiliary roles. "
+                                "Use ANY for non-capability inventory."
+                            ),
+                        },
                         "requested_action": {
                             "type": ["string", "null"],
                             "description": (
@@ -2325,6 +2361,7 @@ class AIEngine:
                         "semantic_operation",
                         "inventory_kind",
                         "scope",
+                        "reference_dependency",
                         "aggregation",
                         "semantic_target",
                         "semantic_terms",
@@ -2333,6 +2370,7 @@ class AIEngine:
                         "domain",
                         "state",
                         "occupancy_state",
+                        "capability_role_filter",
                         "requested_action",
                         "include_diagnostics",
                         "include_virtual",
@@ -3726,6 +3764,48 @@ class AIEngine:
                         f"Unknown Home Assistant area: {semantic_area_id}",
                     )
                 semantic_scope = str(arguments.get("scope") or "HOME").upper()
+                reference_dependency = str(arguments.get("reference_dependency") or "NONE").upper()
+                dependency_scope = {
+                    "CURRENT_OBJECT": "CURRENT_REFERENCE",
+                    "CURRENT_RESULT_SET": "CURRENT_RESULT_SET",
+                }
+                if reference_dependency not in {
+                    "NONE",
+                    "CURRENT_OBJECT",
+                    "CURRENT_RESULT_SET",
+                    "CURRENT_AREA",
+                }:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_reference_dependency",
+                        "The semantic reference dependency is unsupported.",
+                    )
+                expected_scope = dependency_scope.get(reference_dependency)
+                if expected_scope and semantic_scope != expected_scope:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "reference_scope_mismatch",
+                        "The semantic reference dependency does not match its grounded scope.",
+                    )
+                if reference_dependency == "NONE" and semantic_scope in {
+                    "CURRENT_REFERENCE",
+                    "CURRENT_RESULT_SET",
+                }:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "unjustified_reference_scope",
+                        "An independent request cannot inherit a current Home reference.",
+                    )
+                if reference_dependency == "CURRENT_AREA" and semantic_scope != "AREA":
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "reference_scope_mismatch",
+                        "A current-area dependency requires area scope.",
+                    )
                 if semantic_scope not in {
                     "HOME",
                     "AREA",
@@ -3764,13 +3844,19 @@ class AIEngine:
                     )
                 restrict_ids: tuple[str, ...] = ()
                 if semantic_scope in {"CURRENT_REFERENCE", "CURRENT_RESULT_SET"}:
+                    context_query = reference_query(
+                        "them" if semantic_scope == "CURRENT_RESULT_SET" else "it",
+                        object_types=("device", "capability", "virtual_target"),
+                    )
+                    if semantic_scope == "CURRENT_RESULT_SET":
+                        context_query = replace(
+                            context_query,
+                            semantic_concepts=tuple((query, *semantic_terms)),
+                        )
                     resolution = await WorkingContextService(self.dialogue).resolve(
                         principal_id=actor.user_key,
                         conversation_id=conversation_id,
-                        query=reference_query(
-                            "them" if semantic_scope == "CURRENT_RESULT_SET" else "it",
-                            object_types=("device", "capability", "virtual_target"),
-                        ),
+                        query=context_query,
                     )
                     if resolution.status is not ReferenceStatus.RESOLVED or not resolution.objects:
                         return self._tool_failure(
@@ -3803,6 +3889,9 @@ class AIEngine:
                 )
                 include_diagnostics = bool(arguments.get("include_diagnostics"))
                 include_virtual = bool(arguments.get("include_virtual"))
+                capability_role_filter = str(
+                    arguments.get("capability_role_filter") or "ANY"
+                ).upper()
                 semantic_limit = max(1, min(int(arguments.get("limit", 12)), 50))
                 read_arguments: dict[str, Any] = {
                     "query": query,
@@ -3819,6 +3908,8 @@ class AIEngine:
                     "requested_action": arguments.get("requested_action"),
                     "include_diagnostics": include_diagnostics,
                     "include_virtual": include_virtual,
+                    "capability_role_filter": capability_role_filter,
+                    "reference_dependency": reference_dependency,
                     "limit": semantic_limit,
                     "restrict_ids": list(restrict_ids),
                 }
@@ -3850,6 +3941,8 @@ class AIEngine:
                         include_diagnostics=include_diagnostics,
                         limit=semantic_limit,
                         include_virtual=include_virtual,
+                        capability_role_filter=capability_role_filter,
+                        reference_dependency=reference_dependency,
                         restrict_ids=restrict_ids,
                         principal_id=actor.user_key,
                         conversation_id=conversation_id,
@@ -5708,6 +5801,82 @@ class AIEngine:
             "error_category": category,
         }
         return dict(self._astra_probe)
+
+    async def pending_interaction_relevant(
+        self,
+        *,
+        answer: str,
+        interaction: Mapping[str, Any],
+        history: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        """Decide whether an unstructured turn semantically resumes a pending slot.
+
+        Confirmations and exact option identities remain deterministic. This bounded
+        model decision is only for free-form replies where lexical overlap cannot
+        distinguish a genuine answer from a natural task switch.
+        """
+
+        payload = {
+            "current_utterance": str(answer)[:1_000],
+            "pending": {
+                key: interaction.get(key)
+                for key in ("kind", "goal", "prompt", "unresolved_slot", "options")
+            },
+            "recent_dialogue": [
+                {
+                    "role": str(item.get("role") or "")[:20],
+                    "content": str(item.get("content") or "")[:500],
+                }
+                for item in history[-4:]
+                if isinstance(item, Mapping)
+            ],
+        }
+        started = time.monotonic()
+        try:
+            response = await self.client.responses.create(
+                model=self.model,
+                instructions=(
+                    "Classify semantic dependency only. PENDING_INTERACTION means the current "
+                    "utterance supplies, confirms, selects, corrects, or explicitly resumes the "
+                    "pending prompt. NONE means it is independently understandable as a new "
+                    "task, even when topically related. Do not answer either task."
+                ),
+                input=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "pending_reference_dependency",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "reference_dependency": {
+                                    "type": "string",
+                                    "enum": ["NONE", "PENDING_INTERACTION"],
+                                }
+                            },
+                            "required": ["reference_dependency"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                max_output_tokens=100,
+                store=False,
+            )
+            output_text = str(getattr(response, "output_text", "") or "").strip()
+            parsed = json.loads(output_text)
+            return bool(
+                isinstance(parsed, Mapping)
+                and parsed.get("reference_dependency") == "PENDING_INTERACTION"
+            )
+        except Exception:
+            logger.warning("Pending-interaction semantic admission failed closed", exc_info=True)
+            return False
+        finally:
+            runtime_metrics.observe(
+                "pending_interaction_admission_ms",
+                (time.monotonic() - started) * 1000,
+            )
 
     async def select_document_evidence(
         self,
@@ -8632,7 +8801,7 @@ class AIEngine:
                         "search_home"
                         if not is_executive_round
                         and tool_rounds == 0
-                        and understanding.house_relevant
+                        and understanding.home_grounding_required
                         and decision.allow_home_read
                         and "search_home" in authorised_tools
                         and not code_awareness_requested
@@ -8672,7 +8841,7 @@ class AIEngine:
                         on_text_delta=None,
                         force_tool_name=(
                             "search_home"
-                            if understanding.house_relevant
+                            if understanding.home_grounding_required
                             and decision.allow_home_read
                             and "search_home" in authorised_tools
                             and not code_awareness_requested
@@ -8701,7 +8870,7 @@ class AIEngine:
                 semantic_grounding_required = bool(
                     executive_task_id is None
                     and not completed_calls
-                    and understanding.house_relevant
+                    and understanding.home_grounding_required
                     and decision.allow_home_read
                     and "search_home" in authorised_tools
                     and not code_awareness_requested

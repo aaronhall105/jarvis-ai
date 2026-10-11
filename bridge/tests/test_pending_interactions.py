@@ -6,8 +6,61 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.ai_engine import AIEngine
 from app.dialogue_manager import DialogueManager
 from app.pending_interactions import PendingInteractionKind, PendingInteractionService
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dependency", "expected"),
+    (("NONE", False), ("PENDING_INTERACTION", True)),
+)
+async def test_unstructured_pending_reply_uses_semantic_dependency(
+    dependency: str, expected: bool
+) -> None:
+    engine = AIEngine.__new__(AIEngine)
+    create = AsyncMock(
+        return_value=SimpleNamespace(output_text='{"reference_dependency":"' + dependency + '"}')
+    )
+    engine.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    engine.model = "fixture-model"
+
+    relevant = await engine.pending_interaction_relevant(
+        answer="What movie should I watch?",
+        interaction={
+            "kind": "selection",
+            "goal": "select a mailbox",
+            "prompt": "Gmail or Outlook?",
+            "unresolved_slot": "mailbox",
+            "options": [{"label": "Gmail"}, {"label": "Outlook"}],
+        },
+        history=[],
+    )
+
+    assert relevant is expected
+    request = create.await_args.kwargs
+    assert "semantic dependency only" in request["instructions"]
+    assert request["store"] is False
+    assert request["text"]["format"]["schema"]["properties"]["reference_dependency"] == {
+        "type": "string",
+        "enum": ["NONE", "PENDING_INTERACTION"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_unstructured_pending_reply_fails_closed_when_classifier_is_unavailable() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.client = SimpleNamespace(
+        responses=SimpleNamespace(create=AsyncMock(side_effect=RuntimeError("offline")))
+    )
+    engine.model = "fixture-model"
+
+    assert not await engine.pending_interaction_relevant(
+        answer="A new unrelated task",
+        interaction={"kind": "clarification", "prompt": "Which one?"},
+        history=[],
+    )
 
 
 def service(tmp_path, *, dialogue: DialogueManager | None = None):

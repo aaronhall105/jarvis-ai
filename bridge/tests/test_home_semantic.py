@@ -110,16 +110,19 @@ async def search(
     inventory_kind: str = "PHYSICAL_DEVICE",
     state: str | None = None,
     include_virtual: bool = False,
+    domain: str | None = None,
+    capability_role_filter: str = "ANY",
 ) -> dict[str, Any]:
     return await fixture.engine.search(
         query=query,
         semantic_terms=terms,
         area_id=area_id,
         capability=capability,
-        domain=None,
+        domain=domain,
         state=state,
         inventory_kind=inventory_kind,
         include_virtual=include_virtual,
+        capability_role_filter=capability_role_filter,
         aggregation=aggregation,
         operation=operation,
         requested_action=action,
@@ -129,6 +132,217 @@ async def search(
         conversation_id="usr:aaron:semantic",
         request_id="request-1",
     )
+
+
+def capability_role_fixture() -> SemanticFixture:
+    return SemanticFixture(
+        [
+            entity(
+                "light.studio_ceiling",
+                "Studio Ceiling",
+                domain="light",
+                state="on",
+                area_id="studio",
+                area_name="Studio",
+                device_id="ceiling-dimmer",
+                device_name="Studio Ceiling",
+            ),
+            entity(
+                "sensor.studio_ceiling_power",
+                "Studio Ceiling Power",
+                domain="sensor",
+                state="12",
+                area_id="studio",
+                area_name="Studio",
+                device_id="ceiling-dimmer",
+                device_name="Studio Ceiling",
+                device_class="power",
+            ),
+            entity(
+                "camera.patio_clear",
+                "Patio Clear",
+                domain="camera",
+                state="streaming",
+                area_id="patio",
+                area_name="Patio",
+                device_id="patio-sentinel",
+                device_name="Patio Sentinel",
+            ),
+            entity(
+                "binary_sensor.patio_person",
+                "Patio Person",
+                domain="binary_sensor",
+                state="off",
+                area_id="patio",
+                area_name="Patio",
+                device_id="patio-sentinel",
+                device_name="Patio Sentinel",
+                device_class="occupancy",
+            ),
+            entity(
+                "light.patio_flood",
+                "Patio Flood",
+                domain="light",
+                state="on",
+                area_id="patio",
+                area_name="Patio",
+                device_id="patio-sentinel",
+                device_name="Patio Sentinel",
+            ),
+            entity(
+                "switch.kitchen_appliance",
+                "Kitchen Appliance",
+                domain="switch",
+                state="on",
+                area_id="kitchen",
+                area_name="Kitchen",
+                device_id="kitchen-appliance",
+                device_name="Kitchen Appliance",
+                device_class="appliance",
+            ),
+            entity(
+                "sensor.kitchen_appliance_temperature",
+                "Kitchen Appliance Temperature",
+                domain="sensor",
+                state="180",
+                area_id="kitchen",
+                area_name="Kitchen",
+                device_id="kitchen-appliance",
+                device_name="Kitchen Appliance",
+                device_class="temperature",
+            ),
+            entity(
+                "light.kitchen_appliance_cavity",
+                "Kitchen Appliance Cavity",
+                domain="light",
+                state="off",
+                area_id="kitchen",
+                area_name="Kitchen",
+                device_id="kitchen-appliance",
+                device_name="Kitchen Appliance",
+            ),
+            entity(
+                "light.utility_machine_indicator",
+                "Utility Machine Indicator",
+                domain="light",
+                state="off",
+                area_id="utility",
+                area_name="Utility",
+                device_id="utility-machine",
+                device_name="Utility Machine",
+            ),
+            entity(
+                "binary_sensor.utility_machine_door",
+                "Utility Machine Door",
+                domain="binary_sensor",
+                state="off",
+                area_id="utility",
+                area_name="Utility",
+                device_id="utility-machine",
+                device_name="Utility Machine",
+                device_class="opening",
+            ),
+            entity(
+                "sensor.utility_machine_temperature",
+                "Utility Machine Temperature",
+                domain="sensor",
+                state="42",
+                area_id="utility",
+                area_name="Utility",
+                device_id="utility-machine",
+                device_name="Utility Machine",
+                device_class="temperature",
+            ),
+            entity(
+                "fan.conservatory_combo",
+                "Conservatory Airflow",
+                domain="fan",
+                state="on",
+                area_id="conservatory",
+                area_name="Conservatory",
+                device_id="conservatory-combo",
+                device_name="Conservatory Combo",
+                device_class="fan",
+            ),
+            entity(
+                "light.conservatory_combo",
+                "Conservatory Illumination",
+                domain="light",
+                state="on",
+                area_id="conservatory",
+                area_name="Conservatory",
+                device_id="conservatory-combo",
+                device_name="Conservatory Combo",
+                device_class="light",
+            ),
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_capability_roles_follow_parent_structure_not_capability_presence() -> None:
+    graph = await capability_role_fixture().engine.graph()
+    by_entity = {
+        entity_id: capability
+        for capability in graph.capabilities
+        for entity_id in capability.member_entity_ids
+    }
+
+    assert by_entity["light.studio_ceiling"].capability_role == "PRIMARY"
+    assert by_entity["light.patio_flood"].capability_role == "AUXILIARY"
+    assert by_entity["light.kitchen_appliance_cavity"].capability_role == "AUXILIARY"
+    assert by_entity["light.utility_machine_indicator"].capability_role == "AUXILIARY"
+    assert by_entity["binary_sensor.patio_person"].capability_role == "OBSERVATIONAL"
+    assert by_entity["sensor.kitchen_appliance_temperature"].capability_role == "MEASUREMENT"
+    assert by_entity["fan.conservatory_combo"].capability_role == "PRIMARY"
+    assert by_entity["light.conservatory_combo"].capability_role == "PRIMARY"
+
+
+@pytest.mark.asyncio
+async def test_primary_light_collection_excludes_but_does_not_hide_auxiliary_lights() -> None:
+    fixture = capability_role_fixture()
+    primary = await search(
+        fixture,
+        "light",
+        terms=[],
+        domain="light",
+        inventory_kind="CAPABILITY",
+        capability_role_filter="PRIMARY_ONLY",
+        aggregation="COUNT",
+        capability=None,
+    )
+    all_lights = await search(
+        fixture,
+        "light",
+        terms=[],
+        domain="light",
+        inventory_kind="CAPABILITY",
+        capability_role_filter="PRIMARY_OR_AUXILIARY",
+        aggregation="COUNT",
+        capability=None,
+    )
+    auxiliary = await search(
+        fixture,
+        "light",
+        terms=[],
+        domain="light",
+        inventory_kind="CAPABILITY",
+        capability_role_filter="AUXILIARY_ONLY",
+        aggregation="LIST",
+        capability=None,
+    )
+
+    assert primary["count"] == 2
+    assert all_lights["count"] == 5
+    assert auxiliary["count"] == 3
+    assert {item["parent_canonical_id"] for item in auxiliary["items"]} <= {
+        item.canonical_id for item in (await fixture.engine.graph()).physical_objects
+    }
+    response = render_home_search_evidence(
+        [{"tool": "search_home", "arguments": {}, "result": primary}],
+        request_text="How many are there?",
+    )
+    assert response and response.startswith("I found 2 main lights:")
 
 
 def television_fixture() -> SemanticFixture:

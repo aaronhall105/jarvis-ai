@@ -266,6 +266,35 @@ def _capability_kind(entity: Mapping[str, Any]) -> str:
     return domain
 
 
+_CAPABILITY_ROLES = {
+    "PRIMARY",
+    "AUXILIARY",
+    "OBSERVATIONAL",
+    "MEASUREMENT",
+    "DIAGNOSTIC",
+    "CONFIGURATION",
+    "MAINTENANCE",
+    "VIRTUAL",
+    "UNKNOWN",
+}
+
+_CAPABILITY_ROLE_FILTERS = {
+    "PRIMARY_ONLY",
+    "PRIMARY_OR_AUXILIARY",
+    "AUXILIARY_ONLY",
+    "ANY",
+}
+
+_SUPPORTING_MEASUREMENT_CLASSES = {
+    "battery",
+    "current",
+    "energy",
+    "power",
+    "signal_strength",
+    "voltage",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class CanonicalHomeObject:
     canonical_id: str
@@ -288,6 +317,8 @@ class CanonicalHomeObject:
     capability_kind: str | None = None
     parent_canonical_id: str | None = None
     entity_roles: tuple[tuple[str, str], ...] = ()
+    primary_purposes: tuple[str, ...] = ()
+    capability_role: str | None = None
 
     def compact(self, *, confidence: float | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -304,6 +335,8 @@ class CanonicalHomeObject:
             "capability_kind": self.capability_kind,
             "parent_canonical_id": self.parent_canonical_id,
             "entity_roles": {entity_id: role for entity_id, role in self.entity_roles},
+            "primary_purposes": list(self.primary_purposes),
+            "capability_role": self.capability_role,
             "evidence": list(self.evidence),
         }
         if confidence is not None:
@@ -507,9 +540,62 @@ class HomeSemanticEngine:
         domains = tuple(
             sorted({str(item.get("domain") or "") for item in ordered if item.get("domain")})
         )
+        control_members = tuple(item for item in ordered if _entity_role(item) == "PRIMARY_CONTROL")
+        classed_controls = tuple(
+            item for item in control_members if str(item.get("device_class") or "").strip()
+        )
+        device_names = {
+            _normalise(item.get(key))
+            for item in ordered
+            for key in ("device_name_by_user", "device_name")
+            if _normalise(item.get(key))
+        }
+        primary_surface_matches_device = any(
+            _normalise(item.get(key)) in device_names
+            for item in control_members
+            for key in ("name", "registry_name", "registry_original_name")
+            if _normalise(item.get(key))
+        )
+        has_distinct_functional_evidence = any(
+            _entity_role(item) == "OBSERVATION"
+            or (
+                _entity_role(item) == "MEASUREMENT"
+                and _normalise(item.get("device_class")).replace(" ", "_")
+                not in _SUPPORTING_MEASUREMENT_CLASSES
+            )
+            for item in ordered
+            if item not in control_members
+        )
+        subordinate_control_surface = bool(
+            control_members
+            and not kind
+            and not classed_controls
+            and not primary_surface_matches_device
+            and has_distinct_functional_evidence
+        )
+        dynamic_device_purpose = min(device_names, key=len) if device_names else ""
         resolved_kind = str(
-            kind or primary.get("device_class") or primary.get("domain") or "device"
+            kind
+            or (classed_controls[0].get("device_class") if classed_controls else None)
+            or (dynamic_device_purpose if subordinate_control_surface else None)
+            or primary.get("device_class")
+            or primary.get("domain")
+            or "device"
         ).strip()
+        primary_purposes = {
+            *(
+                (_normalise(resolved_kind).replace(" ", "_"),)
+                if kind
+                or classed_controls
+                or primary_surface_matches_device
+                or not subordinate_control_surface
+                else ()
+            ),
+            *(_normalise(item.get("device_class")).replace(" ", "_") for item in classed_controls),
+        }
+        if subordinate_control_surface and dynamic_device_purpose:
+            primary_purposes.add(dynamic_device_purpose.replace(" ", "_"))
+        primary_purposes.discard("")
         physical_ids = tuple(
             sorted({str(item.get("device_id")) for item in ordered if item.get("device_id")})
         )
@@ -554,7 +640,51 @@ class HomeSemanticEngine:
             entity_roles=tuple(
                 sorted((str(item.get("entity_id") or ""), _entity_role(item)) for item in ordered)
             ),
+            primary_purposes=tuple(sorted(primary_purposes)),
         )
+
+    @staticmethod
+    def _capability_role(
+        parent: CanonicalHomeObject,
+        capability_kind: str,
+        members: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Classify a capability's relationship to its physical parent.
+
+        The role follows registry structure rather than product names. Device classes
+        and the parent's grounded dominant purposes identify primary surfaces; control
+        surfaces outside those purposes remain usable as auxiliary capabilities.
+        """
+
+        roles = {_entity_role(item) for item in members}
+        if parent.object_role in {"GROUP", "VIRTUAL", "AGGREGATE"}:
+            return "VIRTUAL"
+        if roles and roles <= {"OBSERVATION"}:
+            return "OBSERVATIONAL"
+        if roles and roles <= {"MEASUREMENT"}:
+            return "MEASUREMENT"
+        if roles and roles <= {"OBSERVATION", "MEASUREMENT"}:
+            return "OBSERVATIONAL"
+        if roles and roles <= {"DIAGNOSTIC"}:
+            return "DIAGNOSTIC"
+        if roles and roles <= {"CONFIGURATION"}:
+            return "CONFIGURATION"
+        if roles and roles <= {"UPDATE"}:
+            return "MAINTENANCE"
+
+        purposes = set(parent.primary_purposes)
+        member_classes = {
+            _normalise(item.get("device_class")).replace(" ", "_")
+            for item in members
+            if str(item.get("device_class") or "").strip()
+        }
+        normalised_kind = _normalise(capability_kind).replace(" ", "_")
+        if normalised_kind in purposes or member_classes & purposes:
+            return "PRIMARY"
+
+        if "PRIMARY_CONTROL" in roles:
+            return "AUXILIARY" if purposes else "UNKNOWN"
+        return "UNKNOWN"
 
     @classmethod
     def _capability_nodes(
@@ -592,6 +722,9 @@ class HomeSemanticEngine:
                     )
                 aliases.discard("")
                 display_name = cls._display_name(ordered, primary)
+                capability_role = cls._capability_role(parent, capability_kind, ordered)
+                if capability_role not in _CAPABILITY_ROLES:  # pragma: no cover - invariant
+                    capability_role = "UNKNOWN"
                 nodes.append(
                     CanonicalHomeObject(
                         canonical_id=f"capability:{digest}",
@@ -629,6 +762,8 @@ class HomeSemanticEngine:
                                 for item in ordered
                             )
                         ),
+                        primary_purposes=parent.primary_purposes,
+                        capability_role=capability_role,
                     )
                 )
         return tuple(
@@ -884,6 +1019,8 @@ class HomeSemanticEngine:
         state: str | None = None,
         inventory_kind: str = "PHYSICAL_DEVICE",
         include_virtual: bool = False,
+        capability_role_filter: str = "ANY",
+        reference_dependency: str = "NONE",
         include_diagnostics: bool = False,
         aggregation: str = "LIST",
         operation: str = "QUERY",
@@ -899,6 +1036,12 @@ class HomeSemanticEngine:
         wanted_capability = _normalise(capability).replace(" ", "_") or None
         wanted_domain = _normalise(domain).replace(" ", "_") or None
         action = _normalise(requested_action).replace(" ", "_") or None
+        role_filter = str(capability_role_filter or "ANY").upper()
+        dependency = str(reference_dependency or "NONE").upper()
+        if role_filter not in _CAPABILITY_ROLE_FILTERS:
+            raise ValueError("Unsupported capability role filter")
+        if inventory_kind.upper() != "CAPABILITY" and role_filter != "ANY":
+            raise ValueError("Capability role filters require capability inventory")
         if operation.upper() == "CONTROL":
             if action not in _ACTION_CAPABILITIES:
                 raise ValueError("A supported requested action is required for control discovery")
@@ -975,6 +1118,15 @@ class HomeSemanticEngine:
                 continue
             if state and not any(_matches_state(entity, state) for entity in item.entities):
                 continue
+            if role_filter == "PRIMARY_ONLY" and item.capability_role != "PRIMARY":
+                continue
+            if role_filter == "AUXILIARY_ONLY" and item.capability_role != "AUXILIARY":
+                continue
+            if role_filter == "PRIMARY_OR_AUXILIARY" and item.capability_role not in {
+                "PRIMARY",
+                "AUXILIARY",
+            }:
+                continue
             eligible.append(item)
 
         ranked: list[tuple[float, CanonicalHomeObject]] = []
@@ -1016,6 +1168,8 @@ class HomeSemanticEngine:
             "domain": wanted_domain,
             "state": state,
             "inventory_kind": inventory_kind.upper(),
+            "capability_role_filter": role_filter,
+            "reference_dependency": dependency,
             "include_virtual": include_virtual,
             "aggregation": aggregation.upper(),
             "operation": operation.upper(),
@@ -1024,6 +1178,8 @@ class HomeSemanticEngine:
             "success": True,
             "inventory_kind": inventory_kind.upper(),
             "include_virtual": include_virtual,
+            "capability_role_filter": role_filter,
+            "reference_dependency": dependency,
             "operation": operation.upper(),
             "aggregation": aggregation.upper(),
             "query": query,
