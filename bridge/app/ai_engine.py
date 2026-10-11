@@ -1576,6 +1576,8 @@ def _clean_reply(value: str) -> str:
 
 
 class AIEngine:
+    MAX_SEMANTIC_GROUNDING_RETRIES = 2
+
     def __init__(
         self,
         api_key: str,
@@ -2214,6 +2216,13 @@ class AIEngine:
                         "area_id": nullable_area_schema,
                         "capability": {
                             "type": ["string", "null"],
+                            "description": (
+                                "A real Home Assistant capability explicitly required by the "
+                                "user's request. Use state for a current-state question. Use null "
+                                "for a plain identity, count, list, summary, or comparison when "
+                                "the user did not request a capability. Never infer an affordance "
+                                "merely from the target concept."
+                            ),
                             "enum": [
                                 "state",
                                 "view",
@@ -8480,7 +8489,7 @@ class AIEngine:
         final_reply = ""
         last_response: Any | None = None
         streamed_live = False
-        semantic_grounding_retry_used = False
+        semantic_grounding_retry_count = 0
         # External/provider turns must be validated against actual tool or task
         # evidence before any model prose reaches realtime clients. Otherwise a
         # fluent future-tense promise can be spoken before the final guards run.
@@ -8609,11 +8618,14 @@ class AIEngine:
                     and "search_home" in authorised_tools
                     and not code_awareness_requested
                 )
-                if semantic_grounding_required and not semantic_grounding_retry_used:
+                if (
+                    semantic_grounding_required
+                    and semantic_grounding_retry_count < self.MAX_SEMANTIC_GROUNDING_RETRIES
+                ):
                     # A forced tool choice can occasionally return no function call at the
-                    # provider boundary. Retry the same grounded planning round once rather
-                    # than accepting ungrounded prose or falling back to raw entity matching.
-                    semantic_grounding_retry_used = True
+                    # provider boundary. Retry the same grounded planning round within a small
+                    # fixed budget rather than accepting prose or raw-entity fallback.
+                    semantic_grounding_retry_count += 1
                     fallback_count += 1
                     runtime_metrics.increment("home_semantic_grounding_retries")
                     continue
