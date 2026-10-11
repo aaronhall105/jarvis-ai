@@ -526,15 +526,25 @@ class HomeSemanticEngine:
         # Area is a structural filter, not target evidence. Removing its words
         # prevents every object in a requested room from appearing to match the
         # semantic concept merely because its display name includes that room.
-        concepts = tuple(
-            cleaned
-            for value in (query, *semantic_terms)
-            if (
-                cleaned := " ".join(
-                    token for token in _normalise(value).split() if token not in scope_tokens
-                )
+        structural_concepts = {
+            normalised
+            for value in (wanted_domain, wanted_capability, action, state)
+            if (normalised := _normalise(value))
+        }
+        concept_list: list[str] = []
+        for index, value in enumerate((query, *semantic_terms)):
+            cleaned = " ".join(
+                token for token in _normalise(value).split() if token not in scope_tokens
             )
-        )
+            if not cleaned:
+                continue
+            # The first value is the free semantic target. Later values are model-provided
+            # equivalents, so structural filters such as a domain or requested capability
+            # must not be allowed to broaden the semantic match to every eligible object.
+            if index > 0 and cleaned in structural_concepts:
+                continue
+            concept_list.append(cleaned)
+        concepts = tuple(concept_list)
         eligible: list[CanonicalHomeObject] = []
         for item in inventory:
             if allowed_ids and item.canonical_id not in allowed_ids:

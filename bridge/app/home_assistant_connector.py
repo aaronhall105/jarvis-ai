@@ -253,6 +253,7 @@ class HomeAssistantConnector(Connector):
                 return await self.tools.search_home(
                     query=str(payload.get("query") or ""),
                     semantic_terms=semantic_terms,
+                    scope=str(payload.get("scope") or "HOME"),
                     inventory_kind=str(payload.get("inventory_kind") or "PHYSICAL_DEVICE"),
                     occupancy_state=(
                         str(payload["occupancy_state"]) if payload.get("occupancy_state") else None

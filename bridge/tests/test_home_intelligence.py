@@ -722,3 +722,7 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     assert "query_home" not in {item["name"] for item in definitions}
     assert "entity_ids" not in properties
     assert "area_id" in properties
+    assert set(properties["scope"]["enum"]) == {"HOME", "AREA", "CURRENT_REFERENCE"}
+    assert "semantic_target" in properties
+    assert "query" not in properties
+    assert "use_current_reference" not in properties

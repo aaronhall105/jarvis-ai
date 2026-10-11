@@ -595,6 +595,48 @@ async def test_count_presentation_uses_only_canonical_results() -> None:
 
 
 @pytest.mark.asyncio
+async def test_structural_domain_term_cannot_broaden_semantic_count() -> None:
+    fixture = television_fixture()
+    fixture.rows.append(
+        entity(
+            "media_player.studio_speaker",
+            "Studio Sound Hub",
+            domain="media_player",
+            state="playing",
+            area_id="studio",
+            area_name="Studio",
+            device_id="studio-sound-hub",
+            device_name="Studio Sound Hub",
+            device_class="speaker",
+            supported_features=1 | 4 | 8 | 4096 | 16384,
+        )
+    )
+
+    result = await fixture.engine.search(
+        query="televisions",
+        semantic_terms=["tv", "screen", "media_player"],
+        area_id=None,
+        capability="state",
+        domain="media_player",
+        state=None,
+        aggregation="COUNT",
+        operation="QUERY",
+        requested_action=None,
+        include_diagnostics=False,
+        limit=20,
+        principal_id="aaron",
+        conversation_id="usr:aaron:semantic",
+        request_id="request-structural-term",
+    )
+
+    assert result["count"] == 2
+    assert {item["display_name"] for item in result["items"]} == {
+        "Bedroom TV",
+        "Lounge Screen",
+    }
+
+
+@pytest.mark.asyncio
 async def test_room_inventory_preserves_exact_alpha39_occupancy_states() -> None:
     engine = ToolEngine.__new__(ToolEngine)
 
@@ -634,6 +676,7 @@ async def test_room_inventory_preserves_exact_alpha39_occupancy_states() -> None
     result = await engine.search_home(
         query="clear rooms",
         semantic_terms=["clear rooms"],
+        scope="HOME",
         inventory_kind="ROOM",
         occupancy_state="PROBABLY_CLEAR",
         area_id=None,
