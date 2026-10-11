@@ -735,6 +735,18 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
         "CURRENT_REFERENCE",
         "CURRENT_RESULT_SET",
     }
+    assert set(properties["reference_dependency"]["enum"]) == {
+        "NONE",
+        "CURRENT_OBJECT",
+        "CURRENT_RESULT_SET",
+        "CURRENT_AREA",
+    }
+    assert set(properties["capability_role_filter"]["enum"]) == {
+        "PRIMARY_ONLY",
+        "PRIMARY_OR_AUXILIARY",
+        "AUXILIARY_ONLY",
+        "ANY",
+    }
     assert "semantic_target" in properties
     assert "query" not in properties
     assert "use_current_reference" not in properties

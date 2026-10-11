@@ -136,6 +136,109 @@ async def test_home_ordered_result_resolves_second_without_inventing_entity(tmp_
 
 
 @pytest.mark.asyncio
+async def test_home_result_set_is_recoverable_after_independent_task_focus(tmp_path) -> None:
+    service = _service(tmp_path)
+    conversation = "usr:aaron:task-switch"
+    televisions = [
+        make_context_object(
+            object_type="device",
+            display_name=name,
+            source="home_assistant_canonical_inventory",
+            canonical_id=canonical_id,
+            provider="home_assistant",
+            metadata={"kind": "tv", "state": state},
+            aliases=(name, "television"),
+        )
+        for canonical_id, name, state in (
+            ("home:bedroom-display", "Bedroom Display", "off"),
+            ("home:lounge-display", "Lounge Display", "on"),
+        )
+    ]
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=televisions,
+        intent="semantic_home_query",
+        result_set={
+            "result_set_id": "home:televisions",
+            "object_refs": [item.reference_id for item in televisions],
+            "filters": {"query": "television", "operation": "QUERY"},
+        },
+        focus_refs=[item.reference_id for item in televisions],
+    )
+    task = make_context_object(
+        object_type="task",
+        display_name="Check inbox",
+        source="task_centre",
+        canonical_id="task:inbox",
+        provider="jarvis",
+    )
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=[task],
+        intent="mail_task",
+        result_set={
+            "result_set_id": "tasks:mail",
+            "object_refs": [task.reference_id],
+        },
+        focus_refs=[task.reference_id],
+    )
+
+    resolution = await service.resolve(
+        principal_id="aaron",
+        conversation_id=conversation,
+        query=ReferenceQuery(
+            object_types=("device",),
+            plural=True,
+            semantic_concepts=("television",),
+        ),
+    )
+
+    assert resolution.status is ReferenceStatus.RESOLVED
+    assert resolution.result_set_id == "home:televisions"
+    assert {item.canonical_id for item in resolution.objects} == {
+        "home:bedroom-display",
+        "home:lounge-display",
+    }
+
+
+@pytest.mark.asyncio
+async def test_new_task_focus_does_not_destroy_grounded_home_history(tmp_path) -> None:
+    service = _service(tmp_path)
+    conversation = "usr:aaron:remembered-object-independent-task"
+    display = make_context_object(
+        object_type="device",
+        display_name="Studio Display",
+        source="home_assistant_canonical_inventory",
+        canonical_id="home:studio-display",
+        provider="home_assistant",
+    )
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=[display],
+        intent="semantic_home_query",
+        result_set={"object_refs": [display.reference_id]},
+        focus_refs=[display.reference_id],
+    )
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=(),
+        intent="general",
+        goal="",
+    )
+
+    context = await service.get(principal_id="aaron", conversation_id=conversation)
+
+    assert context["current_intent"] == "general"
+    assert context["current_goal"] is None
+    assert context["result_sets"]
+    assert any(item["canonical_id"] == "home:studio-display" for item in context["objects"])
+
+
+@pytest.mark.asyncio
 async def test_stale_live_state_requires_refresh_but_immutable_email_does_not(tmp_path) -> None:
     service = _service(tmp_path)
     old = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()

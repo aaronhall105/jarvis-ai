@@ -271,3 +271,46 @@ async def test_referenced_set_read_uses_only_durable_grounded_identities(tmp_pat
         "light.living_room",
     )
     assert plan["reference_result_set_id"]
+
+
+@pytest.mark.asyncio
+async def test_semantic_reference_dependency_must_match_grounded_scope(tmp_path) -> None:
+    engine = _engine(
+        await _project_set(tmp_path),
+        _Tools(("light.hallway", "light.living_room", "light.bedroom")),
+        _Runtime({}),
+    )
+    engine.external_runtime = None
+
+    result = await engine._execute_function(
+        name="search_home",
+        arguments_json=json.dumps(
+            {
+                "semantic_operation": "QUERY",
+                "inventory_kind": "CAPABILITY",
+                "scope": "CURRENT_RESULT_SET",
+                "reference_dependency": "NONE",
+                "aggregation": "LIST",
+                "semantic_target": "illumination",
+                "semantic_terms": [],
+                "area_id": None,
+                "capability": None,
+                "domain": "light",
+                "state": None,
+                "occupancy_state": None,
+                "capability_role_filter": "PRIMARY_ONLY",
+                "requested_action": None,
+                "include_diagnostics": False,
+                "include_virtual": False,
+                "limit": 12,
+            }
+        ),
+        user_text="Which ones are on?",
+        authorised_tools={"search_home"},
+        conversation_id="usr:aaron:home",
+        actor=_actor(),
+        request_id="reference-mismatch",
+    )
+
+    assert result["result"]["success"] is False
+    assert result["result"]["error"]["code"] == "unjustified_reference_scope"

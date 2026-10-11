@@ -25,6 +25,12 @@ class FakeRegistry:
                     "name": "Amber Phone",
                     "model": "SM-S911U1",
                 },
+                {
+                    "id": "novel_device",
+                    "name_by_user": "Nimbus",
+                    "name": "Nimbus",
+                    "model": "NX-1",
+                },
             ],
             entities=[
                 {"entity_id": "person.amber", "name": "Amber", "original_name": "Amber"},
@@ -80,6 +86,43 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.interpreted_text, "I want to be Samba")
         self.assertFalse(result.house_relevant)
 
+    async def test_topical_watch_language_does_not_inherit_home_task(self):
+        history = [
+            {"role": "user", "content": "How many TVs are in the flat?"},
+            {"role": "assistant", "content": "I found three televisions."},
+        ]
+
+        result = await self.engine.interpret(
+            "What movie do you recommend to watch?",
+            history,
+            self.actor,
+        )
+
+        self.assertFalse(result.house_relevant)
+        self.assertFalse(result.home_grounding_required)
+
+    async def test_mixed_reference_is_available_without_forcing_device_state(self):
+        history = [
+            {"role": "user", "content": "Bedroom TV"},
+            {"role": "assistant", "content": "Bedroom TV is off."},
+        ]
+
+        result = await self.engine.interpret("What can I watch on it?", history, self.actor)
+
+        self.assertTrue(result.house_relevant)
+        self.assertFalse(result.home_grounding_required)
+
+    async def test_referential_state_and_control_still_require_grounding(self):
+        history = [
+            {"role": "user", "content": "Bedroom TV"},
+            {"role": "assistant", "content": "Bedroom TV is off."},
+        ]
+        for text in ("Is it on?", "Turn it off"):
+            with self.subTest(text=text):
+                result = await self.engine.interpret(text, history, self.actor)
+                self.assertTrue(result.house_relevant)
+                self.assertTrue(result.home_grounding_required)
+
     async def test_whole_home_semantic_categories_reach_home_planning(self):
         for text in (
             "Which devices are offline?",
@@ -99,6 +142,12 @@ class UnderstandingTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(text=text):
                 result = await self.engine.interpret(text, [], self.actor)
                 self.assertTrue(result.house_relevant)
+
+    async def test_single_word_live_registry_name_reaches_semantic_planning(self):
+        result = await self.engine.interpret("Nimbus", [], self.actor)
+
+        self.assertTrue(result.house_relevant)
+        self.assertTrue(result.home_grounding_required)
 
     async def test_private_activity_not_changed(self):
         result = await self.engine.interpret("is she having a poo?", [], self.actor)

@@ -276,6 +276,7 @@ class ReferenceQuery:
     metric: str | None = None
     metric_operator: str | None = None
     metric_value: float | str | None = None
+    semantic_concepts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1179,6 +1180,50 @@ class WorkingContextService:
             (item for item in result_sets if str(item.get("result_set_id")) == active_id),
             result_sets[0] if result_sets else None,
         )
+
+        def compatible_refs(result_set: Mapping[str, Any]) -> list[ContextObject]:
+            return [
+                by_ref[ref]
+                for ref in result_set.get("object_refs") or ()
+                if ref in by_ref and compatible(by_ref[ref])
+            ]
+
+        concepts = {
+            token
+            for value in query.semantic_concepts
+            for token in re.findall(r"[a-z0-9]+", str(value).casefold())
+            if len(token) > 1
+        }
+
+        def set_score(result_set: Mapping[str, Any]) -> tuple[int, int]:
+            refs = compatible_refs(result_set)
+            if not refs:
+                return (-1, 0)
+            values: list[str] = []
+            filters = result_set.get("filters")
+            if isinstance(filters, Mapping):
+                values.extend(str(value) for value in filters.values() if value is not None)
+            for item in refs:
+                values.extend((item.display_name, *item.aliases))
+                values.extend(str(value) for value in item.metadata.values() if value is not None)
+            tokens = set(re.findall(r"[a-z0-9]+", " ".join(values).casefold()))
+            return (len(concepts & tokens) if concepts else 0, len(refs))
+
+        ordered_sets = ([active_set] if isinstance(active_set, Mapping) else []) + [
+            item for item in result_sets if item is not active_set
+        ]
+        viable_sets = [item for item in ordered_sets if compatible_refs(item)]
+        if viable_sets:
+            if concepts:
+                best_score = max(set_score(item)[0] for item in viable_sets)
+                if best_score > 0:
+                    active_set = next(
+                        item for item in viable_sets if set_score(item)[0] == best_score
+                    )
+                elif not isinstance(active_set, Mapping) or not compatible_refs(active_set):
+                    active_set = viable_sets[0]
+            elif not isinstance(active_set, Mapping) or not compatible_refs(active_set):
+                active_set = viable_sets[0]
         ordered = [
             by_ref[ref]
             for ref in (active_set or {}).get("object_refs") or ()

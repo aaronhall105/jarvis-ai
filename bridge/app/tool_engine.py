@@ -347,6 +347,8 @@ class ToolEngine:
         include_diagnostics: bool,
         limit: int,
         include_virtual: bool = False,
+        capability_role_filter: str = "ANY",
+        reference_dependency: str = "NONE",
         restrict_ids: tuple[str, ...] = (),
         principal_id: str = "",
         conversation_id: str = "",
@@ -372,6 +374,24 @@ class ToolEngine:
             raise ValueError("Current-reference scope requires one grounded reference")
         if semantic_scope == "CURRENT_RESULT_SET" and (area_id is not None or not restrict_ids):
             raise ValueError("Current-result-set scope requires grounded references")
+        dependency = str(reference_dependency or "NONE").upper()
+        expected_dependency = {
+            "CURRENT_REFERENCE": "CURRENT_OBJECT",
+            "CURRENT_RESULT_SET": "CURRENT_RESULT_SET",
+        }.get(semantic_scope)
+        if expected_dependency and dependency != expected_dependency:
+            raise ValueError("Grounded scope requires the matching reference dependency")
+        if not expected_dependency and dependency in {"CURRENT_OBJECT", "CURRENT_RESULT_SET"}:
+            raise ValueError("Reference dependency requires a grounded scope")
+        if dependency == "CURRENT_AREA" and semantic_scope != "AREA":
+            raise ValueError("Current-area dependency requires area scope")
+        if dependency not in {
+            "NONE",
+            "CURRENT_OBJECT",
+            "CURRENT_RESULT_SET",
+            "CURRENT_AREA",
+        }:
+            raise ValueError("Unsupported semantic reference dependency")
         kind = str(inventory_kind or "PHYSICAL_DEVICE").upper()
         if kind not in {
             "PHYSICAL_DEVICE",
@@ -510,6 +530,8 @@ class ToolEngine:
             state=state,
             inventory_kind=kind,
             include_virtual=include_virtual,
+            capability_role_filter=capability_role_filter,
+            reference_dependency=dependency,
             aggregation=aggregation,
             operation=operation,
             requested_action=requested_action,
