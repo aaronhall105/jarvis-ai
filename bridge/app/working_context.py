@@ -676,12 +676,10 @@ def merge_projection(
     object_ref_ids = {str(item.get("reference_id")) for item in context["objects"]}
     selected = [str(ref) for ref in focus_refs if str(ref) in object_ref_ids]
     if selected:
-        previous = [
-            str(ref)
-            for ref in context.get("focused_object_refs") or ()
-            if str(ref) in object_ref_ids and str(ref) not in selected
-        ]
-        context["focused_object_refs"] = (selected + previous)[:8]
+        # Focus describes the objects grounded by the latest result, not a history
+        # of everything focused in earlier turns. Older objects and traversal order
+        # remain available in durable result sets for previous/next references.
+        context["focused_object_refs"] = selected[:8]
     if result_set:
         safe_set = dict(_safe_value(result_set) or {})
         safe_set.setdefault("result_set_id", "set:" + str(uuid.uuid4()))
