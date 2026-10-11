@@ -519,6 +519,51 @@ async def test_two_focused_compatible_objects_remain_ambiguous(tmp_path) -> None
 
 
 @pytest.mark.asyncio
+async def test_new_single_focus_supersedes_prior_turn_focus(tmp_path) -> None:
+    service = _service(tmp_path)
+    first = make_context_object(
+        object_type="device",
+        display_name="First device",
+        source="home_assistant",
+        canonical_id="device.first",
+        provider="home_assistant",
+    )
+    second = make_context_object(
+        object_type="device",
+        display_name="Second device",
+        source="home_assistant",
+        canonical_id="device.second",
+        provider="home_assistant",
+    )
+    conversation = "usr:aaron:latest-single-focus"
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=[first, second],
+        result_set={"object_refs": [first.reference_id, second.reference_id]},
+        focus_refs=[first.reference_id],
+    )
+    await service.project(
+        principal_id="aaron",
+        conversation_id=conversation,
+        objects=[second],
+        result_set={"object_refs": [second.reference_id]},
+        focus_refs=[second.reference_id],
+    )
+
+    resolution = await service.resolve(
+        principal_id="aaron",
+        conversation_id=conversation,
+        query=ReferenceQuery(object_types=("device",)),
+    )
+
+    assert resolution.status is ReferenceStatus.RESOLVED
+    assert resolution.objects[0].canonical_id == "device.second"
+    context = await service.get(principal_id="aaron", conversation_id=conversation)
+    assert context["focused_object_refs"] == [second.reference_id]
+
+
+@pytest.mark.asyncio
 async def test_cross_principal_and_conversation_isolation(tmp_path) -> None:
     service = _service(tmp_path)
     item = make_context_object(
