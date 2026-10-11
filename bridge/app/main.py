@@ -7461,11 +7461,42 @@ async def _execute_ai_request(
     )
     storage_conversation_id = str(conversation["conversation_id"])
 
+    # Domain admission follows the current utterance, not whichever provider
+    # interaction happens to be pending. Keep it lazy so deterministic task
+    # continuations are not forced through an extra registry read.
+    preflight_home_request = False
+    preflight_complete = False
+
+    async def ensure_home_preflight() -> bool:
+        nonlocal preflight_complete, preflight_home_request
+        if not preflight_complete:
+            history = await conversations.get_ai_history(
+                conversation_id=storage_conversation_id,
+                limit=12,
+            )
+            understanding = await ai.understanding.interpret(
+                request.text,
+                history,
+                actor,
+            )
+            preflight_home_request = understanding.house_relevant
+            preflight_complete = True
+        return preflight_home_request
+
+    confirmation = bare_confirmation(request.text)
+    active_interaction = await pending_interactions.current(
+        principal_id=actor.user_key,
+        conversation_id=storage_conversation_id,
+    )
+    if active_interaction is not None and confirmation is None:
+        await ensure_home_preflight()
+
     interaction_resolution = await pending_interactions.resolve(
         principal_id=actor.user_key,
         conversation_id=storage_conversation_id,
         answer=request.text,
         request_id=request.request_id or str(uuid.uuid4()),
+        allow_unstructured_answer=not preflight_home_request,
     )
     memory_result: dict[str, object] | None = None
     if interaction_resolution is not None and interaction_resolution.handled:
@@ -7500,13 +7531,14 @@ async def _execute_ai_request(
             conversation_id=storage_conversation_id,
         )
     if memory_result is None:
+        await ensure_home_preflight()
+    if memory_result is None and not preflight_home_request:
         memory_result = await _try_handle_email_assistant(
             request.text,
             actor=actor,
             conversation_id=storage_conversation_id,
             request_id=request.request_id,
         )
-    confirmation = bare_confirmation(request.text)
     pending_state = await dialogue.get(storage_conversation_id) if confirmation else None
     if (
         memory_result is None
@@ -7540,6 +7572,7 @@ async def _execute_ai_request(
     if (
         personal_result is None
         and not pending_confirmation
+        and not preflight_home_request
         and executive_preflight.route is not ExecutiveRoute.EXECUTIVE
     ):
         personal_result = await _try_handle_personal_task(

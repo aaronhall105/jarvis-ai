@@ -301,6 +301,7 @@ class PendingInteractionService:
         conversation_id: str,
         answer: str,
         request_id: str,
+        allow_unstructured_answer: bool = True,
     ) -> PendingInteractionResolution | None:
         try:
             conversation = self._scoped_conversation(conversation_id, principal_id)
@@ -380,6 +381,8 @@ class PendingInteractionService:
         elif options:
             selected = self._match_option(resolved_answer, options)
             if selected is None:
+                if not allow_unstructured_answer:
+                    return None
                 labels = " or ".join(str(item.get("label") or "that option") for item in options)
                 return PendingInteractionResolution(
                     handled=True,
@@ -395,6 +398,8 @@ class PendingInteractionService:
                 response=str(record.get("prompt") or "Please clarify that choice."),
                 interaction_id=interaction_id,
             )
+        if confirmation is None and selected is None and not allow_unstructured_answer:
+            return None
         if not resolved_answer:
             return PendingInteractionResolution(
                 handled=True,

@@ -4,8 +4,9 @@ import difflib
 import logging
 import re
 import unicodedata
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from app.registry import RegistryEngine
 from app.user_context import UserContext
@@ -183,6 +184,28 @@ _WRITE_ACTION_RE = re.compile(
 )
 
 
+def _word_forms(values: Iterable[str]) -> set[str]:
+    """Return conservative English number forms for semantic admission.
+
+    This is deliberately noun-agnostic. Registry-derived vocabulary such as a
+    newly added device kind receives the same treatment as structural Home terms.
+    """
+
+    forms: set[str] = set()
+    for raw in values:
+        value = str(raw or "").casefold()
+        if not value:
+            continue
+        forms.add(value)
+        if len(value) > 4 and value.endswith("ies"):
+            forms.add(value[:-3] + "y")
+        elif len(value) > 4 and value.endswith(("ches", "shes", "xes", "zes")):
+            forms.add(value[:-2])
+        elif len(value) > 2 and value.endswith("s") and not value.endswith("ss"):
+            forms.add(value[:-1])
+    return forms
+
+
 @dataclass(frozen=True, slots=True)
 class UnderstandingResult:
     original_text: str
@@ -234,7 +257,15 @@ class UnderstandingEngine:
         return candidate
 
     async def _registry_lexicon(self) -> tuple[set[str], set[str], set[str]]:
-        snapshot = await self.registry.ensure_loaded()
+        try:
+            snapshot = await self.registry.ensure_loaded()
+        except Exception as exc:
+            # Semantic admission must remain available when HA is temporarily
+            # unreachable. Cached registry vocabulary is safe to reuse; with no
+            # cache, the caller still has the structural Home vocabulary and
+            # will fail inside the Home tool family rather than another domain.
+            logger.warning("Registry vocabulary unavailable: %s", exc)
+            return self._lexicon_cache or (set(), set(), set())
         stamp = str(snapshot.refreshed_at or "")
         if self._lexicon_cache is not None and stamp == self._lexicon_stamp:
             return self._lexicon_cache
@@ -407,7 +438,7 @@ class UnderstandingEngine:
 
         parts = re.findall(r"[A-Za-z0-9']+|[^A-Za-z0-9']+", interpreted)
         write_action = bool(_WRITE_ACTION_RE.search(interpreted))
-        original_words = set(re.findall(r"[a-z]+", interpreted.casefold()))
+        original_words = _word_forms(re.findall(r"[a-z]+", interpreted.casefold()))
         preliminary_home = bool(original_words & _HOME_WORDS or write_action)
         candidates = set(_HOME_WORDS) | set(_ROUTER_WORDS) | set(anchor_tokens)
         if preliminary_home:
@@ -440,12 +471,16 @@ class UnderstandingEngine:
 
         lowered = interpreted.casefold()
         recent = " ".join(str(item.get("content", "")) for item in history[-6:]).casefold()
+        current_words = _word_forms(re.findall(r"[a-z]+", lowered))
+        recent_words = _word_forms(re.findall(r"[a-z]+", recent))
+        registry_words = _word_forms(device_tokens)
         house_relevant = bool(
-            set(re.findall(r"[a-z]+", lowered)) & _HOME_WORDS
+            current_words & _HOME_WORDS
+            or current_words & registry_words
             or any(phrase in lowered for phrase in phrase_keys if len(phrase) >= 4)
             or (
                 re.search(r"\b(?:it|them|that|those|there|she|he)\b", lowered)
-                and bool(set(re.findall(r"[a-z]+", recent)) & _HOME_WORDS)
+                and bool(recent_words & (_HOME_WORDS | registry_words))
             )
         )
 

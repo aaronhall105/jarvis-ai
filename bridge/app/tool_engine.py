@@ -346,6 +346,7 @@ class ToolEngine:
         requested_action: str | None,
         include_diagnostics: bool,
         limit: int,
+        include_virtual: bool = False,
         restrict_ids: tuple[str, ...] = (),
         principal_id: str = "",
         conversation_id: str = "",
@@ -354,7 +355,12 @@ class ToolEngine:
         """Search compact canonical physical objects, never the raw entity list."""
 
         semantic_scope = str(scope or "HOME").upper()
-        if semantic_scope not in {"HOME", "AREA", "CURRENT_REFERENCE"}:
+        if semantic_scope not in {
+            "HOME",
+            "AREA",
+            "CURRENT_REFERENCE",
+            "CURRENT_RESULT_SET",
+        }:
             raise ValueError("Unsupported semantic home scope")
         if semantic_scope == "HOME" and area_id is not None:
             raise ValueError("Whole-home scope cannot select one area")
@@ -364,7 +370,17 @@ class ToolEngine:
             area_id is not None or len(restrict_ids) != 1
         ):
             raise ValueError("Current-reference scope requires one grounded reference")
+        if semantic_scope == "CURRENT_RESULT_SET" and (area_id is not None or not restrict_ids):
+            raise ValueError("Current-result-set scope requires grounded references")
         kind = str(inventory_kind or "PHYSICAL_DEVICE").upper()
+        if kind not in {
+            "PHYSICAL_DEVICE",
+            "CAPABILITY",
+            "VIRTUAL_TARGET",
+            "ROOM",
+            "HOME_SUMMARY",
+        }:
+            raise ValueError("Unsupported semantic home inventory kind")
         if kind in {"ROOM", "HOME_SUMMARY"}:
             if operation.upper() == "CONTROL":
                 raise ValueError("Room and home summaries are read-only")
@@ -492,6 +508,8 @@ class ToolEngine:
             capability=capability,
             domain=domain,
             state=state,
+            inventory_kind=kind,
+            include_virtual=include_virtual,
             aggregation=aggregation,
             operation=operation,
             requested_action=requested_action,
