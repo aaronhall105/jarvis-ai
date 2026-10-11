@@ -5508,7 +5508,27 @@ class AIEngine:
                 )
                 return fallback_response
 
-            return await self.client.responses.create(**response_kwargs)
+            response = await self.client.responses.create(**response_kwargs)
+            incomplete = getattr(response, "incomplete_details", None)
+            if (
+                str(getattr(response, "status", "") or "") == "incomplete"
+                and str(getattr(incomplete, "reason", "") or "") == "max_output_tokens"
+            ):
+                current_budget = int(
+                    response_kwargs.get("max_output_tokens", self.max_output_tokens)
+                )
+                expanded_budget = min(4000, max(current_budget + 500, current_budget * 2))
+                if expanded_budget > current_budget:
+                    logger.warning(
+                        "Retrying incomplete non-streaming response with expanded output budget "
+                        "current=%s expanded=%s",
+                        current_budget,
+                        expanded_budget,
+                    )
+                    runtime_metrics.increment("openai_incomplete_budget_retries")
+                    response_kwargs["max_output_tokens"] = expanded_budget
+                    response = await self.client.responses.create(**response_kwargs)
+            return response
         except AIEngineError:
             raise
         except AuthenticationError as exc:
