@@ -741,5 +741,7 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     assert "include_virtual" in properties
     assert "actually present in the supplied live Home context" in description
     assert "preserve that predicate in state" in description
+    assert "preserve the exact alpha39" in description
+    assert "filtered ROOM queries" in properties["occupancy_state"]["description"]
     assert "explicitly required" in properties["capability"]["description"]
     assert AIEngine.MAX_SEMANTIC_GROUNDING_RETRIES == 2

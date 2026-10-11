@@ -840,12 +840,57 @@ async def test_broad_area_device_query_resets_prior_semantic_constraints() -> No
     structural_label = await search(
         fixture,
         "devices",
-        terms=[],
+        terms=[
+            "bedroom devices",
+            "devices in bedroom",
+            "things in bedroom",
+            "bedroom appliances",
+        ],
         area_id="bedroom",
         capability=None,
     )
     assert {item["canonical_id"] for item in structural_label["items"]} == {
         item["canonical_id"] for item in result["items"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_distinct_same_named_physical_objects_are_disambiguated_not_merged() -> None:
+    fixture = SemanticFixture(
+        [
+            entity(
+                "media_player.first_display",
+                "Studio Display",
+                domain="media_player",
+                state="off",
+                area_id="studio",
+                area_name="Studio",
+                device_id="first-display",
+                device_name="Studio Display",
+                device_class="tv",
+                model="Model One",
+            ),
+            entity(
+                "media_player.second_display",
+                "Studio Display",
+                domain="media_player",
+                state="off",
+                area_id="studio",
+                area_name="Studio",
+                device_id="second-display",
+                device_name="Studio Display",
+                device_class="tv",
+                model="Model Two",
+            ),
+        ]
+    )
+
+    result = await search(fixture, "tv", terms=["television"], aggregation="COUNT")
+
+    assert result["count"] == 2
+    assert {item["display_name"] for item in result["items"]} == {
+        "Studio Display (Model One)",
+        "Studio Display (Model Two)",
     }
 
 

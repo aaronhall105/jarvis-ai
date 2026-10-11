@@ -2183,6 +2183,9 @@ class AIEngine:
                     "on an explicit current state (for example a state supplied by Home "
                     "Assistant), preserve that predicate in state; never silently turn a "
                     "filtered collection into an unfiltered list. A "
+                    "ROOM collection with an occupancy predicate must preserve the exact alpha39 "
+                    "predicate in occupancy_state; use null only when the user requested every "
+                    "room without an occupancy filter. A "
                     "dwelling-wide scope is HOME even if its ordinary-language description "
                     "resembles a configured area label. AREA means one actual configured room. "
                     "CURRENT_REFERENCE means the exact canonical object already grounded in "
@@ -2275,6 +2278,10 @@ class AIEngine:
                         "state": {"type": ["string", "null"]},
                         "occupancy_state": {
                             "type": ["string", "null"],
+                            "description": (
+                                "Exact alpha39 room occupancy predicate. Preserve it for filtered "
+                                "ROOM queries; null means the user explicitly requested all rooms."
+                            ),
                             "enum": [
                                 "OCCUPIED",
                                 "LIKELY_OCCUPIED",

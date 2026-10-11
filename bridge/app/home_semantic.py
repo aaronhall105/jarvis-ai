@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import re
@@ -642,6 +642,59 @@ class HomeSemanticEngine:
             )
         )
 
+    @staticmethod
+    def _disambiguate_display_names(
+        items: Sequence[CanonicalHomeObject],
+    ) -> tuple[CanonicalHomeObject, ...]:
+        """Keep distinct grounded identities visibly distinct without merging by name."""
+
+        collisions: dict[tuple[str, str], list[CanonicalHomeObject]] = {}
+        for item in items:
+            collisions.setdefault(
+                (_normalise(item.area_id), _normalise(item.display_name)), []
+            ).append(item)
+
+        result: list[CanonicalHomeObject] = []
+        for item in items:
+            peers = collisions[(_normalise(item.area_id), _normalise(item.display_name))]
+            if len(peers) == 1:
+                result.append(item)
+                continue
+            primary = next(
+                (
+                    entity
+                    for entity in item.entities
+                    if str(entity.get("entity_id") or "") == item.primary_entity_id
+                ),
+                item.entities[0],
+            )
+            qualifier = next(
+                (
+                    value
+                    for raw in (
+                        primary.get("device_model"),
+                        primary.get("device_manufacturer"),
+                        primary.get("platform"),
+                    )
+                    if (value := str(raw or "").strip())
+                    and _normalise(value) not in _normalise(item.display_name)
+                ),
+                item.canonical_id.rsplit(":", 1)[-1][:8],
+            )
+            display_name = f"{item.display_name} ({qualifier})"
+            aliases = tuple(
+                sorted({*item.aliases, item.display_name, display_name}, key=str.casefold)
+            )
+            result.append(
+                replace(
+                    item,
+                    display_name=display_name,
+                    aliases=aliases,
+                    semantic_text=_normalise(" ".join(aliases)),
+                )
+            )
+        return tuple(result)
+
     @classmethod
     def _graph_from(cls, rows: Sequence[Mapping[str, Any]]) -> SemanticHomeGraph:
         enabled = [
@@ -708,13 +761,13 @@ class HomeSemanticEngine:
                 )
             )
 
-        physical = tuple(
+        physical = cls._disambiguate_display_names(
             sorted(
                 (item for item in objects if item.object_role == "PHYSICAL"),
                 key=lambda item: ((item.area_name or "").casefold(), item.display_name.casefold()),
             )
         )
-        virtual = tuple(
+        virtual = cls._disambiguate_display_names(
             sorted(
                 (item for item in objects if item.object_role != "PHYSICAL"),
                 key=lambda item: ((item.area_name or "").casefold(), item.display_name.casefold()),
@@ -889,17 +942,25 @@ class HomeSemanticEngine:
                 continue
             concept_list.append(cleaned)
         inventory_tokens = _tokens(inventory_kind)
-        concepts = tuple(
-            value
-            for value in concept_list
-            if value not in {"*", "any", "all"}
-            and not (
-                _tokens(value)
-                and {
-                    token[:-1] if len(token) > 3 and token.endswith("s") else token
-                    for token in _normalise(value).split()
-                }
-                <= inventory_tokens
+
+        def inventory_label(value: str) -> bool:
+            stems = {
+                token[:-1] if len(token) > 3 and token.endswith("s") else token
+                for token in _normalise(value).split()
+            }
+            return bool(stems) and stems <= inventory_tokens
+
+        broad_target = bool(
+            concept_list
+            and (concept_list[0] in {"*", "any", "all"} or inventory_label(concept_list[0]))
+        )
+        concepts = (
+            ()
+            if broad_target
+            else tuple(
+                value
+                for value in concept_list
+                if value not in {"*", "any", "all"} and not inventory_label(value)
             )
         )
         eligible: list[CanonicalHomeObject] = []
