@@ -178,6 +178,44 @@ def test_semantic_home_response_can_force_generic_discovery_tool() -> None:
     assert kwargs["tool_choice"] == {"type": "function", "name": "search_home"}
 
 
+@pytest.mark.asyncio
+async def test_non_streaming_tool_response_recovers_from_output_budget_exhaustion() -> None:
+    engine = AIEngine.__new__(AIEngine)
+    engine.model = "gpt-5-mini"
+    engine.executive_config = ExecutiveConfig()
+    engine.executive_transport = None
+    engine.max_output_tokens = 2600
+    engine.voice_max_output_tokens = 1800
+    engine.text_verbosity = "low"
+    engine.reasoning_effort = "low"
+    first = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+    )
+    completed = SimpleNamespace(status="completed", incomplete_details=None)
+    create = AsyncMock(side_effect=[first, completed])
+    engine.client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    actor = UserContext.from_request(
+        user_id="aaron",
+        user_name="Aaron",
+        user_is_admin=True,
+        device_id="phone",
+        voice_mode=False,
+    )
+
+    result = await engine._create_response(
+        input_items=[{"role": "user", "content": "switch the device off"}],
+        tool_definitions=[{"type": "function", "name": "search_home", "parameters": {}}],
+        actor=actor,
+        force_tool_name="search_home",
+    )
+
+    assert result is completed
+    assert create.await_count == 2
+    assert create.await_args_list[0].kwargs["max_output_tokens"] == 240
+    assert create.await_args_list[1].kwargs["max_output_tokens"] == 740
+
+
 def test_reasoning_configuration_is_documented_input_item_not_ws_event() -> None:
     assert reasoning_configuration_item("high") == {
         "type": "configuration_update",
