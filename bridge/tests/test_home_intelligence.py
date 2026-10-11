@@ -726,3 +726,5 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
     assert "semantic_target" in properties
     assert "query" not in properties
     assert "use_current_reference" not in properties
+    assert "explicitly required" in properties["capability"]["description"]
+    assert AIEngine.MAX_SEMANTIC_GROUNDING_RETRIES == 2
