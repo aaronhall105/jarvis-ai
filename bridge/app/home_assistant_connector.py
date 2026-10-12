@@ -273,6 +273,9 @@ class HomeAssistantConnector(Connector):
                     limit=max(1, min(int(payload.get("limit", 12)), 50)),
                     include_virtual=bool(payload.get("include_virtual")),
                     capability_role_filter=str(payload.get("capability_role_filter") or "ANY"),
+                    parent_purpose=(
+                        str(payload["parent_purpose"]) if payload.get("parent_purpose") else None
+                    ),
                     reference_dependency=str(payload.get("reference_dependency") or "NONE"),
                     restrict_ids=tuple(str(item) for item in payload.get("restrict_ids") or ()),
                     principal_id=str(request.principal_id or ""),

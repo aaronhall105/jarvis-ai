@@ -747,6 +747,9 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
         "AUXILIARY_ONLY",
         "ANY",
     }
+    assert "parent_purpose" in properties
+    assert "returned row represents" in properties["inventory_kind"]["description"]
+    assert "does not replace this filter" in properties["state"]["description"]
     assert "semantic_target" in properties
     assert "query" not in properties
     assert "use_current_reference" not in properties

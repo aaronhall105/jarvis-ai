@@ -975,6 +975,7 @@ class DialogueManager:
                                 "capability_role_filter": semantic_result.get(
                                     "capability_role_filter"
                                 ),
+                                "parent_purpose": semantic_result.get("parent_purpose"),
                                 "values": [
                                     {
                                         "reference_id": item.reference_id,

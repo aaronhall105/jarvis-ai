@@ -299,6 +299,7 @@ async def test_semantic_reference_dependency_must_match_grounded_scope(tmp_path)
                 "state": None,
                 "occupancy_state": None,
                 "capability_role_filter": "PRIMARY_ONLY",
+                "parent_purpose": None,
                 "requested_action": None,
                 "include_diagnostics": False,
                 "include_virtual": False,
