@@ -226,9 +226,12 @@ Home Assistant tools:
 - Treat a natural elliptical object-plus-desired-state command as CONTROL when its
   ordinary conversational reading is imperative. Reserve STATE for questions about
   current state. This applies generically to every discovered capability and object.
-- For arbitrary named home objects, use search_home. Search canonical physical
-  objects first and filter by area and required capability. Do not use raw entity
-  search merely because a canonical search returns several child surfaces.
+- For arbitrary named home objects, use search_home. Choose physical-object versus
+  capability inventory from what each requested result is meant to represent; do
+  not default to physical objects when the user means user-facing surfaces. Filter
+  by area, capability role, parent purpose and requested state when those constraints
+  are part of the meaning. Do not use raw entity search merely because a canonical
+  search returns several child surfaces.
 - Normalise genuine semantic equivalents in search_home semantic_terms using your
   language understanding. Do not invent Home Assistant names or IDs.
 - Before a canonical action, call search_home with semantic_operation CONTROL and
@@ -2176,9 +2179,17 @@ class AIEngine:
                     "is mandatory for a follow-up that keeps that object while omitting its "
                     "scope. Do not reconstruct its identity from prior text. Raw "
                     "diagnostic and observation entities are excluded by default. Use "
-                    "inventory_kind PHYSICAL_DEVICE for endpoint/device identity, CAPABILITY for "
-                    "a user-facing surface such as lighting or measurement even when its parent "
-                    "device has another product kind, VIRTUAL_TARGET for an explicitly requested "
+                    "inventory_kind PHYSICAL_DEVICE only when the requested collection members "
+                    "are physical endpoints or product identities. Use CAPABILITY when the noun "
+                    "means a user-facing control, state, or measurement surface, including a "
+                    "count/list of those surfaces; a parent device having that surface does not "
+                    "make the device itself an ordinary member of the collection. For an ordinary "
+                    "collection of surfaces that are the devices' main purpose, use PRIMARY_ONLY. "
+                    "When the user instead asks which physical devices expose a surface, use "
+                    "PHYSICAL_DEVICE with ANY. When a capability is explicitly attached to a "
+                    "different parent purpose, put only the surface concept in semantic_target, "
+                    "use CAPABILITY with parent_purpose for the parent concept, and apply the role "
+                    "filter warranted by the meaning. Use VIRTUAL_TARGET for an explicitly requested "
                     "group/helper, ROOM only for derived room occupancy, and HOME_SUMMARY only "
                     "for a whole-home overview. Use semantic_target='*' for an intentionally broad "
                     "inventory collection rather than inheriting an earlier noun. A "
@@ -2219,6 +2230,12 @@ class AIEngine:
                                 "ROOM",
                                 "HOME_SUMMARY",
                             ],
+                            "description": (
+                                "What each returned row represents. PHYSICAL_DEVICE counts physical "
+                                "endpoints/product identities. CAPABILITY counts user-facing surfaces "
+                                "even when their parent device has a different purpose. Do not use "
+                                "PHYSICAL_DEVICE merely because capabilities belong to devices."
+                            ),
                         },
                         "scope": {
                             "type": "string",
@@ -2295,7 +2312,15 @@ class AIEngine:
                             "type": ["string", "null"],
                             "enum": [*domains, None],
                         },
-                        "state": {"type": ["string", "null"]},
+                        "state": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Required current-state predicate for a filtered query, such as on, "
+                                "off, playing, or unavailable. The capability value state authorises "
+                                "a read but does not replace this filter. Use null only when no current "
+                                "state constraint was requested."
+                            ),
+                        },
                         "occupancy_state": {
                             "type": ["string", "null"],
                             "description": (
@@ -2325,6 +2350,17 @@ class AIEngine:
                                 "collections of things use PRIMARY_ONLY; explicit questions "
                                 "about devices having a capability may include auxiliary roles. "
                                 "Use ANY for non-capability inventory."
+                            ),
+                        },
+                        "parent_purpose": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Free-form grounded purpose of the physical parent when the user "
+                                "specifically means capabilities attached to that kind of device. "
+                                "Use only with CAPABILITY inventory; null when parent purpose is not "
+                                "part of the request. Keep this parent concept out of semantic_target, "
+                                "which names the capability itself. This is semantic metadata, never "
+                                "an entity ID."
                             ),
                         },
                         "requested_action": {
@@ -2371,6 +2407,7 @@ class AIEngine:
                         "state",
                         "occupancy_state",
                         "capability_role_filter",
+                        "parent_purpose",
                         "requested_action",
                         "include_diagnostics",
                         "include_virtual",
@@ -3892,6 +3929,9 @@ class AIEngine:
                 capability_role_filter = str(
                     arguments.get("capability_role_filter") or "ANY"
                 ).upper()
+                parent_purpose = (
+                    str(arguments["parent_purpose"]) if arguments.get("parent_purpose") else None
+                )
                 semantic_limit = max(1, min(int(arguments.get("limit", 12)), 50))
                 read_arguments: dict[str, Any] = {
                     "query": query,
@@ -3909,6 +3949,7 @@ class AIEngine:
                     "include_diagnostics": include_diagnostics,
                     "include_virtual": include_virtual,
                     "capability_role_filter": capability_role_filter,
+                    "parent_purpose": parent_purpose,
                     "reference_dependency": reference_dependency,
                     "limit": semantic_limit,
                     "restrict_ids": list(restrict_ids),
@@ -3942,6 +3983,7 @@ class AIEngine:
                         limit=semantic_limit,
                         include_virtual=include_virtual,
                         capability_role_filter=capability_role_filter,
+                        parent_purpose=parent_purpose,
                         reference_dependency=reference_dependency,
                         restrict_ids=restrict_ids,
                         principal_id=actor.user_key,
@@ -7776,6 +7818,12 @@ class AIEngine:
                         "surfaces, VIRTUAL_TARGET only for an explicitly intended group/helper, "
                         "ROOM for exact alpha39 occupancy states, and HOME_SUMMARY for the existing "
                         "whole-home projection. "
+                        "A collection whose members are user-facing surfaces uses CAPABILITY, not "
+                        "PHYSICAL_DEVICE. Use PRIMARY_ONLY when the surfaces are asked for as "
+                        "ordinary standalone things; use PHYSICAL_DEVICE when the request is for "
+                        "devices that merely expose a surface. For an attached surface constrained "
+                        "by its parent device purpose, supply parent_purpose and the appropriate "
+                        "capability role. Preserve every explicit current-state predicate in state. "
                         "Telegraphic target-plus-end-state language is an explicit CONTROL, not "
                         "a state query, even when no command verb is present. "
                         "Every independent request starts with fresh transient constraints: do not "

@@ -1020,6 +1020,7 @@ class HomeSemanticEngine:
         inventory_kind: str = "PHYSICAL_DEVICE",
         include_virtual: bool = False,
         capability_role_filter: str = "ANY",
+        parent_purpose: str | None = None,
         reference_dependency: str = "NONE",
         include_diagnostics: bool = False,
         aggregation: str = "LIST",
@@ -1037,11 +1038,14 @@ class HomeSemanticEngine:
         wanted_domain = _normalise(domain).replace(" ", "_") or None
         action = _normalise(requested_action).replace(" ", "_") or None
         role_filter = str(capability_role_filter or "ANY").upper()
+        wanted_parent_purpose = _normalise(parent_purpose).replace(" ", "_") or None
         dependency = str(reference_dependency or "NONE").upper()
         if role_filter not in _CAPABILITY_ROLE_FILTERS:
             raise ValueError("Unsupported capability role filter")
         if inventory_kind.upper() != "CAPABILITY" and role_filter != "ANY":
             raise ValueError("Capability role filters require capability inventory")
+        if inventory_kind.upper() != "CAPABILITY" and wanted_parent_purpose:
+            raise ValueError("Parent-purpose filters require capability inventory")
         if operation.upper() == "CONTROL":
             if action not in _ACTION_CAPABILITIES:
                 raise ValueError("A supported requested action is required for control discovery")
@@ -1127,6 +1131,15 @@ class HomeSemanticEngine:
                 "AUXILIARY",
             }:
                 continue
+            if (
+                wanted_parent_purpose
+                and self._score_values(
+                    item.primary_purposes,
+                    (wanted_parent_purpose,),
+                )
+                < 0.65
+            ):
+                continue
             eligible.append(item)
 
         ranked: list[tuple[float, CanonicalHomeObject]] = []
@@ -1169,6 +1182,7 @@ class HomeSemanticEngine:
             "state": state,
             "inventory_kind": inventory_kind.upper(),
             "capability_role_filter": role_filter,
+            "parent_purpose": wanted_parent_purpose,
             "reference_dependency": dependency,
             "include_virtual": include_virtual,
             "aggregation": aggregation.upper(),
@@ -1179,6 +1193,7 @@ class HomeSemanticEngine:
             "inventory_kind": inventory_kind.upper(),
             "include_virtual": include_virtual,
             "capability_role_filter": role_filter,
+            "parent_purpose": wanted_parent_purpose,
             "reference_dependency": dependency,
             "operation": operation.upper(),
             "aggregation": aggregation.upper(),

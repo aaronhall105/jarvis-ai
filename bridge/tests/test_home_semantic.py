@@ -112,6 +112,7 @@ async def search(
     include_virtual: bool = False,
     domain: str | None = None,
     capability_role_filter: str = "ANY",
+    parent_purpose: str | None = None,
 ) -> dict[str, Any]:
     return await fixture.engine.search(
         query=query,
@@ -123,6 +124,7 @@ async def search(
         inventory_kind=inventory_kind,
         include_virtual=include_virtual,
         capability_role_filter=capability_role_filter,
+        parent_purpose=parent_purpose,
         aggregation=aggregation,
         operation=operation,
         requested_action=action,
@@ -343,6 +345,28 @@ async def test_primary_light_collection_excludes_but_does_not_hide_auxiliary_lig
         request_text="How many are there?",
     )
     assert response and response.startswith("I found 2 main lights:")
+
+
+@pytest.mark.asyncio
+async def test_attached_capabilities_filter_by_free_form_parent_purpose_and_state() -> None:
+    result = await search(
+        capability_role_fixture(),
+        "light",
+        terms=[],
+        domain="light",
+        state="on",
+        inventory_kind="CAPABILITY",
+        capability_role_filter="AUXILIARY_ONLY",
+        parent_purpose="camera",
+        aggregation="LIST",
+        capability=None,
+    )
+
+    assert result["count"] == 1
+    assert result["items"][0]["entity_roles"] == {"light.patio_flood": "PRIMARY_CONTROL"}
+    assert result["items"][0]["capability_role"] == "AUXILIARY"
+    assert result["items"][0]["primary_purposes"] == ["camera"]
+    assert result["parent_purpose"] == "camera"
 
 
 def television_fixture() -> SemanticFixture:
