@@ -943,9 +943,7 @@ class HomeSemanticEngine:
             phrase_tokens = _tokens(phrase)
             if phrase in normalised_values:
                 best = max(best, 1.0)
-            elif any(
-                f" {phrase} " in f" {value} " for value in normalised_values if len(phrase) >= 3
-            ):
+            elif any(f" {phrase} " in f" {value} " for value in normalised_values):
                 best = max(best, 0.9)
             elif phrase_tokens:
                 coverage = len(phrase_tokens & value_tokens) / len(phrase_tokens)
