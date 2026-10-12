@@ -232,6 +232,11 @@ Home Assistant tools:
   by area, capability role, parent purpose and requested state when those constraints
   are part of the meaning. Do not use raw entity search merely because a canonical
   search returns several child surfaces.
+- For an ordinary plural capability collection, its members are the primary
+  user-facing surfaces: use CAPABILITY with PRIMARY_ONLY. PRIMARY_OR_AUXILIARY is
+  never the default; use it only when the user explicitly asks about attached or
+  exposed capabilities. When the requested members are physical parents that have
+  a capability, use PHYSICAL_DEVICE with ANY instead.
 - Normalise genuine semantic equivalents in search_home semantic_terms using your
   language understanding. Do not invent Home Assistant names or IDs.
 - For a why question about why grounded items were included in or excluded from a
@@ -2203,6 +2208,8 @@ class AIEngine:
                     "count/list of those surfaces; a parent device having that surface does not "
                     "make the device itself an ordinary member of the collection. For an ordinary "
                     "collection of surfaces that are the devices' main purpose, use PRIMARY_ONLY. "
+                    "PRIMARY_OR_AUXILIARY is never the default for an ordinary plural capability "
+                    "collection; it requires an explicit request for attached or exposed surfaces. "
                     "When the user instead asks which physical devices expose a surface, use "
                     "PHYSICAL_DEVICE with ANY. When a capability is explicitly attached to a "
                     "different parent purpose, put only the surface concept in semantic_target, "
@@ -2369,8 +2376,10 @@ class AIEngine:
                             "description": (
                                 "For CAPABILITY inventory, distinguish a device's ordinary "
                                 "primary purpose from useful attached capabilities. Ordinary "
-                                "collections of things use PRIMARY_ONLY; explicit questions "
-                                "about devices having a capability may include auxiliary roles. "
+                                "plural capability collections use PRIMARY_ONLY. "
+                                "PRIMARY_OR_AUXILIARY is never the default and requires an explicit "
+                                "request for attached or exposed capabilities. Questions whose "
+                                "members are devices having a capability use PHYSICAL_DEVICE with ANY. "
                                 "Use ANY for non-capability inventory."
                             ),
                         },
@@ -7847,8 +7856,10 @@ class AIEngine:
                         "whole-home projection. "
                         "A collection whose members are user-facing surfaces uses CAPABILITY, not "
                         "PHYSICAL_DEVICE. Use PRIMARY_ONLY when the surfaces are asked for as "
-                        "ordinary standalone things; use PHYSICAL_DEVICE when the request is for "
-                        "devices that merely expose a surface. For an attached surface constrained "
+                        "ordinary standalone things. PRIMARY_OR_AUXILIARY is never the default; "
+                        "reserve it for an explicit request for attached or exposed surfaces. Use "
+                        "PHYSICAL_DEVICE with ANY when the requested members are devices that merely "
+                        "expose a surface. For an attached surface constrained "
                         "by its parent device purpose, supply parent_purpose and the appropriate "
                         "capability role. Preserve every explicit current-state predicate in state. "
                         "Telegraphic target-plus-end-state language is an explicit CONTROL, not "

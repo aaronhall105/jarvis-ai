@@ -760,6 +760,8 @@ async def test_model_semantics_can_request_sets_but_cannot_supply_entity_ids() -
         "AUXILIARY_ONLY",
         "ANY",
     }
+    assert "never the default" in properties["capability_role_filter"]["description"]
+    assert "physical devices expose a surface" in description
     assert "parent_purpose" in properties
     assert "returned row represents" in properties["inventory_kind"]["description"]
     assert "does not replace this filter" in properties["state"]["description"]
