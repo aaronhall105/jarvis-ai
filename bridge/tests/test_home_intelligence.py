@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.ai_engine import AIEngine
+from app.ai_engine import AIEngine, _normalise_semantic_inventory_kind
 from app.dialogue_manager import DialogueManager
 from app.home_intelligence import (
     DeviceAvailability,
@@ -25,6 +25,19 @@ AREAS = (
     {"area_id": "bedroom", "name": "Bedroom"},
     {"area_id": "hallway", "name": "Hallway"},
 )
+
+
+def test_capability_role_constraints_repair_physical_inventory_mismatch() -> None:
+    assert (
+        _normalise_semantic_inventory_kind("PHYSICAL_DEVICE", "PRIMARY_ONLY", None) == "CAPABILITY"
+    )
+    assert (
+        _normalise_semantic_inventory_kind("PHYSICAL_DEVICE", "ANY", "security device")
+        == "CAPABILITY"
+    )
+    assert _normalise_semantic_inventory_kind("PHYSICAL_DEVICE", "ANY", None) == "PHYSICAL_DEVICE"
+    assert _normalise_semantic_inventory_kind("ROOM", "PRIMARY_ONLY", None) == "ROOM"
+
 
 STATES = (
     {

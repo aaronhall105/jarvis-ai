@@ -277,6 +277,27 @@ def capability_role_fixture() -> SemanticFixture:
                 device_name="Conservatory Combo",
                 device_class="light",
             ),
+            entity(
+                "media_player.studio_control_hub",
+                "Studio Control Hub",
+                domain="media_player",
+                state="idle",
+                area_id="studio",
+                area_name="Studio",
+                device_id="studio-control-hub",
+                device_name="Studio Control Hub",
+            ),
+            entity(
+                "light.studio_control_hub_indicator",
+                "Studio Control Hub Indicator",
+                domain="light",
+                state="off",
+                area_id="studio",
+                area_name="Studio",
+                device_id="studio-control-hub",
+                device_name="Studio Control Hub",
+                entity_category="config",
+            ),
         ]
     )
 
@@ -345,6 +366,23 @@ async def test_primary_light_collection_excludes_but_does_not_hide_auxiliary_lig
         request_text="How many are there?",
     )
     assert response and response.startswith("I found 2 main lights:")
+
+
+@pytest.mark.asyncio
+async def test_physical_domain_search_excludes_configuration_only_surfaces() -> None:
+    result = await search(
+        capability_role_fixture(),
+        "light",
+        terms=[],
+        domain="light",
+        inventory_kind="PHYSICAL_DEVICE",
+        capability_role_filter="ANY",
+        aggregation="COUNT",
+        capability=None,
+    )
+
+    assert result["count"] == 5
+    assert "Studio Control Hub" not in {item["display_name"] for item in result["items"]}
 
 
 @pytest.mark.asyncio
