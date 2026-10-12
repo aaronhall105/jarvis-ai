@@ -1395,6 +1395,30 @@ def test_state_presentation_deduplicates_identical_canonical_statements() -> Non
     assert response == "Lounge Display is off."
 
 
+def test_explanation_search_preserves_model_answer_ownership() -> None:
+    result = {
+        "success": True,
+        "operation": "EXPLAIN",
+        "aggregation": "LIST",
+        "query": "attached capability",
+        "count": 1,
+        "items": [
+            {
+                "canonical_id": "capability:example",
+                "display_name": "Attached capability",
+                "state": "off",
+            }
+        ],
+    }
+
+    response = render_home_search_evidence(
+        [{"tool": "search_home", "arguments": {}, "result": result}],
+        request_text="Why was that excluded?",
+    )
+
+    assert response is None
+
+
 @pytest.mark.asyncio
 async def test_structural_domain_term_cannot_broaden_semantic_count() -> None:
     fixture = television_fixture()

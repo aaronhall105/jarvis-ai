@@ -234,6 +234,10 @@ Home Assistant tools:
   search returns several child surfaces.
 - Normalise genuine semantic equivalents in search_home semantic_terms using your
   language understanding. Do not invent Home Assistant names or IDs.
+- For a why question about why grounded items were included in or excluded from a
+  previous Home result, use semantic_operation EXPLAIN. Search for the structural
+  comparison evidence needed for the explanation, including capability role or
+  parent purpose when relevant; do not replace the explanation with a state query.
 - Before a canonical action, call search_home with semantic_operation CONTROL and
   the requested capability. Execute only an exact canonical candidate using the
   returned short-lived handle. If more than one plausible canonical candidate
@@ -2206,7 +2210,10 @@ class AIEngine:
                     "CURRENT_REFERENCE means the exact canonical object already grounded in "
                     "WorkingContext. reference_dependency declares whether the current meaning "
                     "actually needs stored context; never select a current object or set merely "
-                    "because it exists or shares a topic. semantic_target contains only the target concept, without "
+                    "because it exists or shares a topic. For a why question about why items were "
+                    "included in or excluded from a grounded Home result, use EXPLAIN and retrieve "
+                    "the relevant structural comparison evidence; do not substitute a state query. "
+                    "semantic_target contains only the target concept, without "
                     "scope, operation, or state words. area_id is set only for AREA."
                 ),
                 "parameters": {
@@ -2218,7 +2225,8 @@ class AIEngine:
                             "description": (
                                 "CONTROL means the user wants a supported state change now, "
                                 "including terse target-plus-state commands. QUERY only reads; "
-                                "EXPLAIN grounds a follow-up explanation."
+                                "EXPLAIN grounds a follow-up explanation, including why items were "
+                                "included in or excluded from a prior result."
                             ),
                         },
                         "inventory_kind": {
