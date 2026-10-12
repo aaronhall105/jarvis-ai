@@ -507,6 +507,7 @@ async def test_semantic_phrases_do_not_match_partial_vendor_or_name_tokens() -> 
         "Bedroom TV",
         "Lounge Screen",
     }
+    assert HomeSemanticEngine._score_values(("Living Room TV (Cast)",), ("tv",)) == 0.9
 
 
 @pytest.mark.asyncio
