@@ -1578,6 +1578,20 @@ def _normalise_space(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def _normalise_semantic_inventory_kind(
+    inventory_kind: str,
+    capability_role_filter: str,
+    parent_purpose: str | None,
+) -> str:
+    """Repair the model's one structurally unambiguous inventory mismatch."""
+
+    kind = str(inventory_kind or "PHYSICAL_DEVICE").upper()
+    role_filter = str(capability_role_filter or "ANY").upper()
+    if kind == "PHYSICAL_DEVICE" and (role_filter != "ANY" or parent_purpose):
+        return "CAPABILITY"
+    return kind
+
+
 def _clean_reply(value: str) -> str:
     value = value.strip()
     value = re.sub(r"[ \t]+", " ", value)
@@ -3926,7 +3940,6 @@ class AIEngine:
                         )
                 semantic_aggregation = str(arguments.get("aggregation") or "LIST").upper()
                 semantic_operation = str(arguments.get("semantic_operation") or "QUERY").upper()
-                inventory_kind = str(arguments.get("inventory_kind") or "PHYSICAL_DEVICE").upper()
                 occupancy_state = (
                     str(arguments["occupancy_state"]).upper()
                     if arguments.get("occupancy_state")
@@ -3940,6 +3953,12 @@ class AIEngine:
                 parent_purpose = (
                     str(arguments["parent_purpose"]) if arguments.get("parent_purpose") else None
                 )
+                inventory_kind = _normalise_semantic_inventory_kind(
+                    str(arguments.get("inventory_kind") or "PHYSICAL_DEVICE"),
+                    capability_role_filter,
+                    parent_purpose,
+                )
+                arguments["inventory_kind"] = inventory_kind
                 semantic_limit = max(1, min(int(arguments.get("limit", 12)), 50))
                 read_arguments: dict[str, Any] = {
                     "query": query,

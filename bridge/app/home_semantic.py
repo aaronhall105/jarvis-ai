@@ -285,6 +285,15 @@ _CAPABILITY_ROLE_FILTERS = {
     "ANY",
 }
 
+_NON_IDENTITY_ENTITY_ROLES = {
+    "OBSERVATION",
+    "MEASUREMENT",
+    "DIAGNOSTIC",
+    "CONFIGURATION",
+    "UPDATE",
+    "EVENT",
+}
+
 _SUPPORTING_MEASUREMENT_CLASSES = {
     "battery",
     "current",
@@ -599,7 +608,12 @@ class HomeSemanticEngine:
         physical_ids = tuple(
             sorted({str(item.get("device_id")) for item in ordered if item.get("device_id")})
         )
-        aliases: set[str] = {resolved_name, resolved_kind, *domains}
+        semantic_domains = {
+            str(item.get("domain") or "")
+            for item in ordered
+            if item.get("domain") and _entity_role(item) not in _NON_IDENTITY_ENTITY_ROLES
+        }
+        aliases: set[str] = {resolved_name, resolved_kind, *semantic_domains}
         for item in ordered:
             aliases.update(
                 str(item.get(key) or "").strip()
@@ -611,8 +625,8 @@ class HomeSemanticEngine:
                     "device_class",
                 )
             )
-            # Observation/measurement names describe evidence, not physical identity.
-            if _entity_role(item) not in {"OBSERVATION", "MEASUREMENT"} or not physical_ids:
+            # Supporting entity names describe capabilities/evidence, not physical identity.
+            if _entity_role(item) not in _NON_IDENTITY_ENTITY_ROLES or not physical_ids:
                 aliases.update(
                     str(item.get(key) or "").strip()
                     for key in ("registry_name", "registry_original_name", "name")
@@ -1114,8 +1128,18 @@ class HomeSemanticEngine:
                 continue
             if area_id and item.area_id != area_id:
                 continue
-            if wanted_domain and wanted_domain not in item.domains:
-                continue
+            if wanted_domain:
+                domain_members = tuple(
+                    entity
+                    for entity in item.entities
+                    if _normalise(entity.get("domain")).replace(" ", "_") == wanted_domain
+                )
+                if not domain_members:
+                    continue
+                if inventory_kind.upper() == "PHYSICAL_DEVICE" and all(
+                    _entity_role(entity) in _NON_IDENTITY_ENTITY_ROLES for entity in domain_members
+                ):
+                    continue
             if wanted_capability and wanted_capability not in item.capabilities:
                 continue
             if state and not any(_matches_state(entity, state) for entity in item.entities):
