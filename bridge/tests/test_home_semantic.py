@@ -466,6 +466,50 @@ async def test_collection_variations_count_canonical_objects_not_observation_ent
 
 
 @pytest.mark.asyncio
+async def test_semantic_phrases_do_not_match_partial_vendor_or_name_tokens() -> None:
+    fixture = television_fixture()
+    fixture.rows.extend(
+        [
+            entity(
+                "binary_sensor.mobile_connected",
+                "Mobile Connected",
+                domain="binary_sensor",
+                state="on",
+                area_id="study",
+                area_name="Study",
+                device_id="mobile-device",
+                device_name="Mobile Device",
+                device_class="connectivity",
+                manufacturer="Samsung",
+            ),
+            entity(
+                "sensor.sun_next_rising",
+                "Sun Next Rising",
+                domain="sensor",
+                state="tomorrow",
+                area_id="outside",
+                area_name="Outside",
+                device_id="sun-device",
+                device_name="Sun",
+            ),
+        ]
+    )
+
+    result = await search(
+        fixture,
+        "television",
+        terms=["tv", "smart tv", "samsung tv"],
+        aggregation="COUNT",
+    )
+
+    assert result["count"] == 2
+    assert {item["display_name"] for item in result["items"]} == {
+        "Bedroom TV",
+        "Lounge Screen",
+    }
+
+
+@pytest.mark.asyncio
 async def test_bedroom_target_is_canonical_and_capability_filtered() -> None:
     fixture = television_fixture()
     result = await search(

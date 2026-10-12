@@ -944,7 +944,7 @@ class HomeSemanticEngine:
             if phrase in normalised_values:
                 best = max(best, 1.0)
             elif any(
-                phrase in value or value in phrase for value in normalised_values if len(value) >= 3
+                f" {phrase} " in f" {value} " for value in normalised_values if len(phrase) >= 3
             ):
                 best = max(best, 0.9)
             elif phrase_tokens:
