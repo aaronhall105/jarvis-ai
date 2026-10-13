@@ -467,7 +467,7 @@ def render_home_search_evidence(
 
     if technical_output_requested(request_text):
         return None
-    if any(call.get("tool") == "execute_home_action" for call in calls):
+    if any(call.get("tool") in {"execute_home_action", "execute_home_parameter"} for call in calls):
         return None
     call = next(
         (
@@ -507,6 +507,26 @@ def render_home_search_evidence(
                 return f"No rooms are currently {label}."
             return "I found no matching rooms."
         return f"I found no canonical home items matching {query}."
+    requested_parameter = str(result.get("requested_parameter") or "").strip()
+    if requested_parameter and aggregation == "STATE" and len(items) == 1:
+        parameters = items[0].get("parameterized_capabilities") or ()
+        match = next(
+            (
+                value
+                for value in parameters
+                if isinstance(value, Mapping)
+                and str(value.get("parameter") or "").casefold() == requested_parameter.casefold()
+            ),
+            None,
+        )
+        if isinstance(match, Mapping):
+            value = match.get("current_value")
+            unit = str(match.get("unit") or "")
+            if value is not None:
+                return (
+                    f"{items[0].get('display_name') or 'That device'} {requested_parameter} "
+                    f"is {value}{unit}."
+                )
     presented_names = list(
         dict.fromkeys(str(item.get("display_name") or "Home item") for item in items[:6])
     )

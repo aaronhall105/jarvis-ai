@@ -269,6 +269,18 @@ class HomeAssistantConnector(Connector):
                         if payload.get("requested_action")
                         else None
                     ),
+                    requested_parameter=(
+                        str(payload["requested_parameter"])
+                        if payload.get("requested_parameter")
+                        else None
+                    ),
+                    parameter_mode=str(payload.get("parameter_mode") or "NONE"),
+                    parameter_direction=str(payload.get("parameter_direction") or "NONE"),
+                    parameter_value=payload.get("parameter_value"),
+                    parameter_unit=(
+                        str(payload["parameter_unit"]) if payload.get("parameter_unit") else None
+                    ),
+                    target_selection=str(payload.get("target_selection") or "SINGLE"),
                     include_diagnostics=bool(payload.get("include_diagnostics")),
                     limit=max(1, min(int(payload.get("limit", 12)), 50)),
                     include_virtual=bool(payload.get("include_virtual")),
@@ -325,6 +337,17 @@ class HomeAssistantConnector(Connector):
                     handle=str(payload.get("handle") or ""),
                     canonical_ids=[str(item) for item in raw_ids],
                     action=str(payload.get("action") or ""),
+                    principal_id=str(request.principal_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    request_id=str(request.request_id),
+                )
+            if operation == "execute_home_parameter":
+                raw_ids = payload.get("canonical_ids") or ()
+                if not isinstance(raw_ids, (list, tuple)):
+                    raise ValueError("Canonical home targets must be a list")
+                return await self.tools.execute_home_parameter(
+                    handle=str(payload.get("handle") or ""),
+                    canonical_ids=[str(item) for item in raw_ids],
                     principal_id=str(request.principal_id or ""),
                     conversation_id=str(request.conversation_id or ""),
                     request_id=str(request.request_id),
@@ -461,6 +484,11 @@ class HomeAssistantConnector(Connector):
                         "config_key",
                         "canonical_ids",
                         "action",
+                        "parameter",
+                        "parameter_mode",
+                        "requested_value",
+                        "requested_unit",
+                        "outcomes",
                         "verification_status",
                     )
                     if key in data

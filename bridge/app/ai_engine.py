@@ -91,6 +91,7 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "propose_admin_change",
     "prepare_gmail_message",
     "execute_home_action",
+    "execute_home_parameter",
 }
 
 
@@ -247,6 +248,16 @@ Home Assistant tools:
   the requested capability. Execute only an exact canonical candidate using the
   returned short-lived handle. If more than one plausible canonical candidate
   remains, ask which one in a single concise question.
+- Parameterized controls are grounded capabilities, not raw Home Assistant calls.
+  For a requested level, temperature, position, volume, option, colour or similar
+  value, put the free semantic parameter name, absolute/relative mode, direction,
+  value and user-stated unit in search_home. Never invent a service, field, entity
+  ID or payload. Then call execute_home_parameter only with its opaque handle and
+  exact frozen candidate IDs. For a qualitative relative request, use RELATIVE
+  with INCREASE or DECREASE and a null value; Core applies one bounded generic step.
+  For a parameter-state question, use QUERY with requested_parameter and no change
+  mode. Use ALL_MATCHES only when the user explicitly requests every grounded match;
+  otherwise use SINGLE and clarify real ambiguity.
 - When a follow-up keeps or pronominally refers to the single canonical object
   grounded in WorkingContext, set scope=CURRENT_REFERENCE. Do not reconstruct its
   identity from remembered words or invent its area; Core will revalidate the
@@ -1904,6 +1915,34 @@ class AIEngine:
         definitions.append(
             {
                 "type": "function",
+                "name": "execute_home_parameter",
+                "description": (
+                    "Execute and verify the opaque parameter plan returned by search_home. "
+                    "Pass the handle and the exact frozen canonical target set unchanged. "
+                    "Never supply an entity ID, Home Assistant service, field, payload, or "
+                    "replacement value here; Core already validated those in the plan."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "handle": {"type": "string"},
+                        "canonical_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 20,
+                        },
+                    },
+                    "required": ["handle", "canonical_ids"],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        )
+
+        definitions.append(
+            {
+                "type": "function",
                 "name": "control_referenced_set",
                 "description": (
                     "Turn on or off the exact grounded light/switch result set from the "
@@ -2186,7 +2225,8 @@ class AIEngine:
                     "rather than the objects they mention, and groups do not count as physical "
                     "endpoints. Use "
                     "this for named things, arbitrary device kinds, counts, lists, state "
-                    "questions, and as the mandatory discovery step before execute_home_action. "
+                    "questions, and as the mandatory discovery step before execute_home_action "
+                    "or execute_home_parameter. "
                     "Infer the semantic operation from meaning, not exact wording. "
                     "A telegraphic target plus an achievable desired end state is CONTROL even "
                     "when the user omits a verb; QUERY is only for retrieving information. "
@@ -2197,7 +2237,8 @@ class AIEngine:
                     "capabilities without a phrase catalogue. Prefer equivalents and product "
                     "families actually present in the supplied live Home context; do not invent "
                     "unconfigured vendor examples. For CONTROL, supply the exact "
-                    "requested action and capability. Use scope CURRENT_REFERENCE only when the "
+                    "requested action and capability, or the semantic parameter request. Use "
+                    "scope CURRENT_REFERENCE only when the "
                     "conversation's grounded canonical object is the intended referent; this "
                     "is mandatory for a follow-up that keeps that object while omitting its "
                     "scope. Do not reconstruct its identity from prior text. Raw "
@@ -2414,6 +2455,42 @@ class AIEngine:
                                 None,
                             ],
                         },
+                        "requested_parameter": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Free semantic name of a grounded parameter such as a level, "
+                                "temperature, position, volume, option or colour. Core maps it "
+                                "only to live advertised capability metadata. Null for discrete "
+                                "actions and ordinary identity/state queries."
+                            ),
+                        },
+                        "parameter_mode": {
+                            "type": "string",
+                            "enum": ["NONE", "ABSOLUTE", "RELATIVE"],
+                        },
+                        "parameter_direction": {
+                            "type": "string",
+                            "enum": ["NONE", "INCREASE", "DECREASE"],
+                        },
+                        "parameter_value": {
+                            "type": ["number", "string", "null"],
+                            "description": (
+                                "User-requested semantic value or delta. Null for a qualitative "
+                                "relative adjustment or a read-only parameter query."
+                            ),
+                        },
+                        "parameter_unit": {
+                            "type": ["string", "null"],
+                            "description": "Unit stated by the user; null when omitted.",
+                        },
+                        "target_selection": {
+                            "type": "string",
+                            "enum": ["SINGLE", "ALL_MATCHES"],
+                            "description": (
+                                "ALL_MATCHES only when the user explicitly requests every member "
+                                "of the grounded set; otherwise SINGLE."
+                            ),
+                        },
                         "include_diagnostics": {"type": "boolean"},
                         "include_virtual": {
                             "type": "boolean",
@@ -2440,6 +2517,12 @@ class AIEngine:
                         "capability_role_filter",
                         "parent_purpose",
                         "requested_action",
+                        "requested_parameter",
+                        "parameter_mode",
+                        "parameter_direction",
+                        "parameter_value",
+                        "parameter_unit",
+                        "target_selection",
                         "include_diagnostics",
                         "include_virtual",
                         "limit",
@@ -3046,13 +3129,19 @@ class AIEngine:
         )
         if result["accepted"] and not result["success"]:
             if capability_id == "homeassistant.notify":
-                result["response_message"] = (
-                    "Home Assistant accepted the notification request, but device "
-                    "delivery is not verified."
+                result.setdefault(
+                    "response_message",
+                    (
+                        "Home Assistant accepted the notification request, but device "
+                        "delivery is not verified."
+                    ),
                 )
             else:
-                result["response_message"] = (
-                    "Home Assistant accepted the action, but I couldn’t verify the resulting state."
+                result.setdefault(
+                    "response_message",
+                    (
+                        "Home Assistant accepted the action, but I couldn’t verify the resulting state."
+                    ),
                 )
         if execution.get("error") and not result.get("response_message"):
             result["response_message"] = str(execution["error"])
@@ -3982,6 +4071,12 @@ class AIEngine:
                     "aggregation": semantic_aggregation,
                     "semantic_operation": semantic_operation,
                     "requested_action": arguments.get("requested_action"),
+                    "requested_parameter": arguments.get("requested_parameter"),
+                    "parameter_mode": arguments.get("parameter_mode"),
+                    "parameter_direction": arguments.get("parameter_direction"),
+                    "parameter_value": arguments.get("parameter_value"),
+                    "parameter_unit": arguments.get("parameter_unit"),
+                    "target_selection": arguments.get("target_selection"),
                     "include_diagnostics": include_diagnostics,
                     "include_virtual": include_virtual,
                     "capability_role_filter": capability_role_filter,
@@ -4015,6 +4110,20 @@ class AIEngine:
                             if arguments.get("requested_action")
                             else None
                         ),
+                        requested_parameter=(
+                            str(arguments["requested_parameter"])
+                            if arguments.get("requested_parameter")
+                            else None
+                        ),
+                        parameter_mode=str(arguments.get("parameter_mode") or "NONE"),
+                        parameter_direction=str(arguments.get("parameter_direction") or "NONE"),
+                        parameter_value=arguments.get("parameter_value"),
+                        parameter_unit=(
+                            str(arguments["parameter_unit"])
+                            if arguments.get("parameter_unit")
+                            else None
+                        ),
+                        target_selection=str(arguments.get("target_selection") or "SINGLE"),
                         include_diagnostics=include_diagnostics,
                         limit=semantic_limit,
                         include_virtual=include_virtual,
@@ -4062,6 +4171,33 @@ class AIEngine:
                         "handle": handle,
                         "canonical_ids": canonical_ids,
                         "action": action,
+                    },
+                    conversation_id=conversation_id,
+                    actor=actor,
+                    request_id=request_id,
+                    target=canonical_ids,
+                )
+                return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "execute_home_parameter":
+                handle = _normalise_space(str(arguments.get("handle") or ""))
+                raw_ids = arguments.get("canonical_ids") or ()
+                canonical_ids = [
+                    _normalise_space(str(item))
+                    for item in (
+                        raw_ids
+                        if isinstance(raw_ids, Sequence)
+                        and not isinstance(raw_ids, (str, bytes, bytearray))
+                        else ()
+                    )
+                    if _normalise_space(str(item))
+                ]
+                result = await self._execute_registered_home_action(
+                    capability_id="homeassistant.control",
+                    operation="execute_home_parameter",
+                    arguments={
+                        "handle": handle,
+                        "canonical_ids": canonical_ids,
                     },
                     conversation_id=conversation_id,
                     actor=actor,
@@ -7868,8 +8004,9 @@ class AIEngine:
                         "inherit a previous target, domain, capability, state, area, or inventory "
                         "kind unless the user explicitly references that object or set. For an "
                         "action, search with semantic_operation CONTROL and the required "
-                        "capability, then pass its grounded action handle and exact canonical ID "
-                        "to execute_home_action. Never turn a question into a write. Let Core "
+                        "capability or semantic parameter, then pass its grounded action handle "
+                        "and exact canonical ID to execute_home_action or execute_home_parameter. "
+                        "Never turn a question into a write. Let Core "
                         "ground every identity and capability."
                     )
                 ),
