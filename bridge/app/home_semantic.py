@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import logging
 import re
 import time
 from typing import Any
@@ -21,7 +22,19 @@ import uuid
 
 from app.home_canonicalization import canonicalize_cameras, physical_identity
 from app.home_intelligence import GroundedHomeEntity
+from app.home_parameters import (
+    ParameterizedCapability,
+    compile_service_schemas,
+    match_parameter,
+    project_parameterized_capabilities,
+    read_parameter,
+    resolve_parameter_value,
+    verification_tolerance,
+)
 from app.runtime_observability import runtime_metrics
+
+
+logger = logging.getLogger("jarvis-core.home-semantic")
 
 
 _OBSERVATION_DOMAINS = frozenset({"binary_sensor", "sensor"})
@@ -328,6 +341,7 @@ class CanonicalHomeObject:
     entity_roles: tuple[tuple[str, str], ...] = ()
     primary_purposes: tuple[str, ...] = ()
     capability_role: str | None = None
+    parameterized_capabilities: tuple[ParameterizedCapability, ...] = ()
 
     def compact(self, *, confidence: float | None = None) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -346,6 +360,9 @@ class CanonicalHomeObject:
             "entity_roles": {entity_id: role for entity_id, role in self.entity_roles},
             "primary_purposes": list(self.primary_purposes),
             "capability_role": self.capability_role,
+            "parameterized_capabilities": [
+                capability.public() for capability in self.parameterized_capabilities
+            ],
             "evidence": list(self.evidence),
         }
         if confidence is not None:
@@ -416,7 +433,12 @@ class _ActionPlan:
     principal_id: str
     conversation_id: str
     request_id: str
-    action: str
+    action: str | None
+    requested_parameter: str | None
+    parameter_mode: str
+    parameter_direction: str
+    parameter_value: float | str | None
+    parameter_unit: str | None
     canonical_ids: frozenset[str]
     expires_at: datetime
 
@@ -432,10 +454,63 @@ class HomeSemanticEngine:
         *,
         state_loader: Callable[[], Awaitable[Sequence[Mapping[str, Any]]]],
         service_caller: Callable[..., Awaitable[Any]],
+        service_schema_loader: Callable[[], Awaitable[Any]] | None = None,
+        service_schema_ttl_seconds: float = 300.0,
     ) -> None:
         self._state_loader = state_loader
         self._service_caller = service_caller
+        self._service_schema_loader = service_schema_loader
+        self._service_schema_ttl_seconds = max(1.0, float(service_schema_ttl_seconds))
+        self._service_schema_cache: Any = ()
+        self._service_schema_cached_at: float | None = None
+        self._service_schema_lock = asyncio.Lock()
         self._plans: dict[str, _ActionPlan] = {}
+
+    async def _service_schemas(self) -> Any:
+        if self._service_schema_loader is None:
+            return ()
+        now = time.monotonic()
+        if (
+            self._service_schema_cached_at is not None
+            and now - self._service_schema_cached_at < self._service_schema_ttl_seconds
+        ):
+            return self._service_schema_cache
+        async with self._service_schema_lock:
+            now = time.monotonic()
+            if (
+                self._service_schema_cached_at is not None
+                and now - self._service_schema_cached_at < self._service_schema_ttl_seconds
+            ):
+                return self._service_schema_cache
+            started = time.monotonic()
+            try:
+                self._service_schema_cache = compile_service_schemas(
+                    await self._service_schema_loader()
+                )
+            except Exception:
+                # Parameter discovery may temporarily degrade, but ordinary Home
+                # identity/state/power reasoning must remain available.
+                logger.warning(
+                    "Could not refresh Home Assistant service schemas",
+                    exc_info=True,
+                )
+                self._service_schema_cache = ()
+            self._service_schema_cached_at = time.monotonic()
+            runtime_metrics.observe(
+                "home_parameter_schema_load_ms", (time.monotonic() - started) * 1000
+            )
+        return self._service_schema_cache
+
+    @staticmethod
+    def _enrich_item(item: CanonicalHomeObject, schemas: Any) -> CanonicalHomeObject:
+        parameters = project_parameterized_capabilities(item.entities, schemas)
+        return replace(
+            item,
+            parameterized_capabilities=parameters,
+            capabilities=tuple(
+                sorted({*item.capabilities, *(value.parameter for value in parameters)})
+            ),
+        )
 
     @staticmethod
     def _identity_tokens(entity: Mapping[str, Any]) -> frozenset[str]:
@@ -935,6 +1010,19 @@ class HomeSemanticEngine:
     async def graph(self) -> SemanticHomeGraph:
         started = time.monotonic()
         result = self._graph_from(await self._state_loader())
+        schemas = await self._service_schemas()
+        if schemas:
+            result = SemanticHomeGraph(
+                physical_objects=tuple(
+                    self._enrich_item(item, schemas) for item in result.physical_objects
+                ),
+                virtual_targets=tuple(
+                    self._enrich_item(item, schemas) for item in result.virtual_targets
+                ),
+                capabilities=tuple(
+                    self._enrich_item(item, schemas) for item in result.capabilities
+                ),
+            )
         runtime_metrics.observe("home_semantic_inventory_ms", (time.monotonic() - started) * 1000)
         return result
 
@@ -1038,6 +1126,12 @@ class HomeSemanticEngine:
         aggregation: str = "LIST",
         operation: str = "QUERY",
         requested_action: str | None = None,
+        requested_parameter: str | None = None,
+        parameter_mode: str = "NONE",
+        parameter_direction: str = "NONE",
+        parameter_value: float | str | None = None,
+        parameter_unit: str | None = None,
+        target_selection: str = "SINGLE",
         limit: int = 12,
         restrict_ids: Sequence[str] = (),
         principal_id: str = "",
@@ -1049,6 +1143,10 @@ class HomeSemanticEngine:
         wanted_capability = _normalise(capability).replace(" ", "_") or None
         wanted_domain = _normalise(domain).replace(" ", "_") or None
         action = _normalise(requested_action).replace(" ", "_") or None
+        wanted_parameter = _normalise(requested_parameter) or None
+        parameter_mode = str(parameter_mode or "NONE").upper()
+        parameter_direction = str(parameter_direction or "NONE").upper()
+        target_selection = str(target_selection or "SINGLE").upper()
         role_filter = str(capability_role_filter or "ANY").upper()
         wanted_parent_purpose = _normalise(parent_purpose).replace(" ", "_") or None
         dependency = str(reference_dependency or "NONE").upper()
@@ -1058,13 +1156,35 @@ class HomeSemanticEngine:
             raise ValueError("Capability role filters require capability inventory")
         if inventory_kind.upper() != "CAPABILITY" and wanted_parent_purpose:
             raise ValueError("Parent-purpose filters require capability inventory")
+        if parameter_mode not in {"NONE", "ABSOLUTE", "RELATIVE"}:
+            raise ValueError("Unsupported parameter mode")
+        if parameter_direction not in {"NONE", "INCREASE", "DECREASE"}:
+            raise ValueError("Unsupported parameter direction")
+        if target_selection not in {"SINGLE", "ALL_MATCHES"}:
+            raise ValueError("Unsupported control target selection")
         if operation.upper() == "CONTROL":
-            if action not in _ACTION_CAPABILITIES:
-                raise ValueError("A supported requested action is required for control discovery")
-            action_capability = _ACTION_CAPABILITIES[action]
-            if wanted_capability and wanted_capability != action_capability:
-                raise ValueError("Requested action and required capability disagree")
-            wanted_capability = action_capability
+            if bool(action) == bool(wanted_parameter):
+                raise ValueError(
+                    "Control discovery requires exactly one discrete action or parameter"
+                )
+            if action:
+                if action not in _ACTION_CAPABILITIES:
+                    raise ValueError(
+                        "A supported requested action is required for control discovery"
+                    )
+                action_capability = _ACTION_CAPABILITIES[action]
+                if wanted_capability and wanted_capability != action_capability:
+                    raise ValueError("Requested action and required capability disagree")
+                wanted_capability = action_capability
+                if parameter_mode != "NONE" or parameter_value is not None:
+                    raise ValueError("A discrete action cannot include a parameter value")
+            else:
+                if parameter_mode not in {"ABSOLUTE", "RELATIVE"}:
+                    raise ValueError("A parameter control requires absolute or relative mode")
+                if parameter_mode == "ABSOLUTE" and parameter_value is None:
+                    raise ValueError("An absolute parameter control requires a value")
+        elif parameter_mode not in {"NONE", "ABSOLUTE"} or parameter_direction != "NONE":
+            raise ValueError("Read-only parameter discovery cannot request a relative change")
 
         allowed_ids = {str(value) for value in restrict_ids if str(value)}
         inventory = (await self.graph()).inventory(
@@ -1142,6 +1262,12 @@ class HomeSemanticEngine:
                     continue
             if wanted_capability and wanted_capability not in item.capabilities:
                 continue
+            if (
+                wanted_parameter
+                and operation.upper() != "CONTROL"
+                and match_parameter(item.parameterized_capabilities, wanted_parameter) is None
+            ):
+                continue
             if state and not any(_matches_state(entity, state) for entity in item.entities):
                 continue
             if role_filter == "PRIMARY_ONLY" and item.capability_role != "PRIMARY":
@@ -1209,6 +1335,12 @@ class HomeSemanticEngine:
             "include_virtual": include_virtual,
             "aggregation": aggregation.upper(),
             "operation": operation.upper(),
+            "requested_parameter": wanted_parameter,
+            "parameter_mode": parameter_mode,
+            "parameter_direction": parameter_direction,
+            "parameter_value": parameter_value,
+            "parameter_unit": parameter_unit,
+            "target_selection": target_selection,
         }
         result: dict[str, Any] = {
             "success": True,
@@ -1220,15 +1352,26 @@ class HomeSemanticEngine:
             "operation": operation.upper(),
             "aggregation": aggregation.upper(),
             "query": query,
+            "requested_parameter": wanted_parameter,
+            "parameter_mode": parameter_mode,
+            "parameter_direction": parameter_direction,
+            "target_selection": target_selection,
             "count": len(selected),
             "resolution": resolution,
-            "clarification_required": operation.upper() == "CONTROL" and resolution == "ambiguous",
+            "clarification_required": (
+                operation.upper() == "CONTROL"
+                and resolution == "ambiguous"
+                and target_selection == "SINGLE"
+            ),
             "items": [item.compact(confidence=score) for score, item in selected_pairs],
             "complete": len(plausible_pairs) <= safe_limit,
             "observed_at": datetime.now(timezone.utc).isoformat(),
             "context_projection": self._context_projection(selected, filters),
         }
-        if operation.upper() == "CONTROL" and action and resolution == "unique":
+        actionable_selection = bool(selected) and (
+            resolution == "unique" or target_selection == "ALL_MATCHES"
+        )
+        if operation.upper() == "CONTROL" and actionable_selection:
             handle = uuid.uuid4().hex
             self._plans[handle] = _ActionPlan(
                 handle=handle,
@@ -1236,13 +1379,19 @@ class HomeSemanticEngine:
                 conversation_id=conversation_id,
                 request_id=request_id,
                 action=action,
-                canonical_ids=frozenset({selected[0].canonical_id}),
+                requested_parameter=wanted_parameter,
+                parameter_mode=parameter_mode,
+                parameter_direction=parameter_direction,
+                parameter_value=parameter_value,
+                parameter_unit=parameter_unit,
+                canonical_ids=frozenset(item.canonical_id for item in selected),
                 expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.PLAN_TTL_SECONDS),
             )
             result["action_plan"] = {
                 "handle": handle,
                 "action": action,
-                "candidate_ids": [selected[0].canonical_id],
+                "parameter": wanted_parameter,
+                "candidate_ids": [item.canonical_id for item in selected],
                 "expires_in_seconds": self.PLAN_TTL_SECONDS,
             }
         runtime_metrics.observe("home_semantic_search_ms", (time.monotonic() - started) * 1000)
@@ -1419,6 +1568,300 @@ class HomeSemanticEngine:
             changed=bool(verified_ids),
             message=message,
         )
+
+    @staticmethod
+    def _parameter_value_text(value: float | str | None, unit: str | None) -> str:
+        if value is None:
+            return "an unknown value"
+        if isinstance(value, float) and value.is_integer():
+            rendered = str(int(value))
+        else:
+            rendered = str(value)
+        return f"{rendered}{unit or ''}"
+
+    @staticmethod
+    def _parameter_verified(
+        capability: ParameterizedCapability,
+        expected: float | str,
+        actual: float | str | None,
+    ) -> bool:
+        if actual is None:
+            return False
+        if isinstance(expected, str):
+            return isinstance(actual, str) and expected.casefold() == actual.casefold()
+        actual_number = float(actual) if isinstance(actual, (int, float)) else None
+        return actual_number is not None and abs(
+            actual_number - expected
+        ) <= verification_tolerance(capability)
+
+    async def execute_parameter(
+        self,
+        *,
+        handle: str,
+        canonical_ids: Sequence[str],
+        principal_id: str,
+        conversation_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Execute an opaque, grounded parameter plan and verify live read-back."""
+
+        lookup_started = time.monotonic()
+        plan = self._plans.pop(str(handle or ""), None)
+        selected_ids = tuple(dict.fromkeys(str(value) for value in canonical_ids if str(value)))
+        now = datetime.now(timezone.utc)
+        if plan is None or plan.expires_at <= now:
+            raise ValueError("The grounded home parameter plan is missing or expired")
+        if (
+            plan.principal_id != principal_id
+            or plan.conversation_id != conversation_id
+            or plan.request_id != request_id
+            or plan.action is not None
+            or not plan.requested_parameter
+        ):
+            raise ValueError("The grounded home parameter plan does not authorize this request")
+        if not selected_ids or set(selected_ids) != plan.canonical_ids:
+            raise ValueError("The exact frozen parameter target set is required")
+
+        inventory = {item.canonical_id: item for item in (await self.graph()).all_items}
+        selected: list[CanonicalHomeObject] = []
+        outcomes: list[dict[str, Any]] = []
+        pending: list[
+            tuple[
+                CanonicalHomeObject,
+                ParameterizedCapability,
+                Any,
+            ]
+        ] = []
+        for canonical_id in selected_ids:
+            item = inventory.get(canonical_id)
+            if item is None:
+                raise ValueError("A canonical home target no longer exists")
+            selected.append(item)
+            capability = match_parameter(item.parameterized_capabilities, plan.requested_parameter)
+            if capability is None:
+                outcomes.append(
+                    {
+                        "canonical_id": item.canonical_id,
+                        "display_name": item.display_name,
+                        "status": "UNSUPPORTED",
+                        "verified": False,
+                        "message": (
+                            f"{item.display_name} does not expose a supported "
+                            f"{plan.requested_parameter} control."
+                        ),
+                    }
+                )
+                continue
+            if not capability.available:
+                outcomes.append(
+                    {
+                        "canonical_id": item.canonical_id,
+                        "display_name": item.display_name,
+                        "status": "FAILED",
+                        "verified": False,
+                        "message": f"{item.display_name} is currently unavailable.",
+                    }
+                )
+                continue
+            try:
+                validation_started = time.monotonic()
+                resolved = resolve_parameter_value(
+                    capability,
+                    mode=plan.parameter_mode,
+                    direction=plan.parameter_direction,
+                    requested_value=plan.parameter_value,
+                    requested_unit=plan.parameter_unit,
+                )
+                runtime_metrics.observe(
+                    "home_parameter_validation_ms",
+                    (time.monotonic() - validation_started) * 1000,
+                )
+            except ValueError as exc:
+                outcomes.append(
+                    {
+                        "canonical_id": item.canonical_id,
+                        "display_name": item.display_name,
+                        "status": "FAILED",
+                        "verified": False,
+                        "message": str(exc),
+                    }
+                )
+                continue
+            if self._parameter_verified(capability, resolved.semantic_value, resolved.before_value):
+                outcomes.append(
+                    {
+                        "canonical_id": item.canonical_id,
+                        "display_name": item.display_name,
+                        "status": "VERIFIED",
+                        "verified": True,
+                        "already_in_target_state": True,
+                        "changed": False,
+                        "parameter": capability.parameter,
+                        "requested_value": resolved.semantic_value,
+                        "resolved_value": resolved.service_value,
+                        "before_value": resolved.before_value,
+                        "after_value": resolved.before_value,
+                        "unit": capability.unit,
+                    }
+                )
+                continue
+            pending.append((item, capability, resolved))
+
+        runtime_metrics.observe(
+            "home_parameter_lookup_ms", (time.monotonic() - lookup_started) * 1000
+        )
+
+        for item, capability, resolved in pending:
+            service_field = capability.field
+            service_value = resolved.service_value
+            if (
+                plan.parameter_mode == "RELATIVE"
+                and capability.relative_field
+                and isinstance(resolved.before_value, (int, float))
+                and isinstance(resolved.semantic_value, (int, float))
+            ):
+                service_field = capability.relative_field
+                service_value = round(
+                    (resolved.semantic_value - float(resolved.before_value))
+                    * capability.semantic_scale,
+                    6,
+                )
+            try:
+                execution_started = time.monotonic()
+                await self._service_caller(
+                    domain=capability.domain,
+                    service=capability.service,
+                    entity_ids=[capability.entity_id],
+                    service_data={service_field: service_value},
+                )
+                runtime_metrics.observe(
+                    "home_parameter_execution_ms",
+                    (time.monotonic() - execution_started) * 1000,
+                )
+            except Exception as exc:  # Provider failures become truthful per-target receipts.
+                outcomes.append(
+                    {
+                        "canonical_id": item.canonical_id,
+                        "display_name": item.display_name,
+                        "status": "FAILED",
+                        "verified": False,
+                        "message": f"Home Assistant rejected the parameter change: {exc}",
+                    }
+                )
+                continue
+
+            verification_started = time.monotonic()
+            actual: float | str | None = None
+            for delay in self.VERIFY_DELAYS:
+                await asyncio.sleep(delay)
+                rows = await self._state_loader()
+                current = next(
+                    (
+                        row
+                        for row in rows
+                        if str(row.get("entity_id") or "") == capability.entity_id
+                    ),
+                    None,
+                )
+                if current is None:
+                    continue
+                actual = read_parameter(capability, current)
+                if self._parameter_verified(capability, resolved.semantic_value, actual):
+                    break
+            runtime_metrics.observe(
+                "home_parameter_verification_ms",
+                (time.monotonic() - verification_started) * 1000,
+            )
+            verified = self._parameter_verified(capability, resolved.semantic_value, actual)
+            outcomes.append(
+                {
+                    "canonical_id": item.canonical_id,
+                    "display_name": item.display_name,
+                    "status": "VERIFIED" if verified else "UNKNOWN",
+                    "verified": verified,
+                    "already_in_target_state": False,
+                    "changed": verified,
+                    "command_sent": True,
+                    "parameter": capability.parameter,
+                    "requested_value": resolved.semantic_value,
+                    "resolved_value": service_value,
+                    "resolved_field": service_field,
+                    "before_value": resolved.before_value,
+                    "after_value": actual,
+                    "unit": capability.unit,
+                    "normalized_to_step": resolved.normalized_to_step,
+                    "qualitative_delta": resolved.qualitative_delta,
+                }
+            )
+
+        verified_outcomes = [value for value in outcomes if value.get("verified") is True]
+        unknown_outcomes = [value for value in outcomes if value.get("status") == "UNKNOWN"]
+        if len(verified_outcomes) == len(outcomes):
+            status = "VERIFIED"
+        elif verified_outcomes:
+            status = "PARTIAL"
+        elif unknown_outcomes:
+            status = "UNKNOWN"
+        else:
+            status = "FAILED"
+
+        requested = next(
+            (value.get("requested_value") for value in outcomes if "requested_value" in value),
+            plan.parameter_value,
+        )
+        unit = next((value.get("unit") for value in outcomes if value.get("unit")), None)
+        names = ", ".join(item.display_name for item in selected)
+        if status == "VERIFIED":
+            if all(value.get("already_in_target_state") for value in outcomes):
+                message = (
+                    f"{names} already has {plan.requested_parameter} at "
+                    f"{self._parameter_value_text(requested, unit)}."
+                )
+            else:
+                message = (
+                    f"Set {plan.requested_parameter} for {names} to "
+                    f"{self._parameter_value_text(requested, unit)} and verified it."
+                )
+        elif status == "PARTIAL":
+            message = (
+                f"Verified {len(verified_outcomes)} of {len(outcomes)} parameter changes; "
+                f"{len(outcomes) - len(verified_outcomes)} could not be completed."
+            )
+        elif status == "UNKNOWN":
+            message = "Home Assistant accepted the change, but I could not verify the final value."
+        else:
+            messages = [str(value.get("message")) for value in outcomes if value.get("message")]
+            message = (
+                messages[0] if len(messages) == 1 else "I could not apply that parameter change."
+            )
+
+        metadata = {
+            "action": "set_parameter",
+            "parameter": plan.requested_parameter,
+            "parameter_mode": plan.parameter_mode,
+            "parameter_direction": plan.parameter_direction,
+            "requested_value": plan.parameter_value,
+            "requested_unit": plan.parameter_unit,
+            "verification_status": status,
+            "verified": status == "VERIFIED",
+            "already_in_target_state": bool(outcomes)
+            and all(value.get("already_in_target_state") for value in outcomes),
+            "changed": any(value.get("changed") for value in outcomes),
+        }
+        projection = self._context_projection(selected, {"operation": "CONTROL", **metadata})
+        for raw in projection["objects"]:
+            raw["metadata"] = {**raw["metadata"], **metadata}
+        return {
+            "success": status == "VERIFIED",
+            **metadata,
+            "command_sent": any(value.get("command_sent") for value in outcomes),
+            "outcome_unknown": status == "UNKNOWN",
+            "canonical_ids": [item.canonical_id for item in selected],
+            "items": [item.compact() for item in selected],
+            "outcomes": outcomes,
+            "response_message": message,
+            "context_projection": projection,
+        }
 
     @classmethod
     def _action_result(

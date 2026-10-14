@@ -188,9 +188,13 @@ class ToolEngine:
     SAFE_STATE_ATTRIBUTE_KEYS = {
         "battery",
         "battery_level",
+        "brightness",
+        "color_name",
+        "color_temp_kelvin",
         "current_humidity",
         "current_position",
         "current_temperature",
+        "current_tilt_position",
         "device_class",
         "fan_mode",
         "friendly_name",
@@ -200,18 +204,32 @@ class ToolEngine:
         "hvac_action",
         "icon",
         "is_volume_muted",
+        "max",
+        "max_color_temp_kelvin",
+        "max_temp",
         "media_album_name",
         "media_artist",
         "media_content_type",
         "media_title",
+        "min",
+        "min_color_temp_kelvin",
+        "min_temp",
+        "options",
         "percentage",
+        "percentage_step",
         "position",
         "preset_mode",
+        "preset_modes",
         "source",
+        "source_list",
         "state_class",
+        "step",
+        "supported_color_modes",
         "supported_features",
         "swing_mode",
+        "target_temp_step",
         "temperature",
+        "temperature_unit",
         "tilt_position",
         "unit_of_measurement",
         "volume_level",
@@ -246,6 +264,7 @@ class ToolEngine:
         self.home_semantic = HomeSemanticEngine(
             state_loader=lambda: self.readable_entity_states(refresh=True),
             service_caller=self.client.call_service,
+            service_schema_loader=lambda: self.client.rest_request("GET", "/api/services"),
         )
         self._home_experience_projector: Callable[[Any, str], Any] | None = None
 
@@ -344,8 +363,14 @@ class ToolEngine:
         aggregation: str,
         operation: str,
         requested_action: str | None,
-        include_diagnostics: bool,
-        limit: int,
+        requested_parameter: str | None = None,
+        parameter_mode: str = "NONE",
+        parameter_direction: str = "NONE",
+        parameter_value: float | str | None = None,
+        parameter_unit: str | None = None,
+        target_selection: str = "SINGLE",
+        include_diagnostics: bool = False,
+        limit: int = 12,
         include_virtual: bool = False,
         capability_role_filter: str = "ANY",
         parent_purpose: str | None = None,
@@ -537,6 +562,12 @@ class ToolEngine:
             aggregation=aggregation,
             operation=operation,
             requested_action=requested_action,
+            requested_parameter=requested_parameter,
+            parameter_mode=parameter_mode,
+            parameter_direction=parameter_direction,
+            parameter_value=parameter_value,
+            parameter_unit=parameter_unit,
+            target_selection=target_selection,
             include_diagnostics=include_diagnostics,
             limit=limit,
             restrict_ids=restrict_ids,
@@ -564,6 +595,25 @@ class ToolEngine:
             handle=handle,
             canonical_ids=canonical_ids,
             action=action,
+            principal_id=principal_id,
+            conversation_id=conversation_id,
+            request_id=request_id,
+        )
+
+    async def execute_home_parameter(
+        self,
+        *,
+        handle: str,
+        canonical_ids: list[str],
+        principal_id: str,
+        conversation_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Execute only an opaque parameter plan produced by canonical search."""
+
+        return await self.home_semantic.execute_parameter(
+            handle=handle,
+            canonical_ids=canonical_ids,
             principal_id=principal_id,
             conversation_id=conversation_id,
             request_id=request_id,
@@ -1020,6 +1070,12 @@ class ToolEngine:
             value = source[key]
             if isinstance(value, (str, int, float, bool)) or value is None:
                 result[key] = value
+            elif (
+                isinstance(value, (list, tuple))
+                and len(value) <= 100
+                and all(isinstance(item, (str, int, float, bool)) or item is None for item in value)
+            ):
+                result[key] = list(value)
 
         return result
 
