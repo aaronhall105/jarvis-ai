@@ -329,6 +329,27 @@ async def test_live_schema_projects_standard_parameter_capabilities_and_caches()
 
 
 @pytest.mark.asyncio
+async def test_service_schema_cache_loads_during_fresh_process_uptime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = FakeHome(
+        [
+            entity(
+                "light.studio",
+                name="Studio Light",
+                attributes={"supported_color_modes": ["brightness"], "brightness": 128},
+            )
+        ]
+    )
+    monkeypatch.setattr("app.home_semantic.time.monotonic", lambda: 42.0)
+
+    graph = await home.engine().graph()
+
+    assert home.schema_calls == 1
+    assert graph.physical_objects[0].parameterized_capabilities
+
+
+@pytest.mark.asyncio
 async def test_service_schema_failure_does_not_break_existing_home_inventory() -> None:
     rows = [entity("light.studio", name="Studio Light")]
 

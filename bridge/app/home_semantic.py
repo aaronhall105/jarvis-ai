@@ -462,7 +462,7 @@ class HomeSemanticEngine:
         self._service_schema_loader = service_schema_loader
         self._service_schema_ttl_seconds = max(1.0, float(service_schema_ttl_seconds))
         self._service_schema_cache: Any = ()
-        self._service_schema_cached_at = 0.0
+        self._service_schema_cached_at: float | None = None
         self._service_schema_lock = asyncio.Lock()
         self._plans: dict[str, _ActionPlan] = {}
 
@@ -470,11 +470,17 @@ class HomeSemanticEngine:
         if self._service_schema_loader is None:
             return ()
         now = time.monotonic()
-        if now - self._service_schema_cached_at < self._service_schema_ttl_seconds:
+        if (
+            self._service_schema_cached_at is not None
+            and now - self._service_schema_cached_at < self._service_schema_ttl_seconds
+        ):
             return self._service_schema_cache
         async with self._service_schema_lock:
             now = time.monotonic()
-            if now - self._service_schema_cached_at < self._service_schema_ttl_seconds:
+            if (
+                self._service_schema_cached_at is not None
+                and now - self._service_schema_cached_at < self._service_schema_ttl_seconds
+            ):
                 return self._service_schema_cache
             started = time.monotonic()
             try:
