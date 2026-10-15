@@ -2262,12 +2262,22 @@ async def _try_handle_working_context_followup(
             principal_id=actor.user_key,
             conversation_id=conversation_id,
         )
+        dialogue_state = await dialogue.get(conversation_id)
         derived_results = [
             item for item in context.get("derived_results") or () if isinstance(item, Mapping)
         ]
         if not derived_results:
             return None
-        answer = ResultIntelligence.explain(derived_results[0], resolution.objects)
+        explanation_subject = derived_results[0]
+        subject_turn = explanation_subject.get("source_turn_index")
+        if subject_turn is not None and subject_turn != dialogue_state.turn_index:
+            # A bare explanation request must follow the immediately meaningful
+            # result. Retained Home history remains available to the model for an
+            # explicit, semantically grounded historical reference. Derived results
+            # without turn provenance remain valid for pre-migration and in-turn
+            # deterministic projections such as comparisons.
+            return None
+        answer = ResultIntelligence.explain(explanation_subject, resolution.objects)
     else:
         answer = _context_answer(
             kind=followup.kind,

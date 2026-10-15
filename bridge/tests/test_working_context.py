@@ -15,11 +15,308 @@ from app.working_context import (
     ResultIntelligence,
     WorkingContextService,
     email_read_projection,
+    home_action_receipt_projection,
     make_context_object,
     model_safe_context,
     reference_query,
     tool_call_projection,
 )
+
+
+def _home_action_context(name: str = "Studio Control"):
+    return make_context_object(
+        object_type="capability",
+        display_name=name,
+        source="home_assistant_canonical_inventory",
+        canonical_id="capability:studio-control",
+        provider="home_assistant",
+        capability="homeassistant.semantic",
+        metadata={"state": "on"},
+    )
+
+
+def _receipt_call(
+    *,
+    display_name: str = "Studio Control",
+    parameter: str | None = "level",
+    mode: str = "ABSOLUTE",
+    direction: str = "NONE",
+    requested_value=30,
+    before_value=40,
+    after_value=30,
+    unit: str = "%",
+    verification_status: str = "VERIFIED",
+    receipt_status: str = "verified",
+    already: bool = False,
+    changed: bool = True,
+    message: str | None = None,
+    qualitative_delta=None,
+    action: str = "set_parameter",
+    error: str | None = None,
+):
+    outcome = {
+        "canonical_id": "capability:studio-control",
+        "display_name": display_name,
+        "status": verification_status,
+        "verified": verification_status == "VERIFIED",
+        "already_in_target_state": already,
+        "changed": changed,
+        "command_sent": changed,
+        "parameter": parameter,
+        "requested_value": after_value,
+        "before_value": before_value,
+        "after_value": after_value,
+        "unit": unit,
+        "qualitative_delta": qualitative_delta,
+        "message": message,
+    }
+    result = {
+        "action": action,
+        "parameter": parameter,
+        "parameter_mode": mode,
+        "parameter_direction": direction,
+        "requested_value": requested_value,
+        "requested_unit": unit,
+        "verification_status": verification_status,
+        "verified": verification_status == "VERIFIED",
+        "already_in_target_state": already,
+        "changed": changed,
+        "command_sent": changed,
+        "outcome_unknown": verification_status == "UNKNOWN",
+        "outcomes": [outcome],
+        "response_message": "provider result",
+    }
+    receipt = {
+        "action_id": "receipt-1",
+        "requested_operation": ("execute_home_parameter" if parameter else "execute_home_action"),
+        "status": receipt_status,
+        "result": result,
+        "verification": {
+            "action": action,
+            "parameter": parameter,
+            "parameter_mode": mode,
+            "requested_value": requested_value,
+            "requested_unit": unit,
+            "verification_status": verification_status,
+            "outcomes": [outcome],
+        },
+        "error": error,
+        "started_at": "2026-10-15T10:00:00+00:00",
+        "completed_at": "2026-10-15T10:00:01+00:00",
+    }
+    return {
+        "tool": "execute_home_parameter" if parameter else "execute_home_action",
+        "arguments": {"handle": "opaque"},
+        "result": {**result, "action_receipt": receipt},
+    }
+
+
+@pytest.mark.parametrize(
+    ("parameter", "requested", "after", "unit", "expected"),
+    [
+        ("brightness", 30, 30, "%", "brightness to 30%"),
+        ("volume", 40, 40, "%", "volume to 40%"),
+        ("target_temperature", 21, 21, "°C", "target temperature to 21°C"),
+        ("position", 60, 60, "%", "position to 60%"),
+        ("value", 80, 80, "", "value to 80"),
+        ("mode", "Eco", "Eco", "", "mode to Eco"),
+    ],
+)
+def test_verified_parameter_receipt_generically_explains_absolute_actions(
+    parameter, requested, after, unit, expected
+) -> None:
+    item = _home_action_context()
+    calls = [
+        _receipt_call(
+            parameter=parameter,
+            requested_value=requested,
+            after_value=after,
+            unit=unit,
+        )
+    ]
+
+    derived = home_action_receipt_projection(
+        calls=calls,
+        objects=[item],
+        source_turn_index=4,
+    )
+
+    assert derived is not None
+    assert derived["evidence_source"] == "action_receipt"
+    assert derived["receipt_id"] == "receipt-1"
+    assert derived["source_turn_index"] == 4
+    answer = ResultIntelligence.explain(derived, (item,))
+    assert expected.replace(" to ", " for Studio Control to ") in answer
+    assert "checked it again" in answer
+    assert all(
+        jargon not in answer
+        for jargon in ("canonical", "entity_id", "service schema", "parameterized")
+    )
+    assert len(calls) == 1  # Explanation only reads projected receipt evidence.
+
+
+def test_relative_and_qualitative_receipts_explain_recorded_before_after_values() -> None:
+    item = _home_action_context()
+    relative = home_action_receipt_projection(
+        calls=[
+            _receipt_call(
+                parameter="level",
+                mode="RELATIVE",
+                direction="INCREASE",
+                requested_value=10,
+                before_value=30,
+                after_value=40,
+            )
+        ],
+        objects=[item],
+        source_turn_index=1,
+    )
+    qualitative = home_action_receipt_projection(
+        calls=[
+            _receipt_call(
+                parameter="level",
+                mode="RELATIVE",
+                direction="INCREASE",
+                requested_value=None,
+                before_value=30,
+                after_value=40,
+                qualitative_delta=10,
+            )
+        ],
+        objects=[item],
+        source_turn_index=2,
+    )
+
+    assert relative is not None and qualitative is not None
+    relative_answer = ResultIntelligence.explain(relative, (item,))
+    qualitative_answer = ResultIntelligence.explain(qualitative, (item,))
+    assert "increase" in relative_answer
+    assert "30%" in relative_answer and "40%" in relative_answer
+    assert "a little" in qualitative_answer
+    assert "configured 10% adjustment" in qualitative_answer
+    assert "30%" in qualitative_answer and "40%" in qualitative_answer
+
+
+def test_already_satisfied_discrete_receipt_explains_verified_no_op() -> None:
+    item = _home_action_context("Bedroom Display")
+    derived = home_action_receipt_projection(
+        calls=[
+            _receipt_call(
+                display_name="Bedroom Display",
+                parameter=None,
+                action="turn_off",
+                requested_value=None,
+                before_value=None,
+                after_value=None,
+                unit="",
+                already=True,
+                changed=False,
+            )
+        ],
+        objects=[item],
+        source_turn_index=1,
+    )
+
+    assert derived is not None
+    answer = ResultIntelligence.explain(derived, (item,))
+    assert answer == ("Bedroom Display was already off when I checked it, so no change was needed.")
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "receipt_status", "message", "expected"),
+    [
+        ("PARTIAL", "accepted_unverified", "One target does not support this setting", "partial"),
+        ("FAILED", "failed", "The provider rejected the request", "couldn’t change"),
+        ("UNKNOWN", "outcome_unknown", None, "couldn’t confirm the final state"),
+    ],
+)
+def test_non_verified_receipts_are_explained_truthfully(
+    verification_status, receipt_status, message, expected
+) -> None:
+    item = _home_action_context()
+    derived = home_action_receipt_projection(
+        calls=[
+            _receipt_call(
+                verification_status=verification_status,
+                receipt_status=receipt_status,
+                message=message,
+                error=message if verification_status == "FAILED" else None,
+            )
+        ],
+        objects=[item],
+        source_turn_index=1,
+    )
+
+    assert derived is not None
+    answer = ResultIntelligence.explain(derived, (item,))
+    assert expected in answer
+    if verification_status != "VERIFIED":
+        assert "verified it" not in answer
+
+
+def test_partial_receipt_names_successes_and_unsupported_targets() -> None:
+    first = _home_action_context("First Control")
+    second = make_context_object(
+        object_type="capability",
+        display_name="Second Control",
+        source="home_assistant_canonical_inventory",
+        canonical_id="capability:second-control",
+        provider="home_assistant",
+        capability="homeassistant.semantic",
+    )
+    call = _receipt_call(verification_status="PARTIAL", receipt_status="accepted_unverified")
+    result = call["result"]
+    receipt = result["action_receipt"]
+    successful = dict(result["outcomes"][0])
+    successful.update(
+        canonical_id="capability:studio-control",
+        display_name="First Control",
+        status="VERIFIED",
+        verified=True,
+    )
+    unsupported = {
+        "canonical_id": "capability:second-control",
+        "display_name": "Second Control",
+        "status": "UNSUPPORTED",
+        "verified": False,
+        "message": "Second Control does not support this setting",
+    }
+    result["outcomes"] = [successful, unsupported]
+    result["verified"] = False
+    receipt["result"] = dict(result)
+    receipt["result"].pop("action_receipt", None)
+    receipt["verification"]["outcomes"] = [successful, unsupported]
+
+    derived = home_action_receipt_projection(
+        calls=[call], objects=[first, second], source_turn_index=1
+    )
+
+    assert derived is not None
+    answer = ResultIntelligence.explain(derived, (first, second))
+    assert "verified the change for First Control" in answer
+    assert "but not for Second Control" in answer
+    assert "does not support this setting" in answer
+    assert "overall result was only partial" in answer
+
+
+def test_model_context_keeps_receipt_evidence_but_hides_internal_receipt_id() -> None:
+    item = _home_action_context()
+    derived = home_action_receipt_projection(
+        calls=[_receipt_call()], objects=[item], source_turn_index=3
+    )
+    assert derived is not None
+    safe = model_safe_context(
+        {
+            "objects": [item.to_record()],
+            "derived_results": [derived],
+        }
+    )
+
+    projected = safe["derived_results"][0]
+    assert "receipt_id" not in projected
+    assert projected["verification_status"] == "VERIFIED"
+    assert projected["values"][0]["before_value"] == 40
+    assert projected["values"][0]["after_value"] == 30
 
 
 def _service(tmp_path) -> WorkingContextService:

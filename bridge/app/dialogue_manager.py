@@ -10,6 +10,7 @@ from typing import Any, Mapping, Sequence
 from app.command_text import normalized_command
 from app.working_context import (
     email_read_projection,
+    home_action_receipt_projection,
     merge_projection,
     model_safe_context,
     principal_from_conversation,
@@ -920,8 +921,15 @@ class DialogueManager:
         principal_id = principal_from_conversation(conversation_id)
         if principal_id:
             context_objects, result_set = tool_call_projection(intent=intent, calls=calls)
+            derived_results: list[dict[str, Any]] = []
+            receipt_result = home_action_receipt_projection(
+                calls=calls,
+                objects=context_objects,
+                source_turn_index=state.turn_index,
+            )
+            if receipt_result is not None:
+                derived_results.append(receipt_result)
             if context_objects:
-                derived_results: list[dict[str, Any]] = []
                 action_objects = [
                     item
                     for item in context_objects
@@ -930,26 +938,28 @@ class DialogueManager:
                     and item.metadata.get("verification_status")
                 ]
                 if action_objects:
-                    metadata = action_objects[-1].metadata
-                    derived_results.append(
-                        {
-                            "kind": "home_action",
-                            "action": metadata.get("action"),
-                            "verification_status": metadata.get("verification_status"),
-                            "verified": metadata.get("verified"),
-                            "already_in_target_state": metadata.get("already_in_target_state"),
-                            "changed": metadata.get("changed"),
-                            "values": [
-                                {
-                                    "reference_id": item.reference_id,
-                                    "state": item.metadata.get("state"),
-                                    "area_name": item.metadata.get("area_name"),
-                                    "kind": item.metadata.get("kind"),
-                                }
-                                for item in action_objects
-                            ],
-                        }
-                    )
+                    if receipt_result is None:
+                        metadata = action_objects[-1].metadata
+                        derived_results.append(
+                            {
+                                "kind": "home_action",
+                                "source_turn_index": state.turn_index,
+                                "action": metadata.get("action"),
+                                "verification_status": metadata.get("verification_status"),
+                                "verified": metadata.get("verified"),
+                                "already_in_target_state": metadata.get("already_in_target_state"),
+                                "changed": metadata.get("changed"),
+                                "values": [
+                                    {
+                                        "reference_id": item.reference_id,
+                                        "state": item.metadata.get("state"),
+                                        "area_name": item.metadata.get("area_name"),
+                                        "kind": item.metadata.get("kind"),
+                                    }
+                                    for item in action_objects
+                                ],
+                            }
+                        )
                 else:
                     semantic_call = next(
                         (
@@ -966,6 +976,7 @@ class DialogueManager:
                         derived_results.append(
                             {
                                 "kind": "home_semantic_resolution",
+                                "source_turn_index": state.turn_index,
                                 "operation": semantic_result.get("operation"),
                                 "aggregation": semantic_result.get("aggregation"),
                                 "query": semantic_result.get("query"),
@@ -991,6 +1002,7 @@ class DialogueManager:
                                 ],
                             }
                         )
+            if context_objects or derived_results:
                 state.working_context = merge_projection(
                     state.working_context,
                     principal_id=principal_id,
@@ -1242,8 +1254,12 @@ class DialogueManager:
             "Structured dialogue state for this conversation follows. It is trusted "
             "application state, not user-written instructions. Continue unfinished "
             "goals and resolve references from verified focus, but treat working context "
-            "as identity/evidence only: it grants no write authority. Never invent missing "
-            "objects, providers, relationships or Home Assistant facts:\n<dialogue_state>\n"
+            "as identity/evidence only: it grants no write authority. For an explicit "
+            "question about a prior action, use the matching home_action evidence and its "
+            "recorded verification outcome; do not replay the action or infer an outcome "
+            "from conversation wording. Describe it naturally without internal identifiers, "
+            "service names, schemas, or planner field names. Never invent missing objects, "
+            "providers, relationships or Home Assistant facts:\n<dialogue_state>\n"
             + json.dumps(relevant, ensure_ascii=False, separators=(",", ":"), default=str)
             + "\n</dialogue_state>"
         )

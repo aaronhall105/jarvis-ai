@@ -25,6 +25,71 @@ def _actor(principal: str = "aaron") -> UserContext:
     )
 
 
+def _verified_parameter_execution_result() -> dict:
+    outcome = {
+        "canonical_id": "capability:studio-control",
+        "display_name": "Studio Control",
+        "status": "VERIFIED",
+        "verified": True,
+        "already_in_target_state": False,
+        "changed": True,
+        "command_sent": True,
+        "parameter": "level",
+        "requested_value": 30,
+        "before_value": 40,
+        "after_value": 30,
+        "unit": "%",
+    }
+    result = {
+        "success": True,
+        "action": "set_parameter",
+        "parameter": "level",
+        "parameter_mode": "ABSOLUTE",
+        "parameter_direction": "NONE",
+        "requested_value": 30,
+        "requested_unit": "%",
+        "verification_status": "VERIFIED",
+        "verified": True,
+        "already_in_target_state": False,
+        "changed": True,
+        "command_sent": True,
+        "outcomes": [outcome],
+        "context_projection": {
+            "objects": [
+                {
+                    "reference_id": "provider-local",
+                    "object_type": "capability",
+                    "display_name": "Studio Control",
+                    "source": "home_assistant_canonical_inventory",
+                    "canonical_id": "capability:studio-control",
+                    "provider": "home_assistant",
+                    "capability": "homeassistant.semantic",
+                    "metadata": {
+                        "state": "on",
+                        "verification_status": "VERIFIED",
+                        "verified": True,
+                    },
+                }
+            ],
+            "result_set": {"object_refs": ["provider-local"]},
+        },
+    }
+    result["action_receipt"] = {
+        "action_id": "receipt-1",
+        "requested_operation": "execute_home_parameter",
+        "status": "verified",
+        "result": dict(result),
+        "verification": {
+            "verification_status": "VERIFIED",
+            "outcomes": [outcome],
+        },
+        "started_at": "2026-10-15T10:00:00+00:00",
+        "completed_at": "2026-10-15T10:00:01+00:00",
+    }
+    result["action_receipt"]["result"].pop("action_receipt", None)
+    return result
+
+
 @pytest.fixture
 def context_runtime(tmp_path, monkeypatch):
     dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
@@ -45,6 +110,88 @@ def context_runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "working_context", service)
     monkeypatch.setattr(main, "pending_interactions", interactions)
     return dialogue, service, interactions
+
+
+@pytest.mark.asyncio
+async def test_why_uses_verified_action_receipt_without_replaying_write(
+    context_runtime, monkeypatch
+) -> None:
+    dialogue, _service, _interactions = context_runtime
+    conversation = "usr:aaron:receipt-explanation"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Set level to 30% and verified it.",
+        calls=[
+            {
+                "tool": "execute_home_parameter",
+                "arguments": {"handle": "opaque"},
+                "result": _verified_parameter_execution_result(),
+            }
+        ],
+    )
+    execute = AsyncMock()
+    monkeypatch.setattr(main.external_agent, "execute", execute)
+
+    answer = await main._try_handle_working_context_followup(
+        "Why?", actor=_actor(), conversation_id=conversation
+    )
+
+    assert answer
+    assert answer["response"] == (
+        "You asked me to set level for Studio Control to 30%. I made that change and "
+        "checked it again; it reached about 30%."
+    )
+    execute.assert_not_awaited()
+
+    restarted = DialogueManager(str(dialogue.database_path))
+    monkeypatch.setattr(main, "dialogue", restarted)
+    monkeypatch.setattr(main, "working_context", WorkingContextService(restarted))
+    after_restart = await main._try_handle_working_context_followup(
+        "Why?", actor=_actor(), conversation_id=conversation
+    )
+    assert after_restart and after_restart["response"] == answer["response"]
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bare_why_does_not_claim_old_action_after_independent_turn(
+    context_runtime,
+) -> None:
+    dialogue, _service, _interactions = context_runtime
+    conversation = "usr:aaron:receipt-task-switch"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Set level to 30% and verified it.",
+        calls=[
+            {
+                "tool": "execute_home_parameter",
+                "arguments": {"handle": "opaque"},
+                "result": _verified_parameter_execution_result(),
+            }
+        ],
+    )
+    await dialogue.record_result(
+        conversation,
+        intent="general_conversation",
+        success=True,
+        response="Tomorrow will be mild.",
+        calls=[],
+    )
+
+    answer = await main._try_handle_working_context_followup(
+        "Why?", actor=_actor(), conversation_id=conversation
+    )
+
+    assert answer is None
+    model_context = await dialogue.context_for_model(conversation)
+    assert model_context is not None
+    assert '"kind":"home_action"' in model_context
+    assert '"verification_status":"VERIFIED"' in model_context
+    assert "receipt-1" not in model_context
 
 
 @pytest.mark.asyncio
