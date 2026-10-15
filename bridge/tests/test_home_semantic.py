@@ -1603,6 +1603,7 @@ async def test_verified_home_action_projects_grounded_explanation(tmp_path) -> N
     )
     answer = ResultIntelligence.explain(context["derived_results"][0], resolution.objects)
 
-    assert "exact canonical target" in answer
-    assert "authoritative state" in answer
-    assert "Bedroom TV" in answer
+    assert answer == "Bedroom TV was already off when I checked it, so no change was needed."
+    assert all(
+        jargon not in answer for jargon in ("canonical", "authoritative", "entity_id", "service")
+    )

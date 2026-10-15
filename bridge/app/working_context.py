@@ -55,10 +55,12 @@ _FORBIDDEN_CONTENT_KEYS = {
 }
 _MODEL_INTERNAL_KEYS = {
     "account_id",
+    "action_id",
     "attachment_id",
     "conversation_id",
     "message_id",
     "provider_reference",
+    "receipt_id",
     "thread_id",
 }
 _ORDINALS = {
@@ -1050,6 +1052,113 @@ def tool_call_projection(
     return objects, result_set_metadata
 
 
+def home_action_receipt_projection(
+    *,
+    calls: Sequence[Mapping[str, Any]],
+    objects: Sequence[ContextObject],
+    source_turn_index: int,
+) -> dict[str, Any] | None:
+    """Project bounded explanation evidence from the authoritative write receipt."""
+
+    execution_result: Mapping[str, Any] | None = None
+    receipt: Mapping[str, Any] | None = None
+    for call in reversed(calls):
+        if call.get("tool") not in {"execute_home_action", "execute_home_parameter"}:
+            continue
+        raw_result = call.get("result")
+        if not isinstance(raw_result, Mapping):
+            continue
+        raw_receipt = raw_result.get("action_receipt") or raw_result.get("receipt")
+        if not isinstance(raw_receipt, Mapping):
+            continue
+        execution_result = raw_result
+        receipt = raw_receipt
+        break
+    if execution_result is None or receipt is None:
+        return None
+
+    receipt_result = receipt.get("result")
+    result = receipt_result if isinstance(receipt_result, Mapping) else execution_result
+    raw_verification = receipt.get("verification")
+    verification = raw_verification if isinstance(raw_verification, Mapping) else {}
+    by_canonical = {
+        str(item.canonical_id): item
+        for item in objects
+        if item.provider == "home_assistant" and item.canonical_id
+    }
+    raw_outcomes = result.get("outcomes") or verification.get("outcomes") or ()
+    outcomes: list[dict[str, Any]] = []
+    if isinstance(raw_outcomes, Sequence) and not isinstance(raw_outcomes, (bytes, bytearray, str)):
+        for raw in raw_outcomes:
+            if not isinstance(raw, Mapping):
+                continue
+            item = by_canonical.get(str(raw.get("canonical_id") or ""))
+            outcomes.append(
+                {
+                    "reference_id": item.reference_id if item is not None else None,
+                    "display_name": raw.get("display_name")
+                    or (item.display_name if item is not None else None),
+                    "status": raw.get("status"),
+                    "verified": raw.get("verified"),
+                    "already_in_target_state": raw.get("already_in_target_state"),
+                    "changed": raw.get("changed"),
+                    "command_sent": raw.get("command_sent"),
+                    "parameter": raw.get("parameter"),
+                    "requested_value": raw.get("requested_value"),
+                    "before_value": raw.get("before_value"),
+                    "after_value": raw.get("after_value"),
+                    "unit": raw.get("unit"),
+                    "qualitative_delta": raw.get("qualitative_delta"),
+                    "message": raw.get("message"),
+                }
+            )
+    if not outcomes:
+        outcomes = [
+            {
+                "reference_id": item.reference_id,
+                "display_name": item.display_name,
+                "status": result.get("verification_status") or receipt.get("status"),
+                "verified": result.get("verified"),
+                "already_in_target_state": result.get("already_in_target_state"),
+                "changed": result.get("changed"),
+                "state": item.metadata.get("state"),
+            }
+            for item in objects
+            if item.provider == "home_assistant"
+        ]
+
+    status = (
+        result.get("verification_status")
+        or verification.get("verification_status")
+        or receipt.get("status")
+    )
+    return {
+        "kind": "home_action",
+        "evidence_source": "action_receipt",
+        "receipt_id": receipt.get("action_id"),
+        "receipt_status": receipt.get("status"),
+        "requested_operation": receipt.get("requested_operation"),
+        "action": result.get("action") or verification.get("action"),
+        "parameter": result.get("parameter") or verification.get("parameter"),
+        "parameter_mode": result.get("parameter_mode") or verification.get("parameter_mode"),
+        "parameter_direction": result.get("parameter_direction"),
+        "requested_value": result.get("requested_value"),
+        "requested_unit": result.get("requested_unit") or verification.get("requested_unit"),
+        "verification_status": status,
+        "verified": result.get("verified"),
+        "already_in_target_state": result.get("already_in_target_state"),
+        "changed": result.get("changed"),
+        "command_sent": result.get("command_sent"),
+        "outcome_unknown": result.get("outcome_unknown"),
+        "response_message": result.get("response_message"),
+        "error": receipt.get("error"),
+        "started_at": receipt.get("started_at"),
+        "completed_at": receipt.get("completed_at"),
+        "source_turn_index": source_turn_index,
+        "values": outcomes,
+    }
+
+
 def model_safe_context(context: Mapping[str, Any]) -> dict[str, Any]:
     """Return only bounded referent facts; omit provider-internal canonical IDs."""
 
@@ -1079,7 +1188,11 @@ def model_safe_context(context: Mapping[str, Any]) -> dict[str, Any]:
         "focused_object_refs": context.get("focused_object_refs"),
         "objects": objects,
         "result_sets": context.get("result_sets"),
-        "derived_results": context.get("derived_results"),
+        "derived_results": [
+            _model_safe_metadata(item)
+            for item in context.get("derived_results") or ()
+            if isinstance(item, Mapping)
+        ],
         "temporal_context": context.get("temporal_context"),
         "waiting_state": context.get("waiting_state"),
     }
@@ -1767,6 +1880,38 @@ def _natural_topic_label(topic: str, subject: str) -> str:
     return topic_text
 
 
+def _action_value_text(value: Any, unit: Any = None) -> str:
+    if isinstance(value, float):
+        rendered = f"{value:.1f}".rstrip("0").rstrip(".")
+    elif isinstance(value, int):
+        rendered = str(value)
+    else:
+        rendered = _normalise_text(value)
+    normalized_unit = _normalise_text(unit)
+    if normalized_unit.casefold() in {"%", "percent", "percentage"}:
+        return f"{rendered}%"
+    if normalized_unit in {"°C", "°F"}:
+        return f"{rendered}{normalized_unit}"
+    return f"{rendered} {normalized_unit}".strip()
+
+
+def _action_targets(values: Sequence[Mapping[str, Any]], objects: Sequence[ContextObject]) -> str:
+    by_ref = {item.reference_id: item.display_name for item in objects}
+    names = [
+        _normalise_text(value.get("display_name"))
+        or by_ref.get(str(value.get("reference_id") or ""), "")
+        for value in values
+    ]
+    unique = list(dict.fromkeys(name for name in names if name))
+    if not unique:
+        unique = [item.display_name for item in objects]
+    if not unique:
+        return "the selected Home device"
+    if len(unique) == 1:
+        return unique[0]
+    return ", ".join(unique[:-1]) + f" and {unique[-1]}"
+
+
 class ResultIntelligence:
     """Deterministic answer synthesis from grounded context evidence."""
 
@@ -2026,33 +2171,133 @@ class ResultIntelligence:
         values = [item for item in derived.get("values") or () if isinstance(item, Mapping)]
         kind = _normalise_text(derived.get("kind"))
         if kind == "home_action":
-            grounded = [by_ref.get(str(value.get("reference_id") or "")) for value in values]
-            names = [item.display_name for item in grounded if item is not None]
-            target = " and ".join(names) or "the grounded Home Assistant object"
+            target = _action_targets(values, objects)
             action = _normalise_text(derived.get("action")).replace("_", " ")
             status = _normalise_text(derived.get("verification_status")).upper()
-            if derived.get("verified") is True and derived.get("already_in_target_state") is True:
+            parameter = _normalise_text(derived.get("parameter")).replace("_", " ")
+            mode = _normalise_text(derived.get("parameter_mode")).upper()
+            direction = _normalise_text(derived.get("parameter_direction")).upper()
+            verified_values = [
+                value
+                for value in values
+                if value.get("verified") is True
+                or _normalise_text(value.get("status")).upper() == "VERIFIED"
+            ]
+            failed_values = [value for value in values if value not in verified_values]
+
+            if status == "PARTIAL":
+                verified_names = _action_targets(verified_values, ())
+                failed_names = _action_targets(failed_values, ())
+                reason = next(
+                    (
+                        _normalise_text(value.get("message"))
+                        for value in failed_values
+                        if _normalise_text(value.get("message"))
+                    ),
+                    "the requested setting was not supported or could not be verified",
+                )
                 return (
-                    f"Because I resolved {target} as the exact canonical target, checked its "
-                    f"authoritative state, and verified it already satisfied {action or 'the request'}."
+                    f"I verified the change for {verified_names}, but not for {failed_names}: "
+                    f"{reason}. The overall result was only partial."
+                )
+            if (
+                status in {"UNKNOWN", "OUTCOME_UNKNOWN", "ACCEPTED_UNVERIFIED"}
+                or derived.get("outcome_unknown") is True
+            ):
+                return (
+                    f"Home Assistant accepted the request for {target}, but I couldn’t confirm "
+                    "the final state, so I did not report it as completed."
+                )
+            if status in {"FAILED", "REJECTED"} or derived.get("verified") is False:
+                reason = _normalise_text(derived.get("error")) or next(
+                    (
+                        _normalise_text(value.get("message"))
+                        for value in values
+                        if _normalise_text(value.get("message"))
+                    ),
+                    "the requested change could not be completed",
+                )
+                return f"I couldn’t change {target}: {reason}. I did not report it as verified."
+            if derived.get("verified") is True and derived.get("already_in_target_state") is True:
+                if parameter:
+                    outcome = verified_values[0] if verified_values else values[0] if values else {}
+                    unit = outcome.get("unit") or derived.get("requested_unit")
+                    existing = outcome.get("after_value")
+                    if existing is None:
+                        existing = outcome.get("before_value")
+                    existing_text = _action_value_text(existing, unit)
+                    return (
+                        f"{target} already had {parameter} at {existing_text} when I checked it, "
+                        "so no change was needed."
+                    )
+                desired_state = (
+                    "off"
+                    if action == "turn off"
+                    else "on"
+                    if action == "turn on"
+                    else "in the requested state"
+                )
+                return (
+                    f"{target} was already {desired_state} when I checked it, so no change "
+                    "was needed."
+                )
+
+            if parameter and derived.get("verified") is True:
+                outcome = verified_values[0] if verified_values else values[0] if values else {}
+                unit = outcome.get("unit") or derived.get("requested_unit")
+                before = outcome.get("before_value")
+                after = outcome.get("after_value")
+                requested = derived.get("requested_value")
+                qualitative_delta = outcome.get("qualitative_delta")
+                if (
+                    mode == "RELATIVE"
+                    and requested is None
+                    and isinstance(qualitative_delta, (int, float))
+                ):
+                    verb = "raise" if direction == "INCREASE" else "lower"
+                    before_text = _action_value_text(before, unit)
+                    after_text = _action_value_text(after, unit)
+                    delta_text = _action_value_text(abs(qualitative_delta), unit)
+                    return (
+                        f"You asked me to {verb} {parameter} for {target} a little. I used the "
+                        f"configured {delta_text} adjustment, moving it from about {before_text} "
+                        f"to about {after_text}, and checked the result."
+                    )
+                if mode == "RELATIVE" and requested is not None:
+                    verb = "increase" if direction == "INCREASE" else "decrease"
+                    return (
+                        f"You asked me to {verb} {parameter} for {target} by "
+                        f"{_action_value_text(requested, unit)}. It was about "
+                        f"{_action_value_text(before, unit)}, so I moved it to about "
+                        f"{_action_value_text(after, unit)} and checked the result."
+                    )
+                requested_text = _action_value_text(
+                    requested if requested is not None else outcome.get("requested_value"),
+                    unit,
+                )
+                return (
+                    f"You asked me to set {parameter} for {target} to {requested_text}. "
+                    f"I made that change and checked it again; it reached about "
+                    f"{_action_value_text(after, unit)}."
                 )
             if derived.get("verified") is True:
+                desired = action.removeprefix("turn ") if action.startswith("turn ") else action
                 return (
-                    f"Because I resolved {target} as the exact canonical target, used its "
-                    f"supported {action or 'requested'} capability, and verified the resulting state."
+                    f"You asked me to {action or 'make that change'} for {target}. I made the "
+                    f"change and checked again to confirm it was {desired or 'completed'}."
                 )
             return (
-                f"I resolved {target}, but the action result was {status.casefold() or 'unknown'}, "
-                "so I did not treat it as verified."
+                f"I have the result for {target}, but its final state was "
+                f"{status.casefold() or 'unknown'}, so I did not treat it as verified."
             )
         if kind == "home_semantic_resolution":
             grounded = [by_ref.get(str(value.get("reference_id") or "")) for value in values]
             names = [item.display_name for item in grounded if item is not None]
             if names:
                 return (
-                    "Because the live canonical Home Assistant inventory matched "
+                    "I used the live Home Assistant details for "
                     + " and ".join(names)
-                    + " after applying the requested semantic, area, state and capability constraints."
+                    + " and checked the requested room, state, and supported controls."
                 )
         if len(values) >= 2:
             rendered = []
