@@ -320,6 +320,56 @@ async def test_semantic_reference_dependency_must_match_grounded_scope(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_explicit_coreference_cannot_be_planned_as_independent_home_query(tmp_path) -> None:
+    engine = _engine(
+        await _project_set(tmp_path),
+        _Tools(("light.hallway", "light.living_room", "light.bedroom")),
+        _Runtime({}),
+    )
+    engine.external_runtime = None
+
+    result = await engine._execute_function(
+        name="search_home",
+        arguments_json=json.dumps(
+            {
+                "semantic_operation": "QUERY",
+                "inventory_kind": "CAPABILITY",
+                "scope": "HOME",
+                "reference_dependency": "NONE",
+                "aggregation": "STATE",
+                "semantic_target": "level",
+                "semantic_terms": [],
+                "area_id": None,
+                "capability": None,
+                "domain": None,
+                "state": None,
+                "occupancy_state": None,
+                "capability_role_filter": "ANY",
+                "parent_purpose": None,
+                "control_mode": "NONE",
+                "requested_control": "level",
+                "parameter_mode": "NONE",
+                "parameter_direction": "NONE",
+                "parameter_value": None,
+                "parameter_unit": None,
+                "target_selection": "SINGLE",
+                "include_diagnostics": False,
+                "include_virtual": False,
+                "limit": 12,
+            }
+        ),
+        user_text="How high are they?",
+        authorised_tools={"search_home"},
+        conversation_id="usr:aaron:home",
+        actor=_actor(),
+        request_id="missing-reference-dependency",
+    )
+
+    assert result["result"]["success"] is False
+    assert result["result"]["error"]["code"] == "missing_reference_dependency"
+
+
+@pytest.mark.asyncio
 async def test_historical_action_explanation_uses_receipt_without_home_search(tmp_path) -> None:
     dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
     target = make_context_object(

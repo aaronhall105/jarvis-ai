@@ -4330,6 +4330,14 @@ class AIEngine:
                         "unjustified_reference_scope",
                         "An independent request cannot inherit a current Home reference.",
                     )
+                if reference_dependency == "NONE" and grounded_set_reference_requested(user_text):
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "missing_reference_dependency",
+                        "The request grammatically refers to grounded context but the semantic "
+                        "plan declared no reference dependency.",
+                    )
                 if reference_dependency == "CURRENT_AREA" and semantic_scope != "AREA":
                     return self._tool_failure(
                         name,
