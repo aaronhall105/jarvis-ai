@@ -94,6 +94,177 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "execute_home_parameter",
 }
 
+_HOME_EXECUTION_TOOLS = {"execute_home_action", "execute_home_parameter"}
+_SEMANTIC_DISCRETE_ACTIONS = {
+    "turn_on",
+    "turn_off",
+    "play",
+    "pause",
+    "stop",
+    "mute",
+    "unmute",
+    "next",
+    "previous",
+    "volume_up",
+    "volume_down",
+}
+
+
+def _semantic_control_mode(arguments: Mapping[str, Any]) -> tuple[str, str | None]:
+    """Validate the mutually exclusive semantic control contract.
+
+    Older internal callers do not yet carry the discriminator, so a coherent
+    legacy shape is inferred.  Live model tools always supply ``control_mode``.
+    A dual or contradictory shape is never normalised by choosing one branch.
+    """
+
+    operation = str(arguments.get("semantic_operation") or "QUERY").upper()
+    action = str(arguments.get("requested_action") or "").strip()
+    parameter = str(arguments.get("requested_parameter") or "").strip()
+    requested_control = (
+        str(arguments.get("requested_control") or "").strip().casefold().replace(" ", "_")
+    )
+    raw_mode = str(arguments.get("control_mode") or "").upper()
+    if requested_control and (action or parameter):
+        return raw_mode, "A semantic plan cannot mix legacy and exclusive control fields."
+    if requested_control:
+        if raw_mode == "DISCRETE" or (
+            operation == "EXPLAIN" and requested_control in _SEMANTIC_DISCRETE_ACTIONS
+        ):
+            action = requested_control
+        else:
+            parameter = requested_control
+    if not raw_mode:
+        if operation != "CONTROL":
+            raw_mode = "NONE"
+        elif action and not parameter:
+            raw_mode = "DISCRETE"
+        elif parameter and not action:
+            raw_mode = "PARAMETERIZED"
+        else:
+            return "", "A control plan must select exactly one coherent control mode."
+    if raw_mode not in {"NONE", "DISCRETE", "PARAMETERIZED"}:
+        return raw_mode, "The semantic control mode is unsupported."
+    if operation != "CONTROL":
+        if raw_mode != "NONE":
+            return raw_mode, "A non-control operation cannot select a control mode."
+        return raw_mode, None
+    if raw_mode == "NONE":
+        return raw_mode, "A control operation requires a discrete or parameterized mode."
+    if raw_mode == "DISCRETE":
+        if not action or parameter:
+            return raw_mode, "A discrete control requires only a discrete action."
+        if str(arguments.get("parameter_mode") or "NONE").upper() != "NONE":
+            return raw_mode, "A discrete control cannot include a parameter mode."
+        if arguments.get("parameter_value") is not None:
+            return raw_mode, "A discrete control cannot include a parameter value."
+        return raw_mode, None
+    if action or not parameter:
+        return raw_mode, "A parameterized control requires only a semantic parameter."
+    if str(arguments.get("parameter_mode") or "NONE").upper() not in {
+        "ABSOLUTE",
+        "RELATIVE",
+    }:
+        return raw_mode, "A parameterized control requires an absolute or relative mode."
+    return raw_mode, None
+
+
+def _apply_exclusive_control_field(arguments: dict[str, Any], control_mode: str) -> None:
+    """Translate the exclusive model field into trusted internal plan fields."""
+
+    requested_control = (
+        str(arguments.get("requested_control") or "").strip().casefold().replace(" ", "_")
+    )
+    if not requested_control:
+        return
+    operation = str(arguments.get("semantic_operation") or "QUERY").upper()
+    if control_mode == "DISCRETE" or (
+        operation == "EXPLAIN" and requested_control in _SEMANTIC_DISCRETE_ACTIONS
+    ):
+        arguments["requested_action"] = requested_control
+        arguments["requested_parameter"] = None
+    else:
+        arguments["requested_action"] = None
+        arguments["requested_parameter"] = requested_control
+
+
+def _pending_grounded_home_execution(
+    calls: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Return the execution tool for an exact frozen plan the model left unfinished."""
+
+    if any(str(call.get("tool") or "") in _HOME_EXECUTION_TOOLS for call in calls):
+        return None
+    for call in reversed(calls):
+        if call.get("tool") != "search_home":
+            continue
+        result = call.get("result")
+        if not isinstance(result, Mapping):
+            return None
+        if (
+            result.get("success") is not True
+            or str(result.get("operation") or "").upper() != "CONTROL"
+            or result.get("clarification_required") is True
+            or str(result.get("resolution") or "") not in {"unique", "ambiguous"}
+        ):
+            return None
+        plan = result.get("action_plan")
+        if not isinstance(plan, Mapping):
+            return None
+        candidate_ids = plan.get("candidate_ids")
+        if not isinstance(candidate_ids, Sequence) or isinstance(
+            candidate_ids, (str, bytes, bytearray)
+        ):
+            return None
+        if not candidate_ids or not str(plan.get("handle") or ""):
+            return None
+        return "execute_home_parameter" if plan.get("parameter") else "execute_home_action"
+    return None
+
+
+def verified_home_action_explanation_reply(
+    completed_calls: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Own receipt-grounded explanation prose without re-rendering an action."""
+
+    for call in reversed(completed_calls):
+        if call.get("tool") != "explain_home_action_receipt":
+            continue
+        result = call.get("result")
+        if isinstance(result, Mapping) and result.get("success") is True:
+            response = str(result.get("response") or "").strip()
+            if response:
+                return response
+    return None
+
+
+def _home_action_turn_envelope(
+    completed_calls: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Keep this turn's action status separate from referenced receipt status."""
+
+    for call in reversed(completed_calls):
+        tool = str(call.get("tool") or "")
+        result = call.get("result")
+        if tool in _HOME_EXECUTION_TOOLS and isinstance(result, Mapping):
+            status = result.get("verification_status") or result.get("status")
+            return {
+                "home_action_attempted": True,
+                "home_action_status": status,
+                "referenced_home_action_status": None,
+            }
+        if tool == "explain_home_action_receipt" and isinstance(result, Mapping):
+            return {
+                "home_action_attempted": False,
+                "home_action_status": None,
+                "referenced_home_action_status": result.get("referenced_action_status"),
+            }
+    return {
+        "home_action_attempted": False,
+        "home_action_status": None,
+        "referenced_home_action_status": None,
+    }
+
 
 _CODE_AWARENESS_PATTERN = re.compile(
     r"\b(?:"
@@ -249,13 +420,17 @@ Home Assistant tools:
   returned short-lived handle. If more than one plausible canonical candidate
   remains, ask which one in a single concise question.
 - Parameterized controls are grounded capabilities, not raw Home Assistant calls.
+  Every CONTROL plan has exactly one semantic control_mode: DISCRETE or
+  PARAMETERIZED, and one requested_control whose meaning is selected by that mode.
+  A Home Assistant service may internally power a device while
+  applying a parameter, but that adapter detail is not a second semantic action.
   For a requested level, temperature, position, volume, option, colour or similar
   value, put the free semantic parameter name, absolute/relative mode, direction,
   value and user-stated unit in search_home. Never invent a service, field, entity
   ID or payload. Then call execute_home_parameter only with its opaque handle and
   exact frozen candidate IDs. For a qualitative relative request, use RELATIVE
   with INCREASE or DECREASE and a null value; Core applies one bounded generic step.
-  For a parameter-state question, use QUERY with requested_parameter and no change
+  For a parameter-state question, use QUERY with requested_control and no change
   mode. Use ALL_MATCHES only when the user explicitly requests every grounded match;
   otherwise use SINGLE and clarify real ambiguity.
 - When a follow-up keeps or pronominally refers to the single canonical object
@@ -265,6 +440,9 @@ Home Assistant tools:
 - Use a Home Assistant control tool only for an explicit action the user wants
   performed now. Do not operate devices for hypothetical questions, explanations,
   future plans or reminders.
+- When trusted dialogue state contains a matching verified Home action receipt,
+  explain that historical action from the receipt. Do not search the live Home,
+  re-ground its target, or treat the referenced receipt status as a new action.
 - If the request is an immediate action and a suitable control tool is available, use it instead of explaining how the user could do it.
 - Do not ask for confirmation before a clear, safe and reversible action such as switching a known light or ordinary switch on or off. Clarification is still required for ambiguity, and separate confirmation remains mandatory for persistent Admin Mode changes or security-sensitive actions.
 - For a successful routine control, give at most one short natural acknowledgement. The trusted mobile client may intentionally keep that acknowledgement silent.
@@ -1618,6 +1796,7 @@ def _clean_reply(value: str) -> str:
 
 class AIEngine:
     MAX_SEMANTIC_GROUNDING_RETRIES = 2
+    MAX_GROUNDED_CONTROL_COMPLETION_RETRIES = 1
 
     def __init__(
         self,
@@ -2435,33 +2614,28 @@ class AIEngine:
                                 "an entity ID."
                             ),
                         },
-                        "requested_action": {
-                            "type": ["string", "null"],
+                        "control_mode": {
+                            "type": "string",
+                            "enum": ["NONE", "DISCRETE", "PARAMETERIZED"],
                             "description": (
-                                "The desired capability action for CONTROL; null for reads."
+                                "Mutually exclusive semantic control branch. Use NONE for reads "
+                                "and explanations, DISCRETE for an action, or PARAMETERIZED for a "
+                                "semantic parameter. The single requested_control field carries "
+                                "the mode-specific meaning; Core rejects contradictory plans."
                             ),
-                            "enum": [
-                                "turn_on",
-                                "turn_off",
-                                "play",
-                                "pause",
-                                "stop",
-                                "mute",
-                                "unmute",
-                                "next",
-                                "previous",
-                                "volume_up",
-                                "volume_down",
-                                None,
-                            ],
                         },
-                        "requested_parameter": {
+                        "requested_control": {
                             "type": ["string", "null"],
                             "description": (
-                                "Free semantic name of a grounded parameter such as a level, "
-                                "temperature, position, volume, option or colour. Core maps it "
-                                "only to live advertised capability metadata. Null for discrete "
-                                "actions and ordinary identity/state queries."
+                                "The single requested semantic control. With DISCRETE use one "
+                                "supported action such as turn_on, turn_off, play, pause, stop, "
+                                "mute, unmute, next, previous, volume_up or volume_down. With "
+                                "PARAMETERIZED use the free semantic parameter name such as a "
+                                "level, temperature, position, volume, option or colour. For a "
+                                "parameter-state query or historical action explanation, use the "
+                                "relevant action/parameter with control_mode NONE. Null for an "
+                                "ordinary identity, collection or non-parameter state query. Core "
+                                "maps this only to live metadata and never trusts it as a service."
                             ),
                         },
                         "parameter_mode": {
@@ -2516,8 +2690,8 @@ class AIEngine:
                         "occupancy_state",
                         "capability_role_filter",
                         "parent_purpose",
-                        "requested_action",
-                        "requested_parameter",
+                        "control_mode",
+                        "requested_control",
                         "parameter_mode",
                         "parameter_direction",
                         "parameter_value",
@@ -3909,6 +4083,48 @@ class AIEngine:
                     )
                     if _normalise_space(str(item))
                 ][:8]
+                semantic_operation = str(arguments.get("semantic_operation") or "QUERY").upper()
+                control_mode, control_error = _semantic_control_mode(arguments)
+                arguments["control_mode"] = control_mode
+                if control_error is not None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_control_mode",
+                        control_error,
+                    )
+                _apply_exclusive_control_field(arguments, control_mode)
+                if semantic_operation == "EXPLAIN":
+                    receipt_explanation = await WorkingContextService(
+                        self.dialogue
+                    ).explain_matching_home_action(
+                        principal_id=actor.user_key,
+                        conversation_id=conversation_id,
+                        requested_action=(
+                            str(arguments["requested_action"])
+                            if arguments.get("requested_action")
+                            else None
+                        ),
+                        requested_parameter=(
+                            str(arguments["requested_parameter"])
+                            if arguments.get("requested_parameter")
+                            else None
+                        ),
+                        parameter_mode=str(arguments.get("parameter_mode") or "NONE"),
+                        parameter_direction=str(arguments.get("parameter_direction") or "NONE"),
+                        requested_value=arguments.get("parameter_value"),
+                        semantic_concepts=(query, *semantic_terms),
+                    )
+                    if receipt_explanation is not None:
+                        return {
+                            "tool": "explain_home_action_receipt",
+                            "arguments": {
+                                "semantic_operation": "EXPLAIN",
+                                "control_mode": "NONE",
+                                "reference_dependency": arguments.get("reference_dependency"),
+                            },
+                            "result": receipt_explanation,
+                        }
                 semantic_area_id: str | None = (
                     str(arguments["area_id"]) if arguments.get("area_id") else None
                 )
@@ -4037,7 +4253,6 @@ class AIEngine:
                             "The current reference is not one canonical Home Assistant object.",
                         )
                 semantic_aggregation = str(arguments.get("aggregation") or "LIST").upper()
-                semantic_operation = str(arguments.get("semantic_operation") or "QUERY").upper()
                 occupancy_state = (
                     str(arguments["occupancy_state"]).upper()
                     if arguments.get("occupancy_state")
@@ -8970,6 +9185,8 @@ class AIEngine:
         last_response: Any | None = None
         streamed_live = False
         semantic_grounding_retry_count = 0
+        grounded_control_completion_retry_count = 0
+        forced_control_completion_tool: str | None = None
         # External/provider turns must be validated against actual tool or task
         # evidence before any model prose reaches realtime clients. Otherwise a
         # fluent future-tense promise can be spoken before the final guards run.
@@ -9007,6 +9224,17 @@ class AIEngine:
                 )
                 if round_text_delta is not None:
                     streamed_live = True
+                round_force_tool = forced_control_completion_tool
+                forced_control_completion_tool = None
+                if round_force_tool is None and (
+                    not is_executive_round
+                    and tool_rounds == 0
+                    and understanding.home_grounding_required
+                    and decision.allow_home_read
+                    and "search_home" in authorised_tools
+                    and not code_awareness_requested
+                ):
+                    round_force_tool = "search_home"
                 response = await self._create_response(
                     input_items=response_input,
                     tool_definitions=tool_definitions,
@@ -9020,16 +9248,7 @@ class AIEngine:
                         else JARVIS_INSTRUCTIONS
                     ),
                     force_plan=is_executive_round and tool_rounds == 0,
-                    force_tool_name=(
-                        "search_home"
-                        if not is_executive_round
-                        and tool_rounds == 0
-                        and understanding.home_grounding_required
-                        and decision.allow_home_read
-                        and "search_home" in authorised_tools
-                        and not code_awareness_requested
-                        else None
-                    ),
+                    force_tool_name=round_force_tool,
                     executive_task_id=(
                         executive_task_id if is_executive_round and tool_rounds == 0 else None
                     ),
@@ -9090,6 +9309,34 @@ class AIEngine:
 
             function_calls = self._function_calls(response)
             if not function_calls:
+                pending_execution_tool = _pending_grounded_home_execution(completed_calls)
+                if (
+                    pending_execution_tool in authorised_tools
+                    and grounded_control_completion_retry_count
+                    < self.MAX_GROUNDED_CONTROL_COMPLETION_RETRIES
+                ):
+                    # The model has already requested CONTROL and Core has frozen an
+                    # exact, unambiguous target plan.  A prose clarification at this
+                    # point is inconsistent with the grounded result, so permit one
+                    # bounded continuation using only the matching verified executor.
+                    grounded_control_completion_retry_count += 1
+                    fallback_count += 1
+                    runtime_metrics.increment("home_grounded_control_completion_retries")
+                    forced_control_completion_tool = pending_execution_tool
+                    working_input.append(
+                        {
+                            "role": "developer",
+                            "content": (
+                                "The preceding Home CONTROL search returned an exact frozen "
+                                "target plan with clarification_required=false. Complete the "
+                                "user's already-authorised request with the matching execution "
+                                "tool using only the opaque handle and exact candidate IDs from "
+                                "that result. Do not ask another target or capability "
+                                "clarification and do not change the requested value."
+                            ),
+                        }
+                    )
+                    continue
                 semantic_grounding_required = bool(
                     executive_task_id is None
                     and not completed_calls
@@ -9473,6 +9720,7 @@ class AIEngine:
         if reply_status_reply is not None:
             final_reply = reply_status_reply
 
+        home_action_explanation = verified_home_action_explanation_reply(completed_calls)
         home_search_reply = render_home_search_evidence(
             completed_calls,
             request_text=raw_user_text,
@@ -9481,7 +9729,9 @@ class AIEngine:
             completed_calls,
             request_text=raw_user_text,
         )
-        if home_search_reply is not None:
+        if home_action_explanation is not None:
+            final_reply = home_action_explanation
+        elif home_search_reply is not None:
             final_reply = home_search_reply
         elif home_query_reply is not None:
             final_reply = home_query_reply
@@ -9706,6 +9956,7 @@ class AIEngine:
             response_id,
         )
 
+        home_action_envelope = _home_action_turn_envelope(completed_calls)
         return {
             "success": success,
             "response": final_reply,
@@ -9723,6 +9974,7 @@ class AIEngine:
                 house_context_result is not None and house_context_result.text
             ),
             "awareness_context_used": bool(awareness_context),
+            **home_action_envelope,
             "usage": {
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,

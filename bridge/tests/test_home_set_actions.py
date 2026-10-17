@@ -8,7 +8,7 @@ from app.ai_engine import AIEngine
 from app.dialogue_manager import DialogueManager
 from app.home_intelligence import HomeIntelligenceEngine, HomeQueryPlan
 from app.user_context import UserContext
-from app.working_context import WorkingContextService, tool_call_projection
+from app.working_context import WorkingContextService, make_context_object, tool_call_projection
 
 
 class _Tools:
@@ -315,3 +315,139 @@ async def test_semantic_reference_dependency_must_match_grounded_scope(tmp_path)
 
     assert result["result"]["success"] is False
     assert result["result"]["error"]["code"] == "unjustified_reference_scope"
+
+
+@pytest.mark.asyncio
+async def test_historical_action_explanation_uses_receipt_without_home_search(tmp_path) -> None:
+    dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
+    target = make_context_object(
+        object_type="capability",
+        display_name="Studio Control",
+        source="home_assistant_canonical_inventory",
+        canonical_id="capability:studio-control",
+        provider="home_assistant",
+        capability="homeassistant.semantic",
+    )
+    await WorkingContextService(dialogue).project(
+        principal_id="aaron",
+        conversation_id="usr:aaron:home",
+        objects=[target],
+        focus_refs=[target.reference_id],
+        derived_results=[
+            {
+                "kind": "home_action",
+                "evidence_source": "action_receipt",
+                "source_turn_index": 1,
+                "parameter": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_direction": "NONE",
+                "requested_value": 30,
+                "requested_unit": "%",
+                "verification_status": "VERIFIED",
+                "verified": True,
+                "values": [
+                    {
+                        "reference_id": target.reference_id,
+                        "display_name": target.display_name,
+                        "verified": True,
+                        "before_value": 40,
+                        "after_value": 30,
+                        "unit": "%",
+                    }
+                ],
+            }
+        ],
+    )
+    tools = _Tools(("light.studio",))
+    engine = _engine(dialogue, tools, _Runtime({}))
+
+    result = await engine._execute_function(
+        name="search_home",
+        arguments_json=json.dumps(
+            {
+                "semantic_operation": "EXPLAIN",
+                "inventory_kind": "CAPABILITY",
+                "scope": "HOME",
+                "reference_dependency": "NONE",
+                "aggregation": "STATE",
+                "semantic_target": "studio control",
+                "semantic_terms": ["level"],
+                "area_id": "invented-area-that-must-not-be-validated",
+                "capability": "state",
+                "domain": None,
+                "state": None,
+                "occupancy_state": None,
+                "capability_role_filter": "ANY",
+                "parent_purpose": None,
+                "control_mode": "NONE",
+                "requested_control": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_direction": "NONE",
+                "parameter_value": 30,
+                "parameter_unit": "%",
+                "target_selection": "SINGLE",
+                "include_diagnostics": False,
+                "include_virtual": False,
+                "limit": 12,
+            }
+        ),
+        user_text="Explain the earlier setting change",
+        authorised_tools={"search_home"},
+        conversation_id="usr:aaron:home",
+        actor=_actor(),
+        request_id="historical-explanation",
+    )
+
+    assert result["tool"] == "explain_home_action_receipt"
+    assert result["result"]["success"] is True
+    assert result["result"]["action_attempted"] is False
+    assert result["result"]["write_performed"] is False
+    assert result["result"]["referenced_action_status"] == "VERIFIED"
+    assert "reached about 30%" in result["result"]["response"]
+
+
+@pytest.mark.asyncio
+async def test_conflicting_control_modes_fail_before_home_discovery(tmp_path) -> None:
+    dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
+    engine = _engine(dialogue, _Tools(("light.studio",)), _Runtime({}))
+
+    result = await engine._execute_function(
+        name="search_home",
+        arguments_json=json.dumps(
+            {
+                "semantic_operation": "CONTROL",
+                "inventory_kind": "CAPABILITY",
+                "scope": "HOME",
+                "reference_dependency": "NONE",
+                "aggregation": "STATE",
+                "semantic_target": "studio control",
+                "semantic_terms": [],
+                "area_id": None,
+                "capability": "turn_off",
+                "domain": None,
+                "state": None,
+                "occupancy_state": None,
+                "capability_role_filter": "ANY",
+                "parent_purpose": None,
+                "control_mode": "PARAMETERIZED",
+                "requested_action": "turn_off",
+                "requested_parameter": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_direction": "NONE",
+                "parameter_value": 30,
+                "parameter_unit": "%",
+                "target_selection": "SINGLE",
+                "include_diagnostics": False,
+                "include_virtual": False,
+                "limit": 12,
+            }
+        ),
+        user_text="conflicting synthetic plan",
+        authorised_tools={"search_home"},
+        conversation_id="usr:aaron:home",
+        actor=_actor(),
+        request_id="conflicting-plan",
+    )
+
+    assert result["result"]["success"] is False
+    assert result["result"]["error"]["code"] == "invalid_control_mode"

@@ -151,6 +151,31 @@ def _normalise_text(value: Any, *, limit: int = _MAX_STRING) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _semantic_tokens(values: Sequence[Any]) -> set[str]:
+    """Return small inflection-tolerant tokens for grounded evidence matching."""
+
+    tokens: set[str] = set()
+    for value in values:
+        for token in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
+            if len(token) <= 1:
+                continue
+            tokens.add(token)
+            if len(token) > 4 and token.endswith("ies"):
+                tokens.add(token[:-3] + "y")
+            elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+                tokens.add(token[:-1])
+    return tokens
+
+
+def _semantic_values_equal(left: Any, right: Any) -> bool:
+    """Compare planner and receipt values without inventing unit conversion."""
+
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except (InvalidOperation, ValueError):
+        return _normalise_text(left).casefold() == _normalise_text(right).casefold()
+
+
 def _safe_value(value: Any, *, depth: int = 0) -> Any:
     """Return bounded JSON-safe evidence without credentials or raw payloads."""
 
@@ -1222,6 +1247,96 @@ class WorkingContextService:
         ):
             return empty_working_context(principal_id=principal_id, conversation_id=conversation_id)
         return context
+
+    async def explain_matching_home_action(
+        self,
+        *,
+        principal_id: str,
+        conversation_id: str,
+        requested_action: str | None = None,
+        requested_parameter: str | None = None,
+        parameter_mode: str | None = None,
+        parameter_direction: str | None = None,
+        requested_value: float | str | None = None,
+        semantic_concepts: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
+        """Explain one matching historical Home action from receipt evidence only.
+
+        The structured semantic planner must identify an action or parameter before
+        this path is eligible.  That prevents an old write receipt from hijacking a
+        collection or state explanation.  No live Home lookup occurs here: receipt
+        evidence is authoritative for what the earlier turn attempted and verified.
+        """
+
+        action = _normalise_text(requested_action).casefold().replace(" ", "_")
+        parameter = _normalise_text(requested_parameter).casefold().replace(" ", "_")
+        if not action and not parameter:
+            return None
+
+        mode = _normalise_text(parameter_mode).upper()
+        direction = _normalise_text(parameter_direction).upper()
+        context = await self.get(principal_id=principal_id, conversation_id=conversation_id)
+        objects = [
+            item
+            for record in context.get("objects") or ()
+            if isinstance(record, Mapping) and (item := _context_object(record)) is not None
+        ]
+        target_tokens = _semantic_tokens(semantic_concepts)
+        candidates: list[tuple[int, int, Mapping[str, Any]]] = []
+        for index, derived in enumerate(context.get("derived_results") or ()):
+            if not isinstance(derived, Mapping) or derived.get("kind") != "home_action":
+                continue
+            derived_action = _normalise_text(derived.get("action")).casefold().replace(" ", "_")
+            derived_parameter = (
+                _normalise_text(derived.get("parameter")).casefold().replace(" ", "_")
+            )
+            if action and action != derived_action:
+                continue
+            if parameter and parameter != derived_parameter:
+                continue
+            derived_mode = _normalise_text(derived.get("parameter_mode")).upper()
+            if mode not in {"", "NONE"} and mode != derived_mode:
+                continue
+            derived_direction = _normalise_text(derived.get("parameter_direction")).upper()
+            if direction not in {"", "NONE"} and direction != derived_direction:
+                continue
+            if requested_value is not None and not _semantic_values_equal(
+                requested_value,
+                derived.get("requested_value"),
+            ):
+                continue
+
+            values = [item for item in derived.get("values") or () if isinstance(item, Mapping)]
+            evidence_text = [str(item.get("display_name") or "") for item in values]
+            evidence_text.extend(
+                item.display_name
+                for item in objects
+                if any(
+                    str(value.get("reference_id") or "") == item.reference_id for value in values
+                )
+            )
+            concept_score = len(target_tokens & _semantic_tokens(evidence_text))
+            # Derived results are newest-first.  Semantic target overlap wins;
+            # recency breaks ties without fuzzy-merging any Home identities.
+            candidates.append((concept_score, -index, derived))
+
+        if not candidates:
+            return None
+        _, _, selected = max(candidates, key=lambda item: (item[0], item[1]))
+        response = ResultIntelligence.explain(selected, objects)
+        if not response:
+            return None
+        return {
+            "success": True,
+            "operation": "EXPLAIN",
+            "evidence_source": "action_receipt",
+            "response": response,
+            "action_attempted": False,
+            "write_performed": False,
+            "referenced_action_status": selected.get("verification_status")
+            or selected.get("receipt_status"),
+            "source_turn_index": selected.get("source_turn_index"),
+        }
 
     async def project(
         self,

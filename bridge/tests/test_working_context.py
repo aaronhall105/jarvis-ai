@@ -155,6 +155,84 @@ def test_verified_parameter_receipt_generically_explains_absolute_actions(
     assert len(calls) == 1  # Explanation only reads projected receipt evidence.
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("parameter", "requested", "unit"),
+    [
+        ("brightness", 30, "%"),
+        ("volume", 40, "%"),
+        ("target_temperature", 21, "°C"),
+        ("position", 60, "%"),
+        ("value", 80, ""),
+        ("mode", "Eco", ""),
+    ],
+)
+async def test_historical_action_lookup_matches_receipt_without_live_home(
+    tmp_path, parameter, requested, unit
+) -> None:
+    dialogue = DialogueManager(str(tmp_path / f"{parameter}.db"))
+    conversation = f"usr:aaron:historical-{parameter}"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Verified.",
+        calls=[
+            _receipt_call(
+                parameter=parameter,
+                requested_value=requested,
+                after_value=requested,
+                unit=unit,
+            )
+        ],
+    )
+    await dialogue.record_result(
+        conversation,
+        intent="general_conversation",
+        success=True,
+        response="A separate task.",
+        calls=[],
+    )
+
+    explanation = await WorkingContextService(dialogue).explain_matching_home_action(
+        principal_id="aaron",
+        conversation_id=conversation,
+        requested_parameter=parameter,
+        parameter_mode="ABSOLUTE",
+        requested_value=requested,
+        semantic_concepts=("Studio Control",),
+    )
+
+    assert explanation is not None
+    assert explanation["success"] is True
+    assert explanation["evidence_source"] == "action_receipt"
+    assert explanation["action_attempted"] is False
+    assert explanation["write_performed"] is False
+    assert explanation["referenced_action_status"] == "VERIFIED"
+    assert "Studio Control" in explanation["response"]
+
+
+@pytest.mark.asyncio
+async def test_collection_explanation_cannot_be_hijacked_by_old_action_receipt(tmp_path) -> None:
+    dialogue = DialogueManager(str(tmp_path / "collection.db"))
+    conversation = "usr:aaron:collection-after-action"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Verified.",
+        calls=[_receipt_call()],
+    )
+
+    explanation = await WorkingContextService(dialogue).explain_matching_home_action(
+        principal_id="aaron",
+        conversation_id=conversation,
+        semantic_concepts=("primary capabilities",),
+    )
+
+    assert explanation is None
+
+
 def test_relative_and_qualitative_receipts_explain_recorded_before_after_values() -> None:
     item = _home_action_context()
     relative = home_action_receipt_projection(
