@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.ai_engine import AIEngine
+from app.ai_engine import (
+    AIEngine,
+    _home_action_turn_envelope,
+    _pending_grounded_home_execution,
+    _semantic_control_mode,
+)
 from app.connectors.base import ConnectorResult
 from app.home_assistant_connector import (
     HOME_ASSISTANT_CAPABILITIES,
@@ -771,7 +776,15 @@ async def test_llm_tools_expose_semantic_parameter_intent_but_not_ha_execution_f
     read_tools = await engine._home_read_tools(actor)
     search = next(item for item in read_tools if item["name"] == "search_home")
     properties = search["parameters"]["properties"]
-    assert properties["requested_parameter"]["type"] == ["string", "null"]
+    assert properties["control_mode"]["enum"] == [
+        "NONE",
+        "DISCRETE",
+        "PARAMETERIZED",
+    ]
+    assert "control_mode" in search["parameters"]["required"]
+    assert properties["requested_control"]["type"] == ["string", "null"]
+    assert "requested_action" not in properties
+    assert "requested_parameter" not in properties
     assert properties["parameter_mode"]["enum"] == ["NONE", "ABSOLUTE", "RELATIVE"]
     assert "entity_id" not in properties
     assert "service" not in properties
@@ -780,6 +793,140 @@ async def test_llm_tools_expose_semantic_parameter_intent_but_not_ha_execution_f
     control_tools = await engine._home_control_tools(actor=actor)
     execute = next(item for item in control_tools if item["name"] == "execute_home_parameter")
     assert set(execute["parameters"]["properties"]) == {"handle", "canonical_ids"}
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_mode"),
+    [
+        (
+            {
+                "semantic_operation": "CONTROL",
+                "control_mode": "PARAMETERIZED",
+                "requested_control": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_value": 30,
+            },
+            "PARAMETERIZED",
+        ),
+        (
+            {
+                "semantic_operation": "CONTROL",
+                "control_mode": "DISCRETE",
+                "requested_control": "turn_off",
+                "parameter_mode": "NONE",
+                "parameter_value": None,
+            },
+            "DISCRETE",
+        ),
+        (
+            {
+                "semantic_operation": "CONTROL",
+                "control_mode": "PARAMETERIZED",
+                "requested_control": "level",
+                "parameter_mode": "RELATIVE",
+                "parameter_value": 10,
+            },
+            "PARAMETERIZED",
+        ),
+    ],
+)
+def test_semantic_control_mode_accepts_exactly_one_coherent_branch(
+    arguments: dict[str, Any], expected_mode: str
+) -> None:
+    mode, error = _semantic_control_mode(arguments)
+    assert mode == expected_mode
+    assert error is None
+
+
+def test_semantic_control_mode_rejects_genuinely_conflicting_dual_plan() -> None:
+    mode, error = _semantic_control_mode(
+        {
+            "semantic_operation": "CONTROL",
+            "control_mode": "PARAMETERIZED",
+            "requested_action": "turn_off",
+            "requested_parameter": "level",
+            "parameter_mode": "ABSOLUTE",
+            "parameter_value": 30,
+        }
+    )
+    assert mode == "PARAMETERIZED"
+    assert error == "A parameterized control requires only a semantic parameter."
+
+
+def test_exact_grounded_parameter_plan_gets_one_bounded_execution_continuation() -> None:
+    calls = [
+        {
+            "tool": "search_home",
+            "result": {
+                "success": True,
+                "operation": "CONTROL",
+                "resolution": "unique",
+                "clarification_required": False,
+                "action_plan": {
+                    "handle": "opaque",
+                    "parameter": "level",
+                    "candidate_ids": ["capability:studio"],
+                },
+            },
+        }
+    ]
+    assert _pending_grounded_home_execution(calls) == "execute_home_parameter"
+    assert (
+        _pending_grounded_home_execution(
+            [
+                *calls,
+                {
+                    "tool": "execute_home_parameter",
+                    "result": {"success": True, "verification_status": "VERIFIED"},
+                },
+            ]
+        )
+        is None
+    )
+
+
+def test_ambiguous_grounded_control_never_forces_execution() -> None:
+    assert (
+        _pending_grounded_home_execution(
+            [
+                {
+                    "tool": "search_home",
+                    "result": {
+                        "success": True,
+                        "operation": "CONTROL",
+                        "resolution": "ambiguous",
+                        "clarification_required": True,
+                        "action_plan": {
+                            "handle": "opaque",
+                            "parameter": "level",
+                            "candidate_ids": ["one", "two"],
+                        },
+                    },
+                }
+            ]
+        )
+        is None
+    )
+
+
+def test_historical_receipt_status_is_not_current_turn_action_status() -> None:
+    envelope = _home_action_turn_envelope(
+        [
+            {
+                "tool": "explain_home_action_receipt",
+                "result": {
+                    "success": True,
+                    "referenced_action_status": "VERIFIED",
+                    "action_attempted": False,
+                },
+            }
+        ]
+    )
+    assert envelope == {
+        "home_action_attempted": False,
+        "home_action_status": None,
+        "referenced_home_action_status": "VERIFIED",
+    }
 
 
 @pytest.mark.asyncio
