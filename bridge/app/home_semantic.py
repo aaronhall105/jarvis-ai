@@ -1242,6 +1242,12 @@ class HomeSemanticEngine:
                 if value not in {"*", "any", "all"} and not inventory_label(value)
             )
         )
+        if dependency == "CURRENT_OBJECT" and len(allowed_ids) == 1:
+            # The exact canonical identity is already grounded. Free-form target
+            # wording may describe a property rather than the object's name, so
+            # it must not discard that object after structural capability and
+            # parameter validation succeeds.
+            concepts = ()
         eligible: list[CanonicalHomeObject] = []
         for item in inventory:
             if allowed_ids and item.canonical_id not in allowed_ids:

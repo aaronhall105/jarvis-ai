@@ -335,6 +335,48 @@ async def test_live_schema_projects_standard_parameter_capabilities_and_caches()
 
 
 @pytest.mark.asyncio
+async def test_exact_current_object_parameter_query_does_not_require_name_similarity() -> None:
+    home = FakeHome(
+        [
+            entity(
+                "light.studio",
+                name="Studio Fixture",
+                attributes={"supported_color_modes": ["brightness"], "brightness": 128},
+            )
+        ]
+    )
+    engine = home.engine()
+    graph = await engine.graph()
+    target = next(
+        item
+        for item in graph.capabilities
+        if item.kind == "light" and "brightness" in item.capabilities
+    )
+
+    result = await engine.search(
+        query="current level",
+        semantic_terms=(),
+        inventory_kind="CAPABILITY",
+        capability_role_filter="ANY",
+        operation="QUERY",
+        aggregation="STATE",
+        requested_parameter="brightness",
+        reference_dependency="CURRENT_OBJECT",
+        restrict_ids=(target.canonical_id,),
+        principal_id="aaron",
+        conversation_id="conversation",
+        request_id="exact-reference-query",
+    )
+
+    assert result["count"] == 1
+    assert result["resolution"] == "unique"
+    assert result["items"][0]["canonical_id"] == target.canonical_id
+    assert result["items"][0]["parameterized_capabilities"][0]["current_value"] == pytest.approx(
+        50.1961
+    )
+
+
+@pytest.mark.asyncio
 async def test_service_schema_cache_loads_during_fresh_process_uptime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
