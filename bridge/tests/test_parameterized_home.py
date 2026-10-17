@@ -10,6 +10,7 @@ import pytest
 from app.ai_engine import (
     AIEngine,
     _home_action_turn_envelope,
+    _initial_home_tool_choice,
     _pending_grounded_home_execution,
     _semantic_control_mode,
 )
@@ -938,6 +939,50 @@ def test_historical_receipt_status_is_not_current_turn_action_status() -> None:
         "home_action_status": None,
         "referenced_home_action_status": "VERIFIED",
     }
+
+
+def test_action_explanation_gets_one_unforced_receipt_selection_round() -> None:
+    tools = {"search_home", "explain_home_action_receipt"}
+
+    assert (
+        _initial_home_tool_choice(
+            first_tool_round=True,
+            grounding_required=True,
+            allow_home_read=True,
+            authorised_tools=tools,
+            code_awareness_requested=False,
+            explanation_choice_available=True,
+            semantic_retry_count=0,
+        )
+        is None
+    )
+    assert (
+        _initial_home_tool_choice(
+            first_tool_round=True,
+            grounding_required=True,
+            allow_home_read=True,
+            authorised_tools=tools,
+            code_awareness_requested=False,
+            explanation_choice_available=True,
+            semantic_retry_count=1,
+        )
+        == "search_home"
+    )
+
+
+def test_non_explanation_home_turn_keeps_forced_grounding() -> None:
+    assert (
+        _initial_home_tool_choice(
+            first_tool_round=True,
+            grounding_required=True,
+            allow_home_read=True,
+            authorised_tools={"search_home", "explain_home_action_receipt"},
+            code_awareness_requested=False,
+            explanation_choice_available=False,
+            semantic_retry_count=0,
+        )
+        == "search_home"
+    )
 
 
 @pytest.mark.asyncio

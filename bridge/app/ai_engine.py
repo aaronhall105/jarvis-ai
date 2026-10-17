@@ -6,7 +6,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -264,6 +264,38 @@ def _home_action_turn_envelope(
         "home_action_status": None,
         "referenced_home_action_status": None,
     }
+
+
+def _initial_home_tool_choice(
+    *,
+    first_tool_round: bool,
+    grounding_required: bool,
+    allow_home_read: bool,
+    authorised_tools: Collection[str],
+    code_awareness_requested: bool,
+    explanation_choice_available: bool,
+    semantic_retry_count: int,
+) -> str | None:
+    """Force Home grounding except for one bounded explanation-choice round.
+
+    Action-history and structural/current-state explanations use different
+    authoritative evidence.  When both receipt and Home-search tools are
+    available, the semantic planner gets one round to select the correct source.
+    If it emits no tool, the existing bounded retry falls back to forced Home
+    grounding rather than accepting unsupported prose.
+    """
+
+    if not (
+        first_tool_round
+        and grounding_required
+        and allow_home_read
+        and "search_home" in authorised_tools
+        and not code_awareness_requested
+    ):
+        return None
+    if explanation_choice_available and semantic_retry_count == 0:
+        return None
+    return "search_home"
 
 
 _CODE_AWARENESS_PATTERN = re.compile(
@@ -9291,6 +9323,10 @@ class AIEngine:
         authorised_tools = {
             str(definition["name"]) for definition in tool_definitions if definition.get("name")
         }
+        explanation_choice_available = bool(
+            _EXPLANATION_PATTERN.search(user_text)
+            and "explain_home_action_receipt" in authorised_tools
+        )
 
         # Keep ordinary Jarvis requests on the existing conservative
         # tool budget. Live code inspection may legitimately need
@@ -9352,15 +9388,16 @@ class AIEngine:
                     streamed_live = True
                 round_force_tool = forced_control_completion_tool
                 forced_control_completion_tool = None
-                if round_force_tool is None and (
-                    not is_executive_round
-                    and tool_rounds == 0
-                    and understanding.home_grounding_required
-                    and decision.allow_home_read
-                    and "search_home" in authorised_tools
-                    and not code_awareness_requested
-                ):
-                    round_force_tool = "search_home"
+                if round_force_tool is None and not is_executive_round:
+                    round_force_tool = _initial_home_tool_choice(
+                        first_tool_round=tool_rounds == 0,
+                        grounding_required=understanding.home_grounding_required,
+                        allow_home_read=decision.allow_home_read,
+                        authorised_tools=authorised_tools,
+                        code_awareness_requested=code_awareness_requested,
+                        explanation_choice_available=explanation_choice_available,
+                        semantic_retry_count=semantic_grounding_retry_count,
+                    )
                 response = await self._create_response(
                     input_items=response_input,
                     tool_definitions=tool_definitions,
@@ -9407,13 +9444,14 @@ class AIEngine:
                         tool_definitions=tool_definitions,
                         actor=actor,
                         on_text_delta=None,
-                        force_tool_name=(
-                            "search_home"
-                            if understanding.home_grounding_required
-                            and decision.allow_home_read
-                            and "search_home" in authorised_tools
-                            and not code_awareness_requested
-                            else None
+                        force_tool_name=_initial_home_tool_choice(
+                            first_tool_round=tool_rounds == 0,
+                            grounding_required=understanding.home_grounding_required,
+                            allow_home_read=decision.allow_home_read,
+                            authorised_tools=authorised_tools,
+                            code_awareness_requested=code_awareness_requested,
+                            explanation_choice_available=explanation_choice_available,
+                            semantic_retry_count=semantic_grounding_retry_count,
                         ),
                     )
                     model_rounds += 1
