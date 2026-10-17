@@ -790,6 +790,17 @@ async def test_llm_tools_expose_semantic_parameter_intent_but_not_ha_execution_f
     assert "service" not in properties
     assert "service_data" not in properties
 
+    explain = next(item for item in read_tools if item["name"] == "explain_home_action_receipt")
+    explain_properties = explain["parameters"]["properties"]
+    assert explain_properties["control_kind"]["enum"] == [
+        "DISCRETE",
+        "PARAMETERIZED",
+    ]
+    assert "requested_control" in explain["parameters"]["required"]
+    assert "entity_id" not in explain_properties
+    assert "service" not in explain_properties
+    assert "service_data" not in explain_properties
+
     control_tools = await engine._home_control_tools(actor=actor)
     execute = next(item for item in control_tools if item["name"] == "execute_home_parameter")
     assert set(execute["parameters"]["properties"]) == {"handle", "canonical_ids"}

@@ -441,8 +441,12 @@ Home Assistant tools:
   performed now. Do not operate devices for hypothetical questions, explanations,
   future plans or reminders.
 - When trusted dialogue state contains a matching verified Home action receipt,
-  explain that historical action from the receipt. Do not search the live Home,
-  re-ground its target, or treat the referenced receipt status as a new action.
+  use explain_home_action_receipt and explain that historical action from the
+  receipt. Do not search the live Home, re-ground its target, or treat the
+  referenced receipt status as a new action. Preserve every action/parameter,
+  mode, direction, value and unit the user identifies so Core can select the
+  exact receipt. Use search_home EXPLAIN only for structural collection or
+  current-state explanations, never for a receipt-sufficient action history.
 - If the request is an immediate action and a suitable control tool is available, use it instead of explaining how the user could do it.
 - Do not ask for confirmation before a clear, safe and reversible action such as switching a known light or ordinary switch on or off. Clarification is still required for ambiguity, and separate confirmation remains mandatory for persistent Admin Mode changes or security-sensitive actions.
 - For a successful routine control, give at most one short natural acknowledgement. The trusted mobile client may intentionally keep that acknowledgement silent.
@@ -2707,6 +2711,73 @@ class AIEngine:
             },
             {
                 "type": "function",
+                "name": "explain_home_action_receipt",
+                "description": (
+                    "Explain a prior Home Assistant action from Jarvis's durable verified "
+                    "receipt evidence without reading or changing the live Home. Use this "
+                    "only when the user asks what happened, why it happened, or whether a "
+                    "specific earlier Home action worked. Preserve the semantic action or "
+                    "parameter and any mode, direction, value and unit named by the user. "
+                    "Do not use it for a collection-membership explanation or an explanation "
+                    "of a current state observation."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "control_kind": {
+                            "type": "string",
+                            "enum": ["DISCRETE", "PARAMETERIZED"],
+                            "description": "The kind of historical action being explained.",
+                        },
+                        "requested_control": {
+                            "type": "string",
+                            "description": (
+                                "The semantic action or parameter named by the user. This is "
+                                "matched only against receipt metadata and is never an HA service."
+                            ),
+                        },
+                        "parameter_mode": {
+                            "type": "string",
+                            "enum": ["NONE", "ABSOLUTE", "RELATIVE"],
+                        },
+                        "parameter_direction": {
+                            "type": "string",
+                            "enum": ["NONE", "INCREASE", "DECREASE"],
+                        },
+                        "parameter_value": {
+                            "type": ["number", "string", "null"],
+                            "description": "The historical semantic value named by the user.",
+                        },
+                        "parameter_unit": {
+                            "type": ["string", "null"],
+                            "description": "The unit named by the user, when present.",
+                        },
+                        "semantic_target": {
+                            "type": "string",
+                            "description": "The target concept named by the user, without IDs.",
+                        },
+                        "semantic_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 8,
+                        },
+                    },
+                    "required": [
+                        "control_kind",
+                        "requested_control",
+                        "parameter_mode",
+                        "parameter_direction",
+                        "parameter_value",
+                        "parameter_unit",
+                        "semantic_target",
+                        "semantic_terms",
+                    ],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+            {
+                "type": "function",
                 "name": "inspect_home_item",
                 "description": (
                     "Inspect one exact canonical object returned by search_home when its compact "
@@ -4069,6 +4140,61 @@ class AIEngine:
                     target=target,
                 )
                 return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "explain_home_action_receipt":
+                control_kind = str(arguments.get("control_kind") or "").upper()
+                requested_control = (
+                    _normalise_space(str(arguments.get("requested_control") or ""))
+                    .casefold()
+                    .replace(" ", "_")
+                )
+                if control_kind not in {"DISCRETE", "PARAMETERIZED"} or not requested_control:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "invalid_receipt_selector",
+                        "A historical action explanation requires one semantic control selector.",
+                    )
+                raw_terms = arguments.get("semantic_terms") or ()
+                semantic_terms = [
+                    _normalise_space(str(item))
+                    for item in (
+                        raw_terms
+                        if isinstance(raw_terms, Sequence)
+                        and not isinstance(raw_terms, (str, bytes, bytearray))
+                        else ()
+                    )
+                    if _normalise_space(str(item))
+                ][:8]
+                receipt_explanation = await WorkingContextService(
+                    self.dialogue
+                ).explain_matching_home_action(
+                    principal_id=actor.user_key,
+                    conversation_id=conversation_id,
+                    requested_action=(requested_control if control_kind == "DISCRETE" else None),
+                    requested_parameter=(
+                        requested_control if control_kind == "PARAMETERIZED" else None
+                    ),
+                    parameter_mode=str(arguments.get("parameter_mode") or "NONE"),
+                    parameter_direction=str(arguments.get("parameter_direction") or "NONE"),
+                    requested_value=arguments.get("parameter_value"),
+                    semantic_concepts=(
+                        _normalise_space(str(arguments.get("semantic_target") or "")),
+                        *semantic_terms,
+                    ),
+                )
+                if receipt_explanation is None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "receipt_not_found",
+                        "No matching grounded Home action receipt was found.",
+                    )
+                return {
+                    "tool": name,
+                    "arguments": arguments,
+                    "result": receipt_explanation,
+                }
 
             if name == "search_home":
                 query = _normalise_space(str(arguments.get("semantic_target") or ""))
