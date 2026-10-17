@@ -213,6 +213,67 @@ async def test_historical_action_lookup_matches_receipt_without_live_home(
 
 
 @pytest.mark.asyncio
+async def test_historical_parameter_operation_resolves_unique_receipt_parameter(tmp_path) -> None:
+    dialogue = DialogueManager(str(tmp_path / "generic-parameter-operation.db"))
+    conversation = "usr:aaron:historical-generic-parameter"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Verified.",
+        calls=[_receipt_call(parameter="level", requested_value=30, after_value=30)],
+    )
+
+    explanation = await WorkingContextService(dialogue).explain_matching_home_action(
+        principal_id="aaron",
+        conversation_id=conversation,
+        requested_parameter="set_parameter",
+        parameter_mode="ABSOLUTE",
+        requested_value=30,
+        semantic_concepts=("Studio Control",),
+    )
+
+    assert explanation is not None
+    assert explanation["success"] is True
+    assert explanation["evidence_source"] == "action_receipt"
+    assert explanation["referenced_action_status"] == "VERIFIED"
+    assert "level" in explanation["response"]
+
+
+@pytest.mark.asyncio
+async def test_historical_parameter_operation_fails_closed_for_distinct_parameters(
+    tmp_path,
+) -> None:
+    dialogue = DialogueManager(str(tmp_path / "ambiguous-parameter-operation.db"))
+    conversation = "usr:aaron:historical-ambiguous-parameter"
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Verified level.",
+        calls=[_receipt_call(parameter="level", requested_value=30, after_value=30)],
+    )
+    await dialogue.record_result(
+        conversation,
+        intent="control_now",
+        success=True,
+        response="Verified position.",
+        calls=[_receipt_call(parameter="position", requested_value=30, after_value=30)],
+    )
+
+    explanation = await WorkingContextService(dialogue).explain_matching_home_action(
+        principal_id="aaron",
+        conversation_id=conversation,
+        requested_parameter="set_parameter",
+        parameter_mode="ABSOLUTE",
+        requested_value=30,
+        semantic_concepts=("Studio Control",),
+    )
+
+    assert explanation is None
+
+
+@pytest.mark.asyncio
 async def test_collection_explanation_cannot_be_hijacked_by_old_action_receipt(tmp_path) -> None:
     dialogue = DialogueManager(str(tmp_path / "collection.db"))
     conversation = "usr:aaron:collection-after-action"

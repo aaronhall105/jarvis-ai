@@ -1282,7 +1282,7 @@ class WorkingContextService:
             if isinstance(record, Mapping) and (item := _context_object(record)) is not None
         ]
         target_tokens = _semantic_tokens(semantic_concepts)
-        candidates: list[tuple[int, int, Mapping[str, Any]]] = []
+        candidates: list[tuple[int, int, int, Mapping[str, Any]]] = []
         for index, derived in enumerate(context.get("derived_results") or ()):
             if not isinstance(derived, Mapping) or derived.get("kind") != "home_action":
                 continue
@@ -1292,8 +1292,18 @@ class WorkingContextService:
             )
             if action and action != derived_action:
                 continue
-            if parameter and parameter != derived_parameter:
-                continue
+            parameter_match = 0
+            if parameter:
+                if parameter == derived_parameter:
+                    parameter_match = 2
+                elif parameter == derived_action and derived_parameter:
+                    # A planner may select the receipt's generic parameterized
+                    # operation instead of its underlying semantic parameter.
+                    # Receipt evidence may resolve that selector only when the
+                    # matching evidence has one unambiguous parameter kind.
+                    parameter_match = 1
+                else:
+                    continue
             derived_mode = _normalise_text(derived.get("parameter_mode")).upper()
             if mode not in {"", "NONE"} and mode != derived_mode:
                 continue
@@ -1316,13 +1326,26 @@ class WorkingContextService:
                 )
             )
             concept_score = len(target_tokens & _semantic_tokens(evidence_text))
-            # Derived results are newest-first.  Semantic target overlap wins;
-            # recency breaks ties without fuzzy-merging any Home identities.
-            candidates.append((concept_score, -index, derived))
+            # Derived results are newest-first. Exact parameter identity wins,
+            # then semantic target overlap; recency breaks remaining ties
+            # without fuzzy-merging any Home identities.
+            candidates.append((parameter_match, concept_score, -index, derived))
 
         if not candidates:
             return None
-        _, _, selected = max(candidates, key=lambda item: (item[0], item[1]))
+        best_parameter_match = max(item[0] for item in candidates)
+        parameter_candidates = [item for item in candidates if item[0] == best_parameter_match]
+        best_concept_score = max(item[1] for item in parameter_candidates)
+        finalists = [item for item in parameter_candidates if item[1] == best_concept_score]
+        if best_parameter_match == 1:
+            semantic_parameters = {
+                _normalise_text(item[3].get("parameter")).casefold().replace(" ", "_")
+                for item in finalists
+                if _normalise_text(item[3].get("parameter"))
+            }
+            if len(semantic_parameters) != 1:
+                return None
+        _, _, _, selected = max(finalists, key=lambda item: item[2])
         response = ResultIntelligence.explain(selected, objects)
         if not response:
             return None
