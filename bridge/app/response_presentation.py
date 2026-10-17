@@ -508,6 +508,24 @@ def render_home_search_evidence(
             return "I found no matching rooms."
         return f"I found no canonical home items matching {query}."
     requested_parameter = str(result.get("requested_parameter") or "").strip()
+    if not requested_parameter and aggregation == "STATE" and len(items) == 1:
+        # A model may correctly ground a parameter as the semantic target while
+        # leaving the optional selector empty.  Resolve only an exact, unique
+        # live-metadata match; never guess a parameter from user phrasing.
+        normalised_query = re.sub(r"[^a-z0-9]+", "_", query.casefold()).strip("_")
+        exact_parameters = {
+            str(value.get("parameter") or "").strip()
+            for value in items[0].get("parameterized_capabilities") or ()
+            if isinstance(value, Mapping)
+            and re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                str(value.get("parameter") or "").casefold(),
+            ).strip("_")
+            == normalised_query
+        }
+        if len(exact_parameters) == 1:
+            requested_parameter = exact_parameters.pop()
     if requested_parameter and aggregation == "STATE" and len(items) == 1:
         parameters = items[0].get("parameterized_capabilities") or ()
         match = next(

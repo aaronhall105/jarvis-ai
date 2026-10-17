@@ -16,6 +16,7 @@ class _Tools:
 
     def __init__(self, entity_ids: tuple[str, ...]) -> None:
         self.entity_ids = entity_ids
+        self.query_calls: list[object] = []
 
     async def controllable_devices(self):
         return [
@@ -28,6 +29,7 @@ class _Tools:
 
     async def query_home(self, plan, *, principal_id="aaron"):
         assert principal_id == "aaron"
+        self.query_calls.append(plan)
         return {"success": True, "query_plan": dict(plan), "entities": []}
 
 
@@ -404,6 +406,78 @@ async def test_historical_action_explanation_uses_receipt_without_home_search(tm
     assert result["result"]["write_performed"] is False
     assert result["result"]["referenced_action_status"] == "VERIFIED"
     assert "reached about 30%" in result["result"]["response"]
+
+
+@pytest.mark.asyncio
+async def test_dedicated_historical_action_tool_reads_only_receipt_evidence(tmp_path) -> None:
+    dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
+    target = make_context_object(
+        object_type="capability",
+        display_name="Studio Control",
+        source="home_assistant_canonical_inventory",
+        canonical_id="capability:studio-control",
+        provider="home_assistant",
+        capability="homeassistant.semantic",
+    )
+    await WorkingContextService(dialogue).project(
+        principal_id="aaron",
+        conversation_id="usr:aaron:home",
+        objects=[target],
+        focus_refs=[target.reference_id],
+        derived_results=[
+            {
+                "kind": "home_action",
+                "evidence_source": "action_receipt",
+                "source_turn_index": 1,
+                "parameter": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_direction": "NONE",
+                "requested_value": 30,
+                "requested_unit": "%",
+                "verification_status": "VERIFIED",
+                "verified": True,
+                "values": [
+                    {
+                        "reference_id": target.reference_id,
+                        "display_name": target.display_name,
+                        "verified": True,
+                        "before_value": 40,
+                        "after_value": 30,
+                        "unit": "%",
+                    }
+                ],
+            }
+        ],
+    )
+    tools = _Tools(("light.studio",))
+    engine = _engine(dialogue, tools, _Runtime({}))
+
+    result = await engine._execute_function(
+        name="explain_home_action_receipt",
+        arguments_json=json.dumps(
+            {
+                "control_kind": "PARAMETERIZED",
+                "requested_control": "level",
+                "parameter_mode": "ABSOLUTE",
+                "parameter_direction": "NONE",
+                "parameter_value": 30,
+                "parameter_unit": "%",
+                "semantic_target": "studio control",
+                "semantic_terms": [],
+            }
+        ),
+        user_text="Explain the earlier setting change",
+        authorised_tools={"explain_home_action_receipt"},
+        conversation_id="usr:aaron:home",
+        actor=_actor(),
+        request_id="historical-receipt-tool",
+    )
+
+    assert result["tool"] == "explain_home_action_receipt"
+    assert result["result"]["success"] is True
+    assert result["result"]["write_performed"] is False
+    assert result["result"]["referenced_action_status"] == "VERIFIED"
+    assert tools.query_calls == []
 
 
 @pytest.mark.asyncio

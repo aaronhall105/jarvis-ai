@@ -12,9 +12,40 @@ from app.response_presentation import (
     present_user_response,
     render_gmail_message_action,
     render_gmail_reply_status,
+    render_home_search_evidence,
     render_home_state_evidence,
     render_presence_evidence,
 )
+
+
+def test_parameter_state_renderer_uses_unique_exact_live_metadata_match() -> None:
+    response = render_home_search_evidence(
+        [
+            {
+                "tool": "search_home",
+                "result": {
+                    "success": True,
+                    "operation": "QUERY",
+                    "aggregation": "STATE",
+                    "inventory_kind": "CAPABILITY",
+                    "query": "level",
+                    "count": 1,
+                    "items": [
+                        {
+                            "display_name": "Studio Control",
+                            "state": "on",
+                            "parameterized_capabilities": [
+                                {"parameter": "level", "current_value": 30, "unit": "%"}
+                            ],
+                        }
+                    ],
+                },
+            }
+        ],
+        request_text="What is its current level?",
+    )
+
+    assert response == "Studio Control level is 30%."
 
 
 INTERNAL_TERMS = (
