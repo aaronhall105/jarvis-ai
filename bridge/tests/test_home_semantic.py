@@ -97,6 +97,48 @@ class SemanticFixture:
                 item["available"] = True
 
 
+@pytest.mark.asyncio
+async def test_entity_id_rename_preserves_canonical_physical_identity() -> None:
+    before = entity(
+        "sensor.old_name",
+        "Room Sensor",
+        domain="sensor",
+        state="21",
+        area_id="study",
+        area_name="Study",
+        device_id="registry-device-r1",
+        device_name="Room Sensor",
+        device_class="temperature",
+    )
+    fixture = SemanticFixture([before])
+    original = (await fixture.engine.graph()).physical_objects
+
+    fixture.rows = [{**before, "entity_id": "sensor.new_name"}]
+    renamed = (await fixture.engine.graph()).physical_objects
+
+    fixture.rows = [
+        {**before, "entity_id": "sensor.new_name"},
+        entity(
+            "sensor.old_name",
+            "Different Sensor",
+            domain="sensor",
+            state="45",
+            area_id="utility",
+            area_name="Utility",
+            device_id="registry-device-r2",
+            device_name="Different Sensor",
+            device_class="humidity",
+        ),
+    ]
+    reused = (await fixture.engine.graph()).physical_objects
+
+    assert len(original) == len(renamed) == 1
+    assert original[0].canonical_id == renamed[0].canonical_id
+    assert renamed[0].primary_entity_id == "sensor.new_name"
+    assert len(reused) == 2
+    assert {item.canonical_id for item in reused} > {renamed[0].canonical_id}
+
+
 async def search(
     fixture: SemanticFixture,
     query: str,
