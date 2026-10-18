@@ -388,8 +388,23 @@ async def _restore_media_after_voice_pe(metadata: dict[str, object]) -> None:
         )
 
 
+async def _proactive_interaction_started(metadata: dict[str, object]) -> None:
+    await proactive_engine.voice_session_started(dict(metadata))
+
+
+async def _proactive_interaction_ended(metadata: dict[str, object]) -> None:
+    await proactive_engine.voice_session_ended(dict(metadata))
+
+
+async def _interrupt_proactive_speech(metadata: dict[str, object]) -> None:
+    await proactive_engine.voice_user_speech_started(dict(metadata))
+
+
 realtime_voice.voice_pe_session_started = _duck_media_for_voice_pe
 realtime_voice.voice_pe_session_ended = _restore_media_after_voice_pe
+realtime_voice.interaction_session_started = _proactive_interaction_started
+realtime_voice.interaction_session_ended = _proactive_interaction_ended
+realtime_voice.interaction_user_speech_started = _interrupt_proactive_speech
 
 
 async def _registry_transcription_prompt(metadata: dict[str, object]) -> str:

@@ -89,14 +89,17 @@ Public sanitized fixtures:
 ```bash
 /home/aaron/.venvs/jarvis-phase2/bin/python \
   tools/run_asr_semantic_regression.py \
+  bridge/tests/fixtures/asr_regression_public.json \
   --json-output /tmp/jarvis-asr-public.json
 ```
 
 One case or endpoint subset:
 
 ```bash
-python tools/run_asr_semantic_regression.py --case percentage-thirty
-python tools/run_asr_semantic_regression.py --endpoint WATCH
+python tools/run_asr_semantic_regression.py \
+  bridge/tests/fixtures/asr_regression_public.json --case percentage-thirty
+python tools/run_asr_semantic_regression.py \
+  bridge/tests/fixtures/asr_regression_public.json --endpoint WATCH
 ```
 
 Private audio with local JSON stdin/stdout adapters:

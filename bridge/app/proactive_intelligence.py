@@ -12,7 +12,7 @@ import re
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +40,13 @@ from .home_intelligence import (
     DeviceAvailability,
     GroundedHomeEntity,
     roll_up_physical_devices,
+)
+from .proactive_speech import (
+    EndpointActivity,
+    ProactiveSpeechCoordinator,
+    ProactiveSpeechState,
+    SpeechQueueRequest,
+    SpeechStartResult,
 )
 
 
@@ -488,6 +495,24 @@ class ProactiveEngine:
         self.task: asyncio.Task | None = None
         self.initialised = False
         self.state_provider: Any = None
+        self.speech_freshness_seconds = max(
+            30,
+            min(
+                3600,
+                int(env("JARVIS_PROACTIVE_SPEECH_FRESHNESS_SECONDS", default="300")),
+            ),
+        )
+        self.speech = ProactiveSpeechCoordinator(
+            self.database_path,
+            endpoint_status=self._speech_endpoint_activity,
+            start_speech=self._start_proactive_speech,
+            stop_speech=self._stop_proactive_speech,
+            revalidate=self._revalidate_proactive_speech,
+            now_fn=lambda: int(time.time()),
+            resume_window_seconds=int(
+                env("JARVIS_PROACTIVE_SPEECH_RESUME_WINDOW_SECONDS", default="45")
+            ),
+        )
         self.pipeline_counts = {
             "raw_observations": 0,
             "normalized_events": 0,
@@ -655,6 +680,7 @@ class ProactiveEngine:
                     connection.execute(
                         f"ALTER TABLE proactive_incidents ADD COLUMN {column} {definition}"
                     )
+        self.speech.initialise()
         self.initialised = True
 
     async def start(self) -> None:
@@ -669,6 +695,7 @@ class ProactiveEngine:
                 bool(self.ha_token),
             )
             return
+        await self.advance_speech_lifecycle()
         self.task = asyncio.create_task(self.poll_loop())
 
     async def stop(self) -> None:
@@ -1128,6 +1155,17 @@ class ProactiveEngine:
             now=now,
             presence=self.presence,
         )
+        previous_state = str((previous or {}).get("state") or "")
+        current_state = str(current.get("state") or "")
+        candidates = [
+            replace(
+                candidate,
+                previous_state=candidate.previous_state or previous_state,
+                current_state=candidate.current_state or current_state,
+                observed_at=candidate.observed_at or now,
+            )
+            for candidate in candidates
+        ]
         created = []
         for candidate in candidates:
             event = await self.record(candidate)
@@ -1568,7 +1606,9 @@ class ProactiveEngine:
             ).fetchone()
         if row is None:
             raise KeyError(event_id)
-        return self.row(row)
+        event = self.row(row)
+        event["speech_lifecycle"] = self.speech.get(event_id)
+        return event
 
     def feed(self, user: str, limit: int = 100) -> list[dict[str, Any]]:
         self.initialise()
@@ -1580,7 +1620,12 @@ class ProactiveEngine:
                 "ORDER BY created_at DESC LIMIT ?",
                 (user, max(1, min(250, limit))),
             ).fetchall()
-        return [self.row(row) for row in rows]
+        result = []
+        for row in rows:
+            event = self.row(row)
+            event["speech_lifecycle"] = self.speech.get(str(event["id"]))
+            result.append(event)
+        return result
 
     def incidents(self, limit: int = 100) -> list[dict[str, Any]]:
         self.initialise()
@@ -1671,6 +1716,240 @@ class ProactiveEngine:
             self.update(event_id, status="actioned", updated_at=now)
         return self.get_event(event_id)
 
+    async def _speech_endpoint_activity(self, endpoint: str) -> EndpointActivity:
+        """Project authoritative endpoint state into the generic gap contract."""
+
+        states = list(self.states.values())
+        if not states and self.state_provider is not None:
+            states = await self.fetch_states()
+        state = next(
+            (item for item in states if str(item.get("entity_id") or "") == endpoint),
+            None,
+        )
+        if state is None:
+            # A configured script is callable even when it is absent from the compact
+            # state cache. Standalone/test engines have no shared provider, so retain
+            # their established configured-endpoint behaviour. A production provider
+            # that cannot find the endpoint fails closed.
+            return EndpointActivity(
+                available=(endpoint.startswith("script.") or self.state_provider is None)
+            )
+        value = str(state.get("state") or "").strip().casefold()
+        available = value not in {"", "unknown", "unavailable"}
+        if endpoint.startswith("assist_satellite."):
+            return EndpointActivity(
+                available=available,
+                # The satellite's public ``listening`` state says its microphone is
+                # open, not that VAD has proved somebody is speaking. Realtime's
+                # speech-start event owns that distinction and the interruption.
+                user_speaking=False,
+                assistant_speaking=value == "responding",
+                turn_in_progress=value in {"listening", "processing", "responding"},
+            )
+        return EndpointActivity(
+            available=available,
+            assistant_speaking=value in {"on", "playing", "buffering"},
+            turn_in_progress=value in {"on", "playing", "buffering"},
+        )
+
+    async def _start_proactive_speech(
+        self,
+        item: dict[str, Any],
+        replay: bool,
+    ) -> SpeechStartResult:
+        endpoint = str(item["endpoint"])
+        message = str(item["message"])
+        if (
+            not replay
+            and item.get("interrupted_at")
+            and float(item.get("delivered_fraction") or 0) > 0
+        ):
+            # Resume only at a complete sentence boundary. Proactive contributions are
+            # intentionally concise; a one-sentence contribution is safely restated.
+            sentences = [
+                part.strip() for part in re.split(r"(?<=[.!?])\s+", message) if part.strip()
+            ]
+            if sentences:
+                index = min(
+                    len(sentences) - 1,
+                    int(float(item["delivered_fraction"]) * len(sentences)),
+                )
+                message = " ".join(sentences[index:])
+        session_id = f"proactive-{item['event_id']}-{item['generation']}"
+        try:
+            if endpoint.startswith("script."):
+                await self.ha_service(
+                    "script",
+                    "turn_on",
+                    {
+                        "entity_id": endpoint,
+                        "variables": {"message": message},
+                    },
+                )
+            elif endpoint.startswith("assist_satellite."):
+                await self.ha_service(
+                    "assist_satellite",
+                    "start_conversation",
+                    {
+                        "entity_id": endpoint,
+                        "start_message": message,
+                        "preannounce": False,
+                        "extra_system_prompt": (
+                            "This is a grounded Jarvis proactive event. Keep any reply "
+                            "short and do not invent devices or observations."
+                        ),
+                    },
+                )
+            else:
+                return SpeechStartResult(
+                    accepted=False,
+                    detail="unsupported_proactive_speech_endpoint",
+                )
+        except Exception as exc:
+            logger.exception("Proactive speech start failed event_id=%s", item["event_id"])
+            return SpeechStartResult(accepted=False, detail=type(exc).__name__)
+        return SpeechStartResult(
+            accepted=True,
+            session_id=session_id,
+            detail="replay_accepted" if replay else "playback_accepted",
+        )
+
+    async def _stop_proactive_speech(self, item: dict[str, Any]) -> bool:
+        endpoint = str(item["endpoint"])
+        if endpoint.startswith("script."):
+            try:
+                await self.ha_service("script", "turn_off", {"entity_id": endpoint})
+            except Exception:
+                logger.exception(
+                    "Proactive script interruption failed event_id=%s", item["event_id"]
+                )
+                return False
+            return True
+        # Assist satellites own their realtime barge-in boundary. Home Assistant
+        # exposes lifecycle state/conditions but no public stop-conversation action;
+        # never invent a private service here.
+        return False
+
+    async def _revalidate_proactive_speech(self, item: dict[str, Any]) -> bool:
+        """Recheck structured trigger evidence without event-specific phrase logic."""
+
+        try:
+            event = self.get_event(str(item["event_id"]))
+        except KeyError:
+            return False
+        if str(event.get("status") or "") not in {"active", "activity"}:
+            return False
+        evidence = item.get("trigger_evidence")
+        if not isinstance(evidence, dict):
+            return False
+        entity_id = str(evidence.get("entity_id") or "")
+        expected = str(evidence.get("current_state") or "").strip().casefold()
+        if not entity_id or not expected:
+            return True
+        states = list(self.states.values())
+        if not states and self.state_provider is not None:
+            states = await self.fetch_states()
+        current = next(
+            (state for state in states if str(state.get("entity_id") or "") == entity_id),
+            None,
+        )
+        if current is None:
+            return False
+        return str(current.get("state") or "").strip().casefold() == expected
+
+    def _speech_provenance(self, event: dict[str, Any]) -> dict[str, Any]:
+        raw_decision = event.get("decision")
+        decision: dict[str, Any] = raw_decision if isinstance(raw_decision, dict) else {}
+        raw_subject = decision.get("subject")
+        subject: dict[str, Any] = raw_subject if isinstance(raw_subject, dict) else {}
+        raw_transition = decision.get("transition")
+        transition: dict[str, Any] = raw_transition if isinstance(raw_transition, dict) else {}
+        return {
+            "source_type": "HOME_STATE",
+            "source_reference": {
+                "entity_id": subject.get("entity_id") or event.get("entity_id"),
+                "device_id": subject.get("device_id"),
+                "area_id": subject.get("area_id"),
+            },
+            "observed_at": transition.get("observed_at") or event.get("created_at"),
+            "condition_version": transition.get("current_state"),
+            "evidence_references": list(event.get("evidence") or ()),
+        }
+
+    async def _queue_proactive_speech(self, event: dict[str, Any], speaker: str) -> dict[str, Any]:
+        raw_decision = event.get("decision")
+        decision: dict[str, Any] = raw_decision if isinstance(raw_decision, dict) else {}
+        raw_transition = decision.get("transition")
+        transition: dict[str, Any] = raw_transition if isinstance(raw_transition, dict) else {}
+        observed = int(transition.get("observed_at") or event.get("created_at") or time.time())
+        current_state = str(transition.get("current_state") or "")
+        fingerprint = str(event.get("fingerprint") or event["id"])
+        raw_subject = decision.get("subject")
+        subject: dict[str, Any] = raw_subject if isinstance(raw_subject, dict) else {}
+        subject_key = str(
+            subject.get("device_id") or subject.get("entity_id") or event.get("entity_id") or ""
+        )
+        item = self.speech.queue(
+            SpeechQueueRequest(
+                event_id=str(event["id"]),
+                event_type=str(event["kind"]),
+                message=str(event["message"]),
+                importance=int(event["importance"]),
+                endpoint=speaker,
+                freshness_deadline=int(time.time()) + self.speech_freshness_seconds,
+                dedupe_key=f"{fingerprint}:{observed}:{current_state}",
+                supersession_key=f"{event.get('category')}:{subject_key}",
+                provenance=self._speech_provenance(event),
+                trigger_evidence={
+                    "entity_id": event.get("entity_id"),
+                    "device_id": subject.get("device_id"),
+                    "current_state": current_state,
+                    "observed_at": observed,
+                },
+                target_user=str(event.get("target_user") or "all"),
+            )
+        )
+        await self.speech.process_ready()
+        return self.speech.get(str(item["event_id"])) or item
+
+    async def advance_speech_lifecycle(self) -> None:
+        before = {
+            item["event_id"]: item["lifecycle_state"]
+            for item in self.speech.list_items(active_only=True, limit=100)
+        }
+        await self.speech.process_ready()
+        now = int(time.time())
+        for item in self.speech.list_items(limit=100):
+            state = str(item["lifecycle_state"])
+            if (
+                state == ProactiveSpeechState.SPEAKING.value
+                and before.get(item["event_id"]) != state
+            ):
+                self.update(
+                    str(item["event_id"]),
+                    spoken_at=now,
+                    reply_until=now + self.reply_window_seconds,
+                    updated_at=now,
+                )
+
+    async def voice_session_started(self, metadata: dict[str, Any]) -> None:
+        owner = str(metadata.get("session_id") or metadata.get("device_id") or "voice-session")
+        await self.speech.set_interaction_active(owner, True)
+
+    async def voice_session_ended(self, metadata: dict[str, Any]) -> None:
+        owner = str(metadata.get("session_id") or metadata.get("device_id") or "voice-session")
+        # A contribution still undecided at the end of an interactive session was
+        # not explicitly resumed. Treat the completed user turn as a topic change.
+        await self.speech.drop_undecided_interruptions()
+        await self.speech.set_interaction_active(owner, False)
+
+    async def voice_user_speech_started(self, metadata: dict[str, Any]) -> None:
+        await self.speech.interrupt(
+            endpoint=None,
+            topic_changed=False,
+            defer_decision=True,
+        )
+
     async def deliver(self, event: dict[str, Any]) -> None:
         decision = dict(event.get("decision") or {})
         recipient_decisions = decision.get("recipient_decisions")
@@ -1734,44 +2013,19 @@ class ProactiveEngine:
             ):
                 speak = True
 
-        spoken = False
         speaker = str(event["decision"].get("speaker") or "").strip()
         if speak and speaker:
-            try:
-                if speaker.startswith("script."):
-                    await self.ha_service(
-                        "script",
-                        "turn_on",
-                        {
-                            "entity_id": speaker,
-                            "variables": {"message": event["message"]},
-                        },
-                    )
-                else:
-                    await self.ha_service(
-                        "assist_satellite",
-                        "start_conversation",
-                        {
-                            "entity_id": speaker,
-                            "start_message": event["message"],
-                            "preannounce": False,
-                            "extra_system_prompt": (
-                                "This is a Jarvis proactive household event. "
-                                "Accept a short natural reply such as yes, no, "
-                                "thanks, show me, remind me later, or stop telling "
-                                "me that. Do not invent devices or observations."
-                            ),
-                        },
-                    )
-                spoken = True
-            except Exception:
-                logger.exception("Proactive announcement failed")
+            await self._queue_proactive_speech(event, speaker)
 
         fields = {"updated_at": int(time.time())}
         now = int(time.time())
         if notified:
             fields["notified_at"] = now
-        if spoken:
+        speech_item = self.speech.get(str(event["id"])) if speak and speaker else None
+        if speech_item and speech_item["lifecycle_state"] in {
+            ProactiveSpeechState.SPEAKING.value,
+            ProactiveSpeechState.COMPLETED.value,
+        }:
             fields["spoken_at"] = now
             fields["reply_until"] = now + self.reply_window_seconds
         self.update(event["id"], **fields)
@@ -2185,6 +2439,7 @@ class ProactiveEngine:
                 3,
             )
             logger.info("Proactive baseline loaded: %s states", len(current))
+            await self.advance_speech_lifecycle()
             return
         for index, (entity_id, item) in enumerate(
             current.items(),
@@ -2217,6 +2472,7 @@ class ProactiveEngine:
             (time.monotonic() - processing_started) * 1000,
             3,
         )
+        await self.advance_speech_lifecycle()
 
     def update(self, event_id: str, **fields: Any) -> None:
         statements = {
@@ -2294,6 +2550,11 @@ async def authorise(request: Request) -> None:
 @router.get("/status")
 async def status(_: None = Depends(authorise)) -> dict[str, Any]:
     engine.initialise()
+    speech_items = engine.speech.list_items(limit=500)
+    speech_counts = {
+        state.value: sum(1 for item in speech_items if item["lifecycle_state"] == state.value)
+        for state in ProactiveSpeechState
+    }
     return {
         "ready": True,
         "release": "19.0.0-alpha9",
@@ -2311,6 +2572,21 @@ async def status(_: None = Depends(authorise)) -> dict[str, Any]:
         "home_principal": engine.home_principal,
         "pipeline_counts": dict(engine.pipeline_counts),
         "pipeline": engine.pipeline_report(),
+        "speech_lifecycle": {
+            "counts": speech_counts,
+            "active": sum(
+                count
+                for state, count in speech_counts.items()
+                if state
+                not in {
+                    ProactiveSpeechState.COMPLETED.value,
+                    ProactiveSpeechState.DROPPED.value,
+                    ProactiveSpeechState.CANCELLED.value,
+                }
+            ),
+            "resume_window_seconds": engine.speech.resume_window_seconds,
+            "freshness_seconds": engine.speech_freshness_seconds,
+        },
         "active_conditions": sum(
             1 for item in engine.conditions(500) if item.get("status") in {"observed", "qualified"}
         ),

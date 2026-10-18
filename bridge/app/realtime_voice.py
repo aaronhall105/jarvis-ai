@@ -1350,6 +1350,15 @@ class RealtimeVoiceProxy:
         self.voice_pe_session_ended: (
             Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
         ) = None
+        self.interaction_session_started: (
+            Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
+        self.interaction_session_ended: (
+            Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
+        self.interaction_user_speech_started: (
+            Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
+        ) = None
         self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
 
     def _turn_ledger_identity(
@@ -1900,6 +1909,11 @@ class RealtimeVoiceProxy:
         duck_task: asyncio.Task[Any] | None = None
         if client_kind == "voice_pe" and self.voice_pe_session_started is not None:
             duck_task = asyncio.create_task(self.voice_pe_session_started(metadata))
+        if self.interaction_session_started is not None:
+            try:
+                await self.interaction_session_started(metadata)
+            except Exception:
+                _LOGGER.exception("Proactive interaction-session observer failed")
 
         await self._send_json(
             client,
@@ -2138,6 +2152,11 @@ class RealtimeVoiceProxy:
                     await self.voice_pe_session_ended(metadata)
                 except Exception:
                     _LOGGER.exception("Voice PE media restoration failed")
+            if self.interaction_session_ended is not None:
+                try:
+                    await self.interaction_session_ended(metadata)
+                except Exception:
+                    _LOGGER.exception("Proactive interaction-session cleanup failed")
             await self._close(client, 1000)
 
     async def _speaker_identity_process(
@@ -2578,6 +2597,11 @@ class RealtimeVoiceProxy:
                 self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
                 runtime_metrics.increment("voice_speech_started")
+                if self.interaction_user_speech_started is not None:
+                    try:
+                        await self.interaction_user_speech_started(metadata)
+                    except Exception:
+                        _LOGGER.exception("Proactive speech interruption observer failed")
                 if metadata.get("client_kind") == "voice_pe":
                     _speaker_capture_mark_start(
                         state,

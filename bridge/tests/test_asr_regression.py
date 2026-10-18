@@ -90,6 +90,24 @@ def test_public_schema_covers_every_critical_token_class() -> None:
     }
 
 
+def test_cli_accepts_documented_positional_manifest() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "tools" / "run_asr_semantic_regression.py"),
+            str(FIXTURE),
+            "--case",
+            "percentage-thirty",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Cases: 1/1 passed" in completed.stdout
+
+
 def test_schema_rejects_unknown_token_class_and_duplicate_sequence_turn(tmp_path: Path) -> None:
     with pytest.raises(CorpusError, match="unsupported critical token class"):
         _case(critical_tokens=[{"class": "SECRET", "field": "x", "expected_value": "x"}])
