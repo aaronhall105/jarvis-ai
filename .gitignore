@@ -84,3 +84,10 @@ logs/
 speaker-data/
 speaker-verifier/__pycache__/
 speaker-verifier/*.before-*
+
+# Private ASR regression corpora must normally live outside the repository.
+# These local fallbacks are ignored defensively so audio/manifests cannot be
+# staged accidentally when a developer is working offline.
+/private-asr-regression/
+/private/asr-regression/
+*.private-asr.json

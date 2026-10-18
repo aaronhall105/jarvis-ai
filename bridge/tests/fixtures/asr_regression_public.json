@@ -1,0 +1,329 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "home-read-study-level",
+      "gold_transcript": "How bright are the study lights?",
+      "expected": {
+        "task_family": "HOME",
+        "semantic_operation": "QUERY",
+        "grounded_target": "capability:study-main-light",
+        "capability": "brightness",
+        "tool": "search_home",
+        "arguments": {"requested_parameter": "brightness"},
+        "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "AREA", "field": "arguments.area", "expected_value": "Study"},
+        {"class": "DEVICE", "field": "grounded_target", "expected_value": "capability:study-main-light"}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "How bright are study lights?", "model": "synthetic-replay", "confidence": 0.94, "latency_ms": 410},
+        "semantic": {
+          "task_family": "HOME",
+          "semantic_operation": "QUERY",
+          "grounded_target": "capability:study-main-light",
+          "capability": "brightness",
+          "tool": "search_home",
+          "arguments": {"requested_parameter": "brightness", "area": "Study"},
+          "clarification_required": false,
+          "valid": true,
+          "effect": "READ_ONLY_EXTERNAL",
+          "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 315, "grounding": 8}
+        }
+      }
+    },
+    {
+      "case_id": "percentage-thirteen",
+      "gold_transcript": "Set the study lights to thirteen percent.",
+      "expected": {
+        "task_family": "HOME",
+        "semantic_operation": "CONTROL",
+        "grounded_target": "capability:study-main-light",
+        "capability": "brightness",
+        "tool": "execute_home_parameter",
+        "arguments": {"parameter_mode": "ABSOLUTE", "parameter_value": 13, "unit": "percent"},
+        "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "PERCENTAGE", "field": "arguments.parameter_value", "expected_value": 13},
+        {"class": "NUMBER", "field": "arguments.parameter_value", "expected_value": 13}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "minimal_pair"},
+      "observed": {
+        "asr": {"transcript": "Set the study lights to thirteen percent.", "model": "synthetic-replay", "confidence": 0.97, "latency_ms": 430},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+          "capability": "brightness", "tool": "execute_home_parameter",
+          "arguments": {"parameter_mode": "ABSOLUTE", "parameter_value": 13, "unit": "percent"},
+          "clarification_required": false, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 5, "planning": 330, "grounding": 9}
+        }
+      }
+    },
+    {
+      "case_id": "percentage-thirty",
+      "gold_transcript": "Set the study lights to thirty percent.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+        "capability": "brightness", "tool": "execute_home_parameter",
+        "arguments": {"parameter_mode": "ABSOLUTE", "parameter_value": 30, "unit": "percent"},
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "PERCENTAGE", "field": "arguments.parameter_value", "expected_value": 30},
+        {"class": "NUMBER", "field": "arguments.parameter_value", "expected_value": 30}
+      ],
+      "metadata": {"endpoint": "WATCH", "microphone": "synthetic", "environment": "sanitized", "speech_style": "minimal_pair"},
+      "observed": {
+        "asr": {"transcript": "Set the study lights to thirty percent.", "model": "synthetic-replay", "confidence": 0.96, "latency_ms": 470},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+          "capability": "brightness", "tool": "execute_home_parameter",
+          "arguments": {"parameter_mode": "ABSOLUTE", "parameter_value": 30, "unit": "percent"},
+          "clarification_required": false, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 5, "planning": 340, "grounding": 9}
+        }
+      }
+    },
+    {
+      "case_id": "low-confidence-critical-write",
+      "gold_transcript": "Set the study lights to fifty percent.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+        "capability": "brightness", "tool": "execute_home_parameter",
+        "arguments": {"parameter_value": 50, "unit": "percent"},
+        "clarification_required": true, "safety_outcome": "WOULD_CLARIFY"
+      },
+      "critical_tokens": [
+        {"class": "PERCENTAGE", "field": "arguments.parameter_value", "expected_value": 50}
+      ],
+      "metadata": {"endpoint": "VOICE_DEVICE", "microphone": "synthetic", "environment": "background_noise", "speech_style": "quiet"},
+      "observed": {
+        "asr": {
+          "transcript": "Set the study lights to fifty percent.", "model": "synthetic-replay", "confidence": 0.42, "latency_ms": 520,
+          "token_confidences": {"arguments.parameter_value": 0.31}
+        },
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+          "capability": "brightness", "tool": "execute_home_parameter", "arguments": {"parameter_value": 50, "unit": "percent"},
+          "clarification_required": true, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 5, "planning": 350, "grounding": 9}
+        }
+      }
+    },
+    {
+      "case_id": "sequence-ground-device",
+      "sequence_id": "light-follow-up",
+      "turn_index": 0,
+      "gold_transcript": "Study lights.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "QUERY", "grounded_target": "capability:study-main-light",
+        "capability": "light", "tool": "search_home", "reference_dependency": "NONE",
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "AREA", "field": "arguments.area", "expected_value": "Study"},
+        {"class": "DEVICE", "field": "grounded_target", "expected_value": "capability:study-main-light"}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "Study lights.", "model": "synthetic-replay", "confidence": 0.98, "latency_ms": 350},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "QUERY", "grounded_target": "capability:study-main-light",
+          "capability": "light", "tool": "search_home", "reference_dependency": "NONE", "arguments": {"area": "Study"},
+          "clarification_required": false, "valid": true, "effect": "READ_ONLY_EXTERNAL", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 290, "grounding": 7}
+        }
+      }
+    },
+    {
+      "case_id": "sequence-set-reference",
+      "sequence_id": "light-follow-up",
+      "turn_index": 1,
+      "gold_transcript": "Set them to thirty percent.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+        "capability": "brightness", "tool": "execute_home_parameter", "reference_dependency": "CURRENT_RESULT_SET",
+        "arguments": {"parameter_value": 30, "unit": "percent"}, "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "PERCENTAGE", "field": "arguments.parameter_value", "expected_value": 30},
+        {"class": "DEVICE", "field": "grounded_target", "expected_value": "capability:study-main-light"}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "follow_up"},
+      "observed": {
+        "asr": {"transcript": "Set them to thirty percent.", "model": "synthetic-replay", "confidence": 0.95, "latency_ms": 390},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+          "capability": "brightness", "tool": "execute_home_parameter", "reference_dependency": "CURRENT_RESULT_SET",
+          "arguments": {"parameter_value": 30, "unit": "percent"}, "clarification_required": false, "valid": true,
+          "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 305, "grounding": 6}
+        }
+      }
+    },
+    {
+      "case_id": "sequence-relative-reference",
+      "sequence_id": "light-follow-up",
+      "turn_index": 2,
+      "gold_transcript": "Make them ten percent brighter.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+        "capability": "brightness", "tool": "execute_home_parameter", "reference_dependency": "CURRENT_RESULT_SET",
+        "arguments": {"parameter_mode": "RELATIVE", "parameter_value": 10, "unit": "percent"},
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "PERCENTAGE", "field": "arguments.parameter_value", "expected_value": 10},
+        {"class": "MODE", "field": "arguments.parameter_mode", "expected_value": "RELATIVE"}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "follow_up"},
+      "observed": {
+        "asr": {"transcript": "Make them ten percent brighter.", "model": "synthetic-replay", "confidence": 0.95, "latency_ms": 390},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:study-main-light",
+          "capability": "brightness", "tool": "execute_home_parameter", "reference_dependency": "CURRENT_RESULT_SET",
+          "arguments": {"parameter_mode": "RELATIVE", "parameter_value": 10, "unit": "percent"},
+          "clarification_required": false, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 310, "grounding": 6}
+        }
+      }
+    },
+    {
+      "case_id": "mail-latest-read",
+      "gold_transcript": "What's my latest email?",
+      "expected": {
+        "task_family": "MAIL", "semantic_operation": "QUERY", "tool": "mail.search",
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "What's my latest email?", "model": "synthetic-replay", "confidence": 0.96, "latency_ms": 400},
+        "semantic": {
+          "task_family": "MAIL", "semantic_operation": "QUERY", "tool": "mail.search", "arguments": {"limit": 1},
+          "clarification_required": false, "valid": true, "effect": "READ_ONLY_EXTERNAL", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 300, "grounding": 5}
+        }
+      }
+    },
+    {
+      "case_id": "person-presence-read",
+      "gold_transcript": "Where is Morgan?",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "QUERY", "grounded_target": "person:morgan",
+        "tool": "presence.read", "arguments": {"person": "Morgan"}, "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "PERSON", "field": "arguments.person", "expected_value": "Morgan"}
+      ],
+      "metadata": {"endpoint": "WATCH", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "Where is Morgan?", "model": "synthetic-replay", "confidence": 0.93, "latency_ms": 450},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "QUERY", "grounded_target": "person:morgan", "tool": "presence.read",
+          "arguments": {"person": "Morgan"}, "clarification_required": false, "valid": true,
+          "effect": "READ_ONLY_EXTERNAL", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 300, "grounding": 7}
+        }
+      }
+    },
+    {
+      "case_id": "schedule-tomorrow-six",
+      "gold_transcript": "Remind me tomorrow at six for fifteen minutes.",
+      "expected": {
+        "task_family": "SCHEDULER", "semantic_operation": "SCHEDULE", "tool": "task.create",
+        "arguments": {"date": "tomorrow", "time": "18:00", "duration_minutes": 15},
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "DATE", "field": "arguments.date", "expected_value": "tomorrow"},
+        {"class": "TIME", "field": "arguments.time", "expected_value": "18:00"},
+        {"class": "DURATION", "field": "arguments.duration_minutes", "expected_value": 15}
+      ],
+      "metadata": {"endpoint": "VOICE_DEVICE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "Remind me tomorrow at six for fifteen minutes.", "model": "synthetic-replay", "confidence": 0.92, "latency_ms": 500},
+        "semantic": {
+          "task_family": "SCHEDULER", "semantic_operation": "SCHEDULE", "tool": "task.create",
+          "arguments": {"date": "tomorrow", "time": "18:00", "duration_minutes": 15},
+          "clarification_required": false, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 5, "planning": 340, "grounding": 5}
+        }
+      }
+    },
+    {
+      "case_id": "money-read",
+      "gold_transcript": "How much was the forty pound charge?",
+      "expected": {
+        "task_family": "MAIL", "semantic_operation": "QUERY", "tool": "mail.search",
+        "arguments": {"amount": 40, "currency": "GBP"}, "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "MONEY", "field": "arguments.amount", "expected_value": 40}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "How much was the forty pound charge?", "model": "synthetic-replay", "confidence": 0.9, "latency_ms": 430},
+        "semantic": {
+          "task_family": "MAIL", "semantic_operation": "QUERY", "tool": "mail.search", "arguments": {"amount": 40, "currency": "GBP"},
+          "clarification_required": false, "valid": true, "effect": "READ_ONLY_EXTERNAL", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 320, "grounding": 5}
+        }
+      }
+    },
+    {
+      "case_id": "select-eco-mode",
+      "gold_transcript": "Change the purifier mode to Eco.",
+      "expected": {
+        "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:guest-purifier-mode",
+        "capability": "mode", "tool": "execute_home_parameter", "arguments": {"option": "Eco"},
+        "clarification_required": false, "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "OPTION", "field": "arguments.option", "expected_value": "Eco"},
+        {"class": "MODE", "field": "capability", "expected_value": "mode"}
+      ],
+      "metadata": {"endpoint": "PHONE", "microphone": "synthetic", "environment": "sanitized", "speech_style": "normal"},
+      "observed": {
+        "asr": {"transcript": "Change the purifier mode to Eco.", "model": "synthetic-replay", "confidence": 0.91, "latency_ms": 420},
+        "semantic": {
+          "task_family": "HOME", "semantic_operation": "CONTROL", "grounded_target": "capability:guest-purifier-mode",
+          "capability": "mode", "tool": "execute_home_parameter", "arguments": {"option": "Eco"},
+          "clarification_required": false, "valid": true, "effect": "WRITE_REVERSIBLE", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 325, "grounding": 8}
+        }
+      }
+    },
+    {
+      "case_id": "date-thirtieth",
+      "gold_transcript": "Show events on the thirtieth.",
+      "expected": {
+        "task_family": "SCHEDULER", "semantic_operation": "QUERY", "tool": "calendar.read",
+        "arguments": {"day_of_month": 30}, "clarification_required": false,
+        "safety_outcome": "WOULD_EXECUTE_SAFE"
+      },
+      "critical_tokens": [
+        {"class": "DATE", "field": "arguments.day_of_month", "expected_value": 30},
+        {"class": "NUMBER", "field": "arguments.day_of_month", "expected_value": 30}
+      ],
+      "metadata": {"endpoint": "WATCH", "microphone": "synthetic", "environment": "sanitized", "speech_style": "minimal_pair"},
+      "observed": {
+        "asr": {"transcript": "Show events on the thirtieth.", "model": "synthetic-replay", "confidence": 0.91, "latency_ms": 460},
+        "semantic": {
+          "task_family": "SCHEDULER", "semantic_operation": "QUERY", "tool": "calendar.read", "arguments": {"day_of_month": 30},
+          "clarification_required": false, "valid": true, "effect": "READ_ONLY_EXTERNAL", "execution_attempted": false,
+          "timings_ms": {"understanding": 4, "planning": 310, "grounding": 5}
+        }
+      }
+    }
+  ]
+}
