@@ -88,6 +88,7 @@ _AUTHORITATIVE_ACTION_TOOLS = {
     "set_media_volume",
     "send_mobile_notification",
     "announce_message",
+    "continue_proactive_speech",
     "propose_admin_change",
     "prepare_gmail_message",
     "execute_home_action",
@@ -2412,6 +2413,25 @@ class AIEngine:
                 }
             )
 
+        definitions.append(
+            {
+                "type": "function",
+                "name": "continue_proactive_speech",
+                "description": (
+                    "Continue the most recent still-valid proactive contribution after the "
+                    "user semantically asks Jarvis to resume, repeat, or finish it. Use only "
+                    "for an explicit continuation request, never merely because an older "
+                    "proactive event exists. Core selects and revalidates the durable event."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            }
+        )
+
         return definitions
 
     async def _home_read_tools(self, actor: UserContext) -> list[dict[str, Any]]:
@@ -4171,6 +4191,38 @@ class AIEngine:
                     request_id=request_id,
                     target=target,
                 )
+                return {"tool": name, "arguments": arguments, "result": result}
+
+            if name == "continue_proactive_speech":
+                from app.proactive_intelligence import engine as proactive_engine
+
+                proactive_item = await proactive_engine.speech.request_continuation(
+                    principal_id=actor.user_key
+                )
+                if proactive_item is None:
+                    return self._tool_failure(
+                        name,
+                        arguments,
+                        "no_resumable_proactive_speech",
+                        "There is no recent interrupted announcement left to continue.",
+                    )
+                state = str(proactive_item.get("lifecycle_state") or "")
+                success = state in {
+                    "RESUME_PENDING",
+                    "REPLAY_PENDING",
+                    "SPEAKING",
+                    "COMPLETED",
+                }
+                result = {
+                    "success": success,
+                    "event_id": proactive_item.get("event_id"),
+                    "lifecycle_state": state,
+                    "response_message": (
+                        "I’ll continue the interrupted announcement."
+                        if success
+                        else "That announcement is no longer eligible to continue."
+                    ),
+                }
                 return {"tool": name, "arguments": arguments, "result": result}
 
             if name == "explain_home_action_receipt":

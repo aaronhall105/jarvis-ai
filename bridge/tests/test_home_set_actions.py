@@ -5,6 +5,7 @@ import json
 import pytest
 
 from app.ai_engine import AIEngine
+from app import proactive_intelligence
 from app.dialogue_manager import DialogueManager
 from app.home_intelligence import HomeIntelligenceEngine, HomeQueryPlan
 from app.user_context import UserContext
@@ -78,6 +79,37 @@ def _actor() -> UserContext:
         device_id=None,
         voice_mode=False,
     )
+
+
+@pytest.mark.asyncio
+async def test_semantic_proactive_continuation_accepts_deferred_playback(
+    tmp_path, monkeypatch
+) -> None:
+    dialogue = DialogueManager(str(tmp_path / "dialogue.db"))
+    engine = _engine(dialogue, _Tools(()), _Runtime({}))
+
+    async def request_continuation(*, principal_id=None):
+        assert principal_id == "aaron"
+        return {"event_id": "event-1", "lifecycle_state": "RESUME_PENDING"}
+
+    monkeypatch.setattr(
+        proactive_intelligence.engine.speech,
+        "request_continuation",
+        request_continuation,
+    )
+
+    result = await engine._execute_function(
+        name="continue_proactive_speech",
+        arguments_json="{}",
+        user_text="Resume the interrupted contribution",
+        authorised_tools={"continue_proactive_speech"},
+        conversation_id="usr:aaron:voice",
+        actor=_actor(),
+        request_id="continue-proactive",
+    )
+
+    assert result["result"]["success"] is True
+    assert result["result"]["lifecycle_state"] == "RESUME_PENDING"
 
 
 async def _project_set(tmp_path) -> DialogueManager:
