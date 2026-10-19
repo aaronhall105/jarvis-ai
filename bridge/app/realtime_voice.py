@@ -1447,9 +1447,14 @@ class RealtimeVoiceProxy:
     ) -> None:
         # No automatic speech/replay: use the existing client error surface.
         # A newer input or response must never receive an old recovery message.
+        tracker = state.get("input_lifecycle")
+        current_input = isinstance(tracker, InputLifecycle) and not any(
+            other.generation > turn.generation for other in tracker.items.values()
+        )
         if (
             "speech_started" in turn.times
-            and turn.generation == _safe_int(state.get("generation"))
+            and current_input
+            and turn.outcome in {"transcription_failed", "transcription_timeout"}
             and not state.get("provider_transitioning")
         ):
             await self._send_json(

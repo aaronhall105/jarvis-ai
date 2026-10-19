@@ -423,3 +423,11 @@ class RealtimeInputIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["last_terminal_outcome"], "transcription_failed")
         self.assertNotIn("PRIVATE", json.dumps(status))
         self.assertNotIn("session", json.dumps(status))
+
+    async def test_current_failure_notice_survives_old_playback_generation_change(self):
+        await self.consume(prefix())
+        # Cancelling older output can advance response generation while this
+        # input remains current. Recovery must use input ownership, too.
+        self.state["generation"] += 1
+        await self.consume([event("conversation.item.input_audio_transcription.failed")])
+        self.assertEqual(sum(m["type"] == "error" for m in self.client.messages), 1)
