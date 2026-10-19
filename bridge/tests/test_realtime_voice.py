@@ -580,6 +580,7 @@ class RealtimeProvisionalTranscriptTests(unittest.IsolatedAsyncioTestCase):
         proxy.provisional_transcript_handler = provisional
 
         async def stream():
+            yield json.dumps({"type": "input_audio_buffer.committed", "item_id": "item-1"})
             yield json.dumps(
                 {
                     "type": "conversation.item.input_audio_transcription.delta",
@@ -674,11 +675,12 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
         proxy._start_brain_turn = fake_start_brain_turn
 
         events = [
-            {"type": "input_audio_buffer.speech_started"},
-            {"type": "input_audio_buffer.speech_stopped"},
-            {"type": "input_audio_buffer.speech_started"},
+            {"type": "input_audio_buffer.speech_started", "item_id": "wake"},
+            {"type": "input_audio_buffer.speech_stopped", "item_id": "wake"},
+            {"type": "input_audio_buffer.speech_started", "item_id": "command"},
             {
                 "type": ("conversation.item.input_audio_transcription.completed"),
+                "item_id": "wake",
                 "transcript": "Aaron",
             },
         ]
@@ -716,8 +718,8 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(commands, [])
-        self.assertTrue(state.get("voice_pe_wake_guard_used"))
-        self.assertEqual(state.get("voice_pe_transcripts_seen"), 1)
+        self.assertEqual(state["input_lifecycle"].items["wake"].outcome, "superseded")
+        self.assertEqual(state.get("voice_pe_transcripts_seen", 0), 0)
         self.assertEqual(state.get("voice_pe_speech_start_count"), 2)
         self.assertTrue(state.get("voice_pe_speech_active"))
 
@@ -742,10 +744,11 @@ class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
         proxy._start_brain_turn = fake_start_brain_turn
 
         events = [
-            {"type": "input_audio_buffer.speech_started"},
-            {"type": "input_audio_buffer.speech_stopped"},
+            {"type": "input_audio_buffer.speech_started", "item_id": "command"},
+            {"type": "input_audio_buffer.speech_stopped", "item_id": "command"},
             {
                 "type": ("conversation.item.input_audio_transcription.completed"),
+                "item_id": "command",
                 "transcript": "Lights on",
             },
         ]
