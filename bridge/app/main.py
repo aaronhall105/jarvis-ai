@@ -82,6 +82,11 @@ from app.task_centre import TaskCentre
 from app.tone_engine import ToneEngine
 from app.user_context import UserContext, scope_conversation_id
 from app.speech_corrections import SpeechCorrectionEngine
+from app.speculative_reads import (
+    SpeculativeReadCoordinator,
+    ToolEffectRegistry,
+    classify_core_tools,
+)
 from app.runtime_observability import configuration_report, runtime_metrics
 from app.system_diagnostics import build_voice_reliability_report
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE
@@ -327,6 +332,134 @@ realtime_turn_ledger = RealtimeTurnLedger(data_directory / "jarvis_realtime_turn
 realtime_voice = RealtimeVoiceProxy.from_environment(
     turn_ledger=realtime_turn_ledger,
 )
+
+
+async def _speculative_get_entity_state(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    entity_id = str(arguments.get("entity_id") or "").strip()
+    if not entity_id or "." not in entity_id:
+        raise ValueError("A valid entity identity is required.")
+    result = await tools.get_entity_state(entity_id)
+    return {"tool": "get_entity_state", "arguments": dict(arguments), "result": result}
+
+
+async def _speculative_search_entity_states(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    domain = str(arguments["domain"]) if arguments.get("domain") is not None else None
+    area_id = str(arguments["area_id"]) if arguments.get("area_id") is not None else None
+    state_filter = (
+        str(arguments["state_filter"]) if arguments.get("state_filter") is not None else None
+    )
+    result = await tools.search_entity_states(
+        str(arguments.get("query") or ""),
+        domain=domain,
+        area_id=area_id,
+        state_filter=state_filter,
+        limit=int(arguments.get("limit", 12)),
+    )
+    return {"tool": "search_entity_states", "arguments": dict(arguments), "result": result}
+
+
+async def _speculative_list_area_states(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    area_id = str(arguments.get("area_id") or "").strip()
+    if not area_id:
+        raise ValueError("An exact area identity is required.")
+    result = await tools.list_area_states(
+        area_id,
+        domain=str(arguments["domain"]) if arguments.get("domain") is not None else None,
+        state_filter=(
+            str(arguments["state_filter"]) if arguments.get("state_filter") is not None else None
+        ),
+        limit=int(arguments.get("limit", 30)),
+    )
+    return {"tool": "list_area_states", "arguments": dict(arguments), "result": result}
+
+
+async def _speculative_inspect_presence(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    reference = str(arguments.get("reference") or "").strip()
+    if not reference:
+        raise ValueError("An exact person reference is required.")
+    result = await tools.inspect_presence(reference)
+    return {"tool": "inspect_presence", "arguments": dict(arguments), "result": result}
+
+
+speculative_tool_effects = ToolEffectRegistry()
+classify_core_tools(speculative_tool_effects)
+speculative_tool_effects.register_read(
+    "get_entity_state",
+    _speculative_get_entity_state,
+    provider="home_assistant",
+)
+speculative_tool_effects.register_read(
+    "search_entity_states",
+    _speculative_search_entity_states,
+    provider="home_assistant",
+)
+speculative_tool_effects.register_read(
+    "list_area_states",
+    _speculative_list_area_states,
+    provider="home_assistant",
+)
+speculative_tool_effects.register_read(
+    "inspect_presence",
+    _speculative_inspect_presence,
+    provider="home_assistant",
+)
+speculative_reads = SpeculativeReadCoordinator(
+    speculative_tool_effects.read_projection(),
+    enabled=realtime_voice.config.speculative_reads_enabled,
+)
+ai.set_speculative_read_coordinator(speculative_reads)
+
+
+async def _handle_provisional_transcript(
+    text: str,
+    metadata: dict[str, Any],
+) -> None:
+    """Plan at most one read candidate for one authenticated utterance."""
+
+    session_id = str(metadata.get("session_id") or "").strip()
+    generation = int(metadata.get("speculation_generation") or 0)
+    if not session_id or generation <= 0:
+        return
+    if not speculative_reads.reserve_planning(session_id, generation):
+        return
+    actor = UserContext.from_request(
+        user_id=str(metadata.get("user_id") or "") or None,
+        user_name=str(metadata.get("user_name") or "") or None,
+        user_is_admin=bool(metadata.get("user_is_admin", False)),
+        device_id=str(metadata.get("device_id") or "") or None,
+        voice_mode=True,
+        privilege_verified=bool(metadata.get("user_is_admin", False)),
+        area_id=str(metadata.get("area_id") or "") or None,
+    )
+    _, storage_conversation_id = scope_conversation_id(
+        str(metadata.get("conversation_id") or "") or None,
+        actor.user_key,
+    )
+    try:
+        plan = await ai.plan_provisional_read(
+            text,
+            actor=actor,
+            session_id=session_id,
+            conversation_id=storage_conversation_id,
+            generation=generation,
+            input_version=int(metadata.get("provisional_input_version") or 0),
+        )
+        if plan is None:
+            runtime_metrics.increment("voice_speculation_rejected_unstable")
+            return
+        await speculative_reads.start(plan)
+    finally:
+        speculative_reads.release_planning(session_id, generation)
+
+
+realtime_voice.provisional_transcript_handler = _handle_provisional_transcript
+
+
+def _invalidate_speculative_session(session_id: str, generation: int) -> None:
+    speculative_reads.invalidate_session(session_id, generation)
+
+
+realtime_voice.speculation_invalidation_handler = _invalidate_speculative_session
 
 _voice_pe_ducked_media: dict[str, dict[str, float]] = {}
 _voice_pe_duck_lock = asyncio.Lock()
@@ -7932,6 +8065,9 @@ async def _realtime_brain_handler(
         "local_time": metadata.get("local_time"),
         "utc_offset_seconds": metadata.get("utc_offset_seconds"),
         "transcription_confidence": metadata.get("transcription_confidence"),
+        "speculation_session_id": session_id,
+        "speculation_generation": metadata.get("speculation_generation"),
+        "speculation_item_id": metadata.get("speculation_item_id"),
     }
 
     # This handler is reachable only after RealtimeVoiceProxy
@@ -7957,7 +8093,10 @@ async def _realtime_brain_handler(
 async def realtime_voice_status() -> dict[str, object]:
     """Report Android realtime voice availability."""
 
-    return realtime_voice.status()
+    status = realtime_voice.status()
+    status["speculative_reads"] = speculative_reads.snapshot()
+    status["tool_effect_counts"] = speculative_tool_effects.counts()
+    return status
 
 
 @app.websocket("/api/realtime/voice")

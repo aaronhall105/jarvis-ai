@@ -47,6 +47,12 @@ from app.memory_engine import MemoryEngine
 from app.registry import RegistryEngine
 from app.runtime_observability import runtime_metrics
 from app.speech_corrections import SpeechCorrectionEngine
+from app.speculative_reads import (
+    ProvisionalReadPlan,
+    SemanticReadIdentity,
+    SpeculationDisposition,
+    SpeculativeReadCoordinator,
+)
 from app.reply_policy import ReplyBudgetPolicy
 from app.response_presentation import (
     present_user_response,
@@ -1913,6 +1919,7 @@ class AIEngine:
         self.understanding = UnderstandingEngine(registry)
         self.house_context = HouseContextEngine(registry)
         self.tone = ToneEngine()
+        self.speculative_reads: SpeculativeReadCoordinator | None = None
 
         self.history_limit = _env_int(
             "JARVIS_HISTORY_LIMIT",
@@ -3310,6 +3317,97 @@ class AIEngine:
             )
 
         return definitions
+
+    def set_speculative_read_coordinator(
+        self,
+        coordinator: SpeculativeReadCoordinator | None,
+    ) -> None:
+        """Attach the capability-limited read coordinator after composition."""
+
+        self.speculative_reads = coordinator
+
+    async def plan_provisional_read(
+        self,
+        text: str,
+        *,
+        actor: UserContext,
+        session_id: str,
+        conversation_id: str,
+        generation: int,
+        input_version: int,
+    ) -> ProvisionalReadPlan | None:
+        """Interpret one bounded partial using only admitted read tool schemas.
+
+        This plan is provisional evidence only. It is never persisted as a user
+        turn and cannot answer the user. The completed transcript still runs the
+        ordinary planner and must produce the same tool and arguments before a
+        result can be reused.
+        """
+
+        coordinator = self.speculative_reads
+        partial = _normalise_space(text)
+        if coordinator is None or not coordinator.enabled or not partial:
+            return None
+        eligible = coordinator.tools.names
+        if not eligible:
+            return None
+        definitions = [
+            item for item in await self._home_read_tools(actor) if item.get("name") in eligible
+        ]
+        if not definitions:
+            return None
+        response = await self._create_response(
+            input_items=[
+                {
+                    "role": "developer",
+                    "content": (
+                        "This is an incomplete live transcription, not the final user request. "
+                        "Select exactly one supplied read tool only when the available meaning "
+                        "already determines every required grounded argument unambiguously. "
+                        "Do not infer omitted targets, do not request any control or mutation, "
+                        "and otherwise return no tool call. Never answer the user."
+                    ),
+                },
+                {"role": "user", "content": partial},
+            ],
+            tool_definitions=definitions,
+            actor=actor,
+            on_text_delta=None,
+            reasoning_effort="low",
+        )
+        calls = self._function_calls(response)
+        if len(calls) != 1:
+            runtime_metrics.increment("voice_speculation_rejected_ambiguous")
+            return None
+        call = calls[0]
+        name = str(getattr(call, "name", "") or "")
+        definition = coordinator.tools.definition(name)
+        if definition is None or not definition.eligible:
+            runtime_metrics.increment("voice_speculation_rejected_effect_class")
+            return None
+        try:
+            arguments = self._parse_arguments(str(getattr(call, "arguments", "{}")))
+        except AIEngineError:
+            runtime_metrics.increment("voice_speculation_rejected_ambiguous")
+            return None
+        reference_scope = str(arguments.get("reference_dependency") or arguments.get("scope") or "")
+        return ProvisionalReadPlan(
+            identity=SemanticReadIdentity(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                generation=generation,
+                task_family="HOME",
+                semantic_operation="QUERY",
+                tool_name=name,
+                arguments=arguments,
+                reference_scope=reference_scope,
+                provider_identity=definition.provider,
+            ),
+            input_version=input_version,
+            effect=definition.effect,
+            confidence=None,
+            stability_evidence="single_complete_grounded_read_plan",
+        )
 
     async def _area_name(self, area_id: str) -> str:
         for area in await self._area_options():
@@ -9705,23 +9803,76 @@ class AIEngine:
                                 plan_id=plan_id,
                             )
 
-                        async with asyncio.timeout(
-                            self.executive_config.timeout_seconds
-                            if executive_task_id is not None
-                            else 180
+                        speculative_completed: dict[str, Any] | None = None
+                        speculation_session = str(
+                            trusted_context.get("speculation_session_id") or ""
+                        )
+                        speculation_generation = trusted_context.get("speculation_generation")
+                        coordinator = self.speculative_reads
+                        if (
+                            coordinator is not None
+                            and coordinator.enabled
+                            and speculation_session
+                            and isinstance(speculation_generation, int)
+                            and coordinator.tools.supports(name)
                         ):
-                            completed = await self._execute_function(
-                                name=name,
-                                arguments_json=arguments_json,
-                                user_text=user_text,
-                                authorised_tools=authorised_tools,
-                                conversation_id=resolved_conversation_id,
-                                actor=actor,
-                                request_id=resolved_request_id,
-                                authorization_text=raw_user_text,
-                                history=history,
-                                on_plan_created=link_executive_plan,
-                            )
+                            try:
+                                final_arguments = self._parse_arguments(arguments_json)
+                            except AIEngineError:
+                                final_arguments = {}
+                            definition = coordinator.tools.definition(name)
+                            if definition is not None and final_arguments:
+                                authoritative = SemanticReadIdentity(
+                                    session_id=speculation_session,
+                                    conversation_id=resolved_conversation_id,
+                                    generation=speculation_generation,
+                                    task_family="HOME",
+                                    semantic_operation="QUERY",
+                                    tool_name=name,
+                                    arguments=final_arguments,
+                                    reference_scope=str(
+                                        final_arguments.get("reference_dependency")
+                                        or final_arguments.get("scope")
+                                        or ""
+                                    ),
+                                    provider_identity=definition.provider,
+                                )
+                                speculative = await coordinator.resolve(authoritative)
+                                if speculative.disposition is SpeculationDisposition.REUSED:
+                                    speculative_completed = speculative.result
+                                    runtime_metrics.increment("voice_speculation_reused")
+                                    if speculative.latency_saved_ms is not None:
+                                        runtime_metrics.observe(
+                                            "voice_speculation_ready_before_final_ms",
+                                            speculative.latency_saved_ms,
+                                        )
+                                elif speculative.disposition in {
+                                    SpeculationDisposition.MISMATCH,
+                                    SpeculationDisposition.GENERATION_MISMATCH,
+                                }:
+                                    runtime_metrics.increment("voice_speculation_mismatched")
+                                else:
+                                    runtime_metrics.increment("voice_speculation_fallback")
+                        if speculative_completed is None:
+                            async with asyncio.timeout(
+                                self.executive_config.timeout_seconds
+                                if executive_task_id is not None
+                                else 180
+                            ):
+                                completed = await self._execute_function(
+                                    name=name,
+                                    arguments_json=arguments_json,
+                                    user_text=user_text,
+                                    authorised_tools=authorised_tools,
+                                    conversation_id=resolved_conversation_id,
+                                    actor=actor,
+                                    request_id=resolved_request_id,
+                                    authorization_text=raw_user_text,
+                                    history=history,
+                                    on_plan_created=link_executive_plan,
+                                )
+                        else:
+                            completed = speculative_completed
                     except TimeoutError:
                         tool_timed_out = True
                         completed = self._tool_failure(

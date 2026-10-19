@@ -550,6 +550,97 @@ class CancellationStateMachineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(terminal.is_set())
 
 
+class RealtimeProvisionalTranscriptTests(unittest.IsolatedAsyncioTestCase):
+    def _proxy(self) -> module.RealtimeVoiceProxy:
+        return module.RealtimeVoiceProxy(
+            module.RealtimeVoiceConfig(
+                enabled=True,
+                api_key="key",
+                mobile_token="token",
+                voice_pe_token="voice-pe-test-token",
+                model="gpt-realtime",
+                voice="marin",
+                user_id="aaron",
+                user_name="Aaron",
+                user_is_admin=True,
+                transcription_prompt="",
+                speculative_reads_enabled=True,
+                speculative_partial_debounce_ms=25,
+            )
+        )
+
+    async def test_provider_deltas_are_bounded_and_not_exposed_before_completion(self) -> None:
+        proxy = self._proxy()
+        client = FakeClient()
+        observed: list[tuple[str, dict]] = []
+
+        async def provisional(text: str, metadata: dict) -> None:
+            observed.append((text, metadata))
+
+        proxy.provisional_transcript_handler = provisional
+
+        async def stream():
+            yield json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item-1",
+                    "delta": "Where is ",
+                }
+            )
+            yield json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "item_id": "item-1",
+                    "delta": "Aaron?",
+                }
+            )
+
+        state = {"generation": 4, "suppress_audio": True}
+        await proxy._consume_openai_events(
+            client,
+            stream(),
+            lambda *_: None,
+            {"session_id": "session-1"},
+            "realtime",
+            "live",
+            "marin",
+            set(),
+            state,
+        )
+        await asyncio.sleep(0.04)
+
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0][0], "Where is Aaron?")
+        self.assertEqual(observed[0][1]["speculation_generation"], 4)
+        self.assertEqual(observed[0][1]["provisional_input_version"], 2)
+        self.assertFalse(any(item.get("type") == "user.transcript" for item in client.messages))
+        self.assertLessEqual(len(state["speculative_partials"]["item-1"]), 4096)
+
+    async def test_new_speech_generation_invalidates_old_speculation(self) -> None:
+        proxy = self._proxy()
+        invalidations: list[tuple[str, int]] = []
+        proxy.speculation_invalidation_handler = lambda session_id, generation: (
+            invalidations.append((session_id, generation))
+        )
+
+        async def stream():
+            yield json.dumps({"type": "input_audio_buffer.speech_started"})
+
+        state = {"generation": 8, "suppress_audio": False}
+        await proxy._consume_openai_events(
+            FakeClient(),
+            stream(),
+            lambda *_: None,
+            {"session_id": "session-1"},
+            "realtime",
+            "live",
+            "marin",
+            set(),
+            state,
+        )
+        self.assertEqual(invalidations, [("session-1", 9)])
+
+
 class VoicePEWakeResidueTests(unittest.IsolatedAsyncioTestCase):
     def _proxy(self):
         return module.RealtimeVoiceProxy(

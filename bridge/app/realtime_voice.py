@@ -59,6 +59,8 @@ VOICE_PE_WAKE_CONTENTION_SECONDS = 1.25
 _LOGGER = logging.getLogger("jarvis-realtime-voice")
 DeltaHandler = Callable[[str], Awaitable[None]]
 BrainHandler = Callable[[str, dict[str, Any], DeltaHandler], Awaitable[dict[str, Any]]]
+ProvisionalTranscriptHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
+SpeculationInvalidationHandler = Callable[[str, int], None]
 
 
 def _safe_token_fingerprint(value: str) -> str:
@@ -807,6 +809,8 @@ class RealtimeVoiceConfig:
     elevenlabs_voice_id: str = ""
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     elevenlabs_output_format: str = "pcm_24000"
+    speculative_reads_enabled: bool = False
+    speculative_partial_debounce_ms: int = 90
 
     @classmethod
     def from_environment(cls) -> "RealtimeVoiceConfig":
@@ -846,6 +850,14 @@ class RealtimeVoiceConfig:
             elevenlabs_output_format=_env_text(
                 "ELEVENLABS_OUTPUT_FORMAT",
                 "pcm_24000",
+            ),
+            speculative_reads_enabled=_env_bool(
+                "JARVIS_SPECULATIVE_READS_ENABLED",
+                False,
+            ),
+            speculative_partial_debounce_ms=max(
+                25,
+                int(_env_text("JARVIS_SPECULATIVE_PARTIAL_DEBOUNCE_MS", "90")),
             ),
         )
 
@@ -1360,6 +1372,9 @@ class RealtimeVoiceProxy:
             Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None
         ) = None
         self.transcription_prompt_provider: Callable[[dict[str, Any]], Awaitable[str]] | None = None
+        self.provisional_transcript_handler: ProvisionalTranscriptHandler | None = None
+        self.speculation_invalidation_handler: SpeculationInvalidationHandler | None = None
+        self.total_provisional_transcript_deltas = 0
 
     def _turn_ledger_identity(
         self,
@@ -1696,6 +1711,9 @@ class RealtimeVoiceProxy:
             "total_provider_recoveries": self.total_provider_recoveries,
             "total_voice_pe_wake_claims": self.total_voice_pe_wake_claims,
             "total_voice_pe_wake_rejections": self.total_voice_pe_wake_rejections,
+            "speculative_reads_enabled": self.config.speculative_reads_enabled,
+            "provisional_transcript_signal": "input_audio_transcription.delta",
+            "total_provisional_transcript_deltas": self.total_provisional_transcript_deltas,
             "last_voice_pe_wake_owner": self.last_voice_pe_wake_owner,
             "voice_pe_wake_contention_ms": round(
                 self.voice_pe_wake_arbiter.contention_seconds * 1000
@@ -2626,6 +2644,18 @@ class RealtimeVoiceProxy:
                     state["voice_pe_speech_started_at"] = time.monotonic()
 
                 state["generation"] = int(state.get("generation", 0)) + 1
+                session_id = str(metadata.get("session_id") or "")
+                if session_id and self.speculation_invalidation_handler is not None:
+                    self.speculation_invalidation_handler(
+                        session_id,
+                        int(state["generation"]),
+                    )
+                partial_task = state.pop("speculative_partial_task", None)
+                if isinstance(partial_task, asyncio.Task):
+                    partial_task.cancel()
+                state["speculative_partials"] = {}
+                state["speculative_partial_versions"] = {}
+                state["speculative_partial_dispatched"] = False
                 state["suppress_audio"] = True
                 await self._send_json(client, {"type": "speech.started"})
             elif kind == "input_audio_buffer.speech_stopped":
@@ -2654,8 +2684,90 @@ class RealtimeVoiceProxy:
                     state["voice_pe_speech_active"] = False
 
                 await self._send_json(client, {"type": "speech.stopped"})
+            elif kind == "conversation.item.input_audio_transcription.delta":
+                self.total_provisional_transcript_deltas += 1
+                runtime_metrics.increment("voice_provisional_inputs_observed")
+                item_id = str(event.get("item_id") or "").strip()
+                delta = str(event.get("delta") or "")
+                if not item_id or not delta:
+                    continue
+                partials = state.setdefault("speculative_partials", {})
+                versions = state.setdefault("speculative_partial_versions", {})
+                if not isinstance(partials, dict) or not isinstance(versions, dict):
+                    continue
+                # Bounded private state only. Raw partial text is neither logged nor
+                # emitted to clients before the provider's completed transcript.
+                partials[item_id] = (str(partials.get(item_id) or "") + delta)[-4096:]
+                versions[item_id] = int(versions.get(item_id, 0)) + 1
+
+                previous_task = state.pop("speculative_partial_task", None)
+                if isinstance(previous_task, asyncio.Task):
+                    previous_task.cancel()
+                if (
+                    self.config.speculative_reads_enabled
+                    and self.provisional_transcript_handler is not None
+                ):
+                    generation = int(state.get("generation", 0))
+                    version = int(versions[item_id])
+
+                    async def dispatch_partial(
+                        *,
+                        expected_item_id: str = item_id,
+                        expected_generation: int = generation,
+                        expected_version: int = version,
+                    ) -> None:
+                        try:
+                            await asyncio.sleep(self.config.speculative_partial_debounce_ms / 1000)
+                            if expected_generation != int(state.get("generation", 0)):
+                                return
+                            current_versions = state.get("speculative_partial_versions")
+                            current_partials = state.get("speculative_partials")
+                            if (
+                                not isinstance(current_versions, dict)
+                                or not isinstance(current_partials, dict)
+                                or int(current_versions.get(expected_item_id, 0))
+                                != expected_version
+                            ):
+                                return
+                            partial = str(current_partials.get(expected_item_id) or "").strip()
+                            if not partial:
+                                return
+                            state["speculative_partial_dispatched"] = True
+                            provisional_metadata = {
+                                **metadata,
+                                "speculation_generation": expected_generation,
+                                "speculation_item_id": expected_item_id,
+                                "provisional_input_version": expected_version,
+                                "provisional_observed_at": time.monotonic(),
+                            }
+                            handler = self.provisional_transcript_handler
+                            if handler is None:
+                                return
+                            await handler(
+                                partial,
+                                provisional_metadata,
+                            )
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            runtime_metrics.increment("voice_speculation_errors")
+                            _LOGGER.exception("Provisional transcript handling failed")
+
+                    state["speculative_partial_task"] = asyncio.create_task(dispatch_partial())
             elif kind == "conversation.item.input_audio_transcription.completed":
                 transcript = str(event.get("transcript") or "").strip()
+                item_id = str(event.get("item_id") or "").strip()
+                partial_task = state.pop("speculative_partial_task", None)
+                if (
+                    isinstance(partial_task, asyncio.Task)
+                    and not partial_task.done()
+                    and not bool(state.get("speculative_partial_dispatched"))
+                ):
+                    # If the debounce has not admitted a candidate yet, the final
+                    # authoritative path wins; do not delay it for speculation.
+                    partial_task.cancel()
+                metadata["speculation_generation"] = int(state.get("generation", 0))
+                metadata["speculation_item_id"] = item_id
                 transcription_confidence = input_transcription_confidence(event)
                 if transcription_confidence is not None:
                     metadata["transcription_confidence"] = transcription_confidence
