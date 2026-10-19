@@ -13,6 +13,7 @@ import secrets
 import time
 import uuid
 import wave
+from collections import Counter
 from pathlib import Path
 
 import httpx
@@ -27,6 +28,7 @@ from app.speech_render_policy import SpeechRenderPolicy
 from app.speaker_identity import SpeakerIdentityClient, SpeakerIdentityRuntime
 from app.runtime_observability import runtime_metrics
 from app.realtime_turn_ledger import RealtimeTurnLedger, TurnRecord
+from app.realtime_input_lifecycle import InputLifecycle, InputTurn, TRANSCRIPTION_TIMEOUT_SECONDS
 from app.response_presentation import present_error, present_user_response
 from app.version import CORE_APPLICATION_VERSION, JARVIS_RELEASE, REALTIME_PROTOCOL_VERSION
 
@@ -61,6 +63,20 @@ DeltaHandler = Callable[[str], Awaitable[None]]
 BrainHandler = Callable[[str, dict[str, Any], DeltaHandler], Awaitable[dict[str, Any]]]
 ProvisionalTranscriptHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 SpeculationInvalidationHandler = Callable[[str, int], None]
+
+
+class _SingleProviderEvent:
+    """One receive event with writes delegated to the same provider socket."""
+
+    def __init__(self, raw: str, upstream: Any) -> None:
+        self.raw = raw
+        self.upstream = upstream
+
+    async def __aiter__(self):
+        yield self.raw
+
+    async def send(self, message: str) -> None:
+        await self.upstream.send(message)
 
 
 def _safe_token_fingerprint(value: str) -> str:
@@ -1375,6 +1391,75 @@ class RealtimeVoiceProxy:
         self.provisional_transcript_handler: ProvisionalTranscriptHandler | None = None
         self.speculation_invalidation_handler: SpeculationInvalidationHandler | None = None
         self.total_provisional_transcript_deltas = 0
+        self.input_lifecycle_counts: Counter[str] = Counter()
+        self.active_input_turns = 0
+        self.last_input_outcome: str | None = None
+
+    def _input_lifecycle(self, state: dict[str, Any], metadata: dict[str, Any]) -> InputLifecycle:
+        tracker = state.get("input_lifecycle")
+        if isinstance(tracker, InputLifecycle):
+            return tracker
+
+        def observe(turn: InputTurn, stage: str) -> None:
+            self.input_lifecycle_counts[stage] += 1
+            if stage == "observed":
+                self.active_input_turns += 1
+            if stage == turn.outcome:
+                self.active_input_turns = max(0, self.active_input_turns - 1)
+                self.last_input_outcome = stage
+            # Diagnostics are not part of admission/delivery correctness.
+            try:
+                runtime_metrics.increment("voice_input_" + stage)
+                _LOGGER.info(
+                    "Realtime input | session=%s item=%s endpoint=%s epoch=%s "
+                    "generation=%s stage=%s monotonic=%.6f",
+                    _safe_token_fingerprint(str(metadata.get("session_id") or "")),
+                    _safe_token_fingerprint(turn.item_id),
+                    normalise_voice_endpoint(metadata.get("voice_endpoint")),
+                    state.get("provider_epoch", 0),
+                    turn.generation,
+                    stage,
+                    time.monotonic(),
+                )
+            except Exception:
+                self.input_lifecycle_counts["diagnostic_errors"] += 1
+
+        tracker = InputLifecycle(observe)
+        state["input_lifecycle"] = tracker
+        return tracker
+
+    async def _input_watchdog(
+        self, client: Any, tracker: InputLifecycle, state: dict[str, Any]
+    ) -> None:
+        while True:
+            await asyncio.sleep(1)
+            for turn in tracker.expire():
+                await self._input_failure_notice(client, turn, state)
+
+    def _input_diagnostic(self, callback: Callable[..., Any], *args: Any) -> None:
+        try:
+            callback(*args)
+        except Exception:
+            self.input_lifecycle_counts["diagnostic_errors"] += 1
+
+    async def _input_failure_notice(
+        self, client: Any, turn: InputTurn, state: dict[str, Any]
+    ) -> None:
+        # No automatic speech/replay: use the existing client error surface.
+        # A newer input or response must never receive an old recovery message.
+        if (
+            "speech_started" in turn.times
+            and turn.generation == _safe_int(state.get("generation"))
+            and not state.get("provider_transitioning")
+        ):
+            await self._send_json(
+                client,
+                {
+                    "type": "error",
+                    "code": turn.outcome,
+                    "message": "I didn't catch that. Please try again.",
+                },
+            )
 
     def _turn_ledger_identity(
         self,
@@ -1714,6 +1799,12 @@ class RealtimeVoiceProxy:
             "speculative_reads_enabled": self.config.speculative_reads_enabled,
             "provisional_transcript_signal": "input_audio_transcription.delta",
             "total_provisional_transcript_deltas": self.total_provisional_transcript_deltas,
+            "input_lifecycle": {
+                "active_input_turns": self.active_input_turns,
+                "counts": dict(self.input_lifecycle_counts),
+                "last_terminal_outcome": self.last_input_outcome,
+                "transcription_timeout_seconds": TRANSCRIPTION_TIMEOUT_SECONDS,
+            },
             "last_voice_pe_wake_owner": self.last_voice_pe_wake_owner,
             "voice_pe_wake_contention_ms": round(
                 self.voice_pe_wake_arbiter.contention_seconds * 1000
@@ -1997,6 +2088,7 @@ class RealtimeVoiceProxy:
                         established_at=established_at,
                     )
                     state["provider_epoch"] = provider_epoch
+                    state.pop("input_lifecycle", None)
                     state["provider_established_at"] = established_at
                     state["provider_renewal_at"] = lease.renewal_at
                     state["provider_renewal_pending"] = False
@@ -2075,6 +2167,7 @@ class RealtimeVoiceProxy:
                     # Invalidate the provider before cancelling its readers. Any
                     # delayed callback from this point is harmless by epoch.
                     state["provider_epoch"] = 0
+                    self._input_lifecycle(state, metadata).close()
                     state["provider_renewal_pending"] = False
                     if not renewal_requested:
                         # Invalidate turn generation in the same scheduler slice
@@ -2144,6 +2237,7 @@ class RealtimeVoiceProxy:
             _LOGGER.exception("Jarvis mobile voice session failed")
             await self._send_json(client, {"type": "error", "message": self.last_error})
         finally:
+            self._input_lifecycle(state, metadata).close()
             for task in tuple(turn_tasks):
                 task.cancel()
             if turn_tasks:
@@ -2377,6 +2471,7 @@ class RealtimeVoiceProxy:
                     state.get("active_generation"),
                     _safe_int(state.get("generation")),
                 )
+                self._input_lifecycle(state, metadata).cancel("cancelled", cancelled_generation)
                 state["cancelled_client_turn_id"] = cancelled_client_turn_id
                 state["cancelled_generation"] = cancelled_generation
                 state["generation"] = (
@@ -2506,6 +2601,7 @@ class RealtimeVoiceProxy:
                             },
                         )
 
+                    self._input_lifecycle(state, metadata).cancel("superseded")
                     await self._start_brain_turn(
                         text,
                         bool(
@@ -2544,6 +2640,8 @@ class RealtimeVoiceProxy:
         state: dict[str, Any],
         provider_epoch: int = 0,
     ) -> None:
+        tracker = self._input_lifecycle(state, metadata)
+        watchdog = asyncio.create_task(self._input_watchdog(client, tracker, state))
         try:
             await self._consume_openai_events(
                 client,
@@ -2558,12 +2656,114 @@ class RealtimeVoiceProxy:
                 provider_epoch=provider_epoch,
             )
         finally:
+            tracker.close()
             if _provider_epoch_is_current(state, provider_epoch):
                 # Fence client input in the same task that observes provider
                 # closure; the supervisor will either renew or recover next.
                 state["provider_transitioning"] = True
+            watchdog.cancel()
+            await asyncio.gather(watchdog, return_exceptions=True)
 
     async def _consume_openai_events(
+        self,
+        client: Any,
+        upstream: Any,
+        brain_handler: BrainHandler,
+        metadata: dict[str, Any],
+        voice_mode: str,
+        conversation_mode: str,
+        voice: str,
+        turn_tasks: set[asyncio.Task[Any]],
+        state: dict[str, Any],
+        provider_epoch: int = 0,
+    ) -> None:
+        tracker = self._input_lifecycle(state, metadata)
+        async for raw in upstream:
+            if not _provider_epoch_is_current(state, provider_epoch):
+                return
+            if not isinstance(raw, str):
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind = str(event.get("type") or "")
+            item_id = str(event.get("item_id") or "")
+            generation = _safe_int(state.get("generation"))
+            turn = None
+            for expired in tracker.expire():
+                await self._input_failure_notice(client, expired, state)
+            if kind == "input_audio_buffer.speech_started":
+                if item_id and item_id in tracker.items:
+                    continue
+                turn = tracker.started(item_id, generation + 1)
+                if metadata.get("client_kind") == "voice_pe" and state.get("turn_in_progress"):
+                    if turn is not None:
+                        tracker.finish(turn, "suppressed")
+            elif kind in {"input_audio_buffer.speech_stopped", "input_audio_buffer.committed"}:
+                tracker.progress(item_id, generation, kind.rsplit(".", 1)[-1])
+            elif kind in {"conversation.item.created", "conversation.item.added"}:
+                item = event.get("item")
+                if isinstance(item, dict) and item.get("role") == "user":
+                    content = item.get("content") or []
+                    if any(
+                        isinstance(part, dict) and part.get("type") == "input_audio"
+                        for part in content
+                    ):
+                        tracker.progress(str(item.get("id") or ""), generation, "item_created")
+            elif kind == "conversation.item.input_audio_transcription.delta":
+                if item_id not in tracker.items:
+                    self.input_lifecycle_counts["unowned_delta_discarded"] += 1
+                    continue
+                turn = tracker.progress(item_id, generation, "first_delta")
+                if turn is None or turn.outcome is not None:
+                    continue
+            elif kind == "conversation.item.input_audio_transcription.failed":
+                turn = tracker.ensure(item_id, generation)
+                if turn is not None and turn.outcome is None:
+                    tracker.finish(turn, "transcription_failed")
+                    await self._input_failure_notice(client, turn, state)
+                continue
+            elif kind == "conversation.item.input_audio_transcription.completed":
+                if item_id not in tracker.items:
+                    self.input_lifecycle_counts["unowned_final_discarded"] += 1
+                turn = tracker.claim_final(
+                    item_id, generation, empty=not str(event.get("transcript") or "").strip()
+                )
+                if turn is None:
+                    continue
+            try:
+                # No lossy application queue: preserve provider order and backpressure.
+                await self._dispatch_openai_events(
+                    client,
+                    _SingleProviderEvent(raw, upstream),
+                    brain_handler,
+                    metadata,
+                    voice_mode,
+                    conversation_mode,
+                    voice,
+                    turn_tasks,
+                    state,
+                    provider_epoch=provider_epoch,
+                )
+            except asyncio.CancelledError:
+                if turn is not None:
+                    tracker.finish(turn, "disconnected")
+                raise
+            except Exception:
+                self.input_lifecycle_counts["receive_loop_errors"] += 1
+                if kind == "conversation.item.input_audio_transcription.delta":
+                    # Optional partial processing cannot suppress authoritative finals.
+                    continue
+                if turn is not None:
+                    tracker.finish(turn, "delivery_failed")
+                raise
+            if kind == "conversation.item.input_audio_transcription.completed" and turn is not None:
+                tracker.finish(turn, "suppressed")
+
+    async def _dispatch_openai_events(
         self,
         client: Any,
         upstream: Any,
@@ -2614,7 +2814,7 @@ class RealtimeVoiceProxy:
                 )
                 self.total_context_syncs += 1
             elif kind == "input_audio_buffer.speech_started":
-                runtime_metrics.increment("voice_speech_started")
+                self._input_diagnostic(runtime_metrics.increment, "voice_speech_started")
                 if self.interaction_user_speech_started is not None:
                     try:
                         await self.interaction_user_speech_started(metadata)
@@ -2626,7 +2826,8 @@ class RealtimeVoiceProxy:
                         event,
                     )
 
-                _LOGGER.info(
+                self._input_diagnostic(
+                    _LOGGER.info,
                     "JARVIS DIAG | SPEECH STARTED | generation=%s turn_in_progress=%s",
                     state.get("generation"),
                     state.get("turn_in_progress"),
@@ -2646,10 +2847,13 @@ class RealtimeVoiceProxy:
                 state["generation"] = int(state.get("generation", 0)) + 1
                 session_id = str(metadata.get("session_id") or "")
                 if session_id and self.speculation_invalidation_handler is not None:
-                    self.speculation_invalidation_handler(
-                        session_id,
-                        int(state["generation"]),
-                    )
+                    try:
+                        self.speculation_invalidation_handler(
+                            session_id,
+                            int(state["generation"]),
+                        )
+                    except Exception:
+                        self.input_lifecycle_counts["diagnostic_errors"] += 1
                 partial_task = state.pop("speculative_partial_task", None)
                 if isinstance(partial_task, asyncio.Task):
                     partial_task.cancel()
@@ -2665,7 +2869,8 @@ class RealtimeVoiceProxy:
                         event,
                     )
 
-                _LOGGER.info(
+                self._input_diagnostic(
+                    _LOGGER.info,
                     "JARVIS DIAG | SPEECH STOPPED | generation=%s turn_in_progress=%s",
                     state.get("generation"),
                     state.get("turn_in_progress"),
@@ -2757,6 +2962,7 @@ class RealtimeVoiceProxy:
             elif kind == "conversation.item.input_audio_transcription.completed":
                 transcript = str(event.get("transcript") or "").strip()
                 item_id = str(event.get("item_id") or "").strip()
+                metadata = {**metadata, "input_item_id": item_id}
                 partial_task = state.pop("speculative_partial_task", None)
                 if (
                     isinstance(partial_task, asyncio.Task)
@@ -2771,30 +2977,30 @@ class RealtimeVoiceProxy:
                 transcription_confidence = input_transcription_confidence(event)
                 if transcription_confidence is not None:
                     metadata["transcription_confidence"] = transcription_confidence
-                    runtime_metrics.set_gauge(
+                    self._input_diagnostic(
+                        runtime_metrics.set_gauge,
                         "voice_transcription_confidence",
                         transcription_confidence,
                     )
                     if transcription_confidence < 0.20:
-                        runtime_metrics.increment("voice_low_confidence_transcripts")
-                runtime_metrics.increment("voice_transcripts_completed")
+                        self._input_diagnostic(
+                            runtime_metrics.increment, "voice_low_confidence_transcripts"
+                        )
+                self._input_diagnostic(runtime_metrics.increment, "voice_transcripts_completed")
                 speech_started_at = state.get("voice_pe_speech_started_at")
                 if isinstance(speech_started_at, (int, float)):
-                    runtime_metrics.observe(
+                    self._input_diagnostic(
+                        runtime_metrics.observe,
                         "speech_start_to_transcript_ms",
                         (time.monotonic() - float(speech_started_at)) * 1000,
                     )
-
-                _LOGGER.info(
-                    "JARVIS DIAG | STT FINAL | JARVIS HEARD: %r",
-                    transcript,
-                )
 
                 speaker_pcm = b""
 
                 if metadata.get("client_kind") == "voice_pe":
                     if SPEAKER_CAPTURE_DIAGNOSTICS:
-                        _speaker_capture_write_segment(
+                        self._input_diagnostic(
+                            _speaker_capture_write_segment,
                             state,
                             event,
                             transcript,
@@ -2954,6 +3160,10 @@ class RealtimeVoiceProxy:
                     }
                     if transcription_confidence is not None:
                         transcript_payload["confidence"] = transcription_confidence
+                    input_turn = self._input_lifecycle(state, metadata).items.get(item_id)
+                    if input_turn is None or input_turn.outcome is not None:
+                        _mark_turn_terminal(state)
+                        continue
                     await self._send_json(client, transcript_payload)
 
                     closure = _match_voice_closure(
@@ -2962,6 +3172,10 @@ class RealtimeVoiceProxy:
                     )
 
                     if closure is not None:
+                        tracker = self._input_lifecycle(state, metadata)
+                        input_turn = tracker.items.get(item_id)
+                        if input_turn is not None:
+                            tracker.finish(input_turn, "handled_locally")
                         closure_kind, closure_response = closure
 
                         state["generation"] = int(state.get("generation", 0)) + 1
@@ -4109,6 +4323,11 @@ class RealtimeVoiceProxy:
         command = " ".join(str(transcript or "").split()).strip()
         if not command:
             return
+        input_item_id = str(metadata.get("input_item_id") or "")
+        if input_item_id:
+            input_turn = self._input_lifecycle(state, metadata).items.get(input_item_id)
+            if input_turn is None or input_turn.outcome is not None:
+                return
         if (
             metadata.get("client_kind") == "voice_pe"
             and bool(state.get("turn_in_progress"))
@@ -4168,6 +4387,11 @@ class RealtimeVoiceProxy:
             )
         )
         turn_tasks.add(task)
+        input_item_id = str(metadata.get("input_item_id") or "")
+        input_tracker = self._input_lifecycle(state, metadata)
+        input_turn = input_tracker.items.get(input_item_id)
+        if input_turn is not None:
+            input_tracker.finish(input_turn, "delivered_to_core")
 
         def finish_turn_task(completed: asyncio.Task[Any]) -> None:
             turn_tasks.discard(completed)
