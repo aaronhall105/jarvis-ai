@@ -2,6 +2,7 @@ package com.aaron.jarvisvoice;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
@@ -795,7 +796,13 @@ public final class MainActivity extends Activity {
         } else if ("turn/started".equals(method)) {
             generating = true; statusText.setText("Working…"); beginStreaming();
         } else if ("turn/completed".equals(method)) {
-            generating = false; finishStreaming(); statusText.setText("Connected");
+            generating = false; finishStreaming();
+            JSONObject completedTurn = params == null ? null : params.optJSONObject("turn");
+            String completedStatus = completedTurn == null ? "" : completedTurn.optString("status");
+            statusText.setText(DeveloperActivityPolicy.status(completedStatus, true));
+            if ("failed".equals(completedStatus) || "paused".equals(completedStatus)) {
+                offerDeveloperRetry();
+            }
             store.setDeveloperThreadId(developerClient.threadId());
         } else if ("item/started".equals(method) || "item/completed".equals(method)) {
             JSONObject item = params == null ? null : params.optJSONObject("item");
@@ -803,8 +810,9 @@ public final class MainActivity extends Activity {
                 String type = item.optString("type", "Activity");
                 if ("agentMessage".equals(type) && "item/completed".equals(method)) {
                     finishStreaming();
-                    addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
-                        item.optString("text"), System.currentTimeMillis()), true);
+                    String finalText = DeveloperActivityPolicy.messageText(item);
+                    if (!finalText.isBlank()) addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
+                        finalText, System.currentTimeMillis()), true);
                 } else if (!"agentMessage".equals(type) && !"reasoning".equals(type)) {
                     addDeveloperActivity(item, "item/completed".equals(method));
                 }
@@ -837,6 +845,17 @@ public final class MainActivity extends Activity {
         }
         emptyState.setVisibility(messageList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
         scrollToBottom();
+        String state = thread.optString("status");
+        if ("failed".equals(state) || "paused".equals(state)) offerDeveloperRetry();
+    }
+
+    private void offerDeveloperRetry() {
+        new AlertDialog.Builder(this)
+            .setTitle("Developer task paused")
+            .setMessage("Completed work is preserved. Retry continues the recorded task; uncertain operations remain blocked for reconciliation.")
+            .setPositiveButton("Retry task", (dialog, which) -> developerClient.retryTurn())
+            .setNegativeButton("Later", null)
+            .show();
     }
 
     private void switchDeveloperWorkspace(String workspace) {
@@ -863,7 +882,7 @@ public final class MainActivity extends Activity {
         TextView heading = text("Development sessions", 20, BLACK);
         heading.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         sheet.addView(heading, matchWrap(0, dp(10)));
-        sheet.addView(actionSheetRow("New development chat", "Start with a fresh Codex context", () -> {
+        sheet.addView(actionSheetRow("New development chat", "Start with a fresh Developer context", () -> {
             dialog.dismiss(); newDeveloperSession();
         }), matchWrap(0, dp(8)));
         ScrollView listScroll = new ScrollView(this);
@@ -934,6 +953,11 @@ public final class MainActivity extends Activity {
     }
 
     private void renderDeveloperUsage(JSONObject result) {
+        if (result != null && "api".equals(result.optString("backend"))) {
+            developerUsageText.setText("OpenAI API · usage billed");
+            developerUsageProgress.setProgress(0);
+            return;
+        }
         JSONObject limits = result == null ? null : result.optJSONObject("rateLimits");
         if (limits == null) limits = result;
         JSONObject primary = limits == null ? null : limits.optJSONObject("primary");
@@ -958,7 +982,9 @@ public final class MainActivity extends Activity {
     private void openDeveloperUsage() {
         try {
             startActivity(new Intent(Intent.ACTION_VIEW,
-                Uri.parse("https://chatgpt.com/codex/settings/usage")));
+                Uri.parse(developerClient.threadId().startsWith("api_")
+                    ? "https://platform.openai.com/usage"
+                    : "https://chatgpt.com/codex/settings/usage")));
         } catch (Exception exception) {
             Toast.makeText(this, "Could not open Codex usage", Toast.LENGTH_SHORT).show();
         }
@@ -977,7 +1003,7 @@ public final class MainActivity extends Activity {
         TextView title = text("Delete development chat?", 20, BLACK);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         sheet.addView(title, matchWrap(0, dp(7)));
-        sheet.addView(text("This removes the selected Codex session and its history.", 14, MID),
+        sheet.addView(text("This removes the selected Developer chat and its history. Worktree files are preserved.", 14, MID),
             matchWrap(0, dp(18)));
         LinearLayout actions = new LinearLayout(this);
         Button cancel = dialogActionButton("Cancel", false, BLACK);

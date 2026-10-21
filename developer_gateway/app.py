@@ -12,7 +12,8 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
-from .codex_client import CodexAppServer, canonical_workspace
+from .backends import DeveloperBackends
+from .codex_client import canonical_workspace
 
 logging.basicConfig(level=os.getenv("JARVIS_DEVELOPER_LOG_LEVEL", "INFO"))
 log = logging.getLogger("jarvis-developer")
@@ -55,7 +56,8 @@ WORKSPACES = {
     # routing both names to the one authoritative product tree.
     "jarvis-wear": AUTHORITATIVE_WORKSPACE,
 }
-codex = CodexAppServer(os.getenv("CODEX_EXECUTABLE", "/usr/local/bin/codex"))
+# Compatibility name retained for existing gateway tests; events are backend-neutral.
+codex = DeveloperBackends(AUTHORITATIVE_WORKSPACE)
 started = time.monotonic()
 metrics = {"connections": 0, "requests": 0, "events": 0, "reconnects": 0, "active_clients": 0}
 ATTACHMENT_LIMIT = 1_500_000
@@ -93,7 +95,7 @@ async def lifespan(_: FastAPI):
         try:
             await codex.start()
         except Exception:
-            log.exception("Initial Codex warm-up failed; requests will retry")
+            log.warning("Developer backend warm-up unavailable")
     yield
     await codex.stop()
 
@@ -109,6 +111,7 @@ async def health() -> dict[str, Any]:
         "source_commit": SOURCE_COMMIT,
         "workspace": str(AUTHORITATIVE_WORKSPACE),
         "uptime_seconds": int(time.monotonic() - started),
+        **(codex.status() if isinstance(codex, DeveloperBackends) else {}),
     }
 
 
@@ -117,7 +120,11 @@ async def ready(authorization: str | None = Header(default=None)) -> dict[str, A
     if not authorised(authorization):
         raise HTTPException(401, "Authentication required")
     await codex.start()
-    return {"ready": codex.healthy, "codex": "connected", "workspaces": list(WORKSPACES)}
+    return {
+        "ready": codex.healthy,
+        "workspaces": list(WORKSPACES),
+        **(codex.status() if isinstance(codex, DeveloperBackends) else {}),
+    }
 
 
 @app.get("/metrics")
@@ -128,6 +135,7 @@ async def developer_metrics(authorization: str | None = Header(default=None)) ->
         **metrics,
         "codex_ready": codex.healthy,
         "uptime_seconds": int(time.monotonic() - started),
+        **(codex.status() if isinstance(codex, DeveloperBackends) else {}),
     }
 
 
@@ -272,17 +280,17 @@ async def developer_socket(socket: WebSocket) -> None:
                         {"threadId": str(message["thread_id"]), "name": str(message["name"])[:120]},
                     )
                 )
-            elif kind == "turn.start":
+            elif kind in {"turn.start", "turn.retry"}:
                 _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
                 if str(message["thread_id"]) not in owned_threads:
                     raise ValueError("Thread is not owned by this session")
                 text = str(message.get("text", "")).strip()
-                if not text or len(text) > 20000:
+                if kind == "turn.start" and (not text or len(text) > 20000):
                     raise ValueError("Invalid instruction")
                 inputs = codex_inputs(text, message.get("attachments"))
                 result = result_or_raise(
                     await codex.request(
-                        "turn/start",
+                        "turn/retry" if kind == "turn.retry" else "turn/start",
                         {"threadId": str(message["thread_id"]), "cwd": str(path), "input": inputs},
                     )
                 )
@@ -311,12 +319,25 @@ async def developer_socket(socket: WebSocket) -> None:
             else:
                 raise ValueError("Unsupported developer operation")
             await socket.send_json({"type": "response", "request_id": request_id, "result": result})
+            if kind == "thread.resume" and isinstance(codex, DeveloperBackends):
+                await codex.replay(str(message["thread_id"]))
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as exc:
         log.warning("Developer request failed: %s", type(exc).__name__)
         try:
-            await socket.send_json({"type": "error", "message": str(exc)[:240]})
+            # Provider exception bodies may contain request content or credentials.
+            await socket.send_json(
+                {
+                    "type": "error",
+                    "message": (
+                        "Thread is not owned by this session"
+                        if isinstance(exc, ValueError)
+                        and str(exc) == "Thread is not owned by this session"
+                        else "Developer request failed; reconnect or inspect task status."
+                    ),
+                }
+            )
         except Exception:
             pass
     finally:

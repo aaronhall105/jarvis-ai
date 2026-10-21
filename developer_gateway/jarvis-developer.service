@@ -1,5 +1,5 @@
 [Unit]
-Description=Jarvis authenticated Codex developer gateway
+Description=Jarvis authenticated API/Codex developer gateway
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.local/share/jarvis-developer/current
 LoadCredential=jarvis-developer-token:%h/.config/jarvis/developer-token
-ExecStart=%h/.local/share/jarvis-developer/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
+LoadCredential=jarvis-developer-api-key:%h/.config/jarvis/developer-api-key
+EnvironmentFile=-%h/.config/jarvis/developer.env
+ExecStart=%h/.local/share/jarvis-developer/current/venv/bin/uvicorn developer_gateway.app:app --host 127.0.0.1 --port 8765 --no-access-log
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -17,7 +19,9 @@ RestrictSUIDSGID=true
 PrivateTmp=true
 ProtectSystem=strict
 Environment=JARVIS_AUTHORITATIVE_WORKSPACE=__JARVIS_ROOT__
-ReadWritePaths=__JARVIS_ROOT__ %h/.codex %h/.local/share/jarvis-developer /tmp
+Environment=JARVIS_DEVELOPER_SANDBOX=docker
+Environment=JARVIS_DEVELOPER_TOOL_IMAGE=__JARVIS_TOOL_IMAGE__
+ReadWritePaths=__JARVIS_ROOT__ __JARVIS_GIT_COMMON__ %h/.codex %h/.local/share/jarvis-developer /tmp
 
 [Install]
 WantedBy=default.target
