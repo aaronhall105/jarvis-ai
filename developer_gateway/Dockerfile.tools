@@ -1,0 +1,8 @@
+FROM python:3.12-slim
+
+# Trusted, dependency-only build context; never COPY repository source or credentials.
+COPY bridge-requirements.txt requirements-improver.txt developer-requirements.txt /tmp/deps/
+RUN pip install --no-cache-dir -r /tmp/deps/bridge-requirements.txt \
+    -r /tmp/deps/requirements-improver.txt -r /tmp/deps/developer-requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/workspace/bridge:/workspace
+WORKDIR /workspace

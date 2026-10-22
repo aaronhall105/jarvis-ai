@@ -25,22 +25,36 @@ test "$source_commit" = "$(git -C "$repo_root" rev-parse "origin/$authoritative_
 
 release_dir="$release_root/$source_commit"
 install -d -m 700 "$runtime_dir" "$release_root" "$release_dir" "$release_dir/developer_gateway" "$config_dir" "$unit_dir"
-for source_file in __init__.py app.py codex_client.py; do
+for source_file in __init__.py app.py codex_client.py backends.py api_backend.py state.py policy.py tools.py; do
     install -m 600 "$repo_root/developer_gateway/$source_file" "$release_dir/developer_gateway/$source_file"
 done
 printf '%s\n' "$source_commit" > "$release_dir/SOURCE_COMMIT"
 chmod 600 "$release_dir/SOURCE_COMMIT"
-ln -sfn "releases/$source_commit" "$runtime_dir/current"
-
-python3 -m venv "$runtime_dir/venv"
-"$runtime_dir/venv/bin/pip" install --disable-pip-version-check -r "$repo_root/developer_gateway/requirements.txt"
+python3 -m venv "$release_dir/venv"
+"$release_dir/venv/bin/pip" install --disable-pip-version-check -r "$repo_root/developer_gateway/requirements.txt"
 
 if [[ ! -s "$config_dir/developer-token" ]]; then
     umask 077
     openssl rand -hex 32 > "$config_dir/developer-token"
 fi
 chmod 600 "$config_dir/developer-token"
-sed "s|__JARVIS_ROOT__|$repo_root|g" \
+if [[ ! -e "$config_dir/developer-api-key" ]]; then
+    install -m 600 /dev/null "$config_dir/developer-api-key"
+fi
+common_dir=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)
+command -v docker >/dev/null || { echo "Docker is required for Developer tools" >&2; exit 1; }
+# Build from dependency manifests only, never send source/configuration as context.
+build_context=$(mktemp -d "$runtime_dir/tool-build.XXXXXX")
+install -m 600 "$repo_root/developer_gateway/Dockerfile.tools" "$build_context/Dockerfile"
+install -m 600 "$repo_root/bridge/requirements.txt" "$build_context/bridge-requirements.txt"
+install -m 600 "$repo_root/requirements-improver.txt" "$build_context/requirements-improver.txt"
+install -m 600 "$repo_root/developer_gateway/requirements.txt" "$build_context/developer-requirements.txt"
+tool_image="jarvis-developer-tools:$source_commit"
+docker build -t "$tool_image" "$build_context"
+ln -s "releases/$source_commit" "$runtime_dir/current-next-$$"
+mv -Tf "$runtime_dir/current-next-$$" "$runtime_dir/current"
+sed -e "s|__JARVIS_ROOT__|$repo_root|g" -e "s|__JARVIS_GIT_COMMON__|$common_dir|g" \
+    -e "s|__JARVIS_TOOL_IMAGE__|$tool_image|g" \
     "$repo_root/developer_gateway/jarvis-developer.service" \
     > "$unit_dir/jarvis-developer.service"
 chmod 600 "$unit_dir/jarvis-developer.service"
