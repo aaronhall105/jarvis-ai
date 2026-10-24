@@ -13,6 +13,12 @@ final required read/execute modes after complete contents. Added seven regressio
 98 installer/Guardian/snapshot tests passed, Ruff/format passed. All checks must
 rerun for the corrected head. No suppression or installed host modification.
 
+Full local Python suite after the permission correction: **2093 passed, 3 skipped,
+143 subtests**. All four required CI jobs passed `450e1d5e314505ca0ffdfeef70259eadd0f172cd`,
+and its original three alerts resolved. The additional CodeQL alert check caught
+two overly permissive defaults in the new test interceptors, now tightened to
+0600 without suppressions. Require the next exact-head jobs AND alert check green.
+
 This section supersedes historical no-PR/no-version-change statements below.
 Aaron authorized committing/pushing the existing feature and opening its single
 PR for protected CI. Canonical merge, signing/release, observer deployment and

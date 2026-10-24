@@ -20,7 +20,7 @@ def test_install_content_is_private_until_complete(tmp_path, monkeypatch, writer
     original_open, original_chmod = os.open, os.fchmod
     events = []
 
-    def opening(path, flags, mode=0o777, **kwargs):
+    def opening(path, flags, mode=0o600, **kwargs):
         fd = original_open(path, flags, mode, **kwargs)
         if Path(path) == target:
             assert flags & os.O_EXCL and flags & os.O_NOFOLLOW
@@ -57,7 +57,7 @@ def test_snapshot_is_private_until_source_complete(tmp_path, monkeypatch):
             return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=os.getuid())
         return original_lstat(path, **kwargs)
 
-    def opening(path, flags, mode=0o777, **kwargs):
+    def opening(path, flags, mode=0o600, **kwargs):
         fd = original_open(path, flags, mode, **kwargs)
         if Path(path) == destination:
             assert mode == 0o600

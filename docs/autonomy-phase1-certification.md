@@ -11,7 +11,7 @@ observer disabled by default; no autonomous coding/merge/deployment executor.
 
 | Requirement | Status | Reproducible evidence / limitation |
 | --- | --- | --- |
-| Core, tools, gateway regression | PASS (local) | 2,086 passed, 3 skipped, 143 subtests; command below |
+| Core, tools, gateway regression | PASS (local) | 2,093 passed, 3 skipped, 143 subtests; command below |
 | Phone unit tests | PASS (local) | 276 tests, zero failures; Gradle XML reports |
 | Wear / shared protocol tests | PASS (local) | 1 / 30 tests; same Gradle gate |
 | Phone/Wear lint and debug builds | PASS (local) | Full gate BUILD SUCCESSFUL; debug is not production signing |
@@ -33,7 +33,7 @@ observer disabled by default; no autonomous coding/merge/deployment executor.
 | Grounded dashboard capabilities / idle / failures | PASS (local) | Presentation and Governor tests; unknown integrations explicitly unverified; API requires configured AND healthy |
 | Phase 1 RESUME denial | PASS (local) | Signed RESUME receives 403 before IPC; no UI activation action; host CLI separate |
 | Signed STOP / protocol / enrollment | PASS (harness) | Python/Java public vectors, HTTP relay + broker dispatcher, enrollment/revocation rehearsal; no real phone key enrolled |
-| Protected PR checks | BLOCKED pending corrected-head CI | PR #97; initial e89b603 passed core-tests/quality-security but CodeQL reported 3 permission-initialization alerts; source corrected with regressions, all exact-head checks must rerun |
+| Protected PR checks | BLOCKED pending corrected-head CI | PR #97; all four required jobs passed 450e1d5, but the separate CodeQL alert gate flagged permissive defaults in the new test interceptors; defaults tightened, fresh checks required |
 | Human release/security approval | BLOCKED | Must precede canonical merge/signing/release; this matrix is not approval |
 | Production signed candidate | BLOCKED | Canonical-tag CI only; no alpha40 signed artifact/hash yet |
 | Signing continuity | PASS (historical inspection only) | Installed cert 009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac; debug differs, correctly not installed |
@@ -87,6 +87,11 @@ public helper/source read modes. Seven regressions inspect permissions at creati
 and publication; **98 focused tests passed** including installer/Guardian/snapshot
 rehearsals. No scanner suppression. Installed root payloads were NOT changed;
 any later host upgrade needs separate reviewed handling of its pinned manifest.
+On `450e1d5e314505ca0ffdfeef70259eadd0f172cd`, all four required jobs passed and
+the original three alerts were resolved. The separate CodeQL alert gate caught
+two permissive default arguments in the new test `os.open` interceptors; those
+test defaults are now 0600 as well. Do not equate a successful analysis job with
+a clean security-alert gate. Final CI must cover the corrected test source.
 
 - Product observer is off unless the setting is exactly `true`. It uses a separate
   private SQLite journal outside source, fixed local health URLs, bounded reads,
