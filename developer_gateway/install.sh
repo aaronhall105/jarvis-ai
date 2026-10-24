@@ -25,7 +25,7 @@ test "$source_commit" = "$(git -C "$repo_root" rev-parse "origin/$authoritative_
 
 release_dir="$release_root/$source_commit"
 install -d -m 700 "$runtime_dir" "$release_root" "$release_dir" "$release_dir/developer_gateway" "$config_dir" "$unit_dir"
-for source_file in __init__.py app.py codex_client.py backends.py api_backend.py state.py policy.py tools.py; do
+for source_file in __init__.py app.py codex_client.py backends.py api_backend.py state.py policy.py tools.py autonomy.py autonomy_api.py autonomy_host.py observer.py; do
     install -m 600 "$repo_root/developer_gateway/$source_file" "$release_dir/developer_gateway/$source_file"
 done
 printf '%s\n' "$source_commit" > "$release_dir/SOURCE_COMMIT"

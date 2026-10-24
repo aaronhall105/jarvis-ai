@@ -1,0 +1,38 @@
+[Unit]
+Description=Unprivileged Jarvis autonomous development runtime
+BindsTo=jarvis-autonomy-guardian.service
+After=jarvis-autonomy-guardian.service network-online.target
+ConditionPathExists=/var/lib/jarvis-autonomy/work/runtime/governor.py
+
+[Service]
+Type=simple
+User=jarvis-autonomy
+Group=jarvis-autonomy
+WorkingDirectory=/var/lib/jarvis-autonomy/work
+ExecCondition=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy/guardian.py check-active
+ExecStart=/usr/bin/python3 -I /var/lib/jarvis-autonomy/work/runtime/governor.py
+KillMode=control-group
+TimeoutStopSec=5
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/jarvis-autonomy/work
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock -/run/systemd/private -/run/dbus/system_bus_socket -/etc/sudoers -/etc/sudoers.d
+TasksMax=256
+MemoryMax=2G
+CPUQuota=200%

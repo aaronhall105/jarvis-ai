@@ -4,7 +4,17 @@ This document records validation categories for the unified Jarvis product. It
 does not replace CI logs, signed release manifests, runtime health, or physical
 device evidence.
 
-## Validated source and release
+## Phase 1 candidate (not released)
+
+The alpha40/190420 candidate adds an Android dashboard, disabled-by-default
+observe-only API and protected autonomy tooling. Current local results and exact
+certification gaps are in [the Phase 1 matrix](docs/autonomy-phase1-certification.md).
+Passing local checks does not authorize merge/signing/install or certify a phone.
+Guardian remains STOPPED; no autonomous engineering is enabled. The following
+sections retain historical alpha39 and earlier validation, not current integration
+availability or proof for this candidate.
+
+## Previously validated source and release
 
 - Current release candidate: `v19.0.0-alpha39`
 - Release source: the immutable tag, product manifest, and OTA manifest must

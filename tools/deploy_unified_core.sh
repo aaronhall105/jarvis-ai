@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Fixed, offline broker entry. The installed broker executes its root-owned copy
+# of this approved entry point, never a writable worktree script as root.
+# Normal operator deployment below is unchanged. No caller command is accepted.
+if [[ "${1:-}" == "--broker-prebuilt-core" ]]; then
+  [[ "$EUID" == 0 && "$#" == 2 ]] || exit 2
+  exec /usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py release "$2"
+fi
+
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 AUTHORITATIVE_BRANCH="jarvis/unified-production"
 LIVE_ROOT="${JARVIS_LIVE_ROOT:-/home/aaron/.local/share/jarvis-runtime}"
