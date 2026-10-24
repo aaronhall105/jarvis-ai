@@ -129,7 +129,9 @@ def materialize_snapshot(
         safe = relative_source(relative)
         destination = target / safe
         destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o444)
+        # Incomplete files stay private. Only the completed source snapshot is
+        # made read-only/readable for the unprivileged sandbox below.
+        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()

@@ -4,6 +4,15 @@ Updated 2026-10-24. LOCAL WIP, not deployed or Phase 1 certified.
 
 ## Phase 1 release candidate — current continuation
 
+Feature pushed; single PR **#97** opened:
+https://github.com/aaronhall105/jarvis-ai/pull/97. Initial implementation commit
+`e89b6035f66e2bbe3c8dd744a3d7a3eb0095e388`. CI core-tests/quality-security passed;
+CodeQL reported three permission-initialization alerts. Corrected the two installer
+writers and snapshot materializer to create private 0600 files before applying
+final required read/execute modes after complete contents. Added seven regressions;
+98 installer/Guardian/snapshot tests passed, Ruff/format passed. All checks must
+rerun for the corrected head. No suppression or installed host modification.
+
 This section supersedes historical no-PR/no-version-change statements below.
 Aaron authorized committing/pushing the existing feature and opening its single
 PR for protected CI. Canonical merge, signing/release, observer deployment and

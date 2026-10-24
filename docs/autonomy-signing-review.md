@@ -67,6 +67,14 @@ by this candidate review and its exact-head PR check runs.
 
 ### Remaining blockers
 
+PR #97 is now open: https://github.com/aaronhall105/jarvis-ai/pull/97.
+The initial e89b603 head passed core-tests/quality-security but received three
+CodeQL permission-initialization alerts. A focused source correction creates
+incomplete payloads privately before final publication; seven new regressions and
+98 focused tests pass. No installed host payload was modified, no scanner was
+suppressed, and no merge is authorized by these results. Require fresh exact-head
+CI including clean CodeQL alert results, not only the analysis job completing.
+
 Protected CI and human review must attach to the exact feature head. Production
 signing/release, gateway wiring and installation await approval. No signed alpha40
 or recovery artifact exists. Latest ADB read is empty; historical SM_G996B evidence

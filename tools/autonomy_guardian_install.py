@@ -79,7 +79,9 @@ def run(argv: list[str]) -> None:
 
 def write(path: Path, data: bytes, mode: int) -> None:
     # Parent is root-owned/non-writable before this function is called.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    # Keep incomplete content private, even for a final public helper/manifest.
+    # Publish only the reviewed final mode after the complete payload is flushed.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
         handle.flush()

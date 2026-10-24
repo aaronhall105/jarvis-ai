@@ -249,7 +249,9 @@ def verify_guardian_audit(controller) -> None:
 
 
 def exclusive(path: Path, data: bytes, mode: int) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    # Initial creation must be private; final public modes are deliberately set
+    # only once the complete reviewed payload has been written and flushed.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
         handle.flush()

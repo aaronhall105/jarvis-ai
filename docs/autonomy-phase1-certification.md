@@ -33,7 +33,7 @@ observer disabled by default; no autonomous coding/merge/deployment executor.
 | Grounded dashboard capabilities / idle / failures | PASS (local) | Presentation and Governor tests; unknown integrations explicitly unverified; API requires configured AND healthy |
 | Phase 1 RESUME denial | PASS (local) | Signed RESUME receives 403 before IPC; no UI activation action; host CLI separate |
 | Signed STOP / protocol / enrollment | PASS (harness) | Python/Java public vectors, HTTP relay + broker dispatcher, enrollment/revocation rehearsal; no real phone key enrolled |
-| Protected PR checks | BLOCKED pending exact-head CI | Require core-tests, quality-security, android-unit-tests, Analyze Python; no inherited production checks |
+| Protected PR checks | BLOCKED pending corrected-head CI | PR #97; initial e89b603 passed core-tests/quality-security but CodeQL reported 3 permission-initialization alerts; source corrected with regressions, all exact-head checks must rerun |
 | Human release/security approval | BLOCKED | Must precede canonical merge/signing/release; this matrix is not approval |
 | Production signed candidate | BLOCKED | Canonical-tag CI only; no alpha40 signed artifact/hash yet |
 | Signing continuity | PASS (historical inspection only) | Installed cert 009fd523f27cf94eb98917e17670804897e6378e5eccf1ce3ead680721691aac; debug differs, correctly not installed |
@@ -78,6 +78,15 @@ not private runtime/credentials, build downloads or unrelated worktrees. The CI
 scanner scans its fresh checkout. No scanner exclusion or security gate changed.
 
 ## Safety review and remaining architectural scope
+
+PR: https://github.com/aaronhall105/jarvis-ai/pull/97. Initial candidate
+`e89b6035f66e2bbe3c8dd744a3d7a3eb0095e388` received three CodeQL
+`py/overly-permissive-file` alerts. Installers/sandbox snapshots now create files
+privately (0600), write/flush complete payloads, then apply the required final
+public helper/source read modes. Seven regressions inspect permissions at creation
+and publication; **98 focused tests passed** including installer/Guardian/snapshot
+rehearsals. No scanner suppression. Installed root payloads were NOT changed;
+any later host upgrade needs separate reviewed handling of its pinned manifest.
 
 - Product observer is off unless the setting is exactly `true`. It uses a separate
   private SQLite journal outside source, fixed local health URLs, bounded reads,
