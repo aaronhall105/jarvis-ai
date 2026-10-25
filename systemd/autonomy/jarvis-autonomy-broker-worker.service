@@ -1,0 +1,40 @@
+[Unit]
+Description=Protected fixed-profile Jarvis execution and release broker
+Requires=jarvis-autonomy-guardian.service
+After=jarvis-autonomy-guardian.service docker.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py worker
+Restart=on-failure
+RestartSec=1
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/jarvis-autonomy-broker /var/lib/jarvis-autonomy-jobs
+ReadOnlyPaths=/var/lib/jarvis-autonomy-guardian /etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=128
+MemoryMax=1G
+CPUQuota=200%
+TimeoutStopSec=950
+KillMode=mixed
+StandardOutput=null
+StandardError=journal

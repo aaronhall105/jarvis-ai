@@ -1,0 +1,34 @@
+[Unit]
+Description=Independent Jarvis autonomy stop interlock
+After=local-fs.target
+Before=jarvis-autonomy.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy/guardian.py watch
+ExecStopPost=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy/guardian.py stop
+Restart=on-failure
+RestartSec=1
+TimeoutStopSec=20
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_KILL
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/jarvis-autonomy-guardian
+
+[Install]
+WantedBy=multi-user.target

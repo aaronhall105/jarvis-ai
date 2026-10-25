@@ -17,6 +17,9 @@ from developer_gateway.codex_client import canonical_workspace
 
 @pytest.fixture(autouse=True)
 def configured_workspaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A local test must never contend for or recover the running service journal.
+    monkeypatch.setenv("JARVIS_DEVELOPER_STATE_DIR", str(tmp_path / "agent-state"))
+    monkeypatch.delenv("JARVIS_AUTONOMY_OBSERVER_ENABLED", raising=False)
     workspaces = {
         "jarvis": tmp_path / "jarvis",
         "jarvis-wear": tmp_path / "jarvis",
@@ -93,6 +96,54 @@ class FakeCodex:
 
     async def respond(self, request_id, result) -> None:
         pass
+
+
+@pytest.mark.parametrize("flag", [None, "false", "TRUE", "1"])
+def test_observer_disabled_by_default_without_journal_or_authority(monkeypatch, flag):
+    import developer_gateway.app as gateway
+
+    if flag is not None:
+        monkeypatch.setenv("JARVIS_AUTONOMY_OBSERVER_ENABLED", flag)
+    monkeypatch.setattr(gateway, "TOKEN", "fixture-token")
+    monkeypatch.setattr(gateway, "codex", FakeCodex())
+    monkeypatch.setattr(
+        gateway, "Governor", lambda *_: pytest.fail("Disabled observer constructed")
+    )
+    headers = {"Authorization": "Bearer fixture-token"}
+    with TestClient(app) as client:
+        assert client.get("/api/autonomy").status_code == 401
+        assert client.get("/api/autonomy", headers=headers).status_code == 503
+        for route in ("observe", "control"):
+            assert (
+                client.post("/api/autonomy/" + route, headers=headers, json={}).status_code == 503
+            )
+        assert client.get("/health").status_code == 200
+    assert gateway.observer is None
+
+
+def test_observer_startup_failure_does_not_break_manual_developer(monkeypatch, caplog):
+    import developer_gateway.app as gateway
+
+    monkeypatch.setenv("JARVIS_AUTONOMY_OBSERVER_ENABLED", "true")
+    monkeypatch.setattr(gateway, "TOKEN", "fixture-token")
+    monkeypatch.setattr(gateway, "codex", FakeCodex())
+
+    def unavailable(*_):
+        raise OSError("fixture-private-diagnostic-must-not-escape")
+
+    monkeypatch.setattr(gateway, "Governor", unavailable)
+    with TestClient(app) as client, client.websocket_connect("/api/developer") as socket:
+        socket.send_json({"type": "auth", "token": "fixture-token"})
+        assert socket.receive_json()["type"] == "auth.ok"
+        socket.send_json({"type": "thread.start", "workspace": "jarvis", "request_id": 1})
+        assert socket.receive_json()["result"]["thread"]["id"] == "thread-safe"
+        assert (
+            client.get(
+                "/api/autonomy", headers={"Authorization": "Bearer fixture-token"}
+            ).status_code
+            == 503
+        )
+    assert "fixture-private-diagnostic" not in caplog.text
 
 
 def test_websocket_rejects_bad_auth(monkeypatch: pytest.MonkeyPatch) -> None:

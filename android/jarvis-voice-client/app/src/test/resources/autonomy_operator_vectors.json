@@ -1,0 +1,11 @@
+{
+  "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/L5ywML956XYVywKO3drAktrcdgG0S0IfzJfHYFmSZ2mvCdHSw+9yX6EtovB/M9Kd3dNYekMRaBYb1KUZdmIeg==",
+  "control": {
+    "unsigned": "{\"action\":\"stop\",\"expires_at\":2000000030,\"generation\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"57f03d2d6dd94e749cf8148c61fd44018d72a50d5ebd91bb5387a358d41d27af\",\"request_id\":\"00000000-0000-4000-8000-000000000002\",\"version\":1}",
+    "signature": "MEMCH2Nk/cbJacOyQqm2z3cig+w6cOQW7PkCUcPoCb/kaMkCIBugt2GEjl1rFymuF2XPiYzK6PYLK7k8Surwq/UNrlKy"
+  },
+  "enrollment": {
+    "unsigned": "{\"key_id\":\"57f03d2d6dd94e749cf8148c61fd44018d72a50d5ebd91bb5387a358d41d27af\",\"nonce\":\"00000000-0000-4000-8000-000000000003\",\"public_key\":\"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/L5ywML956XYVywKO3drAktrcdgG0S0IfzJfHYFmSZ2mvCdHSw+9yX6EtovB/M9Kd3dNYekMRaBYb1KUZdmIeg==\",\"version\":1}",
+    "signature": "MEYCIQCfXJ6KENz47bJKjuRNeEBJIpjsxXh9axQsrXDjSlc+dgIhANnhlLDfJJOMZbNWhqvl8y+k6OxM+dlYoMVGDTudD5lm"
+  }
+}

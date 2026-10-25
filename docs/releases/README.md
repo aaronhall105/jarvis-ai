@@ -2,7 +2,9 @@
 
 Historical release notes are retained for traceability.
 
-The current unified release candidate is [Jarvis v19.0.0-alpha39](CHANGES_V19_0_0_ALPHA39.md).
+The current unified release candidate is [Jarvis v19.0.0-alpha40](CHANGES_V19_0_0_ALPHA40.md).
+It is not published or physically certified yet. The latest published release
+remains [Jarvis v19.0.0-alpha39](CHANGES_V19_0_0_ALPHA39.md).
 
 ## Archived releases
 

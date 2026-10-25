@@ -13,6 +13,9 @@ from typing import Any
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 
 from .backends import DeveloperBackends
+from .autonomy import Governor
+from .autonomy_api import router as autonomy_router
+from .observer import review_loop
 from .codex_client import canonical_workspace
 
 logging.basicConfig(level=os.getenv("JARVIS_DEVELOPER_LOG_LEVEL", "INFO"))
@@ -60,6 +63,7 @@ WORKSPACES = {
 codex = DeveloperBackends(AUTHORITATIVE_WORKSPACE)
 started = time.monotonic()
 metrics = {"connections": 0, "requests": 0, "events": 0, "reconnects": 0, "active_clients": 0}
+observer: Governor | None = None
 ATTACHMENT_LIMIT = 1_500_000
 ATTACHMENT_DIR = Path(
     os.getenv(
@@ -89,6 +93,21 @@ def authorised(value: str | None) -> bool:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global observer
+    observer_task = None
+    if os.getenv("JARVIS_AUTONOMY_OBSERVER_ENABLED") == "true":
+        path = Path(
+            os.getenv(
+                "JARVIS_AUTONOMY_OBSERVER_STATE",
+                str(Path.home() / ".local/share/jarvis-observer/roadmap.sqlite3"),
+            )
+        )
+        try:
+            observer = Governor(path)
+            observer_task = asyncio.create_task(review_loop(observer))
+        except Exception:
+            # Optional observation must never prevent ordinary Developer use.
+            log.warning("Observe-only journal unavailable")
     if not TOKEN:
         log.error("JARVIS_DEVELOPER_TOKEN is not configured")
     else:
@@ -96,11 +115,23 @@ async def lifespan(_: FastAPI):
             await codex.start()
         except Exception:
             log.warning("Developer backend warm-up unavailable")
-    yield
-    await codex.stop()
+    try:
+        yield
+    finally:
+        if observer_task is not None:
+            observer_task.cancel()
+            from contextlib import suppress
+
+            with suppress(asyncio.CancelledError):
+                await observer_task
+        if observer is not None:
+            observer.close()
+            observer = None
+        await codex.stop()
 
 
 app = FastAPI(title="Jarvis Developer Gateway", version="1.0.0", lifespan=lifespan)
+app.include_router(autonomy_router(lambda: observer, authorised))
 
 
 @app.get("/health")

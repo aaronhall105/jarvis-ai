@@ -1,0 +1,36 @@
+[Unit]
+Description=Independent authenticated Jarvis autonomy operator control
+After=jarvis-autonomy-guardian.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py operator
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_KILL CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/jarvis-autonomy-broker/operator /var/lib/jarvis-autonomy-guardian
+ReadOnlyPaths=/etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+TasksMax=32
+MemoryMax=128M
+CPUQuota=50%
+TimeoutStopSec=20
+StandardOutput=null
+StandardError=journal
