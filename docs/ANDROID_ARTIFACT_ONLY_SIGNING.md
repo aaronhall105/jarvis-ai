@@ -99,6 +99,19 @@ References: [artifact validation](https://docs.github.com/en/actions/tutorials/s
 
 ## Human setup/activation checkpoint — not performed
 
+### Existing secret-scope boundary
+
+Metadata-only inspection confirms the existing JARVIS_SIGNING_* secrets are
+repository-scoped. Their values were not read. The new required-reviewer gate
+protects THIS workflow, not every possible workflow an authorized repository
+writer could propose. This PR does not move/rotate/export secrets, change the
+existing tag publisher, or claim repository-wide isolation. No autonomous account
+receives signing credentials or workflow approval rights. Before future unattended
+workflow-edit/push authority is enabled, separately review repository secret scope
+and protected signing-workflow authority; this Phase1 proposal cannot substitute
+for that boundary. Any secret-scope migration requires explicit operator approval
+and compatibility review of the existing publisher.
+
 Fresh inspection found **no repository environments configured**. The proposed
 workflow therefore refuses to proceed today. Do not auto-create a permissive
 environment or move/export/replace signing credentials as a workaround.
@@ -207,3 +220,24 @@ credential reset or Guardian reinstall. Unknown outcome requires reconciliation.
 **PHASE 1 BLOCKED** pending explicit signing infrastructure/sequence approvals,
 verified signed recovery/return artifacts, observer deployment, real enrollment,
 signed STOP, essential functions and retained-data recovery proof. No Phase 2.
+
+## Review evidence
+
+Signing infrastructure PR: https://github.com/aaronhall105/jarvis-ai/pull/99.
+Initial implementation head b4a488a96bac186968b30ce2549e01878d670fb1:
+
+- local 2164 Python tests, 3 skipped, 143 subtests; 71 new signer tests;
+- Ruff/format, 111 active-source mypy files plus signer namespace, compileall,
+  Bandit, actionlint and product baseline green;
+- staged-source-only Gitleaks 8.30.1 scan: 8.78 MB, no findings;
+- protected CI run 40204160719 and CodeQL workflow 40204160648 successful;
+- separate CodeQL analysis 2022469244: zero findings, no open PR alerts;
+  synthetic merge 0125d1329a2df6b8f05c30a3e093205209542de3 has the exact reviewed
+  source tree a6b3091be3cc3feeb95e0102622102c3fa11bd7e;
+- real SDK verifier accepted existing unsigned alpha41 Phone/Wear metadata and
+  the cached installed alpha40 package/certificate/hash; no signing occurred.
+
+Any later documentation/review commit still requires fresh protected checks.
+Use the PR's exact-head completion record, not an earlier success, for approval.
+Runtime signing, protected-environment approval and no-feed-change proof remain
+NOT TESTED until separately authorized. A green workflow test is not a signed APK.

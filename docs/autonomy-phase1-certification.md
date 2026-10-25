@@ -16,8 +16,9 @@ for the exact proposed permission boundary and approval sequence.
 | Recovery separate security gate | PASS | CodeQL analysis 2021791832, matching merge tree 4344144ef36b38f14d48a4fea8895de298ad92c8, zero findings, no open PR alerts; not a claim that all historic Core findings are resolved |
 | Artifact-only signer safety | PASS (local harness) | 71 new tests: source/check/approval gates, stale-source rejection, bounded paths, signer/package checks, key cleanup, read-only workflow structure; 88 combined signer/manifest tests |
 | Full Python regression with signer | PASS (local) | 2,164 passed, 3 skipped, 143 subtests; bridge/tests tools/tests developer_gateway/tests; not a signing run |
-| New signer authoritative CI | BLOCKED pending exact-head PR | Separate infrastructure PR required; local success does not authorize merge or signing |
+| New signer authoritative CI | PASS on implementation head; refresh required after changes | PR99 b4a488a96bac186968b30ce2549e01878d670fb1: all four protected jobs passed, separate CodeQL analysis2022469244 zero findings/no open alerts; final exact-head proof is recorded in PR99 |
 | Human signing approval environment | BLOCKED | No repository environments configured; jarvis-artifact-signing must be explicitly approved/configured with Aaron-only required reviewer; code fails closed meanwhile |
+| Repository signing-secret scope | BLOCKED for future autonomous workflow authority | Existing repository-level secrets unchanged; this workflow approval gate is not a repository-wide secret ACL; separate operator review required before unattended workflow edits |
 | Signed recovery / higher-code return | BLOCKED | Neither artifact exists; canonical-only trust retained; approve source sequence before recovery merge, then exact-head CI and separate signing approval for each; no tags/feed changes |
 | Public OTA / installed host infrastructure | PASS (unchanged by this work) | Existing publishing workflow untouched; no signing dispatch, tag, release, host install, enrollment or activation performed |
 | Guardian | PASS (live read-only) | STOPPED/trusted=true; no control operation performed |
