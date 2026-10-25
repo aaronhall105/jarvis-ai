@@ -1,5 +1,34 @@
 # Phase 1 release-candidate certification matrix
 
+## Current recovery continuation — 2026-10-25
+
+Historical alpha40 candidate rows below are superseded by PR97 release evidence
+and [physical preparation](autonomy-physical-preparation.md). Alpha40 is published
+and the Samsung already has its exact signed APK. This branch prepares alpha41
+recovery only; [the recovery review](autonomy-recovery-review.md) documents its
+source/security review, verification commands and mandatory approval boundaries.
+
+| Current gate | Status | Evidence / limitation |
+| --- | --- | --- |
+| Alpha40 protected checks / signed release | PASS | PR97 release evidence, d4013a0137a5b88e3e401627084b35d58c8c813a |
+| Recovery compatibility / version / storage / inactive helper | PASS local | Three new invariants; alpha39 behavior, unchanged alpha40 storage and signing contract |
+| Recovery full Python | PASS local | 2096 passed, 3 skipped, 143 subtests |
+| Recovery Phone / Wear / protocol | PASS local | 265 / 1 / 30; debug/release lint, debug and unsigned release builds |
+| Recovery security/static/release manifests | PASS local | Ruff, mypy, compile, Bandit, dependency audit, actionlint, baseline and manifest tests |
+| Recovery protected CI / security alerts | PENDING exact-head PR evidence | Must be recorded on the final PR head; local results are not CI |
+| Guardian | PASS read-only | STOPPED, trusted=true; no activation or installed payload changes |
+| Samsung connectivity / installed identity | PASS read-only | Authorized SM_G996B; alpha40 / 190420; previous pulled APK equals published artifact |
+| Home / Development launch | PASS limited physical | Prior real launch; dashboard truthfully reports unavailable observer |
+| Live observer / complete dashboard | BLOCKED approval | Gateway not deployed, observer remains disabled |
+| Signed recovery / feature-return artifacts | BLOCKED approval/policy | No approved staging-only signer; current tag workflow promotes OTA |
+| Real enrollment / signed STOP / retained data | NOT TESTED | Requires separately approved live procedures |
+| Recovery / return device rehearsal | NOT TESTED | Requires exact signed higher-version artifacts and installation approvals |
+
+**PHASE 1 BLOCKED.** No merge, signing, publication, deployment, installation,
+operator enrollment or Phase 2 is authorized by green recovery checks.
+
+## Historical alpha40 candidate matrix
+
 Date: 2026-10-24. Branch `jarvis/autonomous-development`, based on production
 `429cee8ac2d8efdc5d7c99805699edae78e9a85d`. The immutable candidate commit is the
 PR head containing this document; subsequent CI results must identify that exact

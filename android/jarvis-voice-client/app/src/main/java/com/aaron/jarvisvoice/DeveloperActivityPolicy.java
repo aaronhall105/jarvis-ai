@@ -20,9 +20,6 @@ final class DeveloperActivityPolicy {
         return switch (state == null ? "" : state) {
             case "completed" -> "Completed";
             case "failed" -> "Failed";
-            case "cancelled", "interrupted" -> "Cancelled";
-            case "paused" -> "Paused — retry available";
-            case "waiting_approval" -> "Approval required";
             default -> completed ? "Completed" : "Running…";
         };
     }
@@ -63,8 +60,7 @@ final class DeveloperActivityPolicy {
         StringBuilder value = new StringBuilder();
         for (int index = 0; index < content.length(); index++) {
             JSONObject part = content.optJSONObject(index);
-            if (part == null || !("text".equals(part.optString("type"))
-                    || "output_text".equals(part.optString("type")))) continue;
+            if (part == null || !"text".equals(part.optString("type"))) continue;
             if (value.length() > 0) value.append("\n");
             value.append(part.optString("text"));
         }

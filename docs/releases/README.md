@@ -2,9 +2,13 @@
 
 Historical release notes are retained for traceability.
 
-The current unified release candidate is [Jarvis v19.0.0-alpha40](CHANGES_V19_0_0_ALPHA40.md).
-It is not published or physically certified yet. The latest published release
-remains [Jarvis v19.0.0-alpha39](CHANGES_V19_0_0_ALPHA39.md).
+The latest published release is [Jarvis v19.0.0-alpha40](CHANGES_V19_0_0_ALPHA40.md).
+Phase 1 physical certification remains incomplete.
+
+This isolated branch prepares [alpha41 recovery](CHANGES_V19_0_0_ALPHA41.md),
+restoring alpha39 Android behavior with a higher version code. It is local,
+unsigned and unpublished; no merge, signing, feed promotion or installation is
+authorized. See [the physical preparation record](../autonomy-physical-preparation.md).
 
 ## Archived releases
 

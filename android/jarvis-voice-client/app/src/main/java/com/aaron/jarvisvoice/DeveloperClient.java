@@ -210,11 +210,6 @@ final class DeveloperClient {
     }
 
     String threadId() { return threadId; }
-    void retryTurn() {
-        long id = nextRequest("turn.retry");
-        send(json("type", "turn.retry", "workspace", workspace,
-            "thread_id", threadId, "request_id", id));
-    }
     void listThreads() {
         long id = nextRequest("threads.list");
         send(json("type", "threads.list", "workspace", workspace, "request_id", id));

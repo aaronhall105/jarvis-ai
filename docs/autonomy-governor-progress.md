@@ -1,5 +1,17 @@
 # Observe-only Governor continuation checkpoint
 
+## Latest continuation — 2026-10-25 physical preparation
+
+See [the current preparation record](autonomy-physical-preparation.md). Samsung is
+connected and already has the exact signed alpha40 APK; the agent installed nothing.
+Home and Development open; observation correctly reports unavailable because the
+gateway is not deployed. Guardian remains trusted STOPPED. No enrollment, signed
+control, deployment or engineering execution occurred. The separate local recovery
+branch restores alpha39 Android code with alpha41/190430 metadata; focused checks
+pass, but it is unsigned/unpublished. Next boundaries are approved recovery PR/CI,
+separately approved release, observe-only gateway wiring, enrollment and physical
+data-preserving recovery. No Phase 2. Older entries below are historical.
+
 Updated 2026-10-24. LOCAL WIP, not deployed or Phase 1 certified.
 
 ## Phase 1 release candidate — current continuation

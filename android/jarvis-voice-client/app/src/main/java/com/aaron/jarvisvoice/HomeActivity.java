@@ -86,10 +86,6 @@ public final class HomeActivity extends Activity {
         appShell.clearChat.setVisibility(View.GONE);
         root.addView(appShell.view, matchWrap());
 
-        Button development = button("Jarvis Development");
-        development.setOnClickListener(view -> startActivity(new Intent(this, AutonomyActivity.class)));
-        root.addView(development, matchWrap());
-
         LinearLayout statusRow = new LinearLayout(this);
         statusRow.setOrientation(LinearLayout.HORIZONTAL);
         statusRow.setGravity(Gravity.CENTER_VERTICAL);

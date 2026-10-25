@@ -1,5 +1,15 @@
 # Phase 1 release review — 2026-10-24
 
+## 2026-10-25 continuation — superseding release/device status
+
+Alpha40 is now merged, production-signed and published at canonical d4013a0.
+Fresh Samsung inspection finds that exact published APK already installed; this
+continuation installed nothing. Observer deployment and signed recovery remain
+unapproved. See [physical preparation](autonomy-physical-preparation.md) for exact
+source/artifact/device evidence, the isolated alpha41 recovery branch, new local
+tests and mandatory approval sequence. Historical pending-release statements below
+are retained as chronology, not current status. Phase 1 remains BLOCKED.
+
 ## Current decision and authorization
 
 Prepare one controlled candidate containing Android dashboard, optional observer

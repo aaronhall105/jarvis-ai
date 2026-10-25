@@ -37,14 +37,4 @@ public class DeveloperActivityPolicyTest {
         assertEquals("MOBILE OK request", DeveloperActivityPolicy.messageText(user));
         assertEquals("MOBILE OK", DeveloperActivityPolicy.messageText(agent));
     }
-
-    @Test public void liveAndHistoryUseSameContentParserAndFailuresStayFailures() throws Exception {
-        JSONObject item = new JSONObject().put("content", new JSONArray()
-            .put(new JSONObject().put("type", "output_text").put("text", "Evidence-backed result")));
-        assertEquals("Evidence-backed result", DeveloperActivityPolicy.messageText(item));
-        assertEquals("Failed", DeveloperActivityPolicy.status("failed", true));
-        assertEquals("Cancelled", DeveloperActivityPolicy.status("cancelled", true));
-        assertEquals("Paused — retry available", DeveloperActivityPolicy.status("paused", true));
-        assertEquals("", DeveloperActivityPolicy.messageText(new JSONObject()));
-    }
 }
