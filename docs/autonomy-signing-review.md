@@ -1,5 +1,16 @@
 # Phase 1 release review — 2026-10-24
 
+## 2026-10-25 artifact-only recovery-signing continuation
+
+Alpha40 has since shipped from d4013a0137a5b88e3e401627084b35d58c8c813a.
+The following original review is historical. Current recovery/signing design,
+approval boundaries, physical acceptance procedure and source sequence are in
+[ANDROID_ARTIFACT_ONLY_SIGNING.md](ANDROID_ARTIFACT_ONLY_SIGNING.md), with the
+current [certification matrix](autonomy-phase1-certification.md).
+PR98 recovery remains unmerged/unsigned. The new separate signing-infrastructure
+proposal does not authorize merging, creating an approval environment, dispatching
+signing, deploying the observer, enrolling a key, installing, or enabling autonomy.
+
 ## Current decision and authorization
 
 Prepare one controlled candidate containing Android dashboard, optional observer

@@ -1,5 +1,43 @@
 # Phase 1 release-candidate certification matrix
 
+## Recovery artifact-only signing continuation — 2026-10-25
+
+This section supersedes the historical release blockers below, not the physical
+acceptance requirements. Alpha40 is released at canonical
+`d4013a0137a5b88e3e401627084b35d58c8c813a`; no runtime deployment is inferred from
+that Git state. See [artifact-only signing review](ANDROID_ARTIFACT_ONLY_SIGNING.md)
+for the exact proposed permission boundary and approval sequence.
+
+| Requirement | Status | Current evidence / remaining gate |
+| --- | --- | --- |
+| Alpha40 release | PASS | PR97 merged; v19.0.0-alpha40/190420 Phone/Wear production signatures and hashes independently verified; PR97 comment 6393482224 |
+| Recovery source | PASS (review/local) | PR98 head ac3f3f1e2ac442fa4ded96d1229e51481b4b6636; alpha41/190430 restores actual released alpha39 Android behavior, preserves storage/aliases; not merged |
+| Recovery protected checks | PASS (authoritative CI) | All four required contexts on exact PR98 head; runs 40182269133 and 40182269141 |
+| Recovery separate security gate | PASS | CodeQL analysis 2021791832, matching merge tree 4344144ef36b38f14d48a4fea8895de298ad92c8, zero findings, no open PR alerts; not a claim that all historic Core findings are resolved |
+| Artifact-only signer safety | PASS (local harness) | 71 new tests: source/check/approval gates, stale-source rejection, bounded paths, signer/package checks, key cleanup, read-only workflow structure; 88 combined signer/manifest tests |
+| Full Python regression with signer | PASS (local) | 2,164 passed, 3 skipped, 143 subtests; bridge/tests tools/tests developer_gateway/tests; not a signing run |
+| New signer authoritative CI | BLOCKED pending exact-head PR | Separate infrastructure PR required; local success does not authorize merge or signing |
+| Human signing approval environment | BLOCKED | No repository environments configured; jarvis-artifact-signing must be explicitly approved/configured with Aaron-only required reviewer; code fails closed meanwhile |
+| Signed recovery / higher-code return | BLOCKED | Neither artifact exists; canonical-only trust retained; approve source sequence before recovery merge, then exact-head CI and separate signing approval for each; no tags/feed changes |
+| Public OTA / installed host infrastructure | PASS (unchanged by this work) | Existing publishing workflow untouched; no signing dispatch, tag, release, host install, enrollment or activation performed |
+| Guardian | PASS (live read-only) | STOPPED/trusted=true; no control operation performed |
+| Samsung installed alpha40 | PASS (package bytes) | Same production package/signature; version190420; fresh device APK hash d30d92894ca2266676468aa2c589ac55dd0388e5e314c7e3634aadb956f17482; update history alone does not prove who installed it |
+| Current Samsung connectivity | BLOCKED | Latest ADB/mDNS lists empty after earlier authorized SM_G996B observation; reconnect only this phone, no silent pairing |
+| Home/dashboard rendering | NOT TESTED (full acceptance) | Earlier physical Home/Development launches observed; dashboard truthfully reports observer unavailable, not successful live observation |
+| Observer deployment / live dashboard | BLOCKED | Default remains OFF; separate deployment and temporary observe-only approval needed; private journal under existing Developer writable data directory |
+| Real operator enrollment / signed STOP | BLOCKED | No real key enrolled or signed STOP accepted; public-key-only local ceremony and approval still required |
+| RESUME boundary | PASS (software only) | Phase1 relay denies RESUME before IPC; no activation allowed for physical test |
+| Retained chats/settings/auth/Keystore | NOT TESTED | Original install timestamp/UID retained but insufficient; require content-free operator baseline and explicit before/after checks |
+| Physical recovery and feature return | NOT TESTED | Same signer, strictly increasing version codes, both verified artifacts in hand; no uninstall, clearing, downgrade or database restore |
+| Phase1 overall | BLOCKED | CI alone is not physical certification; no Phase2 authorization |
+
+All new source work is on the isolated signing-infrastructure branch. Canonical,
+recovery, production runtimes, devices, credentials and Guardian state are not
+modified. Current signing PR/check evidence belongs in its exact-head PR record;
+do not reinterpret an earlier green head after any source change.
+
+## Historical alpha40 candidate evidence
+
 Date: 2026-10-24. Branch `jarvis/autonomous-development`, based on production
 `429cee8ac2d8efdc5d7c99805699edae78e9a85d`. The immutable candidate commit is the
 PR head containing this document; subsequent CI results must identify that exact
