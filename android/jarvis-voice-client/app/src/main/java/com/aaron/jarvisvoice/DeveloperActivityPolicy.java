@@ -6,6 +6,18 @@ import org.json.JSONObject;
 final class DeveloperActivityPolicy {
     private DeveloperActivityPolicy() { }
 
+    static boolean isActivity(JSONObject item) {
+        String type = item.optString("type");
+        return "mcpToolCall".equals(type) || "commandExecution".equals(type)
+            || "fileChange".equals(type) || "webSearch".equals(type);
+    }
+
+    static String activityStatus(JSONObject item, boolean completed) {
+        String label = status(item.optString("status"), completed);
+        String message = item.optString("message");
+        return message.isBlank() ? label : label + "\n" + message;
+    }
+
     static String title(String type) {
         return switch (type == null ? "" : type) {
             case "commandExecution" -> "Command";

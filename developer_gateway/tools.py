@@ -497,6 +497,10 @@ class ToolRunner:
             actual = hashlib.sha256(old).hexdigest() if old is not None else ""
             if actual != args["expected_sha256"]:
                 raise ValueError("File changed: preimage does not match")
+            if args["content"] is not None and args["content"].count("[REDACTED]") > (
+                old.decode(errors="replace").count("[REDACTED]") if old is not None else 0
+            ):
+                raise ValueError("Refusing a replacement containing new redaction placeholders")
             if args["content"] is None:
                 if old is None:
                     raise ValueError("File does not exist")
@@ -559,6 +563,8 @@ class ToolRunner:
             )
         if name.startswith("pr_"):
             if not thread.get("branch"):
+                if name == "pr_status":
+                    return {"ok": False, "error": "This task has no branch or pull request yet"}
                 raise ValueError("No task branch")
             branch = thread["branch"]
             view = await self.command(

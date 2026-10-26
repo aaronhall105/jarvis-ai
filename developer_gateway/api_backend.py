@@ -7,15 +7,16 @@ import os
 import sys
 import time
 import uuid
+import httpx
 from collections.abc import Awaitable, Callable
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
-from openai import AsyncOpenAI, APIConnectionError, APIStatusError
+from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APIError
 
-from .policy import POLICY, credential, redact
-from .state import State
+from .policy import POLICY, credential, redact, redact_value
+from .state import READ_ONLY_TOOLS, State
 from .tools import APPROVAL, ToolRunner, schemas, validate
 
 Sink = Callable[[dict[str, Any]], Awaitable[None]]
@@ -23,6 +24,34 @@ Sink = Callable[[dict[str, Any]], Awaitable[None]]
 
 class ProviderUnavailable(RuntimeError):
     pass
+
+
+def provider_failure_code(exc: Exception) -> str:
+    code = getattr(exc, "code", None)
+    if code in {
+        "server_error",
+        "rate_limit_exceeded",
+        "insufficient_quota",
+        "invalid_api_key",
+        "model_not_found",
+        "invalid_request_error",
+        "unsupported_parameter",
+        "context_length_exceeded",
+    }:
+        return code
+    # Some SSE billing failures have no machine code. Map known billing messages
+    # to a fixed category, never persist/emit the provider's arbitrary text.
+    message = str(exc).casefold()
+    if any(
+        part in message
+        for part in (
+            "no credits remaining",
+            "exceeded your current quota",
+            "insufficient quota",
+        )
+    ):
+        return "insufficient_quota"
+    return "unclassified_stream_error"
 
 
 class OpenAIResponsesDeveloperBackend:
@@ -39,6 +68,7 @@ class OpenAIResponsesDeveloperBackend:
             AsyncOpenAI(api_key=self.key, max_retries=0, timeout=120) if self.key else None
         )
         self.jobs: dict[str, asyncio.Task[None]] = {}
+        self.closed = False
         self.sinks: set[Sink] = set()
         self.healthy = False
         self.provider_unavailable = False
@@ -185,6 +215,7 @@ class OpenAIResponsesDeveloperBackend:
                     repeats={},
                     no_progress=0,
                     last_outcome=None,
+                    accounted_calls=[],
                 )
                 thread["turns"].append(
                     {
@@ -199,6 +230,11 @@ class OpenAIResponsesDeveloperBackend:
             elif thread["status"] not in {"paused", "failed", "waiting_approval"}:
                 raise ValueError("No resumable task")
             thread["status"] = "running"
+            thread["error"] = None
+            thread["turns"][-1]["status"] = "inProgress"
+            thread["turns"][-1]["items"] = [
+                item for item in thread["turns"][-1]["items"] if item.get("id") != "turn-error"
+            ]
             self.state.save(thread)
             self.jobs[identifier] = asyncio.create_task(self.run(identifier))
             return {"result": {"turn": {"id": thread["turn_id"], "status": "inProgress"}}}
@@ -206,10 +242,9 @@ class OpenAIResponsesDeveloperBackend:
             raise ValueError("Unsupported API operation")
         return {"result": {}}
 
-    @staticmethod
-    def public_thread(thread: dict[str, Any]) -> dict[str, Any]:
+    def public_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
         # Never return provider items/reasoning, pending prompts or tool internals.
-        return {
+        result = {
             key: thread[key]
             for key in (
                 "id",
@@ -223,6 +258,21 @@ class OpenAIResponsesDeveloperBackend:
                 "usage",
             )
         }
+        result = json.loads(json.dumps(result))
+        result["usage_incomplete"] = bool(thread.get("usage_incomplete"))
+        for turn in result["turns"]:
+            items = turn["items"]
+            existing = {item.get("id") for item in items}
+            missing = [
+                item
+                for item in self.state.activity(thread["id"], turn["id"])
+                if item["id"] not in existing
+            ]
+            final_index = next(
+                (i for i, item in enumerate(items) if item["type"] == "agentMessage"), len(items)
+            )
+            items[final_index:final_index] = missing
+        return result
 
     async def respond(self, identifier: int, result: dict[str, Any], owned: set[str]) -> None:
         row = self.state.call(identifier)
@@ -303,9 +353,14 @@ class OpenAIResponsesDeveloperBackend:
                 self.healthy = True
                 self.provider_unavailable = False
                 return final
-            except (APIConnectionError, APIStatusError) as exc:
+            except (APIConnectionError, APIStatusError, httpx.TransportError) as exc:
                 self.healthy = False
                 self.provider_unavailable = True
+                thread["provider_failure_code"] = provider_failure_code(exc)
+                if thread["provider_failure_code"] == "insufficient_quota":
+                    raise ProviderUnavailable(
+                        "API credits/quota unavailable; task preserved for retry"
+                    ) from None
                 status = getattr(exc, "status_code", None)
                 if status in {401, 403}:
                     raise ProviderUnavailable("API authentication unavailable") from None
@@ -344,7 +399,63 @@ class OpenAIResponsesDeveloperBackend:
                     },
                 )
                 await asyncio.sleep(delay)
+            except APIError as exc:
+                # SSE error envelopes can be raised by the SDK before we receive
+                # a typed event. Preserve completed tools; do not leak the body.
+                self.healthy = False
+                self.provider_unavailable = True
+                code = provider_failure_code(exc)
+                thread["provider_failure_code"] = code
+                if code == "insufficient_quota":
+                    raise ProviderUnavailable(
+                        "API credits/quota unavailable; task preserved for retry"
+                    ) from None
+                if code in {"server_error", "rate_limit_exceeded"} and attempt < len(
+                    self.retry_delays
+                ):
+                    await asyncio.sleep(self.retry_delays[attempt])
+                    continue
+                raise ProviderUnavailable(
+                    "API stream failed; retry task to continue safely"
+                ) from None
         raise ProviderUnavailable("API temporarily unavailable")
+
+    @staticmethod
+    def recoverable_tool(name: str) -> bool:
+        return name in READ_ONLY_TOOLS
+
+    def interrupted_tool_state(self, name: str) -> str:
+        return "recoverable" if self.recoverable_tool(name) else "uncertain"
+
+    async def record_tool_item(
+        self,
+        thread_id: str,
+        call: dict[str, Any],
+        status: str,
+        *,
+        message: str | None = None,
+        replayed: bool = False,
+    ) -> None:
+        item = {
+            "id": call["call_id"],
+            "type": "mcpToolCall",
+            "tool": call["name"],
+            "status": status,
+        }
+        if message:
+            item["message"] = message
+        if replayed:
+            item["replayed"] = True
+        thread = self.state.get(thread_id)
+        # Persist normalized activity, never arguments, outputs or hidden reasoning.
+        if thread.get("turns"):
+            items = thread["turns"][-1]["items"]
+            items[:] = [p for p in items if p.get("id") != item["id"]]
+            items.append(item)
+            self.state.save(thread)
+        await self.emit(
+            "item/started" if status == "inProgress" else "item/completed", thread_id, item=item
+        )
 
     async def tool(self, thread: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
         args = json.loads(call["arguments"])
@@ -354,8 +465,25 @@ class OpenAIResponsesDeveloperBackend:
             raise ValueError("Tool turn ownership mismatch")
         row = self.state.claim(thread["id"], thread["turn_id"], call["call_id"], name, args)
         if row["state"] == "completed":
-            return json.loads(row["result"])
-        if row["state"] in {"executing", "uncertain"}:
+            result = json.loads(row["result"])
+            await self.record_tool_item(
+                thread["id"],
+                call,
+                "failed"
+                if isinstance(result, dict) and not result.get("ok", True)
+                else "completed",
+                replayed=True,
+            )
+            return result
+        if row["state"] in {"recoverable", "uncertain"} and self.recoverable_tool(name):
+            await self.record_tool_item(
+                thread["id"],
+                call,
+                "paused",
+                message="Previous read-only attempt was interrupted — safely retrying",
+                replayed=True,
+            )
+        elif row["state"] in {"executing", "uncertain", "recoverable"}:
             raise ProviderUnavailable("Tool outcome uncertain; manual reconciliation required")
         if owner["status"] not in {"running", "waiting_approval"}:
             raise ValueError("Tool turn is not active")
@@ -390,58 +518,53 @@ class OpenAIResponsesDeveloperBackend:
         thread["status"] = "running"
         self.state.save(thread)
         self.state.update_call(row["id"], state="executing")
-        await self.emit(
-            "item/started",
-            thread["id"],
-            item={
-                "id": call["call_id"],
-                "type": "mcpToolCall",
-                "tool": name,
-                "status": "inProgress",
-            },
-        )
+        await self.record_tool_item(thread["id"], call, "inProgress")
         try:
             result = await self.runner.execute(thread, name, args)
         except asyncio.CancelledError:
-            self.state.update_call(row["id"], state="uncertain")
+            self.state.update_call(row["id"], state=self.interrupted_tool_state(name))
+            await self.record_tool_item(
+                thread["id"], call, "paused", message="Operation interrupted"
+            )
             raise
         except Exception:
-            # A timeout/process error can occur after an effect; never automatically rerun it.
-            self.state.update_call(row["id"], state="uncertain")
+            # A timeout/process error can occur after an effect; rerun only safe read-only tools.
+            self.state.update_call(row["id"], state=self.interrupted_tool_state(name))
+            await self.record_tool_item(
+                thread["id"], call, "paused", message="Operation interrupted"
+            )
             raise ProviderUnavailable(
-                "Tool did not finish safely; reconciliation required"
+                "Read-only tool interrupted; retry task to continue safely"
+                if self.recoverable_tool(name)
+                else "Tool did not finish safely; reconciliation required"
             ) from None
-        result = json.loads(redact(json.dumps(result), (self.key,)))
+        result = redact_value(result, (self.key,))
         # Worktree identity must be durable before a tool outcome is exposed.
         self.state.save(thread)
         self.state.update_call(row["id"], state="completed", result=json.dumps(result))
-        await self.emit(
-            "item/completed",
+        await self.record_tool_item(
             thread["id"],
-            item={
-                "id": call["call_id"],
-                "type": "mcpToolCall",
-                "tool": name,
-                "status": "completed"
-                if not isinstance(result, dict) or result.get("ok", True)
-                else "failed",
-            },
+            call,
+            "completed" if not isinstance(result, dict) or result.get("ok", True) else "failed",
         )
         return result
 
     async def run(self, identifier: str) -> None:
         thread = self.state.get(identifier)
+        phase = "provider"
         await self.emit("turn/started", identifier, turn={"id": thread["turn_id"]})
         try:
             async with asyncio.timeout(self.emergency_seconds or None):
                 while True:
                     response = thread.get("pending_response")
                     if response is None:
+                        phase = "provider"
                         response = await self.provider(thread)
                         thread["pending_response"] = response
                         self.state.save(thread)
                     calls = [p for p in response["output"] if p["type"] == "function_call"]
                     if not calls:
+                        phase = "finalization"
                         text = "\n".join(
                             c.get("text", "")
                             for p in response["output"]
@@ -459,16 +582,13 @@ class OpenAIResponsesDeveloperBackend:
                             response_id=response["id"],
                             pending_response=None,
                         )
-                        usage = response.get("usage") or {}
-                        for key in thread["usage"]:
-                            thread["usage"][key] += max(0, int(usage.get(key, 0)))
-                            thread["turns"][-1].setdefault("usage", {}).setdefault(key, 0)
-                            thread["turns"][-1]["usage"][key] += max(0, int(usage.get(key, 0)))
+                        self.account_usage(thread, response)
                         thread["turns"][-1]["status"] = "completed"
                         self.state.save(thread)
                         await self.emit("item/completed", identifier, item=item)
                         break
                     results = []
+                    phase = "tools"
                     for call in calls:
                         signature = hashlib.sha256(
                             (call["name"] + call["arguments"]).encode()
@@ -485,17 +605,24 @@ class OpenAIResponsesDeveloperBackend:
                             outcome = await self.tool(thread, call)
                         except (ValueError, KeyError, TypeError):
                             outcome = {"ok": False, "error": "Tool request rejected by policy"}
-                        failed = isinstance(outcome, dict) and not outcome.get("ok", True)
-                        thread["failures"] = thread["failures"] + 1 if failed else 0
-                        digest = hashlib.sha256(
-                            json.dumps(outcome, sort_keys=True).encode()
-                        ).hexdigest()
-                        thread["no_progress"] = (
-                            thread.get("no_progress", 0) + 1
-                            if digest == thread.get("last_outcome")
-                            else 0
-                        )
-                        thread["last_outcome"] = digest
+                        # Tool activity is saved independently before transport;
+                        # retain it when committing this task's continuation.
+                        thread["turns"] = self.state.get(identifier)["turns"]
+                        accounted = thread.setdefault("accounted_calls", [])
+                        if call["call_id"] not in accounted:
+                            failed = isinstance(outcome, dict) and not outcome.get("ok", True)
+                            thread["failures"] = thread["failures"] + 1 if failed else 0
+                            digest = hashlib.sha256(
+                                json.dumps(outcome, sort_keys=True).encode()
+                            ).hexdigest()
+                            thread["no_progress"] = (
+                                thread.get("no_progress", 0) + 1
+                                if digest == thread.get("last_outcome")
+                                else 0
+                            )
+                            thread["last_outcome"] = digest
+                            accounted.append(call["call_id"])
+                            self.state.save(thread)
                         if thread["failures"] >= 5:
                             raise ProviderUnavailable("Repeated failed tool guard stopped the task")
                         if thread["no_progress"] >= 8:
@@ -507,21 +634,38 @@ class OpenAIResponsesDeveloperBackend:
                                 "output": json.dumps(outcome),
                             }
                         )
-                    usage = response.get("usage") or {}
-                    for key in thread["usage"]:
-                        thread["usage"][key] += max(0, int(usage.get(key, 0)))
-                        thread["turns"][-1].setdefault("usage", {}).setdefault(key, 0)
-                        thread["turns"][-1]["usage"][key] += max(0, int(usage.get(key, 0)))
+                    self.account_usage(thread, response)
                     thread.update(response_id=response["id"], input=results, pending_response=None)
                     self.state.save(thread)
         except asyncio.CancelledError:
             thread["status"] = "cancelled"
+            thread["turns"] = self.state.get(identifier)["turns"]
         except Exception as exc:
             thread["status"] = "failed"
             message = (
                 str(exc) if isinstance(exc, ProviderUnavailable) else "Turn failed; state preserved"
             )
             thread["error"] = message
+            thread["diagnostic"] = {
+                "phase": phase,
+                "category": (
+                    "provider_unavailable"
+                    if isinstance(exc, ProviderUnavailable)
+                    else "transport_error"
+                    if isinstance(exc, httpx.TransportError)
+                    else "timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "invalid_data"
+                    if isinstance(exc, (ValueError, TypeError, KeyError))
+                    else "internal_error"
+                ),
+            }
+            thread["turns"] = self.state.get(identifier)["turns"]
+            items = thread["turns"][-1]["items"]
+            items[:] = [item for item in items if item.get("id") != "turn-error"]
+            items.append(
+                {"type": "mcpToolCall", "id": "turn-error", "status": "failed", "message": message}
+            )
             await self.emit(
                 "item/completed",
                 identifier,
@@ -545,7 +689,21 @@ class OpenAIResponsesDeveloperBackend:
                 },
             )
 
+    @staticmethod
+    def account_usage(thread: dict[str, Any], response: dict[str, Any]) -> None:
+        usage = response.get("usage")
+        for key in thread["usage"]:
+            value = usage.get(key) if isinstance(usage, dict) else None
+            if type(value) is not int or value < 0:
+                thread["usage_incomplete"] = True
+                continue
+            thread["usage"][key] += value
+            turn_usage = thread["turns"][-1].setdefault("usage", {})
+            turn_usage[key] = turn_usage.get(key, 0) + value
+
     async def stop(self) -> None:
+        if self.closed:
+            return
         for task in self.jobs.values():
             if not task.done():
                 task.cancel()
@@ -554,7 +712,12 @@ class OpenAIResponsesDeveloperBackend:
             thread = self.state.get(identifier)
             if thread["status"] == "cancelled":
                 thread["status"] = "paused"
+                if thread.get("turns"):
+                    thread["turns"][-1]["status"] = "paused"
                 self.state.save(thread)
-        if self.client:
-            await self.client.close()
-        self.state.close()
+        try:
+            if self.client:
+                await self.client.close()
+        finally:
+            self.state.close()
+            self.closed = True

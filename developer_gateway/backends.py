@@ -90,6 +90,7 @@ class DeveloperBackends:
     async def stop(self) -> None:
         if self.api:
             await self.api.stop()
+            self.api = None
         await self.codex.stop()
 
     @property

@@ -834,6 +834,10 @@ public final class MainActivity extends Activity {
                 JSONObject item = items.optJSONObject(itemIndex);
                 if (item == null) continue;
                 String type = item.optString("type");
+                if (DeveloperActivityPolicy.isActivity(item)) {
+                    addDeveloperActivity(item, !"inProgress".equals(item.optString("status")));
+                    continue;
+                }
                 String text = DeveloperActivityPolicy.messageText(item);
                 if (text.isBlank()) continue;
                 if ("userMessage".equals(type)) {
@@ -846,6 +850,7 @@ public final class MainActivity extends Activity {
         emptyState.setVisibility(messageList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
         scrollToBottom();
         String state = thread.optString("status");
+        statusText.setText(DeveloperActivityPolicy.status(state, false));
         if ("failed".equals(state) || "paused".equals(state)) offerDeveloperRetry();
     }
 
@@ -1069,7 +1074,7 @@ public final class MainActivity extends Activity {
         String rawType = item.optString("type", "activity");
         TextView existing = developerActivityStatuses.get(id);
         String state = item.optString("status", completed ? "completed" : "inProgress");
-        String status = DeveloperActivityPolicy.status(state, completed);
+        String status = DeveloperActivityPolicy.activityStatus(item, completed);
         if (existing != null) {
             existing.setText(status);
             View parent = (View) existing.getParent();
