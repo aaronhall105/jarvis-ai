@@ -214,3 +214,63 @@ phone/watch operation, release activity, or autonomy/Phase2 activation occurred.
 Official OpenAI documentation was consulted for the preserved completed-response
 and error-event boundary: [Streaming API responses](https://developers.openai.com/api/docs/guides/streaming-responses).
 It did not justify changing the model, tool authority or release controls.
+
+## Local Android review corrections — 2026-10-26
+
+Authorization: local corrections/tests only. HEAD remains
+`5f5578605822227e98992827c2c846fa282cd845`; these changes are uncommitted and have
+not been pushed to PR100. The previously green GitHub checks do not certify this
+new local diff.
+
+Two original findings were reproduced in actual MainActivity rendering under
+Robolectric (SDK35), without starting services, networking or loading credentials:
+
+1. Restoring an idle thread displayed Running because the status mapper had no
+   idle case. It now explicitly displays Ready, never Completed or Running.
+2. Repeated turn-error IDs collided in the activity-card map across turns, losing
+   earlier failure explanations. Cards now use an unambiguous JSON turn/item pair
+   as their local key. Wire IDs remain unchanged. History establishes the latest
+   turn identity, turn/started updates it, and tool events without turnId use that
+   identity, preserving Alpha40 gateway compatibility.
+
+Added DeveloperHistoryRenderingTest with four cases: idle restore; two historical
+failures plus repeated restore; separate live turns plus same-turn retry; and live
+completion after reconnect without a new turn/started event. All four failed on
+the certified pre-fix source, then all four passed with the correction. Existing
+DeveloperActivityPolicyTest also checks idle with both completion-flag values.
+The tests exercise the real private rendering methods through reflection; they
+are not physical-device evidence.
+
+Final local validation:
+
+- Focused renderer/policy run:10 tests passed.
+- Full Phone unit suite:281 passed,0 failures/errors/skips.
+- Wear1 and shared protocol30 remain green; Gradle reused unchanged up-to-date
+  results, rather than claiming fresh execution.
+- Phone/Wear lintDebug and debug Java compilation:PASS, offline. Existing Java/
+  Gradle deprecation warnings remain. No assemble/sign/install tasks were run and
+  no APK outputs exist in this integration worktree.
+- Gateway/API compatibility subset:56 passed on existing Python3.14,one existing
+  Starlette/httpx warning. Gateway implementation and wire protocol are unchanged.
+- Product baseline --skip-ref:PASS. Only MainActivity's expected SHA256 changed
+  to d4ea89493c983250eb32fe180e90363ab78d73f60419acb8f83d37e3c6545fc0.
+- Gitleaks8.30.1 on Android app/src (including the new test):zero findings,1.26MB.
+- git diff --check:PASS. No permission/approval/authentication,endpoint,version,
+  package,manifest,signing,OTA,Guardian or broker changes.
+
+Commands, from android/jarvis-voice-client with existing JDK17/Android SDK:
+
+```sh
+./gradlew --offline --no-daemon :app:testDebugUnitTest --tests com.aaron.jarvisvoice.DeveloperHistoryRenderingTest --tests com.aaron.jarvisvoice.DeveloperActivityPolicyTest
+./gradlew --offline --no-daemon :app:testDebugUnitTest :app:lintDebug :app:compileDebugJavaWithJavac :wear:testDebugUnitTest :wear:lintDebug :wear:compileDebugJavaWithJavac :wearprotocol:test
+```
+
+Python subset:developer_gateway/tests/test_gateway.py and test_api_backend.py.
+Three gated deployment/rollback tests were not activated; no new provider probe
+or physical Samsung test was run. Production remains unchanged. Guardian again
+reported STOPPED/trusted=true. Original self-repair diff still hashes to
+b4d45a7fe53ebab759d59442620d46693327aa777ad0c5abea84b553d8930849.
+
+Ready for authorization to commit/update PR100 and obtain new exact-head CI.
+No commit,push,PR mutation,merge,deployment,service restart,device change or
+autonomy activation was performed during these corrections.

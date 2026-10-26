@@ -30,6 +30,7 @@ final class DeveloperActivityPolicy {
 
     static String status(String state, boolean completed) {
         return switch (state == null ? "" : state) {
+            case "idle" -> "Ready";
             case "completed" -> "Completed";
             case "failed" -> "Failed";
             case "cancelled", "interrupted" -> "Cancelled";

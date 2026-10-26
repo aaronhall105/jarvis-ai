@@ -26,6 +26,8 @@ public class DeveloperActivityPolicyTest {
     }
 
     @Test public void activityStatusIsHumanReadable() {
+        assertEquals("Ready", DeveloperActivityPolicy.status("idle", false));
+        assertEquals("Ready", DeveloperActivityPolicy.status("idle", true));
         assertEquals("Running…", DeveloperActivityPolicy.status("inProgress", false));
         assertEquals("Completed", DeveloperActivityPolicy.status("completed", true));
         assertEquals("Failed", DeveloperActivityPolicy.status("failed", true));
