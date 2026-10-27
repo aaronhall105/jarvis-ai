@@ -157,7 +157,8 @@ async def test_exhaustion_preserves_task_and_no_false_final(backend):
     backend.client = Client(status_error(429), status_error(429))
     thread = await start(backend)
     assert thread["status"] == "failed"
-    assert len(thread["turns"][-1]["items"]) == 1
+    assert not any(i["type"] == "agentMessage" for i in thread["turns"][-1]["items"])
+    assert thread["turns"][-1]["items"][-1]["status"] == "failed"
     assert "private-fixture-key" not in thread["error"]
     backend.client.values.append(response())
     await backend.request("turn/retry", {"threadId": thread["id"]})

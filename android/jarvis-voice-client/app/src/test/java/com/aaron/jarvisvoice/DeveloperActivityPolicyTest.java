@@ -7,6 +7,18 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class DeveloperActivityPolicyTest {
+    @Test public void restoredToolActivityKeepsFailureAndRetryExplanation() throws Exception {
+        JSONObject item = new JSONObject().put("type", "mcpToolCall")
+            .put("status", "paused").put("message", "Read-only operation interrupted");
+        assertTrue(DeveloperActivityPolicy.isActivity(item));
+        assertEquals("Paused — retry available\nRead-only operation interrupted",
+            DeveloperActivityPolicy.activityStatus(item, true));
+        assertTrue(!DeveloperActivityPolicy.isActivity(new JSONObject().put("type", "reasoning")));
+        item.put("status", "failed");
+        assertTrue(DeveloperActivityPolicy.activityStatus(item, true).startsWith("Failed"));
+        item.put("status", "completed").remove("message");
+        assertEquals("Completed", DeveloperActivityPolicy.activityStatus(item, true));
+    }
     @Test public void toolEventsUseFriendlyCardTitles() {
         assertEquals("Command", DeveloperActivityPolicy.title("commandExecution"));
         assertEquals("Files changed", DeveloperActivityPolicy.title("fileChange"));
@@ -14,6 +26,8 @@ public class DeveloperActivityPolicyTest {
     }
 
     @Test public void activityStatusIsHumanReadable() {
+        assertEquals("Ready", DeveloperActivityPolicy.status("idle", false));
+        assertEquals("Ready", DeveloperActivityPolicy.status("idle", true));
         assertEquals("Running…", DeveloperActivityPolicy.status("inProgress", false));
         assertEquals("Completed", DeveloperActivityPolicy.status("completed", true));
         assertEquals("Failed", DeveloperActivityPolicy.status("failed", true));

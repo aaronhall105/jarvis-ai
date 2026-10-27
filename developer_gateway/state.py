@@ -12,6 +12,18 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .tools import SPECS
+
+# Verification can format files or execute scripts; it is NOT replay-safe.
+READ_ONLY_TOOLS = frozenset(
+    {
+        "repository",
+        "read_file",
+        "search",
+        "pr_status",
+    }
+)
+
 
 class State:
     def __init__(self, path: Path):
@@ -44,12 +56,61 @@ class State:
                 self.db.execute("ALTER TABLE calls ADD COLUMN tool TEXT")
             if "arguments" not in columns:
                 self.db.execute("ALTER TABLE calls ADD COLUMN arguments TEXT")
-            # Never replay an operation whose completion was not durably recorded.
+            # Recover read-only calls safely; fail closed for anything that may have side effects.
+            self.db.execute(
+                "UPDATE calls SET state='recoverable' "
+                "WHERE state IN ('executing','uncertain') AND tool IN (%s)"
+                % ",".join("?" for _ in READ_ONLY_TOOLS),
+                tuple(sorted(READ_ONLY_TOOLS)),
+            )
             self.db.execute("UPDATE calls SET state='uncertain' WHERE state='executing'")
         for thread in self.threads():
             if thread.get("status") in {"running", "retrying", "waiting_approval"}:
                 thread["status"] = "paused"
+                if thread.get("turns"):
+                    thread["turns"][-1]["status"] = "paused"
+                    for item in thread["turns"][-1]["items"]:
+                        if item.get("type") == "mcpToolCall" and item.get("status") == "inProgress":
+                            item.update(
+                                status="paused",
+                                message="Interrupted; retry or reconcile the recorded operation",
+                            )
                 self.save(thread)
+
+    def activity(self, thread: str, turn: str) -> list[dict[str, Any]]:
+        """Reconstruct legacy tool history from the ledger, never exposing output."""
+        items = []
+        for row in self.db.execute(
+            "SELECT call_id,tool,state,result FROM calls WHERE thread=? AND turn=? ORDER BY id",
+            (thread, turn),
+        ):
+            if row["tool"] not in SPECS:
+                continue
+            status = "paused"
+            if row["state"] == "completed":
+                try:
+                    result = json.loads(row["result"])
+                    status = (
+                        "failed"
+                        if isinstance(result, dict) and not result.get("ok", True)
+                        else "completed"
+                    )
+                except (ValueError, TypeError):
+                    status = "failed"
+            elif row["state"] in {"executing", "pending"}:
+                status = "inProgress"
+            item = {
+                "type": "mcpToolCall",
+                "id": row["call_id"],
+                "tool": row["tool"],
+                "status": status,
+            }
+            if row["state"] == "uncertain":
+                item["message"] = "Outcome uncertain; manual reconciliation required"
+            elif row["state"] == "recoverable":
+                item["message"] = "Read-only operation interrupted; retry available"
+            items.append(item)
+        return items
 
     def close(self) -> None:
         self.db.close()

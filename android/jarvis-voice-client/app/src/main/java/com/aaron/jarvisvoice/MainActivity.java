@@ -99,6 +99,7 @@ public final class MainActivity extends Activity {
     private TaskCentreClient taskCentreClient;
     private TextView tasksTab;
     private final Map<String, TextView> developerActivityStatuses = new HashMap<>();
+    private String developerActivityTurnId = "";
     private JSONArray pendingDeveloperAttachments = new JSONArray();
 
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
@@ -794,6 +795,8 @@ public final class MainActivity extends Activity {
             generating = true;
             appendStreaming(params == null ? "" : params.optString("delta"));
         } else if ("turn/started".equals(method)) {
+            JSONObject startedTurn = params == null ? null : params.optJSONObject("turn");
+            developerActivityTurnId = startedTurn == null ? "" : startedTurn.optString("id");
             generating = true; statusText.setText("Working…"); beginStreaming();
         } else if ("turn/completed".equals(method)) {
             generating = false; finishStreaming();
@@ -814,7 +817,8 @@ public final class MainActivity extends Activity {
                     if (!finalText.isBlank()) addMessageView(new ChatMessage(ChatMessage.ASSISTANT,
                         finalText, System.currentTimeMillis()), true);
                 } else if (!"agentMessage".equals(type) && !"reasoning".equals(type)) {
-                    addDeveloperActivity(item, "item/completed".equals(method));
+                    addDeveloperActivity(item, "item/completed".equals(method),
+                        params.optString("turnId", developerActivityTurnId));
                 }
             }
         }
@@ -826,14 +830,22 @@ public final class MainActivity extends Activity {
         JSONArray turns = thread == null ? null : thread.optJSONArray("turns");
         if (turns == null) return;
         finishStreaming(); messageList.removeAllViews(); developerActivityStatuses.clear();
+        developerActivityTurnId = "";
         for (int turnIndex = 0; turnIndex < turns.length(); turnIndex++) {
             JSONObject turn = turns.optJSONObject(turnIndex);
-            JSONArray items = turn == null ? null : turn.optJSONArray("items");
+            if (turn == null) continue;
+            developerActivityTurnId = turn.optString("id", "history-" + turnIndex);
+            JSONArray items = turn.optJSONArray("items");
             if (items == null) continue;
             for (int itemIndex = 0; itemIndex < items.length(); itemIndex++) {
                 JSONObject item = items.optJSONObject(itemIndex);
                 if (item == null) continue;
                 String type = item.optString("type");
+                if (DeveloperActivityPolicy.isActivity(item)) {
+                    addDeveloperActivity(item, !"inProgress".equals(item.optString("status")),
+                        developerActivityTurnId);
+                    continue;
+                }
                 String text = DeveloperActivityPolicy.messageText(item);
                 if (text.isBlank()) continue;
                 if ("userMessage".equals(type)) {
@@ -846,6 +858,7 @@ public final class MainActivity extends Activity {
         emptyState.setVisibility(messageList.getChildCount() == 0 ? View.VISIBLE : View.GONE);
         scrollToBottom();
         String state = thread.optString("status");
+        statusText.setText(DeveloperActivityPolicy.status(state, false));
         if ("failed".equals(state) || "paused".equals(state)) offerDeveloperRetry();
     }
 
@@ -1063,13 +1076,16 @@ public final class MainActivity extends Activity {
         styleBottomSheet(dialog);
     }
 
-    private void addDeveloperActivity(JSONObject item, boolean completed) {
+    private void addDeveloperActivity(JSONObject item, boolean completed, String turnId) {
         emptyState.setVisibility(View.GONE);
-        String id = item.optString("id", item.optString("type") + System.nanoTime());
+        String itemId = item.optString("id", item.optString("type") + System.nanoTime());
+        // Item IDs (notably turn-error) may repeat across turns. Keep the wire
+        // IDs unchanged and use the same turn/item identity for history and live updates.
+        String id = new JSONArray().put(turnId).put(itemId).toString();
         String rawType = item.optString("type", "activity");
         TextView existing = developerActivityStatuses.get(id);
         String state = item.optString("status", completed ? "completed" : "inProgress");
-        String status = DeveloperActivityPolicy.status(state, completed);
+        String status = DeveloperActivityPolicy.activityStatus(item, completed);
         if (existing != null) {
             existing.setText(status);
             View parent = (View) existing.getParent();
