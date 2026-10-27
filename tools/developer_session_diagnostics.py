@@ -25,6 +25,38 @@ _SECRET_PATTERNS = (
     re.compile(r"sk-[a-z0-9]+", re.I),
 )
 
+# Presentation vocabulary only, never execution authority. Keep this standalone
+# stdlib utility usable without importing or opening a gateway backend/journal.
+_TOOLS = frozenset(
+    {
+        "repository",
+        "read_file",
+        "search",
+        "create_worktree",
+        "patch_file",
+        "verify",
+        "git_commit",
+        "git_push",
+        "pr_status",
+        "pr_create",
+        "pr_update",
+        "pr_merge",
+    }
+)
+_READ_ONLY_TOOLS = frozenset({"repository", "read_file", "search", "pr_status"})
+_STATUSES = frozenset(
+    {
+        "completed",
+        "failed",
+        "paused",
+        "running",
+        "retrying",
+        "waiting_approval",
+        "idle",
+        "cancelled",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SessionSummary:
@@ -49,7 +81,9 @@ class DiagnosticsReport:
 
 
 def _open_read_only(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=5)
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA trusted_schema=OFF")
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -83,33 +117,38 @@ def _safe_failure_reason(value: Any) -> str | None:
 
 def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool]:
     state = str(row["state"] or "")
-    tool = _safe_text(row["tool"], limit=80)
+    tool = row["tool"] if row["tool"] in _TOOLS else None
     if state == "uncertain":
         return "uncertain", tool, True
     if state == "recoverable":
-        return "uncertain", tool, False
-    if state in {"executing", "pending"}:
+        return "uncertain", tool, tool not in _READ_ONLY_TOOLS
+    if state == "pending":
         return "uncertain", tool, False
     if state != "completed":
-        return "uncertain", tool, False
+        return "uncertain", tool, tool not in _READ_ONLY_TOOLS
     try:
         result = json.loads(row["result"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return "failed", tool, False
-    if isinstance(result, dict) and result.get("ok") is False:
+    if not isinstance(result, dict) or result.get("ok") is not True:
         return "failed", tool, False
     return "completed", tool, False
 
 
 def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> SessionSummary:
-    session_id = _safe_text(row["id"], limit=80) or "unknown-session"
+    identifier = row["id"]
+    session_id = (
+        identifier
+        if isinstance(identifier, str) and re.fullmatch(r"api_[0-9a-f]{32}", identifier)
+        else "unknown-session"
+    )
     warnings: list[str] = []
     raw_status = "malformed"
     created_at = updated_at = None
     failure_reason = None
     try:
         payload = json.loads(row["state"])
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         payload = {}
         warnings.append("Malformed thread state JSON")
     if isinstance(payload, dict):
@@ -129,9 +168,10 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
     try:
         calls = connection.execute(
             "SELECT tool,state,result FROM calls WHERE thread=? ORDER BY id", (row["id"],)
-        )
+        ).fetchall()
     except sqlite3.Error:
-        calls = ()
+        calls = []
+        manual_reconciliation = True
         warnings.append("Could not read calls table")
     for call in calls:
         outcome, tool, reconcile = _tool_outcome(call)
@@ -146,16 +186,9 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
         manual_reconciliation = manual_reconciliation or reconcile
     if raw_status == "failed" and not failure_reason:
         warnings.append("Failed session without recorded safe error")
-    if raw_status not in {
-        "completed",
-        "failed",
-        "paused",
-        "running",
-        "retrying",
-        "waiting_approval",
-        "idle",
-    }:
-        warnings.append(f"Unexpected session status: {raw_status}")
+    if raw_status not in _STATUSES:
+        warnings.append("Unexpected session status withheld")
+        raw_status = "unknown"
     return SessionSummary(
         session_id=session_id,
         created_at=created_at,
@@ -174,17 +207,17 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
 def load_recent_sessions(path: Path, *, limit: int = 5) -> DiagnosticsReport:
     if limit <= 0:
         raise ValueError("limit must be positive")
-    if not path.exists():
-        return DiagnosticsReport(path, (), warning="Database not found")
     try:
+        if not path.exists():
+            return DiagnosticsReport(path, (), warning="Database not found")
         connection = _open_read_only(path)
-    except sqlite3.Error as exc:
-        return DiagnosticsReport(path, (), warning=f"Could not open database read-only: {exc}")
+    except (sqlite3.Error, OSError, ValueError):
+        return DiagnosticsReport(path, (), warning="Could not open database read-only")
     try:
         try:
             rows = connection.execute("SELECT id,state FROM threads WHERE backend='api'").fetchall()
-        except sqlite3.Error as exc:
-            return DiagnosticsReport(path, (), warning=f"Could not read sessions: {exc}")
+        except sqlite3.Error:
+            return DiagnosticsReport(path, (), warning="Could not read sessions")
         sessions = tuple(_session_from_row(row, connection) for row in rows)
         sessions = tuple(
             sorted(
@@ -203,7 +236,8 @@ def load_recent_sessions(path: Path, *, limit: int = 5) -> DiagnosticsReport:
 
 
 def render_report(report: DiagnosticsReport) -> str:
-    lines = [f"Developer session diagnostics: {report.database}"]
+    # Even a caller-supplied filename can contain private text or credentials.
+    lines = ["Developer session diagnostics"]
     if report.warning:
         lines.append(f"warning: {report.warning}")
         return "\n".join(lines)
