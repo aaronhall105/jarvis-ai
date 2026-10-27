@@ -5,10 +5,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_SAFE_FAILURE_REASONS = {
+    "provider unavailable": "Provider unavailable",
+    "tool outcome uncertain; manual reconciliation required": "Tool outcome uncertain; manual reconciliation required",
+    "read-only operation interrupted; retry available": "Read-only operation interrupted; retry available",
+}
+
+_SECRET_PATTERNS = (
+    re.compile(
+        r"\b(authorization|x-api-key|api[_-]?key|password|secret|token|cookie|set-cookie)\b", re.I
+    ),
+    re.compile(r"\bbearer\s+[a-z0-9._\-]+", re.I),
+    re.compile(r"sk-[a-z0-9]+", re.I),
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +67,20 @@ def _safe_text(value: Any, *, limit: int = 240) -> str | None:
     return text[:limit]
 
 
+def _safe_failure_reason(value: Any) -> str | None:
+    text = _safe_text(value, limit=240)
+    if not text:
+        return None
+    normalized = text.lower()
+    if normalized in _SAFE_FAILURE_REASONS:
+        return _SAFE_FAILURE_REASONS[normalized]
+    if any(pattern.search(text) for pattern in _SECRET_PATTERNS):
+        return "Saved failure details withheld for privacy"
+    if any(character in text for character in "{}[]") or "://" in text:
+        return "Saved failure details withheld for privacy"
+    return "Saved failure details withheld for privacy"
+
+
 def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool]:
     state = str(row["state"] or "")
     tool = _safe_text(row["tool"], limit=80)
@@ -87,7 +116,7 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
         raw_status = _safe_text(payload.get("status"), limit=40) or raw_status
         created_at = _safe_int(payload.get("createdAt"))
         updated_at = _safe_int(payload.get("updatedAt"))
-        failure_reason = _safe_text(payload.get("error"), limit=240)
+        failure_reason = _safe_failure_reason(payload.get("error"))
         if created_at is None:
             warnings.append("Missing or invalid createdAt")
         if updated_at is None:
@@ -97,9 +126,14 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
     completed_tools = failed_tools = uncertain_tools = 0
     last_tool = None
     manual_reconciliation = False
-    for call in connection.execute(
-        "SELECT tool,state,result FROM calls WHERE thread=? ORDER BY id", (row["id"],)
-    ):
+    try:
+        calls = connection.execute(
+            "SELECT tool,state,result FROM calls WHERE thread=? ORDER BY id", (row["id"],)
+        )
+    except sqlite3.Error:
+        calls = ()
+        warnings.append("Could not read calls table")
+    for call in calls:
         outcome, tool, reconcile = _tool_outcome(call)
         if outcome == "completed":
             completed_tools += 1
@@ -111,7 +145,7 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
             last_tool = tool
         manual_reconciliation = manual_reconciliation or reconcile
     if raw_status == "failed" and not failure_reason:
-        warnings.append("Failed session without recorded error")
+        warnings.append("Failed session without recorded safe error")
     if raw_status not in {
         "completed",
         "failed",

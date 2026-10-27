@@ -4,17 +4,18 @@ import sqlite3
 from tools.developer_session_diagnostics import load_recent_sessions, render_report
 
 
-def build_database(path):
+def build_database(path, *, include_calls=True):
     with sqlite3.connect(path) as connection:
         connection.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, backend TEXT NOT NULL, state TEXT NOT NULL)"
         )
-        connection.execute(
-            "CREATE TABLE calls ("
-            "id INTEGER PRIMARY KEY, thread TEXT NOT NULL, turn TEXT NOT NULL, call_id TEXT NOT NULL, "
-            "signature TEXT NOT NULL, state TEXT NOT NULL, result TEXT, approval TEXT, expires REAL, "
-            "tool TEXT, arguments TEXT, UNIQUE(thread,turn,call_id))"
-        )
+        if include_calls:
+            connection.execute(
+                "CREATE TABLE calls ("
+                "id INTEGER PRIMARY KEY, thread TEXT NOT NULL, turn TEXT NOT NULL, call_id TEXT NOT NULL, "
+                "signature TEXT NOT NULL, state TEXT NOT NULL, result TEXT, approval TEXT, expires REAL, "
+                "tool TEXT, arguments TEXT, UNIQUE(thread,turn,call_id))"
+            )
 
 
 def insert_thread(connection, thread_id, payload):
@@ -153,6 +154,73 @@ def test_load_recent_sessions_handles_malformed_records_safely(tmp_path):
     assert sessions["api_bad_json"].failed_tools == 1
     assert "Malformed thread state JSON" in rendered
     assert "Unexpected session status: mystery" in rendered
+
+
+def test_load_recent_sessions_masks_sensitive_failure_reasons(tmp_path):
+    database = tmp_path / "sensitive tasks.sqlite3"
+    build_database(database)
+    sensitive_error = (
+        "Authorization: Bearer sk-secret-token api_key=abcdef123456 "
+        'https://private.example/error {"detail":"hidden"}'
+    )
+    with sqlite3.connect(database) as connection:
+        insert_thread(
+            connection,
+            "api_sensitive",
+            {"status": "failed", "createdAt": 1, "updatedAt": 2, "error": sensitive_error},
+        )
+
+    report = load_recent_sessions(database)
+    rendered = render_report(report)
+
+    assert report.sessions[0].failure_reason == "Saved failure details withheld for privacy"
+    assert "Bearer sk-secret-token" not in rendered
+    assert "api_key=abcdef123456" not in rendered
+    assert "private.example" not in rendered
+    assert '"detail":"hidden"' not in rendered
+
+
+def test_load_recent_sessions_handles_missing_calls_table_and_unusual_path(tmp_path):
+    directory = tmp_path / "odd path ü"
+    directory.mkdir()
+    database = directory / "tasks sqlite3.db"
+    build_database(database, include_calls=False)
+    with sqlite3.connect(database) as connection:
+        insert_thread(
+            connection,
+            "api_session",
+            {"status": "running", "createdAt": 1, "updatedAt": 2, "error": None},
+        )
+
+    report = load_recent_sessions(database)
+
+    assert report.warning is None
+    assert len(report.sessions) == 1
+    assert report.sessions[0].warnings == ("Could not read calls table",)
+
+
+def test_load_recent_sessions_treats_pending_and_executing_as_uncertain_without_retries(tmp_path):
+    database = tmp_path / "tasks.sqlite3"
+    build_database(database)
+    with sqlite3.connect(database) as connection:
+        insert_thread(
+            connection,
+            "api_pending",
+            {"status": "running", "createdAt": 1, "updatedAt": 3, "error": None},
+        )
+        insert_call(connection, 1, "api_pending", "repository", "pending", None)
+        insert_call(connection, 2, "api_pending", "verify", "executing", None)
+    before = database.read_bytes()
+
+    report = load_recent_sessions(database)
+    rendered = render_report(report)
+    after = database.read_bytes()
+
+    assert before == after
+    assert report.sessions[0].uncertain_tools == 2
+    assert report.sessions[0].manual_reconciliation is False
+    assert report.sessions[0].last_tool == "verify"
+    assert "repository" not in rendered
 
 
 def test_render_report_is_read_only_summary_without_private_contents_and_db_is_unchanged(tmp_path):
