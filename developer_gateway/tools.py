@@ -419,6 +419,16 @@ class ToolRunner:
         result = await self.git(root, "ls-files", "-z")
         return [value for value in result["output"].split("\0") if value][:4000]
 
+    async def read_revision(self, thread: dict[str, Any], args: dict[str, Any]) -> str:
+        """Revalidate access and bytes even on cache hits. HEAD/mtime alone cannot
+        identify dirty/untracked source, and cached output cannot bypass policy.
+        """
+        root = self.workspace(thread)
+        self.source(root, args["path"])
+        if args["path"] not in await self.readable_files(thread):
+            raise ToolPolicyError("Source is not authorized for this workspace")
+        return hashlib.sha256(self.read_source(root, args["path"], 500000)).hexdigest()
+
     async def assert_branch(self, thread: dict[str, Any]) -> Path:
         root = self.workspace(thread, True)
         result = await self.git(root, "branch", "--show-current")
