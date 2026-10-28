@@ -17,13 +17,17 @@ from openai import AsyncOpenAI, APIConnectionError, APIStatusError, APIError
 
 from .policy import POLICY, credential, redact, redact_value
 from .state import READ_ONLY_TOOLS, State
-from .tools import APPROVAL, ToolRunner, schemas, validate
+from .tools import APPROVAL, ToolPolicyError, ToolRunner, schemas, validate
 
 Sink = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 class ProviderUnavailable(RuntimeError):
     pass
+
+
+class PolicyLoopStopped(RuntimeError):
+    """A permanent denial needs a changed request, not transport recovery."""
 
 
 def provider_failure_code(exc: Exception) -> str:
@@ -194,7 +198,9 @@ class OpenAIResponsesDeveloperBackend:
             if identifier in self.jobs and not self.jobs[identifier].done():
                 raise ValueError("A task is already active")
             if method == "turn/start":
-                if thread["status"] in {"paused", "failed", "waiting_approval"}:
+                if thread["status"] in {"paused", "failed", "waiting_approval"} and not thread.get(
+                    "policy_blocked"
+                ):
                     raise ValueError(
                         "Previous task is resumable; use turn.retry or cancel it first"
                     )
@@ -216,6 +222,8 @@ class OpenAIResponsesDeveloperBackend:
                     no_progress=0,
                     last_outcome=None,
                     accounted_calls=[],
+                    policy_blocked=False,
+                    policy_rejections=0,
                 )
                 thread["turns"].append(
                     {
@@ -229,6 +237,10 @@ class OpenAIResponsesDeveloperBackend:
                 )
             elif thread["status"] not in {"paused", "failed", "waiting_approval"}:
                 raise ValueError("No resumable task")
+            elif thread.get("policy_blocked"):
+                raise ValueError(
+                    "File policy rejected this task; send a changed request instead of retrying"
+                )
             thread["status"] = "running"
             thread["error"] = None
             thread["turns"][-1]["status"] = "inProgress"
@@ -472,6 +484,9 @@ class OpenAIResponsesDeveloperBackend:
                 "failed"
                 if isinstance(result, dict) and not result.get("ok", True)
                 else "completed",
+                message="File policy rejected this request; change it instead of retrying"
+                if isinstance(result, dict) and result.get("code") == "file_policy_rejected"
+                else None,
                 replayed=True,
             )
             return result
@@ -521,6 +536,15 @@ class OpenAIResponsesDeveloperBackend:
         await self.record_tool_item(thread["id"], call, "inProgress")
         try:
             result = await self.runner.execute(thread, name, args)
+        except ToolPolicyError:
+            # This explicit exception certifies rejection before effects. Never
+            # classify arbitrary ValueError/OSError from an effect as safe.
+            result = {
+                "ok": False,
+                "error": "Tool request rejected by file policy; change the request, not retry it",
+                "code": "file_policy_rejected",
+                "retryable": False,
+            }
         except asyncio.CancelledError:
             self.state.update_call(row["id"], state=self.interrupted_tool_state(name))
             await self.record_tool_item(
@@ -546,6 +570,9 @@ class OpenAIResponsesDeveloperBackend:
             thread["id"],
             call,
             "completed" if not isinstance(result, dict) or result.get("ok", True) else "failed",
+            message="File policy rejected this request; change it instead of retrying"
+            if isinstance(result, dict) and result.get("code") == "file_policy_rejected"
+            else None,
         )
         return result
 
@@ -622,7 +649,17 @@ class OpenAIResponsesDeveloperBackend:
                             )
                             thread["last_outcome"] = digest
                             accounted.append(call["call_id"])
+                            if (
+                                isinstance(outcome, dict)
+                                and outcome.get("code") == "file_policy_rejected"
+                            ):
+                                thread["policy_rejections"] = thread.get("policy_rejections", 0) + 1
                             self.state.save(thread)
+                        if thread.get("policy_rejections", 0) >= 3:
+                            thread["policy_blocked"] = True
+                            raise PolicyLoopStopped(
+                                "Repeated file-policy rejection; send a changed request instead of retrying"
+                            )
                         if thread["failures"] >= 5:
                             raise ProviderUnavailable("Repeated failed tool guard stopped the task")
                         if thread["no_progress"] >= 8:
@@ -643,13 +680,17 @@ class OpenAIResponsesDeveloperBackend:
         except Exception as exc:
             thread["status"] = "failed"
             message = (
-                str(exc) if isinstance(exc, ProviderUnavailable) else "Turn failed; state preserved"
+                str(exc)
+                if isinstance(exc, (ProviderUnavailable, PolicyLoopStopped))
+                else "Turn failed; state preserved"
             )
             thread["error"] = message
             thread["diagnostic"] = {
                 "phase": phase,
                 "category": (
-                    "provider_unavailable"
+                    "policy_rejected"
+                    if isinstance(exc, PolicyLoopStopped)
+                    else "provider_unavailable"
                     if isinstance(exc, ProviderUnavailable)
                     else "transport_error"
                     if isinstance(exc, httpx.TransportError)
