@@ -30,6 +30,10 @@ class PolicyLoopStopped(RuntimeError):
     """A permanent denial needs a changed request, not transport recovery."""
 
 
+class ToolLoopStopped(RuntimeError):
+    """Bounded orchestration stop, not a provider/transport outage."""
+
+
 def provider_failure_code(exc: Exception) -> str:
     code = getattr(exc, "code", None)
     if code in {
@@ -198,8 +202,10 @@ class OpenAIResponsesDeveloperBackend:
             if identifier in self.jobs and not self.jobs[identifier].done():
                 raise ValueError("A task is already active")
             if method == "turn/start":
-                if thread["status"] in {"paused", "failed", "waiting_approval"} and not thread.get(
-                    "policy_blocked"
+                if (
+                    thread["status"] in {"paused", "failed", "waiting_approval"}
+                    and not thread.get("policy_blocked")
+                    and not thread.get("loop_blocked")
                 ):
                     raise ValueError(
                         "Previous task is resumable; use turn.retry or cancel it first"
@@ -219,11 +225,15 @@ class OpenAIResponsesDeveloperBackend:
                     pending_response=None,
                     failures=0,
                     repeats={},
+                    seen_calls=[],
                     no_progress=0,
                     last_outcome=None,
                     accounted_calls=[],
                     policy_blocked=False,
                     policy_rejections=0,
+                    progress={},
+                    progress_cycle=0,
+                    loop_blocked=False,
                 )
                 thread["turns"].append(
                     {
@@ -240,6 +250,10 @@ class OpenAIResponsesDeveloperBackend:
             elif thread.get("policy_blocked"):
                 raise ValueError(
                     "File policy rejected this task; send a changed request instead of retrying"
+                )
+            elif thread.get("loop_blocked"):
+                raise ValueError(
+                    "No new tool evidence; send a changed objective instead of retrying"
                 )
             thread["status"] = "running"
             thread["error"] = None
@@ -324,6 +338,8 @@ class OpenAIResponsesDeveloperBackend:
                             "branch": thread.get("branch"),
                             "goal": thread.get("goal"),
                             "unresolved_error": thread.get("error"),
+                            "completed_operations": thread.get("progress", {}).get("recent", []),
+                            "unchanged_observations": thread.get("progress", {}).get("stalled", 0),
                         }
                     ),
                     input=thread["input"],
@@ -534,8 +550,20 @@ class OpenAIResponsesDeveloperBackend:
         self.state.save(thread)
         self.state.update_call(row["id"], state="executing")
         await self.record_tool_item(thread["id"], call, "inProgress")
+        reused = False
         try:
-            result = await self.runner.execute(thread, name, args)
+            result = None
+            if name == "read_file":
+                candidate = self.state.completed_read(
+                    thread["id"], thread["turn_id"], row["signature"]
+                )
+                if candidate is not None:
+                    revision = await self.runner.read_revision(thread, args)
+                    if candidate["sha256"] == revision:
+                        result = candidate
+                        reused = True
+            if not reused:
+                result = await self.runner.execute(thread, name, args)
         except ToolPolicyError:
             # This explicit exception certifies rejection before effects. Never
             # classify arbitrary ValueError/OSError from an effect as safe.
@@ -570,11 +598,55 @@ class OpenAIResponsesDeveloperBackend:
             thread["id"],
             call,
             "completed" if not isinstance(result, dict) or result.get("ok", True) else "failed",
+            replayed=reused,
             message="File policy rejected this request; change it instead of retrying"
             if isinstance(result, dict) and result.get("code") == "file_policy_rejected"
             else None,
         )
         return result
+
+    def observe_progress(self, thread: dict[str, Any], call: dict[str, Any], outcome: Any) -> None:
+        progress = thread.setdefault("progress", {})
+        # Count a pending response once across restart, but bound a provider
+        # reissuing the same completed ID in a later continuation cycle.
+        step = str(thread.get("progress_cycle", 0)) + ":" + call["call_id"]
+        steps = progress.setdefault("steps", [])
+        if step in steps:
+            return
+        signature = hashlib.sha256(
+            json.dumps(
+                [call["name"], json.loads(call["arguments"])], sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        digest = hashlib.sha256(json.dumps(outcome, sort_keys=True).encode()).hexdigest()
+        observation = signature + ":" + digest
+        known = progress.setdefault("observations", [])
+        failed = isinstance(outcome, dict) and not outcome.get("ok", True)
+        fresh = not failed and observation not in known
+        progress["stalled"] = 0 if fresh else progress.get("stalled", 0) + 1
+        if fresh:
+            known.append(observation)
+        steps.append(step)
+        recent = progress.setdefault("recent", [])
+        recent.append(
+            {
+                "tool": call["name"],
+                "operation": signature[:16],
+                "result": digest[:16],
+                "successful": not failed,
+                "new_evidence": fresh,
+            }
+        )
+        progress["recent"] = recent[-8:]
+        # Keep the three-repeat bound, measuring consecutive redundant evidence
+        # instead of lifetime reads separated by useful work.
+        if not failed and progress["stalled"] >= 3:
+            thread["loop_blocked"] = True
+        self.state.save(thread)
+        if thread.get("loop_blocked"):
+            raise ToolLoopStopped(
+                "Repeated unchanged-result guard stopped the task; use completed evidence or send a changed objective"
+            )
 
     async def run(self, identifier: str) -> None:
         thread = self.state.get(identifier)
@@ -626,8 +698,14 @@ class OpenAIResponsesDeveloperBackend:
                             seen.append(call["call_id"])
                             thread["repeats"][signature] = thread["repeats"].get(signature, 0) + 1
                             self.state.save(thread)
-                        if thread["repeats"][signature] > 3:
-                            raise ProviderUnavailable("Repeated operation guard stopped the task")
+                        if (
+                            not self.recoverable_tool(call["name"])
+                            and thread["repeats"][signature] > 3
+                        ):
+                            thread["loop_blocked"] = True
+                            raise ToolLoopStopped(
+                                "Repeated effectful-operation guard stopped the task; inspect completed effects before changing the objective"
+                            )
                         try:
                             outcome = await self.tool(thread, call)
                         except (ValueError, KeyError, TypeError):
@@ -663,7 +741,11 @@ class OpenAIResponsesDeveloperBackend:
                         if thread["failures"] >= 5:
                             raise ProviderUnavailable("Repeated failed tool guard stopped the task")
                         if thread["no_progress"] >= 8:
-                            raise ProviderUnavailable("No-progress guard stopped the task")
+                            thread["loop_blocked"] = True
+                            raise ToolLoopStopped(
+                                "No-progress guard stopped the task; send a changed objective"
+                            )
+                        self.observe_progress(thread, call, outcome)
                         results.append(
                             {
                                 "type": "function_call_output",
@@ -673,6 +755,7 @@ class OpenAIResponsesDeveloperBackend:
                         )
                     self.account_usage(thread, response)
                     thread.update(response_id=response["id"], input=results, pending_response=None)
+                    thread["progress_cycle"] = thread.get("progress_cycle", 0) + 1
                     self.state.save(thread)
         except asyncio.CancelledError:
             thread["status"] = "cancelled"
@@ -681,14 +764,16 @@ class OpenAIResponsesDeveloperBackend:
             thread["status"] = "failed"
             message = (
                 str(exc)
-                if isinstance(exc, (ProviderUnavailable, PolicyLoopStopped))
+                if isinstance(exc, (ProviderUnavailable, PolicyLoopStopped, ToolLoopStopped))
                 else "Turn failed; state preserved"
             )
             thread["error"] = message
             thread["diagnostic"] = {
                 "phase": phase,
                 "category": (
-                    "policy_rejected"
+                    "tool_loop"
+                    if isinstance(exc, ToolLoopStopped)
+                    else "policy_rejected"
                     if isinstance(exc, PolicyLoopStopped)
                     else "provider_unavailable"
                     if isinstance(exc, ProviderUnavailable)

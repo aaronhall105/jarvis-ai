@@ -187,6 +187,27 @@ class State:
             raise ValueError("Unknown approval")
         return dict(row)
 
+    def completed_read(self, thread: str, turn: str, signature: str) -> Any:
+        """Find a candidate; caller MUST revalidate current access and content.
+
+        No write or approval caching across different call IDs. Changed content
+        and legacy results without a source hash are misses. No schema change.
+        """
+        row = self.db.execute(
+            "SELECT result FROM calls WHERE thread=? AND turn=? AND signature=? "
+            "AND tool='read_file' AND state='completed' ORDER BY id DESC LIMIT 1",
+            (thread, turn, signature),
+        ).fetchone()
+        if row and row[0]:
+            result = json.loads(row[0])
+            if (
+                isinstance(result, dict)
+                and result.get("ok", True)
+                and isinstance(result.get("sha256"), str)
+            ):
+                return result
+        return None
+
     def update_call(self, identifier: int, **fields: Any) -> None:
         if not fields or set(fields) - {"state", "result", "approval", "expires"}:
             raise ValueError("Invalid journal update")
