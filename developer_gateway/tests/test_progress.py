@@ -286,7 +286,7 @@ async def test_alternating_known_observations_do_not_evade_loop_guard(repository
     )
     result = await start(backend)
     assert result["diagnostic"]["category"] == "tool_loop"
-    assert len(backend.client.requests) == 5
+    assert len(backend.client.requests) == 7
     await backend.stop()
 
 
@@ -309,4 +309,27 @@ async def test_call_identity_and_progress_are_scoped_to_turn(repository, tmp_pat
     assert all(turn["status"] == "completed" for turn in result["turns"])
     assert backend.state.db.execute("SELECT count(*) FROM calls").fetchone()[0] == 2
     assert result["progress"]["stalled"] == 0
+    await backend.stop()
+
+
+@pytest.mark.asyncio
+async def test_finite_review_of_multiple_known_files_is_not_a_loop(repository, tmp_path):
+    for i in range(3):
+        (repository.root / f"review{i}.py").write_text(f"evidence = {i}\n")
+        await repository.git(repository.root, "add", f"review{i}.py")
+    backend = OpenAIResponsesDeveloperBackend(
+        repository.root,
+        tmp_path / "agent",
+        client=Client(
+            *[
+                response(call("read_file", {"path": f"review{i % 3}.py", "start": 1}, f"r{i}"))
+                for i in range(6)
+            ],
+            response(),
+        ),
+        key="",
+    )
+    result = await start(backend)
+    assert result["status"] == "completed"
+    assert result["progress"]["stalled"] == 3
     await backend.stop()

@@ -626,6 +626,10 @@ class OpenAIResponsesDeveloperBackend:
         progress["stalled"] = 0 if fresh else progress.get("stalled", 0) + 1
         if fresh:
             known.append(observation)
+            progress["redundant"] = {}
+        redundant = progress.setdefault("redundant", {})
+        if not fresh and not failed:
+            redundant[signature] = redundant.get(signature, 0) + 1
         steps.append(step)
         recent = progress.setdefault("recent", [])
         recent.append(
@@ -638,9 +642,9 @@ class OpenAIResponsesDeveloperBackend:
             }
         )
         progress["recent"] = recent[-8:]
-        # Keep the three-repeat bound, measuring consecutive redundant evidence
-        # instead of lifetime reads separated by useful work.
-        if not failed and progress["stalled"] >= 3:
+        # Keep the three-repeat bound per operation since the last new evidence.
+        # A finite review of several known files is not an endless reread loop.
+        if not failed and redundant.get(signature, 0) >= 3:
             thread["loop_blocked"] = True
         self.state.save(thread)
         if thread.get("loop_blocked"):

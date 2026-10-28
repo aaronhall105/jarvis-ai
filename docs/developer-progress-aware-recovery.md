@@ -68,8 +68,9 @@ Neither worktree contains Android client source changes.
 ## Correction
 
 - Preserve a durable per-turn set of successful operation/result observations.
-  New evidence resets stagnation; three consecutive redundant observations stop
-  the turn. Alternating already-known results cannot evade this guard. The
+  New evidence resets stagnation; three redundant requests for the same operation
+  without intervening new evidence stop the turn. A finite review of different
+  known files is allowed; alternating loops cannot evade the per-operation bound. The
   repetition threshold is not raised, and effectful-operation repetition limits
   remain enforced before execution.
 - Reuse only a successful same-turn `read_file` result with the same canonical
@@ -98,10 +99,20 @@ Before implementation, four new deterministic cases failed on unchanged source:
 read/search revisits separated by new evidence, reads after real patches, and
 the erroneous provider-outage category on an unchanged-read loop.
 
+Final review replayed the recorded current-turn operation/result hashes without
+executing tools. An initial cross-operation stagnation counter would stop finite
+multi-file verification too early. A fifth red regression reproduced that issue.
+The final guard therefore counts redundant requests per operation within the
+current progress epoch, still bounded at three. Neither recorded completed-call
+sequence hits that guard. Assuming the blocked read returns the same recorded
+source revision, it adds just one redundant observation after the latest new
+evidence. This is journal-sequence analysis, not a live model replay or a claim
+that either unfinished task would complete successfully.
+
 After correction:
 
-- New progress suite: **14 passed**.
-- Entire Developer gateway suite: **193 passed**, including the PR #102 owned
+- New progress suite: **15 passed**.
+- Entire Developer gateway suite: **194 passed**, including the PR #102 owned
   source regressions and existing recovery, approval and sandbox tests.
 - Compilation, Ruff correctness/format, mypy (116 source files), Bandit
   high-severity scan, product-baseline integrity and `git diff --check`: **PASS**.
