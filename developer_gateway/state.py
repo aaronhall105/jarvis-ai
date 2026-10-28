@@ -25,6 +25,10 @@ READ_ONLY_TOOLS = frozenset(
 )
 
 
+class ThreadNotFound(ValueError):
+    """Authoritative absence, distinct from workspace, storage or provider errors."""
+
+
 class State:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -148,7 +152,7 @@ class State:
             "SELECT state FROM threads WHERE id=? AND backend='api'", (thread_id,)
         ).fetchone()
         if not row:
-            raise ValueError("Unknown API thread")
+            raise ThreadNotFound("Unknown API thread")
         return json.loads(row["state"])
 
     def threads(self) -> list[dict[str, Any]]:

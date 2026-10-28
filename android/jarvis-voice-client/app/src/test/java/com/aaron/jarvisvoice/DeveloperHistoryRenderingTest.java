@@ -46,6 +46,28 @@ public final class DeveloperHistoryRenderingTest {
         assertTrue(cards().isEmpty());
     }
 
+    @Test public void confirmedMissingSelectionPreservesAllOtherPreferencesAndRenderedHistory() throws Exception {
+        SecureStore store = new SecureStore(activity);
+        set("store", store);
+        restore("completed", new JSONArray().put(turn("retained-turn", item("failed", "Retained activity"))));
+        Map<String, ?> retainedCards = new java.util.HashMap<>(cards());
+        store.setDeveloperThreadId("api_deleted");
+        android.content.SharedPreferences prefs = activity.getSharedPreferences("jarvis_voice_settings", 0);
+        prefs.edit().putString("fixture_history", "retained").putString("developer_token_v190210", "inert-envelope").apply();
+        Map<String, ?> before = new java.util.HashMap<>(prefs.getAll());
+        Method render = MainActivity.class.getDeclaredMethod("renderDeveloperEvent", JSONObject.class);
+        render.setAccessible(true);
+        render.invoke(activity, new JSONObject().put("type", "thread.unavailable").put("thread_id", "api_deleted"));
+        assertEquals("", store.developerThreadId());
+        Map<String, ?> after = new java.util.HashMap<>(prefs.getAll());
+        before.remove("developer_thread_v190210"); after.remove("developer_thread_v190210");
+        assertEquals(before, after);
+        assertEquals(retainedCards, cards());
+        store.setDeveloperThreadId("api_kept");
+        render.invoke(activity, new JSONObject().put("type", "thread.unavailable").put("thread_id", "api_deleted"));
+        assertEquals("api_kept", store.developerThreadId());
+    }
+
     @Test public void repeatedFailureIdsKeepBothHistoricalExplanations() throws Exception {
         JSONArray turns = new JSONArray()
             .put(turn("first", item("failed", "First failure")))

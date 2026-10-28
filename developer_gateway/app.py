@@ -17,6 +17,7 @@ from .autonomy import Governor
 from .autonomy_api import router as autonomy_router
 from .observer import review_loop
 from .codex_client import canonical_workspace
+from .state import ThreadNotFound
 
 logging.basicConfig(level=os.getenv("JARVIS_DEVELOPER_LOG_LEVEL", "INFO"))
 log = logging.getLogger("jarvis-developer")
@@ -265,93 +266,129 @@ async def developer_socket(socket: WebSocket) -> None:
             metrics["requests"] += 1
             kind = str(message.get("type", ""))
             request_id = message.get("request_id")
-            if kind == "threads.list":
-                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                result = result_or_raise(
-                    await codex.request(
-                        "thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}
+            try:
+                if kind == "threads.list":
+                    _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                    result = result_or_raise(
+                        await codex.request(
+                            "thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}
+                        )
                     )
-                )
-            elif kind == "threads.refresh":
-                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                result = result_or_raise(
-                    await codex.request(
-                        "thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}
+                elif kind == "threads.refresh":
+                    _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                    result = result_or_raise(
+                        await codex.request(
+                            "thread/list", {"cwd": str(path), "limit": 50, "sortKey": "updated_at"}
+                        )
                     )
-                )
-            elif kind == "account.rate_limits":
-                result = result_or_raise(await codex.request("account/rateLimits/read", {}))
-            elif kind == "thread.delete":
-                thread_id = str(message.get("thread_id", ""))
-                if thread_id not in owned_threads:
-                    raise ValueError("Thread is not owned by this session")
-                result = result_or_raise(
-                    await codex.request("thread/delete", {"threadId": thread_id})
-                )
-                owned_threads.discard(thread_id)
-                log.info("Developer audit event=thread_delete")
-            elif kind == "thread.start":
-                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                options = {**thread_options(path), "personality": "pragmatic"}
-                result = result_or_raise(await codex.request("thread/start", options))
-                owned_threads.add(str(result["thread"]["id"]))
-                log.info("Developer audit event=thread_start")
-            elif kind == "thread.resume":
-                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                options = {**thread_options(path), "threadId": str(message["thread_id"])}
-                result = result_or_raise(await codex.request("thread/resume", options))
-                owned_threads.add(str(message["thread_id"]))
-                log.info("Developer audit event=thread_resume")
-            elif kind == "thread.name":
-                if str(message["thread_id"]) not in owned_threads:
-                    raise ValueError("Thread is not owned by this session")
-                result = result_or_raise(
-                    await codex.request(
-                        "thread/name/set",
-                        {"threadId": str(message["thread_id"]), "name": str(message["name"])[:120]},
+                elif kind == "account.rate_limits":
+                    result = result_or_raise(await codex.request("account/rateLimits/read", {}))
+                elif kind == "thread.delete":
+                    thread_id = str(message.get("thread_id", ""))
+                    if thread_id not in owned_threads:
+                        raise ValueError("Thread is not owned by this session")
+                    result = result_or_raise(
+                        await codex.request("thread/delete", {"threadId": thread_id})
                     )
-                )
-            elif kind in {"turn.start", "turn.retry"}:
-                _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
-                if str(message["thread_id"]) not in owned_threads:
-                    raise ValueError("Thread is not owned by this session")
-                text = str(message.get("text", "")).strip()
-                if kind == "turn.start" and (not text or len(text) > 20000):
-                    raise ValueError("Invalid instruction")
-                inputs = codex_inputs(text, message.get("attachments"))
-                result = result_or_raise(
-                    await codex.request(
-                        "turn/retry" if kind == "turn.retry" else "turn/start",
-                        {"threadId": str(message["thread_id"]), "cwd": str(path), "input": inputs},
+                    owned_threads.discard(thread_id)
+                    log.info("Developer audit event=thread_delete")
+                elif kind == "thread.start":
+                    _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                    options = {**thread_options(path), "personality": "pragmatic"}
+                    result = result_or_raise(await codex.request("thread/start", options))
+                    owned_threads.add(str(result["thread"]["id"]))
+                    log.info("Developer audit event=thread_start")
+                elif kind == "thread.resume":
+                    _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                    options = {**thread_options(path), "threadId": str(message["thread_id"])}
+                    result = result_or_raise(await codex.request("thread/resume", options))
+                    owned_threads.add(str(message["thread_id"]))
+                    log.info("Developer audit event=thread_resume")
+                elif kind == "thread.name":
+                    if str(message["thread_id"]) not in owned_threads:
+                        raise ValueError("Thread is not owned by this session")
+                    result = result_or_raise(
+                        await codex.request(
+                            "thread/name/set",
+                            {
+                                "threadId": str(message["thread_id"]),
+                                "name": str(message["name"])[:120],
+                            },
+                        )
                     )
-                )
-                log.info("Developer audit event=turn_start")
-            elif kind == "turn.interrupt":
-                if str(message["thread_id"]) not in owned_threads:
-                    raise ValueError("Thread is not owned by this session")
-                result = result_or_raise(
-                    await codex.request(
-                        "turn/interrupt",
-                        {"threadId": str(message["thread_id"]), "turnId": str(message["turn_id"])},
+                elif kind in {"turn.start", "turn.retry"}:
+                    _, path = canonical_workspace(str(message.get("workspace")), WORKSPACES)
+                    if str(message["thread_id"]) not in owned_threads:
+                        raise ValueError("Thread is not owned by this session")
+                    text = str(message.get("text", "")).strip()
+                    if kind == "turn.start" and (not text or len(text) > 20000):
+                        raise ValueError("Invalid instruction")
+                    inputs = codex_inputs(text, message.get("attachments"))
+                    result = result_or_raise(
+                        await codex.request(
+                            "turn/retry" if kind == "turn.retry" else "turn/start",
+                            {
+                                "threadId": str(message["thread_id"]),
+                                "cwd": str(path),
+                                "input": inputs,
+                            },
+                        )
                     )
+                    log.info("Developer audit event=turn_start")
+                elif kind == "turn.interrupt":
+                    if str(message["thread_id"]) not in owned_threads:
+                        raise ValueError("Thread is not owned by this session")
+                    result = result_or_raise(
+                        await codex.request(
+                            "turn/interrupt",
+                            {
+                                "threadId": str(message["thread_id"]),
+                                "turnId": str(message["turn_id"]),
+                            },
+                        )
+                    )
+                    log.info("Developer audit event=turn_interrupt")
+                elif kind == "approval.respond":
+                    decision = str(message.get("decision"))
+                    approval_id = int(message["codex_request_id"])
+                    if approval_id not in pending_approvals:
+                        raise ValueError("Approval is not owned by this session")
+                    if decision not in {"accept", "acceptForSession", "decline", "cancel"}:
+                        raise ValueError("Invalid approval decision")
+                    pending_approvals.remove(approval_id)
+                    await codex.respond(approval_id, {"decision": decision})
+                    result = {"accepted": True}
+                    log.info("Developer audit event=approval_response")
+                else:
+                    raise ValueError("Unsupported developer operation")
+                await socket.send_json(
+                    {"type": "response", "request_id": request_id, "result": result}
                 )
-                log.info("Developer audit event=turn_interrupt")
-            elif kind == "approval.respond":
-                decision = str(message.get("decision"))
-                approval_id = int(message["codex_request_id"])
-                if approval_id not in pending_approvals:
-                    raise ValueError("Approval is not owned by this session")
-                if decision not in {"accept", "acceptForSession", "decline", "cancel"}:
-                    raise ValueError("Invalid approval decision")
-                pending_approvals.remove(approval_id)
-                await codex.respond(approval_id, {"decision": decision})
-                result = {"accepted": True}
-                log.info("Developer audit event=approval_response")
-            else:
-                raise ValueError("Unsupported developer operation")
-            await socket.send_json({"type": "response", "request_id": request_id, "result": result})
-            if kind == "thread.resume" and isinstance(codex, DeveloperBackends):
-                await codex.replay(str(message["thread_id"]))
+                if kind == "thread.resume" and isinstance(codex, DeveloperBackends):
+                    await codex.replay(str(message["thread_id"]))
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                raise
+            except Exception as exc:
+                # A failed authenticated request must not tear down other sessions.
+                # Never infer deletion from arbitrary provider text or expose it.
+                missing = isinstance(exc, ThreadNotFound)
+                log.warning("Developer request failed: %s", type(exc).__name__)
+                await socket.send_json(
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "code": "THREAD_NOT_FOUND" if missing else "REQUEST_FAILED",
+                        "thread_id": str(message.get("thread_id", "")) if missing else "",
+                        "message": (
+                            "Developer conversation is no longer available."
+                            if missing
+                            else "Thread is not owned by this session"
+                            if isinstance(exc, ValueError)
+                            and str(exc) == "Thread is not owned by this session"
+                            else "Developer request failed; inspect task status before retrying."
+                        ),
+                    }
+                )
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
     except Exception as exc:
