@@ -1,11 +1,13 @@
 """Capability-based developer tools; model-controlled command strings are never executed."""
 
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import re
 import signal
+import stat
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,12 @@ READ = "read"
 WORKSPACE = "workspace"
 EXECUTION = "execution"
 APPROVAL = "approval"
+
+
+class ToolPolicyError(ValueError):
+    """Deterministic rejection raised only before any tool side effect."""
+
+
 SPECS: dict[str, tuple[str, str, dict[str, Any]]] = {
     "repository": (
         READ,
@@ -26,7 +34,7 @@ SPECS: dict[str, tuple[str, str, dict[str, Any]]] = {
     ),
     "read_file": (
         READ,
-        "Read at most 200 lines of a tracked source file.",
+        "Read bounded tracked source, or safe untracked source in your owned worktree.",
         {
             "path": {"type": "string"},
             "start": {"type": "integer", "minimum": 1},
@@ -34,7 +42,7 @@ SPECS: dict[str, tuple[str, str, dict[str, Any]]] = {
     ),
     "search": (
         READ,
-        "Search literal text in bounded tracked source files.",
+        "Search bounded source, including safe untracked source in your owned worktree.",
         {
             "text": {"type": "string", "minLength": 2, "maxLength": 100},
         },
@@ -253,21 +261,22 @@ class ToolRunner:
     def workspace(self, thread: dict[str, Any], write: bool = False) -> Path:
         if not thread.get("worktree"):
             if write:
-                raise ValueError("Create an isolated worktree before writing")
+                raise ToolPolicyError("Create an isolated worktree before writing")
             return self.root
         expected = self.workspaces / thread["id"]
         if Path(thread["worktree"]) != expected or expected.is_symlink():
-            raise ValueError("Workspace identity mismatch")
+            raise ToolPolicyError("Workspace identity mismatch")
         if expected.resolve() == self.root or not expected.resolve().is_relative_to(
             self.workspaces
         ):
-            raise ValueError("Production writes are forbidden")
+            raise ToolPolicyError("Production writes are forbidden")
         return expected
 
     def source(self, root: Path, name: str, *, directory: bool = False) -> Path:
         path = Path(name)
         if (
             not name
+            or "\x00" in name
             or path.is_absolute()
             or any(
                 part in {".", "..", ".git", ".ssh", ".gnupg", "data", "logs", "secrets"}
@@ -275,22 +284,136 @@ class ToolRunner:
                 for part in path.parts
             )
         ):
-            raise ValueError("Unsafe source path")
+            raise ToolPolicyError("Unsafe source path")
         target = root / path
-        if not target.resolve().is_relative_to(root):
-            raise ValueError("Workspace escape rejected")
+        try:
+            contained = target.resolve().is_relative_to(root)
+        except RuntimeError:
+            raise ToolPolicyError("Source path cannot be resolved safely") from None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ToolPolicyError("Source path cannot be resolved safely") from None
+            raise
+        if not contained:
+            raise ToolPolicyError("Workspace escape rejected")
         for item in (target, *target.parents):
             if item == root:
                 break
             if item.is_symlink():
-                raise ValueError("Symlink source rejected")
+                raise ToolPolicyError("Symlink source rejected")
         if (
             target.exists()
             and not (directory and target.is_dir())
             and (not target.is_file() or target.stat().st_nlink != 1)
         ):
-            raise ValueError("Non-regular source rejected")
+            raise ToolPolicyError("Non-regular source rejected")
         return target
+
+    async def readable_files(self, thread: dict[str, Any]) -> list[str]:
+        root = self.workspace(thread)
+        args = ["ls-files", "--cached", "--exclude-standard", "-z"]
+        if thread.get("worktree"):
+            await self.assert_branch(thread)
+            if thread.get("branch") != "jarvis/developer-" + thread["id"][4:]:
+                raise ToolPolicyError("Feature branch ownership changed")
+            identities = [
+                await self.git(path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                for path in (self.root, root)
+            ]
+            if not all(item["ok"] for item in identities):
+                raise RuntimeError("Repository identity unavailable")
+            if identities[0]["output"].strip() != identities[1]["output"].strip():
+                raise ToolPolicyError("Repository identity mismatch")
+            args.append("--others")
+        result = await self.git(root, *args)
+        ignored = await self.git(
+            root, "ls-files", "--cached", "--ignored", "--exclude-standard", "-z"
+        )
+        for item in (result, ignored):
+            if not item["ok"] or (item["output"] and not item["output"].endswith("\0")):
+                raise RuntimeError("Source enumeration unavailable or truncated")
+        excluded = set(ignored["output"].split("\0"))
+        tracked = set(await self.files(root))
+        return list(
+            dict.fromkeys(
+                path
+                for path in result["output"].split("\0")
+                if path
+                and path not in excluded
+                and (path in tracked or self.untracked_source(path))
+            )
+        )[:4000]
+
+    @staticmethod
+    def untracked_source(name: str) -> bool:
+        path = Path(name)
+        # New source only, never arbitrary runtime/credential material. Tracked
+        # source retains its existing scope; source() still guards both kinds.
+        return not any(
+            part.startswith(".")
+            or any(
+                word in part.lower()
+                for word in ("credential", "secret", "token", "password", "private_key")
+            )
+            for part in path.parts
+        ) and path.suffix.lower() in {
+            ".py",
+            ".kt",
+            ".kts",
+            ".java",
+            ".md",
+            ".rst",
+            ".sh",
+            ".xml",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".json",
+            ".js",
+            ".ts",
+            ".tsx",
+            ".css",
+            ".html",
+        }
+
+    def read_source(self, root: Path, name: str, limit: int) -> bytes:
+        self.source(root, name)
+        # Walk using directory descriptors: a concurrent symlink swap must not
+        # redirect a validated read. NONBLOCK prevents a FIFO swap from hanging.
+        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parts = Path(name).parts
+            for part in parts[:-1]:
+                child = os.open(
+                    part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+                )
+                os.close(directory)
+                directory = child
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+                    raise ToolPolicyError("Source is not a bounded regular file")
+                raw = stream.read(limit + 1)
+            if len(raw) > limit or b"\0" in raw:
+                raise ToolPolicyError("Source is oversized or binary")
+            try:
+                raw.decode("utf-8")
+            except UnicodeError:
+                raise ToolPolicyError("Source is not UTF-8 text") from None
+            return raw
+        except OSError as exc:
+            if exc.errno in {
+                errno.ENOENT,
+                errno.ENOTDIR,
+                errno.EACCES,
+                errno.ELOOP,
+                errno.ENAMETOOLONG,
+            }:
+                raise ToolPolicyError("Source is missing or inaccessible") from None
+            raise  # Genuine I/O interruption remains recoverable, not a policy denial.
+        finally:
+            os.close(directory)
 
     async def files(self, root: Path) -> list[str]:
         result = await self.git(root, "ls-files", "-z")
@@ -298,9 +421,12 @@ class ToolRunner:
 
     async def assert_branch(self, thread: dict[str, Any]) -> Path:
         root = self.workspace(thread, True)
-        branch = (await self.git(root, "branch", "--show-current"))["output"].strip()
+        result = await self.git(root, "branch", "--show-current")
+        if not result["ok"]:
+            raise RuntimeError("Feature branch identity unavailable")
+        branch = result["output"].strip()
         if branch != thread["branch"] or not branch.startswith("jarvis/developer-"):
-            raise ValueError("Feature branch ownership changed")
+            raise ToolPolicyError("Feature branch ownership changed")
         return root
 
     def sandbox(self, root: Path, argv: list[str], writable: bool) -> list[str]:
@@ -461,12 +587,10 @@ class ToolRunner:
                         continue
             return result
         if name == "read_file":
-            target = self.source(root, args["path"])
-            if args["path"] not in await self.files(root):
-                raise ValueError("Only tracked source may be read")
-            if target.stat().st_size > 500000:
-                raise ValueError("Source exceeds read limit")
-            raw = target.read_bytes()
+            self.source(root, args["path"])
+            if args["path"] not in await self.readable_files(thread):
+                raise ToolPolicyError("Source is not authorized for this workspace")
+            raw = self.read_source(root, args["path"], 500000)
             content = raw.decode()
             return {
                 "sha256": hashlib.sha256(raw).hexdigest(),
@@ -476,12 +600,11 @@ class ToolRunner:
             }
         if name == "search":
             matches = []
-            for path in await self.files(root):
+            for path in await self.readable_files(thread):
                 try:
-                    target = self.source(root, path)
-                    if target.stat().st_size > 200000:
-                        continue
-                    for number, line in enumerate(target.read_text().splitlines(), 1):
+                    for number, line in enumerate(
+                        self.read_source(root, path, 200000).decode().splitlines(), 1
+                    ):
                         if args["text"] in line:
                             matches.append(
                                 {"path": path, "line": number, "text": redact(line[:300])}
