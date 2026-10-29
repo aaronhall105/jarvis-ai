@@ -37,11 +37,13 @@ final class DeveloperClient {
     private int endpointIndex;
     private long connectionEpoch;
     private final Map<Long, String> requestKinds = new HashMap<>();
+    private final Map<Long, String> resumeThreads = new HashMap<>();
     private String localUrl = "";
     private String remoteUrl = "";
     private boolean enabled;
     private boolean authenticated;
     private boolean sessionReady;
+    private boolean awaitingSessionChoice;
     private long reconnectDelayMs = 1000;
     private boolean reconnectScheduled;
     private boolean lastLocalNetwork;
@@ -103,9 +105,11 @@ final class DeveloperClient {
                 webSocket.send(json("type", "auth", "token", DeveloperClient.this.token).toString());
             }
             @Override public void onMessage(WebSocket webSocket, String text) {
-                if (!isCurrent(webSocket, epoch)) return;
-                try { handle(new JSONObject(text)); }
-                catch (Exception exception) { postError("Invalid Developer response"); }
+                main.post(() -> {
+                    if (!isCurrent(webSocket, epoch)) return;
+                    try { handle(new JSONObject(text)); }
+                    catch (Exception exception) { postRequestError("Invalid Developer response"); }
+                });
             }
             @Override public void onFailure(WebSocket webSocket, Throwable failure, Response response) {
                 if (!isCurrent(webSocket, epoch)) return;
@@ -134,6 +138,11 @@ final class DeveloperClient {
 
     void sendInstruction(String text) { sendInstruction(text, new JSONArray()); }
     void sendInstruction(String text, JSONArray attachments) {
+        if (awaitingSessionChoice) {
+            awaitingSessionChoice = false;
+            pendingInstruction = "";
+            pendingAttachments = new JSONArray();
+        }
         if (!authenticated || !sessionReady) {
             if (!pendingInstruction.isBlank()) { postError("A Developer message is already queued"); return; }
             pendingInstruction = text;
@@ -168,6 +177,7 @@ final class DeveloperClient {
                 sessionReady = false;
                 postState("Restoring session…");
                 long id = nextRequest("thread.resume");
+                resumeThreads.put(id, threadId);
                 send(json("type", "thread.resume", "workspace", workspace,
                     "thread_id", threadId, "request_id", id));
             }
@@ -177,12 +187,21 @@ final class DeveloperClient {
         else if ("response".equals(type)) {
             long responseId = message.optLong("request_id", -1);
             String requestKind = requestKinds.remove(responseId);
+            String resumedThread = resumeThreads.remove(responseId);
+            if (requestKind == null) return;
+            if ("thread.resume".equals(requestKind)
+                    && (resumedThread == null || !resumedThread.equals(threadId))) return;
             if (requestKind != null) {
                 try { message.put("request_kind", requestKind); }
                 catch (Exception ignored) { }
             }
             JSONObject result = message.optJSONObject("result");
             JSONObject thread = result == null ? null : result.optJSONObject("thread");
+            if ("thread.resume".equals(requestKind)
+                    && (thread == null || !resumedThread.equals(thread.optString("id")))) {
+                postRequestError("Developer returned a different conversation");
+                return;
+            }
             if (thread != null && threadId.isBlank()) {
                 threadId = thread.optString("id");
                 if (!pendingInstruction.isBlank()) {
@@ -206,7 +225,30 @@ final class DeveloperClient {
             }
             postEvent(event);
         }
-        else if ("error".equals(type) || "auth.error".equals(type)) postError(message.optString("message", "Developer authentication failed"));
+        else if ("error".equals(type)) {
+            long id = message.optLong("request_id", -1);
+            String kind = requestKinds.remove(id);
+            String requestedThread = resumeThreads.remove(id);
+            if ("thread.resume".equals(kind) && requestedThread != null
+                    && !requestedThread.equals(threadId)) return;
+            if (authenticated && "thread.resume".equals(kind)
+                    && requestedThread != null && !requestedThread.isBlank()
+                    && requestedThread.equals(threadId)
+                    && requestedThread.equals(message.optString("thread_id"))
+                    && "THREAD_NOT_FOUND".equals(message.optString("code"))) {
+                String staleThread = threadId;
+                threadId = "";
+                activeTurnId = "";
+                sessionReady = true;
+                awaitingSessionChoice = true;
+                // Do not silently submit queued instructions into a different chat.
+                // Retain them until the user explicitly chooses/sends a new request.
+                postEvent(json("type", "thread.unavailable", "thread_id", staleThread));
+                postState("Connected — conversation unavailable; choose or start a chat");
+                refreshThreads();
+            } else postRequestError(message.optString("message", "Developer request failed"));
+        }
+        else if ("auth.error".equals(type)) postError(message.optString("message", "Developer authentication failed"));
     }
 
     String threadId() { return threadId; }
@@ -228,19 +270,25 @@ final class DeveloperClient {
         send(json("type", "account.rate_limits", "request_id", id));
     }
     void selectThread(String selectedThreadId) {
+        awaitingSessionChoice = false;
         threadId = selectedThreadId == null ? "" : selectedThreadId;
         activeTurnId = "";
+        sessionReady = false;
         long id = nextRequest("thread.resume");
+        resumeThreads.put(id, threadId);
         send(json("type", "thread.resume", "workspace", workspace,
             "thread_id", threadId, "request_id", id));
         postState("Restoring session…");
     }
     void newSession() {
+        awaitingSessionChoice = false;
         threadId = "";
         activeTurnId = "";
         pendingInstruction = "";
         pendingAttachments = new JSONArray();
         requestKinds.clear();
+        resumeThreads.clear();
+        sessionReady = authenticated;
     }
     void deleteCurrentThread() {
         if (!authenticated || threadId.isBlank()) return;
@@ -277,6 +325,7 @@ final class DeveloperClient {
         sessionReady = false;
         activeTurnId = "";
         requestKinds.clear();
+        resumeThreads.clear();
     }
     private final Object reconnectToken = new Object();
     private void scheduleReconnect(String reason) {
@@ -344,7 +393,7 @@ final class DeveloperClient {
         return id;
     }
     private void drainPendingInstruction() {
-        if (!sessionReady || pendingInstruction.isBlank()) return;
+        if (!sessionReady || awaitingSessionChoice || pendingInstruction.isBlank()) return;
         String text = pendingInstruction; JSONArray attachments = pendingAttachments;
         pendingInstruction = ""; pendingAttachments = new JSONArray();
         if (threadId.isBlank()) {
@@ -363,4 +412,7 @@ final class DeveloperClient {
     private void postState(String value) { main.post(() -> listener.onState(value)); }
     private void postEvent(JSONObject value) { if (value != null) main.post(() -> listener.onEvent(value)); }
     private void postError(String value) { main.post(() -> { listener.onState("Reconnecting…"); listener.onError(value); }); }
+    private void postRequestError(String value) {
+        main.post(() -> { listener.onState("Request failed — choose a chat or retry"); listener.onError(value); });
+    }
 }

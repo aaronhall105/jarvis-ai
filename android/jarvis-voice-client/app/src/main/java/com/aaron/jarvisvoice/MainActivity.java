@@ -771,7 +771,13 @@ public final class MainActivity extends Activity {
     private void renderDeveloperEvent(JSONObject event) {
         String method = event.optString("method");
         JSONObject params = event.optJSONObject("params");
-        if (event.has("id") && method.endsWith("requestApproval")) {
+        if ("thread.unavailable".equals(event.optString("type"))) {
+            // Only forget this confirmed stale selection, never history/settings.
+            if (store.developerThreadId().equals(event.optString("thread_id"))) {
+                store.setDeveloperThreadId("");
+                statusText.setText("Conversation unavailable — choose or start a chat");
+            }
+        } else if (event.has("id") && method.endsWith("requestApproval")) {
             showDeveloperApproval(event.optLong("id"), method, params);
         } else if ("response".equals(event.optString("type"))
                 && "threads.list".equals(event.optString("request_kind"))) {
