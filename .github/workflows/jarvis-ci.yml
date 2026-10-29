@@ -75,8 +75,12 @@ jobs:
           python -m mypy bridge/app developer_gateway
           tools/generate_ota_manifest.py tools/generate_product_release_manifest.py
           tools/verify_product_baseline.py
+      - name: Artifact signer namespace typing
+        run: python -m mypy --explicit-package-bases tools/artifact_signing.py
       - name: Bandit high-severity repository scan
-        run: python -m bandit -q -r bridge/app developer_gateway -lll
+        run: |
+          python -m bandit -q -r bridge/app developer_gateway -lll
+          python -m bandit -q -lll tools/artifact_signing.py
       - name: Dependency audit
         run: >-
           python -m pip_audit -r bridge/requirements.txt -r requirements-improver.txt
