@@ -130,9 +130,32 @@ def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool]:
         result = json.loads(row["result"])
     except (TypeError, ValueError, RecursionError):
         return "failed", tool, False
-    if not isinstance(result, dict) or result.get("ok") is not True:
+    if isinstance(result, dict):
+        if result.get("ok") is False:
+            return "failed", tool, False
+        if result.get("ok") is True:
+            return "completed", tool, False
+        if (
+            tool == "read_file"
+            and isinstance(result.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", result["sha256"])
+            and isinstance(result.get("text"), str)
+        ):
+            return "completed", tool, False
         return "failed", tool, False
-    return "completed", tool, False
+    if (
+        tool == "search"
+        and isinstance(result, list)
+        and all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and type(entry.get("line")) is int
+            and isinstance(entry.get("text"), str)
+            for entry in result
+        )
+    ):
+        return "completed", tool, False
+    return "failed", tool, False
 
 
 def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> SessionSummary:

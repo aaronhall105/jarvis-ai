@@ -629,14 +629,16 @@ class ToolRunner:
             old = target.read_bytes() if target.exists() else None
             actual = hashlib.sha256(old).hexdigest() if old is not None else ""
             if actual != args["expected_sha256"]:
-                raise ValueError("File changed: preimage does not match")
+                raise ToolPolicyError("File changed: preimage does not match")
             if args["content"] is not None and args["content"].count("[REDACTED]") > (
                 old.decode(errors="replace").count("[REDACTED]") if old is not None else 0
             ):
-                raise ValueError("Refusing a replacement containing new redaction placeholders")
+                raise ToolPolicyError(
+                    "Refusing a replacement containing new redaction placeholders"
+                )
             if args["content"] is None:
                 if old is None:
-                    raise ValueError("File does not exist")
+                    raise ToolPolicyError("File does not exist")
                 target.unlink()
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
