@@ -15,8 +15,8 @@ def test_manifest_identifies_single_authoritative_branch() -> None:
     manifest = verify_product_baseline.load_manifest()
     assert manifest["authoritative_branch"] == "jarvis/unified-production"
     assert manifest["current_release"] == {
-        "version_name": "19.0.0-alpha40",
-        "version_code": 190420,
+        "version_name": "19.0.0-alpha43",
+        "version_code": 190450,
         "core_application_version": "3.7.0",
         "realtime_protocol": 2,
         "phone_package": "com.aaron.jarvisvoice",
