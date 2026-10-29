@@ -125,6 +125,22 @@ def test_bad_recipient_never_reaches_signer(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_malformed_pem_whitespace_fails_before_sdk(tmp_path, monkeypatch):
+    sdk = Mock(side_effect=AssertionError("must not invoke SDK"))
+    monkeypatch.setattr(signing, "run", sdk)
+    with pytest.raises(signing.Denied):
+        signing.recipient_certificate(
+            tmp_path,
+            {
+                "RECIPIENT_CERT_PEM": "-----BEGIN CERTIFICATE-----\n"
+                + " " * 15000
+                + "\n-----END CERTIFICATE-----",
+                "RECIPIENT_CERT_SHA256": "0" * 64,
+            },
+        )
+    sdk.assert_not_called()
+
+
 @pytest.mark.parametrize("kind", ["weak_rsa", "ec", "near_expiry"])
 def test_recipient_algorithm_strength_and_expiry(tmp_path, kind):
     key, cert = tmp_path / "test.key", tmp_path / "test.pem"

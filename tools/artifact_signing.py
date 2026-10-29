@@ -252,11 +252,13 @@ def write_json(path: Path, value: dict) -> None:
 def recipient_certificate(directory: Path, env: dict[str, str]) -> Path:
     """Public encryption identity ONLY; never an Android signing certificate/key."""
     pem = env.get("RECIPIENT_CERT_PEM", "").strip()
+    lines = pem.splitlines()
     require(
         len(pem) < 20_000
-        and re.fullmatch(
-            r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+-----END CERTIFICATE-----", pem
-        )
+        and 3 <= len(lines) <= 256
+        and lines[0] == "-----BEGIN CERTIFICATE-----"
+        and lines[-1] == "-----END CERTIFICATE-----"
+        and all(re.fullmatch(r"[A-Za-z0-9+/=]{1,76}", line) for line in lines[1:-1])
     )
     der = ssl.PEM_cert_to_DER_cert(pem)
     require(hashlib.sha256(der).hexdigest() == env["RECIPIENT_CERT_SHA256"])

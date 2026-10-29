@@ -204,8 +204,8 @@ validation is the exact-head GitHub CI, not inferred from local results):
 
 | Check | Local result |
 | --- | --- |
-| Full bridge/tools/gateway pytest | 2,326 passed, 3 gated deployment tests skipped, 143 subtests |
-| Signing/privacy regressions | 92 passed, including real disposable encryption, wrong-key and tamper rejection |
+| Full bridge/tools/gateway pytest | 2,326 passed before final bounded-PEM hardening, 3 gated deployment tests skipped, 143 subtests |
+| Signing/privacy regressions | 93 passed after bounded-PEM hardening, including real disposable encryption, wrong-key and tamper rejection |
 | Phone / shared protocol / Wear unit tests | 286 / 30 / 1 passed, zero failures/skips |
 | Phone/Wear debug + release lint, debug + unsigned release builds | PASS, 195 Gradle tasks |
 | Ruff / format / mypy / compileall / baseline | PASS; 267 formatted files, 117 existing + 1 signer typed source |
