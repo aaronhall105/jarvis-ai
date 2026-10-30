@@ -1,10 +1,18 @@
 import json
 import sqlite3
 import uuid
+from contextlib import closing, contextmanager
 
 import pytest
 
 from tools.developer_session_diagnostics import load_recent_sessions, render_report
+
+
+@contextmanager
+def transaction(path):
+    # SQLite's connection context commits/rolls back; it does not close the FD.
+    with closing(sqlite3.connect(path)) as connection, connection:
+        yield connection
 
 
 def session_id(label):
@@ -12,7 +20,7 @@ def session_id(label):
 
 
 def build_database(path, *, include_calls=True):
-    with sqlite3.connect(path) as connection:
+    with transaction(path) as connection:
         connection.execute(
             "CREATE TABLE threads (id TEXT PRIMARY KEY, backend TEXT NOT NULL, state TEXT NOT NULL)"
         )
@@ -57,7 +65,7 @@ def insert_call(connection, identifier, thread_id, tool, state, result):
 def test_load_recent_sessions_summarises_completed_failed_uncertain_and_recoverable(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "api_success",
@@ -106,7 +114,7 @@ def test_load_recent_sessions_summarises_completed_failed_uncertain_and_recovera
 def test_load_recent_sessions_orders_by_recent_timestamps_not_thread_id(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "zzz_old_id",
@@ -157,7 +165,7 @@ def test_load_recent_sessions_handles_corrupted_database(tmp_path):
 def test_load_recent_sessions_handles_malformed_records_safely(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(connection, "api_bad_json", "not-json")
         insert_thread(
             connection,
@@ -196,7 +204,7 @@ def test_load_recent_sessions_handles_malformed_records_safely(tmp_path):
 def test_load_recent_sessions_masks_sensitive_failure_reasons(tmp_path, sensitive_error):
     database = tmp_path / "sensitive tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "api_sensitive",
@@ -216,7 +224,7 @@ def test_load_recent_sessions_handles_missing_calls_table_and_unusual_path(tmp_p
     directory.mkdir()
     database = directory / "tasks sqlite3.db"
     build_database(database, include_calls=False)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "api_session",
@@ -234,7 +242,7 @@ def test_load_recent_sessions_handles_missing_calls_table_and_unusual_path(tmp_p
 def test_load_recent_sessions_treats_pending_and_executing_as_uncertain_without_retries(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "api_pending",
@@ -258,7 +266,7 @@ def test_load_recent_sessions_treats_pending_and_executing_as_uncertain_without_
 def test_render_report_is_read_only_summary_without_private_contents_and_db_is_unchanged(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection,
             "api_session",
@@ -299,7 +307,7 @@ def test_sqlite_uri_reserved_characters_open_exact_file_read_only(tmp_path, file
 
     database = tmp_path / filename
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(connection, "reserved", {"status": "idle", "createdAt": 1, "updatedAt": 2})
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     report = load_recent_sessions(database)
@@ -319,7 +327,7 @@ def test_uri_query_cannot_select_a_different_database(tmp_path):
     intended = tmp_path / "tasks?mode=rw#ignored"
     for path, label in [(other, "other"), (intended, "intended")]:
         build_database(path)
-        with sqlite3.connect(path) as connection:
+        with transaction(path) as connection:
             insert_thread(connection, label, {"status": "idle", "createdAt": 1, "updatedAt": 2})
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     assert load_recent_sessions(intended).sessions[0].session_id == session_id("intended")
@@ -330,7 +338,7 @@ def test_private_text_in_identifiers_status_tool_and_path_is_withheld(tmp_path):
     marker = "INERT-PRIVATE-MARKER"
     database = tmp_path / marker
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(connection, "private", {"status": marker, "createdAt": 1, "updatedAt": 2})
         insert_call(connection, 1, "private", marker, "completed", '{"ok": true}')
         connection.execute("UPDATE threads SET id=?", (marker,))
@@ -344,7 +352,7 @@ def test_private_text_in_identifiers_status_tool_and_path_is_withheld(tmp_path):
 
 def test_sqlite_error_details_are_not_exposed(tmp_path):
     database = tmp_path / "tasks.sqlite3"
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         connection.execute(
             "CREATE VIEW threads AS SELECT INERT_PRIVATE_MARKER AS id, 'api' AS backend, '{}' AS state"
         )
@@ -370,7 +378,7 @@ def test_sqlite_error_details_are_not_exposed(tmp_path):
 def test_unresolved_write_states_never_report_safe_recovery(tmp_path, tool, state, manual):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(connection, "recovery", {"status": "paused", "createdAt": 1, "updatedAt": 2})
         insert_call(connection, 1, "recovery", tool, state, None)
     before = database.read_bytes()
@@ -384,7 +392,7 @@ def test_unresolved_write_states_never_report_safe_recovery(tmp_path, tool, stat
 def test_malformed_completed_result_is_not_reported_successful(tmp_path, result):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection, "bad-result", {"status": "failed", "createdAt": 1, "updatedAt": 2}
         )
@@ -403,7 +411,7 @@ def test_cancelled_status_and_gateway_vocabulary_are_supported(tmp_path):
     assert _READ_ONLY_TOOLS == READ_ONLY_TOOLS
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(
             connection, "cancelled", {"status": "cancelled", "createdAt": 1, "updatedAt": 2}
         )
@@ -415,6 +423,6 @@ def test_cancelled_status_and_gateway_vocabulary_are_supported(tmp_path):
 def test_deeply_nested_malformed_thread_is_handled(tmp_path):
     database = tmp_path / "tasks.sqlite3"
     build_database(database)
-    with sqlite3.connect(database) as connection:
+    with transaction(database) as connection:
         insert_thread(connection, "deep", "[" * 2000)
     assert "Malformed thread state JSON" in render_report(load_recent_sessions(database))

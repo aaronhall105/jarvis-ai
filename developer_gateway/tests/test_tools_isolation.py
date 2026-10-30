@@ -60,8 +60,8 @@ async def repository(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_isolated_worktree_patch_diff_and_replay(repository, tmp_path):
-    backend = OpenAIResponsesDeveloperBackend(
+async def test_real_isolated_worktree_patch_diff_and_replay(repository, tmp_path, backend_factory):
+    backend = backend_factory(
         repository.root, tmp_path / "agent", client=Client(response()), key=""
     )
     thread = backend.state.create(str(repository.root))
@@ -90,8 +90,8 @@ async def test_real_isolated_worktree_patch_diff_and_replay(repository, tmp_path
         workspace
     )
     # Reopen the durable journal as a new process would; no model/tool callback needed.
-    backend.state.close()
-    restored = OpenAIResponsesDeveloperBackend(
+    await backend.stop()
+    restored = backend_factory(
         repository.root, tmp_path / "agent", client=Client(response()), key=""
     )
 
@@ -150,10 +150,8 @@ async def test_real_sandbox_has_no_home_secrets_network_or_git_metadata(reposito
 
 
 @pytest.mark.asyncio
-async def test_approval_cannot_cross_threads_or_turns(tmp_path):
-    backend = OpenAIResponsesDeveloperBackend(
-        tmp_path, tmp_path / "agent", client=Client(response()), key=""
-    )
+async def test_approval_cannot_cross_threads_or_turns(tmp_path, backend_factory):
+    backend = backend_factory(tmp_path, tmp_path / "agent", client=Client(response()), key="")
     thread = backend.state.create(str(tmp_path))
     thread.update(turn_id="one", status="running")
     backend.state.save(thread)
@@ -167,8 +165,8 @@ async def test_approval_cannot_cross_threads_or_turns(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_threads_have_independent_jobs(tmp_path):
-    backend = OpenAIResponsesDeveloperBackend(
+async def test_concurrent_threads_have_independent_jobs(tmp_path, backend_factory):
+    backend = backend_factory(
         tmp_path,
         tmp_path / "agent",
         client=Client(response(text="one"), response(text="two")),
