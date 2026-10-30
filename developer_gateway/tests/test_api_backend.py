@@ -79,8 +79,8 @@ class Client:
 
 
 @pytest.fixture
-def backend(tmp_path):
-    return OpenAIResponsesDeveloperBackend(
+def backend(tmp_path, backend_factory):
+    return backend_factory(
         tmp_path, tmp_path / "state", client=Client(response()), key="private-fixture-key"
     )
 
@@ -125,8 +125,8 @@ async def test_thread_stream_final_and_stateful_continuation(backend):
 
 
 @pytest.mark.asyncio
-async def test_missing_credential_fails_closed(tmp_path):
-    backend = OpenAIResponsesDeveloperBackend(tmp_path, tmp_path / "state", key="")
+async def test_missing_credential_fails_closed(tmp_path, backend_factory):
+    backend = backend_factory(tmp_path, tmp_path / "state", key="")
     with pytest.raises(ProviderUnavailable, match="authentication"):
         await backend.request("thread/start", {"cwd": str(tmp_path)})
     assert not backend.status()["api_backend_configured"]
@@ -232,9 +232,12 @@ def test_restart_marks_uncertain_and_preserves_completed(tmp_path):
     state.update_call(second["id"], state="executing")
     state.close()
     restored = State(path)
-    assert restored.get(thread["id"])["status"] == "paused"
-    assert restored.call(first["id"])["state"] == "completed"
-    assert restored.call(second["id"])["state"] == "uncertain"
+    try:
+        assert restored.get(thread["id"])["status"] == "paused"
+        assert restored.call(first["id"])["state"] == "completed"
+        assert restored.call(second["id"])["state"] == "uncertain"
+    finally:
+        restored.close()
 
 
 @pytest.mark.parametrize("decision", ["accept", "decline", "expire"])
