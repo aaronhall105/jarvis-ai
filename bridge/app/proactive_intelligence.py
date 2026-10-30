@@ -10,12 +10,13 @@ import logging
 import os
 import re
 import sqlite3
+from contextlib import closing, contextmanager
 import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -558,6 +559,11 @@ class ProactiveEngine:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self.connection()) as connection, connection:
+            yield connection
+
     def _speaker_map(self) -> dict[str, str]:
         raw = env("JARVIS_PROACTIVE_ROOM_SPEAKERS", default="")
         if not raw:
@@ -605,7 +611,7 @@ class ProactiveEngine:
             " notification_mode TEXT NOT NULL DEFAULT 'important_only'\n"
             ");\n"
         )
-        with self.connection() as connection:
+        with self._connection() as connection:
             connection.executescript(schema)
             existing = {
                 str(row[1])
@@ -724,7 +730,7 @@ class ProactiveEngine:
     def settings(self, user: str) -> dict[str, Any]:
         self.initialise()
         user = normalise_user(user)
-        with self.connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_settings WHERE user_id = ?",
                 (user,),
@@ -778,7 +784,7 @@ class ProactiveEngine:
         for key, value in model.categories.items():
             if key in CATEGORIES:
                 categories[key] = bool(value)
-        with self.connection() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "INSERT INTO proactive_settings ("
                 "user_id,enabled,min_importance,notify_enabled,speak_enabled,"
@@ -827,7 +833,7 @@ class ProactiveEngine:
     ) -> list[dict[str, Any]]:
         self.initialise()
         principal = normalise_user(principal_id or self.home_principal)
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_home_conditions WHERE principal_id=? "
                 "ORDER BY last_seen DESC LIMIT ?",
@@ -907,7 +913,7 @@ class ProactiveEngine:
             ],
             "evidence_kind": device.evidence_kind,
         }
-        with self.connection() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT 1 FROM proactive_home_conditions WHERE condition_key=?",
                 (key,),
@@ -944,7 +950,7 @@ class ProactiveEngine:
         suppression_reason: str | None = None,
         event_id: str | None = None,
     ) -> None:
-        with self.connection() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE proactive_home_conditions SET status=?,last_seen=?,"
                 "qualified_at=CASE WHEN ?='qualified' THEN COALESCE(qualified_at,?) "
@@ -1078,7 +1084,7 @@ class ProactiveEngine:
                 )
                 continue
 
-            with self.connection() as connection:
+            with self._connection() as connection:
                 row = connection.execute(
                     "SELECT * FROM proactive_home_conditions WHERE condition_key=? "
                     "AND status IN ('observed','qualified')",
@@ -1205,7 +1211,7 @@ class ProactiveEngine:
     def _resolve_device_incidents(self, device_id: str, now: int) -> None:
         if not device_id:
             return
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT incident_id,last_decision_json FROM proactive_incidents "
                 "WHERE kind='device_unavailable' AND status='active' AND target_user=?",
@@ -1233,7 +1239,7 @@ class ProactiveEngine:
         if not entity_id:
             return
         state = str(current.get("state") or "")
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT incident_id,kind FROM proactive_incidents "
                 "WHERE entity_id=? AND status='active'",
@@ -1354,7 +1360,7 @@ class ProactiveEngine:
     async def record(self, candidate: Candidate) -> dict[str, Any] | None:
         self.initialise()
         now = int(time.time())
-        with self.connection() as connection:
+        with self._connection() as connection:
             incident_id, duplicate = self._begin_incident(connection, candidate, now)
             if duplicate:
                 return None
@@ -1411,7 +1417,7 @@ class ProactiveEngine:
         await self.deliver(event)
         if not self._persistent_incident(candidate.kind):
             resolved_at = int(time.time())
-            with self.connection() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     "UPDATE proactive_incidents SET status='resolved',resolved_at=?,last_seen=?,"
                     "cooldown_until=COALESCE(cooldown_until,?) "
@@ -1599,7 +1605,7 @@ class ProactiveEngine:
 
     def get_event(self, event_id: str) -> dict[str, Any]:
         self.initialise()
-        with self.connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_events WHERE id = ?",
                 (event_id,),
@@ -1613,7 +1619,7 @@ class ProactiveEngine:
     def feed(self, user: str, limit: int = 100) -> list[dict[str, Any]]:
         self.initialise()
         user = normalise_user(user)
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_events "
                 "WHERE target_user IN (?, 'all') "
@@ -1629,7 +1635,7 @@ class ProactiveEngine:
 
     def incidents(self, limit: int = 100) -> list[dict[str, Any]]:
         self.initialise()
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_incidents ORDER BY last_seen DESC LIMIT ?",
                 (max(1, min(250, int(limit))),),
@@ -1648,7 +1654,7 @@ class ProactiveEngine:
         """Return current incidents without letting recent recoveries displace them."""
 
         self.initialise()
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_incidents WHERE status='active' "
                 "ORDER BY last_seen DESC LIMIT ?",
@@ -1666,7 +1672,7 @@ class ProactiveEngine:
 
     def incident(self, incident_id: str) -> dict[str, Any] | None:
         self.initialise()
-        with self.connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_incidents WHERE incident_id=?",
                 (incident_id,),
@@ -2045,7 +2051,7 @@ class ProactiveEngine:
         if notified:
             self.pipeline_counts["notifications"] += 1
         incident_id = str(decision.get("incident_id") or "")
-        with self.connection() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "UPDATE proactive_events SET decision_json=?,updated_at=? WHERE id=?",
                 (json.dumps(decision, separators=(",", ":")), now, event["id"]),
@@ -2094,7 +2100,7 @@ class ProactiveEngine:
         self.initialise()
         current = int(now or time.time())
         requester = normalise_user(user)
-        with self.connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """SELECT * FROM proactive_events
                    WHERE reply_until >= ? AND status = 'active'
@@ -2108,7 +2114,7 @@ class ProactiveEngine:
         self.initialise()
         current = int(now or time.time())
         requester = normalise_user(user)
-        with self.connection() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_events WHERE notified_at IS NOT NULL "
                 "AND notified_at >= ? AND target_user IN (?, 'all') "
@@ -2120,7 +2126,7 @@ class ProactiveEngine:
     def significant_brief(self, user: str) -> str:
         self.initialise()
         requester = normalise_user(user)
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT incident_id,last_event_id FROM proactive_incidents "
                 "WHERE status='active' AND notification_count > 0 "
@@ -2243,7 +2249,7 @@ class ProactiveEngine:
             "stop telling me that",
         }:
             self.update(event["id"], status="dismissed", updated_at=int(time.time()))
-            with self.connection() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     "INSERT OR REPLACE INTO initiative_suppressions(fingerprint,reason,created_at) VALUES(?,?,?)",
                     (event["fingerprint"], "explicit_user_feedback", int(time.time())),
@@ -2262,7 +2268,7 @@ class ProactiveEngine:
             feedback, response = "snoozed_15m", "I'll remind you in fifteen minutes."
         else:
             return None
-        with self.connection() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "INSERT INTO proactive_feedback(event_id,user_id,feedback,created_at) VALUES(?,?,?,?)",
                 (event["id"], normalise_user(user), feedback, int(time.time())),
@@ -2271,7 +2277,7 @@ class ProactiveEngine:
 
     def proposals(self, limit: int = 50) -> list[dict[str, Any]]:
         self.initialise()
-        with self.connection() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_proposals ORDER BY updated_at DESC LIMIT ?",
                 (max(1, min(250, int(limit))),),
@@ -2283,7 +2289,7 @@ class ProactiveEngine:
         if resolved not in {"approve", "reject"}:
             raise ValueError("Proposal action must be approve or reject")
         status = "approved" if resolved == "approve" else "rejected"
-        with self.connection() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE proactive_proposals SET status=?, updated_at=? WHERE id=?",
                 (status, int(time.time()), proposal_id),
@@ -2486,7 +2492,7 @@ class ProactiveEngine:
         safe = {key: value for key, value in fields.items() if key in statements}
         if not safe:
             return
-        with self.connection() as connection:
+        with self._connection() as connection:
             for key, value in safe.items():
                 connection.execute(
                     statements[key],

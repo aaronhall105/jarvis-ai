@@ -2,10 +2,11 @@ import asyncio
 import json
 import re
 import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from app.command_text import normalized_command
 from app.working_context import (
@@ -174,8 +175,13 @@ class DialogueManager:
         connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     def _initialise_database(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS dialogue_states (
@@ -237,7 +243,7 @@ class DialogueManager:
         return DialogueState(**values)
 
     def _get_sync(self, conversation_id: str) -> DialogueState:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT state_json FROM dialogue_states WHERE conversation_id = ?",
                 (conversation_id,),
@@ -258,7 +264,7 @@ class DialogueManager:
     ) -> list[DialogueState]:
         prefix = f"usr:{principal_id}:"
         escaped_prefix = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT conversation_id,state_json FROM dialogue_states "
                 "WHERE conversation_id LIKE ? ESCAPE '\\' ORDER BY updated_at DESC LIMIT ?",
@@ -300,7 +306,7 @@ class DialogueManager:
             state.as_dict(), ensure_ascii=False, separators=(",", ":"), default=str
         )
         event_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO dialogue_states (conversation_id, state_json, created_at, updated_at)
@@ -1265,7 +1271,7 @@ class DialogueManager:
         )
 
     def _delete_sync(self, conversation_id: str) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "DELETE FROM dialogue_states WHERE conversation_id = ?",
                 (conversation_id,),

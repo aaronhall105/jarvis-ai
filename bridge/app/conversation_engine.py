@@ -1,10 +1,11 @@
 import asyncio
 import sqlite3
+from contextlib import closing, contextmanager
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.response_presentation import present_user_response
 
@@ -81,8 +82,13 @@ class ConversationEngine:
 
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     def _initialise_database(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -142,7 +148,7 @@ class ConversationEngine:
 
     def _health_snapshot_sync(self) -> dict[str, object]:
         try:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 result = connection.execute("PRAGMA quick_check(1)").fetchone()
                 tables = {
                     str(row[0])
@@ -183,7 +189,7 @@ class ConversationEngine:
 
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 """
                 SELECT
@@ -251,7 +257,7 @@ class ConversationEngine:
         self,
         conversation_id: str,
     ) -> Conversation | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT
@@ -329,7 +335,7 @@ class ConversationEngine:
 
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             conversation = connection.execute(
                 """
                 SELECT conversation_id
@@ -506,7 +512,7 @@ class ConversationEngine:
     ) -> list[ConversationMessage]:
         safe_limit = max(1, min(limit, 200))
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT
@@ -583,7 +589,7 @@ class ConversationEngine:
     ) -> list[Conversation]:
         safe_limit = max(1, min(limit, 100))
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             if conversation_id_prefix is None:
                 rows = connection.execute(
                     """
@@ -639,7 +645,7 @@ class ConversationEngine:
 
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE conversations
@@ -677,7 +683,7 @@ class ConversationEngine:
 
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE conversations
@@ -710,7 +716,7 @@ class ConversationEngine:
         self,
         conversation_id: str,
     ) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 DELETE FROM conversations
@@ -734,7 +740,7 @@ class ConversationEngine:
         self,
         conversation_id: str,
     ) -> int:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT COUNT(*) AS total

@@ -6,10 +6,11 @@ import logging
 import os
 import re
 import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Iterator, Any, Callable, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.response_presentation import present_user_response
@@ -296,8 +297,13 @@ class ProactiveOrchestrator:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     def _initialise_database(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS proactive_meta (
@@ -369,7 +375,7 @@ class ProactiveOrchestrator:
             )
 
     def _meta_get_sync(self, key: str) -> str | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT value FROM proactive_meta WHERE key = ?",
                 (key,),
@@ -377,7 +383,7 @@ class ProactiveOrchestrator:
         return str(row["value"]) if row else None
 
     def _meta_set_sync(self, key: str, value: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO proactive_meta (key, value) VALUES (?, ?)
@@ -394,7 +400,7 @@ class ProactiveOrchestrator:
         actor: str = "orchestrator",
         details: dict[str, Any] | None = None,
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO proactive_audit (
@@ -1028,7 +1034,7 @@ class ProactiveOrchestrator:
         snoozed_until: str | None = None,
     ) -> int | None:
         now = self._iso(self._utc_now())
-        with self._connect() as connection:
+        with self._connection() as connection:
             try:
                 cursor = connection.execute(
                     """
@@ -1068,7 +1074,7 @@ class ProactiveOrchestrator:
             return int(cursor.lastrowid)
 
     def _get_alert_sync(self, alert_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_alerts WHERE alert_id = ?",
                 (int(alert_id),),
@@ -1097,7 +1103,7 @@ class ProactiveOrchestrator:
         next_escalation_at: str | None,
         reason: str,
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 UPDATE proactive_alerts
@@ -1229,7 +1235,7 @@ class ProactiveOrchestrator:
         due_at: str,
         payload: dict[str, Any],
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO proactive_conditions (
@@ -1260,14 +1266,14 @@ class ProactiveOrchestrator:
             )
 
     def _delete_condition_sync(self, condition_key: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "DELETE FROM proactive_conditions WHERE condition_key = ?",
                 (condition_key,),
             )
 
     def _due_conditions_sync(self, now_iso: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_conditions WHERE due_at <= ? ORDER BY due_at",
                 (now_iso,),
@@ -1368,7 +1374,7 @@ class ProactiveOrchestrator:
                 )
 
     def _snoozed_due_sync(self, now_iso: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM proactive_alerts
@@ -1403,7 +1409,7 @@ class ProactiveOrchestrator:
             await self._deliver(int(alert["alert_id"]), decision)
 
     def _escalations_due_sync(self, now_iso: str) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM proactive_alerts
@@ -1466,7 +1472,7 @@ class ProactiveOrchestrator:
         next_at: str | None,
         result: dict[str, Any],
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT channels_json FROM proactive_alerts WHERE alert_id = ?",
                 (alert_id,),
@@ -1498,7 +1504,7 @@ class ProactiveOrchestrator:
         )
 
     def _active_dedupe_sync(self, dedupe_key: str) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM proactive_alerts
@@ -1512,7 +1518,7 @@ class ProactiveOrchestrator:
         return row is not None
 
     def _recent_duplicate_sync(self, dedupe_key: str, since: str) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT alert_id, status, created_at FROM proactive_alerts
@@ -1530,7 +1536,7 @@ class ProactiveOrchestrator:
         if entity_id:
             keys.append(f"entity:{entity_id}")
         placeholders = ",".join("?" for _ in keys)
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "DELETE FROM proactive_suppressions WHERE until_at <= ?",
                 (now_iso,),
@@ -1548,7 +1554,7 @@ class ProactiveOrchestrator:
         reason: str,
         actor: str,
     ) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO proactive_suppressions (
@@ -1565,7 +1571,7 @@ class ProactiveOrchestrator:
 
     def _resolve_alerts_sync(self, dedupe_key: str, reason: str) -> int:
         now = self._iso(self._utc_now())
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE proactive_alerts
@@ -1579,7 +1585,7 @@ class ProactiveOrchestrator:
 
     def _resolve_event_type_sync(self, event_type: str, reason: str) -> int:
         now = self._iso(self._utc_now())
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE proactive_alerts
@@ -1592,7 +1598,7 @@ class ProactiveOrchestrator:
             return cursor.rowcount
 
     def _latest_actionable_sync(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM proactive_alerts
@@ -1608,7 +1614,7 @@ class ProactiveOrchestrator:
 
     def _acknowledge_sync(self, alert_id: int, actor: str) -> bool:
         now = self._iso(self._utc_now())
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE proactive_alerts
@@ -1623,7 +1629,7 @@ class ProactiveOrchestrator:
         return cursor.rowcount > 0
 
     def _set_snooze_sync(self, alert_id: int, until_at: str, reason: str) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE proactive_alerts
@@ -1781,7 +1787,7 @@ class ProactiveOrchestrator:
 
     async def status(self) -> dict[str, Any]:
         def counts() -> dict[str, int]:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 result = {
                     "total": int(
                         connection.execute("SELECT COUNT(*) FROM proactive_alerts").fetchone()[0]
@@ -1853,7 +1859,7 @@ class ProactiveOrchestrator:
                 clause = f"WHERE status IN ({','.join('?' for _ in values)})"
                 params.extend(values)
             params.append(safe_limit)
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     f"SELECT * FROM proactive_alerts {clause} ORDER BY created_at DESC, alert_id DESC LIMIT ?",
                     params,
@@ -1864,7 +1870,7 @@ class ProactiveOrchestrator:
 
     async def audit_log(self, limit: int = 100) -> list[dict[str, Any]]:
         def query() -> list[dict[str, Any]]:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     "SELECT * FROM proactive_audit ORDER BY created_at DESC, audit_id DESC LIMIT ?",
                     (max(1, min(int(limit), 500)),),
