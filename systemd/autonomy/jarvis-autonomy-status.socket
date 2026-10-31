@@ -1,0 +1,14 @@
+[Unit]
+Description=Read-only authenticated Jarvis Guardian status socket
+
+[Socket]
+ListenStream=/run/jarvis-autonomy-status/status.sock
+SocketUser=root
+SocketGroup=aaron
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+Backlog=16
+
+[Install]
+WantedBy=sockets.target

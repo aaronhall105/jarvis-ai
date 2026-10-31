@@ -1,0 +1,38 @@
+[Unit]
+Description=Read-only host-namespace Jarvis Guardian trust validation
+After=jarvis-autonomy-guardian.service
+Requires=jarvis-autonomy-status.socket
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-status/status.py
+Restart=no
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateUsers=no
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @reboot @swap @privileged
+TasksMax=8
+MemoryMax=64M
+CPUQuota=20%
+TimeoutStopSec=5
+StandardOutput=null
+StandardError=null

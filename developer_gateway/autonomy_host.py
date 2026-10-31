@@ -7,10 +7,12 @@ Developer authentication alone cannot authorize a Guardian transition.
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import struct
-import subprocess
+import time
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -77,9 +79,19 @@ def collect_report() -> tuple[dict[str, bool], tuple[str, ...]]:
             type(developer.get(field)) is bool
             for field in ("api_backend_healthy", "api_backend_configured")
         ):
-            readings["api_developer"] = (
-                developer["api_backend_healthy"] and developer["api_backend_configured"]
+            configured, healthy = (
+                developer["api_backend_configured"],
+                developer["api_backend_healthy"],
             )
+            observed = developer.get("api_backend_health")
+            if not configured:
+                readings["api_developer"] = False
+            elif healthy and observed in {None, "HEALTHY"}:
+                readings["api_developer"] = True
+            elif not healthy and observed == "UNHEALTHY":
+                readings["api_developer"] = False
+            # Legacy false, initial UNKNOWN, or contradictory observations are
+            # unavailable evidence, never a fabricated API failure or success.
         if "developer" not in readings or "api_developer" not in readings:
             unavailable.append("developer")
     except Exception:
@@ -88,20 +100,57 @@ def collect_report() -> tuple[dict[str, bool], tuple[str, ...]]:
 
 
 def guardian_status() -> dict[str, Any]:
+    unknown = {"state": "UNKNOWN", "trusted": False, "generation": None}
     try:
-        result = subprocess.run(
-            ["/usr/local/bin/jarvis-autonomy", "status"],
-            capture_output=True,
-            timeout=5,
-            check=True,
-            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-        )
-        body = json.loads(result.stdout)
-        if body.get("state") not in {"STOPPED", "ACTIVE"} or body.get("trusted") is not True:
+        challenge = b"JGS1" + secrets.token_bytes(32)
+        deadline = time.monotonic() + 3
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(3)
+            connection.connect("/run/jarvis-autonomy-status/status.sock")
+            pid, uid, gid = struct.unpack(
+                "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            )
+            # Socket activation preserves the LISTENING socket creator's kernel
+            # credentials: host system manager PID 1. Root UID/GID may appear as
+            # overflow IDs inside the user manager's mount/user sandbox. Neither
+            # root UID alone nor overflow UID alone is authentication.
+            if pid != 1 or uid not in {0, 65534} or gid not in {0, 65534}:
+                raise ValueError("Unauthenticated status endpoint")
+            connection.sendall(challenge)
+            connection.shutdown(socket.SHUT_WR)
+            raw = bytearray()
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError()
+                connection.settimeout(remaining)
+                chunk = connection.recv(293 - len(raw))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+                if len(raw) > 292:
+                    raise ValueError("Status too large")
+        if time.monotonic() >= deadline or raw[:36] != challenge:
+            raise ValueError("Stale status response")
+        body = json.loads(raw[36:], object_pairs_hook=_unique_fields)
+        if not isinstance(body, dict) or set(body) != {"state", "trusted", "generation"}:
+            raise ValueError("Invalid status fields")
+        if body["state"] not in {"STOPPED", "ACTIVE"} or body["trusted"] is not True:
             raise ValueError("Untrusted state")
+        if str(uuid.UUID(body["generation"])) != body["generation"]:
+            raise ValueError("Invalid generation")
         return {key: body[key] for key in ("state", "trusted", "generation")}
     except Exception:
-        return {"state": "UNKNOWN", "trusted": False}
+        return unknown
+
+
+def _unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate status field")
+        result[key] = value
+    return result
 
 
 def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
