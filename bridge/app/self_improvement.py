@@ -7,10 +7,11 @@ import logging
 import re
 import secrets
 import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
@@ -258,6 +259,11 @@ class SelfImprovementEngine:
         connection.execute("PRAGMA busy_timeout = 30000")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     @staticmethod
     def _ensure_candidate_transaction_columns(
         connection: sqlite3.Connection,
@@ -330,7 +336,7 @@ class SelfImprovementEngine:
 
     def _initialise_database(self) -> None:
         now = self._utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS improvement_settings (
@@ -555,7 +561,7 @@ class SelfImprovementEngine:
         return "low"
 
     def _setting_sync(self, key: str, default: str = "") -> str:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT value FROM improvement_settings WHERE key = ?",
                 (key,),
@@ -566,7 +572,7 @@ class SelfImprovementEngine:
         return await asyncio.to_thread(self._setting_sync, key, default)
 
     def _set_setting_sync(self, key: str, value: str) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 INSERT INTO improvement_settings (key, value, updated_at)
@@ -624,7 +630,7 @@ class SelfImprovementEngine:
         tone: dict[str, Any],
         failure_like: bool,
     ) -> int:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO improvement_interactions (
@@ -749,7 +755,7 @@ class SelfImprovementEngine:
         return item
 
     def _get_interaction_sync(self, interaction_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM improvement_interactions WHERE interaction_id = ?",
                 (interaction_id,),
@@ -771,7 +777,7 @@ class SelfImprovementEngine:
             + "ORDER BY interaction_id DESC LIMIT 1"
         )
         params: tuple[Any, ...] = (conversation_id, before_id) if before_id else (conversation_id,)
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(query, params).fetchone()
         return self._interaction_from_row(row) if row else None
 
@@ -829,7 +835,7 @@ class SelfImprovementEngine:
             },
             "correction": self.redact_text(correction or "") or None,
         }
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT failure_id, occurrences, status FROM improvement_failures WHERE signature = ?",
                 (signature,),
@@ -924,7 +930,7 @@ class SelfImprovementEngine:
 
     def _queue_failure_sync(self, failure_id: int) -> tuple[bool, int | None, str]:
         now = self._utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             failure = connection.execute(
                 "SELECT status FROM improvement_failures WHERE failure_id = ?",
                 (failure_id,),
@@ -1104,7 +1110,7 @@ class SelfImprovementEngine:
             params.append(status)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(max(1, min(limit, 200)))
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._failure_from_row(row) for row in rows]
 
@@ -1114,7 +1120,7 @@ class SelfImprovementEngine:
         return await asyncio.to_thread(self._list_failures_sync, limit, status)
 
     def _get_failure_sync(self, failure_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM improvement_failures WHERE failure_id = ?",
                 (failure_id,),
@@ -1132,7 +1138,7 @@ class SelfImprovementEngine:
             params.append(status)
         query += " ORDER BY updated_at DESC LIMIT ?"
         params.append(max(1, min(limit, 200)))
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(query, tuple(params)).fetchall()
         return [self._candidate_from_row(row) for row in rows]
 
@@ -1143,7 +1149,7 @@ class SelfImprovementEngine:
 
     async def list_archived_candidates(self, limit: int = 50):
         def load():
-            with self._connect() as connection:
+            with self._connection() as connection:
                 rows = connection.execute(
                     "SELECT * FROM improvement_candidates "
                     "WHERE archived_at IS NOT NULL "
@@ -1156,7 +1162,7 @@ class SelfImprovementEngine:
 
     def _set_candidate_archived_sync(self, candidate_id: int, archived: bool):
         now = self._utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT status FROM improvement_candidates WHERE candidate_id = ?",
                 (candidate_id,),
@@ -1187,7 +1193,7 @@ class SelfImprovementEngine:
         return result
 
     def _get_candidate_sync(self, candidate_id: int) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM improvement_candidates WHERE candidate_id = ?",
                 (candidate_id,),
@@ -1208,7 +1214,7 @@ class SelfImprovementEngine:
         return item
 
     def _last_failure_sync(self) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM improvement_failures
@@ -1247,7 +1253,7 @@ class SelfImprovementEngine:
             fields.append("error = ?")
             values.append(error)
         values.append(candidate_id)
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 f"UPDATE improvement_candidates SET {', '.join(fields)} WHERE candidate_id = ?",
                 tuple(values),
@@ -1281,7 +1287,7 @@ class SelfImprovementEngine:
     ]:
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
@@ -1408,7 +1414,7 @@ class SelfImprovementEngine:
     ]:
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
@@ -1686,7 +1692,7 @@ class SelfImprovementEngine:
     ]:
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
@@ -1853,7 +1859,7 @@ class SelfImprovementEngine:
     ]:
         now = self._utc_now()
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
 
             row = connection.execute(
@@ -2056,7 +2062,7 @@ class SelfImprovementEngine:
         }
 
     def _audit_log_sync(self, limit: int) -> list[dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 """
                 SELECT audit_id, created_at, event_type, actor, failure_id,
@@ -2086,7 +2092,7 @@ class SelfImprovementEngine:
         details: dict[str, Any] | None = None,
     ) -> None:
         def _write() -> None:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 connection.execute(
                     """
                     INSERT INTO improvement_audit (
@@ -2108,7 +2114,7 @@ class SelfImprovementEngine:
 
     def _mark_recent_failure_confirmed_resolved_sync(self, conversation_id: str) -> None:
         now = self._utc_now()
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT failure_id FROM improvement_failures

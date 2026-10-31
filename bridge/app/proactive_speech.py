@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from contextlib import closing, contextmanager
 import time
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Iterator, Any, Awaitable, Callable
 
 from app.runtime_observability import runtime_metrics
 
@@ -155,10 +156,15 @@ class ProactiveSpeechCoordinator:
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     def initialise(self) -> None:
         if self._initialised:
             return
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS proactive_speech_lifecycle (
@@ -272,7 +278,7 @@ class ProactiveSpeechCoordinator:
         fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.initialise()
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_speech_lifecycle WHERE event_id=?", (event_id,)
             ).fetchone()
@@ -336,7 +342,7 @@ class ProactiveSpeechCoordinator:
 
     def _reconcile_restart(self) -> None:
         now = self.now_fn()
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT event_id,lifecycle_state,freshness_deadline,resume_until,importance "
                 "FROM proactive_speech_lifecycle WHERE lifecycle_state NOT IN ('COMPLETED','DROPPED','CANCELLED')"
@@ -369,7 +375,7 @@ class ProactiveSpeechCoordinator:
     def queue(self, request: SpeechQueueRequest) -> dict[str, Any]:
         self.initialise()
         now = self.now_fn()
-        with self._connect() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 "SELECT * FROM proactive_speech_lifecycle WHERE dedupe_key=? "
                 "AND lifecycle_state NOT IN ('COMPLETED','DROPPED','CANCELLED') "
@@ -447,7 +453,7 @@ class ProactiveSpeechCoordinator:
 
     def get(self, event_id: str) -> dict[str, Any] | None:
         self.initialise()
-        with self._connect() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT * FROM proactive_speech_lifecycle WHERE event_id=?", (event_id,)
             ).fetchone()
@@ -460,7 +466,7 @@ class ProactiveSpeechCoordinator:
             if active_only
             else ""
         )
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 f"SELECT * FROM proactive_speech_lifecycle {clause} "
                 "ORDER BY importance DESC,created_at LIMIT ?",
@@ -470,7 +476,7 @@ class ProactiveSpeechCoordinator:
 
     def transitions(self, event_id: str) -> list[dict[str, Any]]:
         self.initialise()
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM proactive_speech_transitions WHERE event_id=? "
                 "ORDER BY transition_id",
@@ -556,7 +562,7 @@ class ProactiveSpeechCoordinator:
                 started = await self.start_speech(item, replay)
                 if not started.accepted:
                     # Keep the item eligible for a bounded later cycle without claiming speech.
-                    with self._connect() as connection:
+                    with self._connection() as connection:
                         connection.execute(
                             "UPDATE proactive_speech_lifecycle SET retry_count=retry_count+1,"
                             "state_reason='endpoint_start_rejected',updated_at=? WHERE event_id=?",

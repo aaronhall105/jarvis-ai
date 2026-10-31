@@ -7,10 +7,11 @@ import json
 import logging
 import re
 import sqlite3
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterator, Any, Iterable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.home_assistant import HomeAssistantClient
@@ -179,8 +180,13 @@ class HouseAwarenessEngine:
         connection.execute("PRAGMA synchronous = NORMAL")
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._connect()) as connection, connection:
+            yield connection
+
     def _initialise_database(self) -> None:
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS house_events (
@@ -798,7 +804,7 @@ class HouseAwarenessEngine:
     ) -> int | None:
         # Suppress duplicate integration updates for the same physical change.
         cutoff = self._iso(self._utc_now() - timedelta(seconds=4))
-        with self._connect() as connection:
+        with self._connection() as connection:
             duplicate = connection.execute(
                 """
                 SELECT event_id FROM house_events
@@ -846,7 +852,7 @@ class HouseAwarenessEngine:
 
     def _prune_sync(self) -> None:
         cutoff = self._iso(self._utc_now() - timedelta(days=self.retention_days))
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute("DELETE FROM house_events WHERE occurred_at < ?", (cutoff,))
 
     @staticmethod
@@ -920,7 +926,7 @@ class HouseAwarenessEngine:
             + " AND ".join(clauses)
             + " ORDER BY occurred_at DESC, event_id DESC LIMIT ?"
         )
-        with self._connect() as connection:
+        with self._connection() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._row_to_event(row) for row in rows]
 
@@ -1006,7 +1012,7 @@ class HouseAwarenessEngine:
         )
 
     def _mark_delivered_sync(self, event_id: int) -> bool:
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "UPDATE house_events SET proactive_delivered = 1 WHERE event_id = ?",
                 (int(event_id),),
@@ -1018,7 +1024,7 @@ class HouseAwarenessEngine:
 
     async def status(self) -> dict[str, Any]:
         def counts() -> tuple[int, int]:
-            with self._connect() as connection:
+            with self._connection() as connection:
                 total = int(connection.execute("SELECT COUNT(*) FROM house_events").fetchone()[0])
                 candidates = int(
                     connection.execute(

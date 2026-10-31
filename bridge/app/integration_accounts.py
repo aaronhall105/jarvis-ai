@@ -9,11 +9,12 @@ import json
 import os
 import secrets
 import sqlite3
+from contextlib import closing, contextmanager
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -193,11 +194,16 @@ class IntegrationAccountStore:
             raise
         return connection
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        with closing(self._db()) as connection, connection:
+            yield connection
+
     async def initialize(self) -> None:
         await asyncio.to_thread(self._initialize_sync)
 
     def _initialize_sync(self) -> None:
-        with self._db() as connection:
+        with self._connection() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS integration_accounts (
@@ -292,7 +298,7 @@ class IntegrationAccountStore:
             purpose=self._oauth_purpose(session_id),
         )
         scopes = tuple(dict.fromkeys(str(item).strip() for item in requested_scopes if item))
-        with self._db() as connection:
+        with self._connection() as connection:
             connection.execute(
                 "DELETE FROM integration_oauth_sessions WHERE expires_at<?",
                 (_iso(created - timedelta(days=1)),),
@@ -342,7 +348,7 @@ class IntegrationAccountStore:
         if not state or len(state) < 32 or len(state) > 512 or not state.isascii():
             raise OAuthSessionError("OAuth state is missing or malformed")
         now = _utc_now()
-        with self._db() as connection:
+        with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM integration_oauth_sessions WHERE state_hash=?",
@@ -383,7 +389,7 @@ class IntegrationAccountStore:
         return await asyncio.to_thread(self._oauth_session_sync, session_id, principal_id)
 
     def _oauth_session_sync(self, session_id: str, principal_id: str) -> OAuthSession | None:
-        with self._db() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM integration_oauth_sessions
@@ -410,7 +416,7 @@ class IntegrationAccountStore:
     def _finish_oauth_session_sync(
         self, session_id: str, status: str, error: str | None, account_id: str | None
     ) -> None:
-        with self._db() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
                 UPDATE integration_oauth_sessions
@@ -478,7 +484,7 @@ class IntegrationAccountStore:
         credentials: dict[str, Any],
     ) -> str:
         now = _iso()
-        with self._db() as connection:
+        with self._connection() as connection:
             existing = connection.execute(
                 """
                 SELECT account_id FROM integration_accounts
@@ -540,7 +546,7 @@ class IntegrationAccountStore:
     def _account_sync(
         self, principal_id: str, provider: str, account_id: str | None
     ) -> sqlite3.Row | None:
-        with self._db() as connection:
+        with self._connection() as connection:
             if account_id:
                 return connection.execute(
                     """
@@ -563,7 +569,7 @@ class IntegrationAccountStore:
         return await asyncio.to_thread(self._account_credentials_sync, account_id)
 
     def _account_credentials_sync(self, account_id: str) -> dict[str, Any]:
-        with self._db() as connection:
+        with self._connection() as connection:
             row = connection.execute(
                 "SELECT encrypted_credentials FROM integration_accounts WHERE account_id=?",
                 (account_id,),
@@ -600,7 +606,7 @@ class IntegrationAccountStore:
             purpose=self._account_purpose(account_id),
         )
         now = _iso()
-        with self._db() as connection:
+        with self._connection() as connection:
             if scopes is not None:
                 connection.execute(
                     """
@@ -681,7 +687,7 @@ class IntegrationAccountStore:
         reauthorization_required: bool,
     ) -> None:
         now = _iso()
-        with self._db() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
                 UPDATE integration_accounts
@@ -704,7 +710,7 @@ class IntegrationAccountStore:
         return await asyncio.to_thread(self._delete_account_sync, principal_id, account_id)
 
     def _delete_account_sync(self, principal_id: str, account_id: str) -> bool:
-        with self._db() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 "DELETE FROM integration_accounts WHERE principal_id=? AND account_id=?",
                 (principal_id, account_id),
@@ -716,7 +722,7 @@ class IntegrationAccountStore:
 
     def _database_health_sync(self) -> dict[str, Any]:
         try:
-            with self._db() as connection:
+            with self._connection() as connection:
                 quick = connection.execute("PRAGMA quick_check(1)").fetchone()
                 schema = connection.execute(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name LIKE 'integration_%'"
