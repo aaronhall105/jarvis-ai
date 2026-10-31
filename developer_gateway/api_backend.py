@@ -93,6 +93,9 @@ class OpenAIResponsesDeveloperBackend:
         return {
             "api_backend_configured": self.configured,
             "api_backend_healthy": self.healthy,
+            "api_backend_health": "HEALTHY"
+            if self.healthy
+            else ("UNHEALTHY" if self.provider_unavailable else "UNKNOWN"),
             "active_jobs": sum(not job.done() for job in self.jobs.values()),
             "waiting_for_approval": sum(t["status"] == "waiting_approval" for t in threads),
             "failed_jobs": sum(t["status"] in {"failed", "paused"} for t in threads),
