@@ -136,9 +136,7 @@ def test_host_entry_rejects_unprivileged_or_wrong_user_namespace(monkeypatch):
     monkeypatch.setattr(service.os, "geteuid", lambda: 1000)
     assert service.main() == 1
     monkeypatch.setattr(service.os, "geteuid", lambda: 0)
-    monkeypatch.setattr(
-        service.os, "stat", lambda path: SimpleNamespace(st_ino=1 if "self" in path else 2)
-    )
+    monkeypatch.setattr(Path, "read_text", lambda self: "0 1000 1")
     assert service.main() == 1
 
 
@@ -157,10 +155,12 @@ def test_new_units_keep_status_read_only_and_separate():
         "PrivateNetwork=true",
         "RestrictAddressFamilies=AF_UNIX",
         "StandardOutput=null",
+        "OpenFile=/proc/self/ns/user:guardian-host-userns:read-only",
     ):
         assert setting in unit
     assert "ReadWritePaths=" not in unit
     assert "SocketUser=root" in socket_unit and "SocketMode=0660" in socket_unit
     assert "SocketGroup=aaron" in socket_unit
+    assert "FileDescriptorName=guardian-status" in socket_unit
     assert service.SOCKET in socket_unit
     assert "operator.sock" not in unit + socket_unit

@@ -3,6 +3,7 @@ Description=Read-only authenticated Jarvis Guardian status socket
 
 [Socket]
 ListenStream=/run/jarvis-autonomy-status/status.sock
+FileDescriptorName=guardian-status
 SocketUser=root
 SocketGroup=aaron
 SocketMode=0660

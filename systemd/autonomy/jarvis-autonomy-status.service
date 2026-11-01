@@ -8,6 +8,8 @@ Type=simple
 User=root
 Group=root
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-status/status.py
+# Open in the system manager, before the service loses ptrace capabilities.
+OpenFile=/proc/self/ns/user:guardian-host-userns:read-only
 Restart=no
 UMask=0077
 NoNewPrivileges=true
