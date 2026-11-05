@@ -115,34 +115,34 @@ def _safe_failure_reason(value: Any) -> str | None:
     return "Saved failure details withheld for privacy"
 
 
-def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool]:
+def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool, bool]:
     state = str(row["state"] or "")
     tool = row["tool"] if row["tool"] in _TOOLS else None
     if state == "uncertain":
-        return "uncertain", tool, True
+        return "uncertain", tool, True, False
     if state == "recoverable":
-        return "uncertain", tool, tool not in _READ_ONLY_TOOLS
+        return "uncertain", tool, tool not in _READ_ONLY_TOOLS, False
     if state == "pending":
-        return "uncertain", tool, False
+        return "uncertain", tool, False, False
     if state != "completed":
-        return "uncertain", tool, tool not in _READ_ONLY_TOOLS
+        return "uncertain", tool, tool not in _READ_ONLY_TOOLS, False
     try:
         result = json.loads(row["result"])
     except (TypeError, ValueError, RecursionError):
-        return "failed", tool, False
+        return "failed", tool, False, True
     if isinstance(result, dict):
         if result.get("ok") is False:
-            return "failed", tool, False
+            return "failed", tool, False, False
         if result.get("ok") is True:
-            return "completed", tool, False
+            return "completed", tool, False, False
         if (
             tool == "read_file"
             and isinstance(result.get("sha256"), str)
             and re.fullmatch(r"[0-9a-f]{64}", result["sha256"])
             and isinstance(result.get("text"), str)
         ):
-            return "completed", tool, False
-        return "failed", tool, False
+            return "completed", tool, False, False
+        return "failed", tool, False, True
     if (
         tool == "search"
         and isinstance(result, list)
@@ -154,8 +154,8 @@ def _tool_outcome(row: sqlite3.Row) -> tuple[str, str | None, bool]:
             for entry in result
         )
     ):
-        return "completed", tool, False
-    return "failed", tool, False
+        return "completed", tool, False, False
+    return "failed", tool, False, True
 
 
 def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> SessionSummary:
@@ -188,6 +188,7 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
     completed_tools = failed_tools = uncertain_tools = 0
     last_tool = None
     manual_reconciliation = False
+    malformed_persisted_result = False
     try:
         calls = connection.execute(
             "SELECT tool,state,result FROM calls WHERE thread=? ORDER BY id", (row["id"],)
@@ -197,7 +198,7 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
         manual_reconciliation = True
         warnings.append("Could not read calls table")
     for call in calls:
-        outcome, tool, reconcile = _tool_outcome(call)
+        outcome, tool, reconcile, malformed_result = _tool_outcome(call)
         if outcome == "completed":
             completed_tools += 1
         elif outcome == "failed":
@@ -207,6 +208,9 @@ def _session_from_row(row: sqlite3.Row, connection: sqlite3.Connection) -> Sessi
         if tool:
             last_tool = tool
         manual_reconciliation = manual_reconciliation or reconcile
+        malformed_persisted_result = malformed_persisted_result or malformed_result
+    if malformed_persisted_result:
+        warnings.append("Malformed persisted tool result")
     if raw_status == "failed" and not failure_reason:
         warnings.append("Failed session without recorded safe error")
     if raw_status not in _STATUSES:

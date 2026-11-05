@@ -400,6 +400,7 @@ def test_malformed_completed_result_is_not_reported_successful(tmp_path, result)
     summary = load_recent_sessions(database).sessions[0]
     assert summary.failed_tools == 1
     assert summary.completed_tools == 0
+    assert summary.warnings.count("Malformed persisted tool result") == 1
 
 
 def test_cancelled_status_and_gateway_vocabulary_are_supported(tmp_path):
