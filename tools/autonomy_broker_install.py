@@ -56,6 +56,11 @@ SERVICES = (
     "jarvis-autonomy-broker-development-admission.service",
 )
 
+# The only legacy installation accepted by the narrowly-scoped upgrade path.
+# These values are reviewed bundle identities, not user-selectable versions.
+LEGACY_BUNDLE = "a85bd8e7e907b38a51ce10e724c13d9bb9744c87e1e5ba9ce5396c1669b9133f"
+UPGRADE_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
+
 
 def payload() -> dict[Path, tuple[bytes, int]]:
     files = {
@@ -236,6 +241,183 @@ def checked_existing(files: dict, policy: dict) -> tuple[str, dict]:
             if parent.exists():
                 g.trusted(parent, directory=True)
     return "UPGRADE_GUARDIAN_ONLY", {}
+
+
+def _verified_legacy_install(files: dict) -> dict:
+    """Verify the one known installed broker before an executable upgrade."""
+    marker = BASE / "installed.json"
+    if marker.is_symlink() or not marker.is_file():
+        raise Denied("upgrade_source_marker_missing")
+    g.trusted(marker)
+    try:
+        previous = json.loads(marker.read_text())
+    except (OSError, ValueError) as error:
+        raise Denied("upgrade_source_marker_invalid") from error
+    if previous.get("version") != 1 or previous.get("bundle") != LEGACY_BUNDLE:
+        raise Denied("upgrade_source_bundle_not_reviewed")
+    recorded = previous.get("files")
+    if not isinstance(recorded, dict) or not recorded:
+        raise Denied("upgrade_source_manifest_invalid")
+    private = BASE / "docker-client/config.json"
+    legacy_paths = {
+        str(POLICY),
+        str(private),
+        str(DROPIN),
+        str(LIB / "entry.py"),
+        str(LIB / "deploy_unified_core.sh"),
+        str(LIB / "tools/__init__.py"),
+        *(
+            str(LIB / "tools" / (name + ".py"))
+            for name in MODULES
+            if name != "supervised_development_broker"
+        ),
+        *(str(UNITS / name) for name in UNIT_NAMES if "development-admission" not in name),
+    }
+    if set(recorded) != legacy_paths:
+        raise Denied("upgrade_source_manifest_invalid")
+    for name, digest in recorded.items():
+        path = Path(name)
+        g.trusted(path)
+        if path.is_symlink() or not path.is_file():
+            raise Denied("upgrade_source_payload_missing")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise Denied("upgrade_source_payload_modified")
+    return previous
+
+
+def _stage(path: Path, data: bytes, mode: int, directory: Path) -> Path:
+    fd, name = tempfile.mkstemp(prefix=".upgrade-stage-", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+        return Path(name)
+    except BaseException:
+        Path(name).unlink(missing_ok=True)
+        raise
+
+
+def upgrade(files: dict, policy: dict) -> None:
+    """Migrate only the reviewed legacy broker to the development-admission bundle."""
+    if (
+        os.geteuid() != 0
+        or os.getenv("SUDO_USER") != "aaron"
+        or os.getenv("SUDO_UID") != str(policy["operator_uid"])
+    ):
+        raise Denied("local_operator_sudo_required")
+    if fingerprint(files) != UPGRADE_BUNDLE:
+        raise Denied("upgrade_destination_bundle_not_reviewed")
+    previous = _verified_legacy_install(files)
+    controller = g.Guardian()
+    controller.integrity()
+    if controller.status().get("state") != "STOPPED":
+        raise Denied("guardian_must_be_trusted_stopped")
+    guardian_marker = controller.base / "installed.json"
+    guardian_before = guardian_marker.read_bytes()
+    staged: dict[Path, Path] = {}
+    backups: dict[Path, Path] = {}
+    created_dirs: list[Path] = []
+    replaced: list[Path] = []
+    marker = BASE / "installed.json"
+    entries = dict(files)
+    entries[POLICY] = (canonical(policy), 0o644)
+    # Preserve the existing private broker configuration and its recorded hash.
+    private = BASE / "docker-client/config.json"
+    if private.is_symlink() or not private.is_file():
+        raise Denied("upgrade_private_configuration_missing")
+    private_digest = hashlib.sha256(private.read_bytes()).hexdigest()
+    old_private_digest = previous["files"].get(str(private))
+    if private_digest != old_private_digest:
+        raise Denied("upgrade_private_configuration_modified")
+    new_digests = {
+        str(path): hashlib.sha256(data).hexdigest() for path, (data, _) in entries.items()
+    }
+    new_digests[str(private)] = private_digest
+    new_marker = canonical({"version": 1, "bundle": UPGRADE_BUNDLE, "files": new_digests})
+    try:
+        for directory, mode_bits in (
+            (LIB / "tools", 0o755),
+            (BASE / "development-admission", 0o700),
+            (JOBS, 0o755),
+        ):
+            if not directory.exists():
+                directory.mkdir(mode=mode_bits)
+                directory.chmod(mode_bits)
+                created_dirs.append(directory)
+            g.trusted(directory, directory=True)
+        for path, (data, mode_bits) in entries.items():
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise Denied("upgrade_destination_path_invalid")
+            staged[path] = _stage(path, data, mode_bits, path.parent)
+        marker_stage = _stage(marker, new_marker, 0o644, marker.parent)
+        staged[marker] = marker_stage
+        # Stop all broker roles before replacing executable payloads, preventing
+        # mixed-version execution. No application data or ledgers are touched.
+        command(["/usr/bin/systemctl", "disable", "--now", *SOCKETS[:2]])
+        command(["/usr/bin/systemctl", "stop", *SERVICES[:2]])
+        for path, staged_path in staged.items():
+            if path.exists():
+                backups[path] = _stage(
+                    path, path.read_bytes(), path.stat().st_mode & 0o777, path.parent
+                )
+            os.replace(staged_path, path)
+            replaced.append(path)
+        old_manifest = json.loads(guardian_before)
+        old_manifest["files"].update(new_digests)
+        old_manifest["files"][str(marker)] = hashlib.sha256(new_marker).hexdigest()
+        with controller.lock():
+            replace_manifest(guardian_marker, canonical(old_manifest))
+        command(["/usr/bin/systemd-analyze", "verify", *[str(UNITS / name) for name in UNIT_NAMES]])
+        command(["/usr/bin/systemctl", "daemon-reload"])
+        command(["/usr/bin/systemctl", "enable", "--now", *SOCKETS])
+        controller.integrity()
+        if controller.status().get("state") != "STOPPED":
+            raise Denied("upgrade_did_not_remain_stopped")
+    except BaseException:
+        # Restore only executable payloads and manifests; retain all broker data,
+        # audit records and ledgers for reconciliation.
+        try:
+            command(["/usr/bin/systemctl", "disable", "--now", *SOCKETS])
+            command(["/usr/bin/systemctl", "stop", *SERVICES])
+        finally:
+            for path in reversed(replaced):
+                backup = backups.get(path)
+                if backup and backup.exists():
+                    os.replace(backup, path)
+                else:
+                    path.unlink(missing_ok=True)
+            if guardian_marker.exists():
+                replace_manifest(guardian_marker, guardian_before)
+            for path in staged.values():
+                path.unlink(missing_ok=True)
+            for path in backups.values():
+                path.unlink(missing_ok=True)
+            for directory in reversed(created_dirs):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            command(["/usr/bin/systemctl", "daemon-reload"])
+            command(["/usr/bin/systemctl", "enable", "--now", *SOCKETS[:2]])
+        raise
+    finally:
+        for path in staged.values():
+            path.unlink(missing_ok=True)
+        for path in backups.values():
+            path.unlink(missing_ok=True)
+    print("Protected broker upgraded; development admission endpoint installed; autonomy STOPPED.")
+
+
+def existing_upgrade_policy() -> dict:
+    if POLICY.is_symlink() or not POLICY.is_file():
+        raise Denied("upgrade_policy_missing")
+    g.trusted(POLICY)
+    value = json.loads(POLICY.read_text())
+    if value.get("version") != 1 or value.get("autonomy_uid") != g.identity():
+        raise Denied("broker_identity_changed")
+    return value
 
 
 def verify_guardian_audit(controller) -> None:
@@ -442,12 +624,16 @@ def install(files: dict, policy: dict) -> None:
 
 
 def main(args: list[str]) -> int:
-    if args not in ([], ["--check"], ["--repair-public-manifest"]):
+    if args not in ([], ["--check"], ["--upgrade"], ["--repair-public-manifest"]):
         return 2
     try:
         files = payload()
         if args == ["--repair-public-manifest"]:
             repair_public_manifest(files)
+            return 0
+        if args == ["--upgrade"]:
+            policy = existing_upgrade_policy()
+            upgrade(files, policy)
             return 0
         policy = reviewed_policy(files)
         mode, _ = checked_existing(files, policy)
