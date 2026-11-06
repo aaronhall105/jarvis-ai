@@ -111,6 +111,15 @@ def test_guardian_only_upgrade_and_repeat_are_safe(rehearsal):
     assert not list(paths["BASE"].rglob("*credential*"))
 
 
+def test_payload_contains_development_admission_endpoint(rehearsal):
+    files, _policy, _controller, _commands, _original, _paths = rehearsal
+    assert any(path.name == "supervised_development_broker.py" for path in files)
+    assert any(path.name == "jarvis-autonomy-broker-development-admission.socket" for path in files)
+    assert any(
+        path.name == "jarvis-autonomy-broker-development-admission.service" for path in files
+    )
+
+
 def test_modified_protected_payload_refused(rehearsal):
     files, policy, controller, _, _, _ = rehearsal
     installer.install(files, policy)
