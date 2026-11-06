@@ -12,6 +12,8 @@ import hashlib
 import json
 import re
 import sqlite3
+import socket
+import struct
 import time
 import uuid
 from pathlib import Path
@@ -31,11 +33,13 @@ _SECRET = re.compile(
     r"(?i)[\"']?(?:authorization\s*:\s*bearer|api[_-]?key|password|secret|token|cookie)[\"']?\s*[:=]\s*[\"']?\S+"
 )
 _MAX_JSON = 64_000
+_MAX_ADMISSION_RESPONSE = 16_384
+ADMISSION_SOCKET = "/run/jarvis-autonomy-broker/development-admission.sock"
 _TRANSITIONS = {
     PROPOSED: {APPROVAL_REQUESTED, FAILED},
-    APPROVAL_REQUESTED: {FAILED},
+    APPROVAL_REQUESTED: {RUNNING, FAILED},
     RUNNING: {REVIEW_PENDING, FAILED, RECONCILIATION_REQUIRED},
-    REVIEW_PENDING: {REVIEW_REQUIRED, FAILED},
+    REVIEW_PENDING: {REVIEW_REQUIRED, FAILED, RECONCILIATION_REQUIRED},
     REVIEW_REQUIRED: set(),
     FAILED: set(),
     RECONCILIATION_REQUIRED: set(),
@@ -196,8 +200,66 @@ class SupervisedDevelopmentController:
             raise
 
     def start(self, task_id: str, *, current_base_sha: str) -> None:
-        del task_id, current_base_sha
-        raise LifecycleError("trusted_execution_admission_unavailable")
+        """Admit execution only after the installed protected broker attests it.
+
+        The socket path is intentionally fixed.  Callers cannot provide a
+        verifier, authority object, or alternate endpoint.  The production
+        broker endpoint is a separately installed protected capability; until
+        it exists this method fails closed.
+        """
+        row = self._task(task_id)
+        if row["state"] != APPROVAL_REQUESTED:
+            raise LifecycleError("execution_admission_denied")
+        parameters = json.loads(row["parameters"])
+        try:
+            approval = json.loads(row["approval"] or "")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LifecycleError("malformed_approval") from exc
+        if not isinstance(approval, dict) or not isinstance(approval.get("request_ref"), str):
+            raise LifecycleError("malformed_approval")
+        request = {
+            "task_id": task_id,
+            "approval_id": approval["request_ref"],
+            "source_sha": parameters["base_sha"],
+            "parameters_sha256": hashlib.sha256(str(row["parameters"]).encode()).hexdigest(),
+            "allowed_paths": parameters["allowed_paths"],
+            "provider": parameters["provider"],
+            "model": parameters["model"],
+            "max_calls": parameters["max_calls"],
+            "max_cost_usd": parameters["max_cost_usd"],
+            "deadline_seconds": parameters["deadline_seconds"],
+        }
+        if current_base_sha != request["source_sha"]:
+            raise LifecycleError("source_drift_before_admission")
+        try:
+            response = _request_protected_admission(request)
+        except LifecycleError:
+            raise
+        except Exception as exc:
+            raise LifecycleError("trusted_execution_admission_unavailable") from exc
+        _validate_admission_response(response, request)
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            current = self._task(task_id)
+            if current["state"] != APPROVAL_REQUESTED:
+                raise LifecycleError("execution_admission_race")
+            if (
+                current["parameters"] != row["parameters"]
+                or hashlib.sha256(str(current["parameters"]).encode()).hexdigest()
+                != request["parameters_sha256"]
+            ):
+                raise LifecycleError("execution_parameters_changed")
+            self.db.execute(
+                "UPDATE tasks SET state=?,started_at=?,updated_at=? WHERE id=? AND state=?",
+                (RUNNING, _now(), _now(), task_id, APPROVAL_REQUESTED),
+            )
+            if self.db.execute("SELECT changes()").fetchone()[0] != 1:
+                raise LifecycleError("execution_admission_race")
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
 
     def _check_deadline(self, task_id: str) -> None:
         row = self._task(task_id)
@@ -275,9 +337,23 @@ class SupervisedDevelopmentController:
         )
         self._transition(task_id, REVIEW_PENDING)
 
+    def record_review(self, task_id: str, *, review: dict[str, Any]) -> None:
+        row = self._task(task_id)
+        if row["state"] != REVIEW_PENDING:
+            raise LifecycleError("review_not_allowed")
+        if review.get("verified") is not True or not review.get("checks"):
+            raise LifecycleError("independent_review_unverified")
+        current = json.loads(row["evidence"] or "{}")
+        current["independent_review"] = review
+        self.db.execute(
+            "UPDATE tasks SET evidence=?,updated_at=? WHERE id=?",
+            (_json(current), _now(), task_id),
+        )
+        self._transition(task_id, REVIEW_REQUIRED)
+
     def recover_after_restart(self, task_id: str) -> str:
         row = self._task(task_id)
-        if row["state"] == RUNNING:
+        if row["state"] in {RUNNING, REVIEW_PENDING}:
             self._transition(task_id, RECONCILIATION_REQUIRED)
         return str(self._task(task_id)["state"])
 
@@ -291,3 +367,67 @@ class SupervisedDevelopmentController:
             "evidence": json.loads(row["evidence"]) if row["evidence"] else None,
             "provider_calls": row["provider_calls"],
         }
+
+
+def _request_protected_admission(request: dict[str, Any]) -> dict[str, Any]:
+    """Exchange a bounded request with the fixed root-owned broker endpoint."""
+    raw = _json(request).encode("ascii")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect(ADMISSION_SOCKET)
+        credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        _, uid, _ = struct.unpack("3i", credentials)
+        if uid != 0:
+            raise LifecycleError("untrusted_admission_peer")
+        connection.sendall(struct.pack("!I", len(raw)) + raw)
+        header = connection.recv(4)
+        if len(header) != 4:
+            raise LifecycleError("malformed_admission_response")
+        size = struct.unpack("!I", header)[0]
+        if size <= 0 or size > _MAX_ADMISSION_RESPONSE:
+            raise LifecycleError("admission_response_size")
+        payload = b""
+        while len(payload) < size:
+            chunk = connection.recv(size - len(payload))
+            if not chunk:
+                raise LifecycleError("truncated_admission_response")
+            payload += chunk
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("malformed_admission_response") from exc
+    if not isinstance(value, dict):
+        raise LifecycleError("malformed_admission_response")
+    return value
+
+
+def _validate_admission_response(response: dict[str, Any], request: dict[str, Any]) -> None:
+    required = {
+        "status",
+        "authority",
+        "task_id",
+        "approval_id",
+        "source_sha",
+        "parameters_sha256",
+        "allowed_paths",
+        "provider",
+        "model",
+        "max_calls",
+        "max_cost_usd",
+        "deadline_seconds",
+        "expires_at",
+        "guardian_generation",
+    }
+    if set(response) != required or response.get("status") != "approved":
+        raise LifecycleError("invalid_admission_attestation")
+    if response.get("authority") != "jarvis-autonomy-broker":
+        raise LifecycleError("untrusted_admission_authority")
+    for key, value in request.items():
+        if response.get(key) != value:
+            raise LifecycleError("admission_parameters_mismatch")
+    if type(response["expires_at"]) is not int or response["expires_at"] <= _now():
+        raise LifecycleError("expired_admission_attestation")
+    try:
+        uuid.UUID(str(response["guardian_generation"]))
+    except (ValueError, AttributeError):
+        raise LifecycleError("invalid_admission_generation") from None

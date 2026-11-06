@@ -244,7 +244,7 @@ def test_service_profiles_have_no_worker_privilege_grant():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[2]
-    for role in ("worker", "operator"):
+    for role in ("worker", "operator", "development-admission"):
         text = (root / f"systemd/autonomy/jarvis-autonomy-broker-{role}.service").read_text()
         assert "NoNewPrivileges=true" in text and "ProtectSystem=strict" in text
         assert "ExecStart=/usr/bin/python3 -I /usr/local/libexec/" in text

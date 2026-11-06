@@ -40,6 +40,10 @@ from tools.autonomy_broker_operator import OperatorDispatcher
 from tools.autonomy_broker_release import ComposeRelease
 from tools.autonomy_broker_snapshot import materialize_snapshot, read_source_tree
 from tools.autonomy_broker_store import Records
+from tools.supervised_development_broker import (
+    DevelopmentAdmissionBroker,
+    serve_admission_connection,
+)
 
 LIB = Path("/usr/local/libexec/jarvis-autonomy-broker")
 BASE = Path("/var/lib/jarvis-autonomy-broker")
@@ -82,6 +86,18 @@ def emergency_stop() -> None:
         response = json.loads(receive(connection))
         if response.get("ok") is not True or response.get("result", {}).get("state") != "STOPPED":
             raise Denied("emergency_stop_unconfirmed")
+
+
+def forward_development_approval(raw: bytes) -> dict:
+    """Forward a signed approval from the protected operator service only."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(5)
+        connection.connect("/run/jarvis-autonomy-broker/development-admission.sock")
+        connection.sendall(struct.pack("!I", len(raw)) + raw)
+        response = json.loads(receive(connection))
+    if "error" in response:
+        raise Denied("development_approval_denied")
+    return response
 
 
 def health(sha: str, *, quiet: bool = False) -> bool:
@@ -410,6 +426,26 @@ def serve(role: str, policy: dict) -> None:
     expected = "/run/jarvis-autonomy-broker/" + role + ".sock"
     if listener.family != socket.AF_UNIX or listener.getsockname() != expected:
         raise Denied("wrong_socket")
+    if role == "development-admission":
+        ledger = Ledger(BASE / role / "operations.sqlite3")
+        admission_broker = DevelopmentAdmissionBroker(
+            ledger,
+            relay_uid=0,
+            worker_uid=policy["autonomy_uid"],
+            public_keys={
+                key: base64.b64decode(value, validate=True)
+                for key, value in policy["operator_public_keys"].items()
+            },
+            guardian=guardian_status,
+        )
+        try:
+            while True:
+                connection, _ = listener.accept()
+                with connection:
+                    serve_admission_connection(connection, admission_broker)
+        finally:
+            ledger.close()
+        return
     ledger = Ledger(BASE / role / "operations.sqlite3")
     if role == "worker":
         runtime = Runtime(policy, Records(BASE / "records"), ledger)
@@ -452,6 +488,7 @@ def serve(role: str, policy: dict) -> None:
                 lambda: guardian_module.fixed_systemctl("start", guardian_module.UNIT),
                 expected_generation=epoch,
             ),
+            development_approve=forward_development_approval,
         )
 
         def dispatch(raw, actor):
@@ -476,7 +513,7 @@ def main(arguments: list[str]) -> int:
         return 1
     try:
         policy = installed_policy()
-        if arguments in (["worker"], ["operator"]):
+        if arguments in (["worker"], ["operator"], ["development-admission"]):
             serve(arguments[0], policy)
         elif len(arguments) == 2 and arguments[0] == "release":
             release_entry(arguments[1], policy)

@@ -1,0 +1,41 @@
+[Unit]
+Description=Protected signed Jarvis development-admission broker
+Requires=jarvis-autonomy-guardian.service
+After=jarvis-autonomy-guardian.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py development-admission
+Restart=on-failure
+RestartSec=1
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/jarvis-autonomy-broker
+ReadOnlyPaths=/var/lib/jarvis-autonomy-guardian /etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+TasksMax=32
+MemoryMax=128M
+CPUQuota=50%
+TimeoutStopSec=20
+KillMode=mixed
+StandardOutput=null
+StandardError=journal

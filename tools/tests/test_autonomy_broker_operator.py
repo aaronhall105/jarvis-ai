@@ -179,3 +179,14 @@ def test_worker_cannot_obtain_completed_operator_receipt(operator, signed):
     dispatcher.dispatch(canonical(signed[0]), 1000)
     with pytest.raises(Denied, match="operator_peer_denied"):
         dispatcher.dispatch(canonical(signed[0]), 995)
+
+
+def test_development_approval_is_forwarded_only_through_operator_peer(operator):
+    dispatcher, _, _ = operator
+    received = []
+    dispatcher.development_approve = lambda raw: received.append(raw) or {"status": "approved"}
+    raw = canonical({"action": "approve_development", "signature": "opaque"})
+    assert dispatcher.dispatch(raw, 1000) == {"status": "approved"}
+    assert received == [raw]
+    with pytest.raises(Denied, match="operator_peer_denied"):
+        dispatcher.dispatch(raw, 995)

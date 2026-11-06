@@ -56,7 +56,7 @@ def test_approval_request_is_durable_but_cannot_execute(tmp_path):
 def test_missing_or_wrong_approval_request_is_rejected(tmp_path):
     controller = make_controller(tmp_path)
     task = make_task(controller)
-    with pytest.raises(LifecycleError, match="trusted_execution_admission_unavailable"):
+    with pytest.raises(LifecycleError, match="execution_admission_denied"):
         controller.start(task, current_base_sha=SHA)
     with pytest.raises(LifecycleError, match="approval_parameters_mismatch"):
         controller.record_approval_request(
@@ -100,7 +100,7 @@ def test_modified_state_cannot_grant_execution(tmp_path):
     controller = make_controller(tmp_path)
     task = make_task(controller)
     controller.db.execute("UPDATE tasks SET state='APPROVED' WHERE id=?", (task,))
-    with pytest.raises(LifecycleError, match="trusted_execution_admission_unavailable"):
+    with pytest.raises(LifecycleError, match="execution_admission_denied"):
         controller.start(task, current_base_sha=SHA)
     assert controller.snapshot(task)["provider_calls"] == 0
 
@@ -112,7 +112,7 @@ def test_malformed_request_is_not_execution_authority(tmp_path):
         "UPDATE tasks SET state=?,approval=? WHERE id=?",
         (APPROVAL_REQUESTED, "not-json", task),
     )
-    with pytest.raises(LifecycleError, match="trusted_execution_admission_unavailable"):
+    with pytest.raises(LifecycleError, match="malformed_approval"):
         controller.start(task, current_base_sha=SHA)
 
 

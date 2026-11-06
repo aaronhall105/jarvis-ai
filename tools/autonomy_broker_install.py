@@ -37,15 +37,24 @@ MODULES = (
     "autonomy_broker_snapshot",
     "autonomy_broker_store",
     "autonomy_guardian",
+    "supervised_development_broker",
 )
 UNIT_NAMES = tuple(
     "jarvis-autonomy-broker-" + role + suffix
-    for role in ("worker", "operator")
+    for role in ("worker", "operator", "development-admission")
     for suffix in (".service", ".socket")
 )
 DROPIN = UNITS / "jarvis-autonomy.service.d/broker.conf"
-SOCKETS = ("jarvis-autonomy-broker-operator.socket", "jarvis-autonomy-broker-worker.socket")
-SERVICES = ("jarvis-autonomy-broker-operator.service", "jarvis-autonomy-broker-worker.service")
+SOCKETS = (
+    "jarvis-autonomy-broker-operator.socket",
+    "jarvis-autonomy-broker-worker.socket",
+    "jarvis-autonomy-broker-development-admission.socket",
+)
+SERVICES = (
+    "jarvis-autonomy-broker-operator.service",
+    "jarvis-autonomy-broker-worker.service",
+    "jarvis-autonomy-broker-development-admission.service",
+)
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -360,6 +369,7 @@ def install(files: dict, policy: dict) -> None:
             (BASE / "snapshots", 0o700),
             (BASE / "worker", 0o700),
             (BASE / "operator", 0o700),
+            (BASE / "development-admission", 0o700),
             (BASE / "docker-client", 0o700),
             (JOBS, 0o755),
             (DROPIN.parent, 0o755),
