@@ -210,6 +210,79 @@ def test_public_guardian_status_does_not_require_private_broker_reads(rehearsal,
     assert private.stat().st_mode & 0o777 == 0o600
 
 
+def _make_legacy_install(rehearsal, monkeypatch):
+    files, policy, controller, commands, original, paths = rehearsal
+    installer.install(files, policy)
+    marker = paths["BASE"] / "installed.json"
+    current = json.loads(marker.read_bytes())
+    development = {
+        str(path)
+        for path in files
+        if "development-admission" in str(path) or path.name == "supervised_development_broker.py"
+    }
+    for path in development:
+        Path(path).unlink()
+        current["files"].pop(path, None)
+    current["bundle"] = installer.LEGACY_BUNDLE
+    marker.write_bytes(canonical(current))
+    guardian_marker = controller.base / "installed.json"
+    guardian = json.loads(guardian_marker.read_bytes())
+    for path in development:
+        guardian["files"].pop(path, None)
+    guardian["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(guardian))
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+    return files, policy, controller, commands, paths
+
+
+def test_reviewed_legacy_upgrade_adds_development_endpoint_atomically(rehearsal, monkeypatch):
+    files, policy, controller, commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    installer.upgrade(files, policy)
+    assert controller.status()["state"] == "STOPPED"
+    assert all(path.exists() for path in files)
+    upgraded = json.loads((paths["BASE"] / "installed.json").read_bytes())
+    assert upgraded["bundle"] == installer.UPGRADE_BUNDLE
+    assert any("development-admission" in name for name in upgraded["files"])
+    assert all("docker-client/config.json" not in str(call) for call in commands.call_args_list)
+
+
+def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkeypatch):
+    files, policy, controller, commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["bundle"] = "unreviewed"
+    marker.write_bytes(canonical(value))
+    before = marker.read_bytes()
+    commands.reset_mock()
+    with pytest.raises(Denied, match="upgrade_source_bundle_not_reviewed"):
+        installer.upgrade(files, policy)
+    assert marker.read_bytes() == before
+    assert controller.status()["state"] == "STOPPED"
+    commands.assert_not_called()
+
+
+def test_upgrade_activation_failure_restores_payload_and_manifest(rehearsal, monkeypatch):
+    files, policy, controller, _, paths = _make_legacy_install(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    before_marker = marker.read_bytes()
+    before_guardian = (controller.base / "installed.json").read_bytes()
+    calls = []
+
+    def fail_activation(argv):
+        calls.append(argv)
+        if "enable" in argv and "development-admission.socket" in " ".join(argv):
+            raise OSError("synthetic activation failure")
+
+    monkeypatch.setattr(installer, "command", fail_activation)
+    with pytest.raises(OSError, match="synthetic activation failure"):
+        installer.upgrade(files, policy)
+    assert marker.read_bytes() == before_marker
+    assert (controller.base / "installed.json").read_bytes() == before_guardian
+    assert controller.status()["state"] == "STOPPED"
+    assert not any(path.exists() for path in files if "development-admission" in str(path))
+    assert calls
+
+
 @pytest.fixture
 def legacy_private_manifest(rehearsal, monkeypatch):
     from tools.autonomy_broker_store import Records
