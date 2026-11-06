@@ -68,6 +68,8 @@ public final class AutonomyActivity extends Activity {
             heading("WHAT I'M DOING"); text(current.optString("doing"));
             text(AutonomyPresentation.progress(state));
         }
+        JSONObject developmentTask = state.optJSONObject("development_task");
+        if (developmentTask != null) renderDevelopmentTask(developmentTask);
         heading("WHAT I'M PLANNING");
         JSONArray plans = state.optJSONArray("plans");
         if (plans == null || plans.length() == 0) text("No evidence-backed plans yet.");
@@ -142,6 +144,32 @@ public final class AutonomyActivity extends Activity {
                     busy = false;
                     if (error != null) new AlertDialog.Builder(this).setMessage(error).setPositiveButton("OK", null).show();
                     refresh(); // Never optimistically flip ACTIVE/STOPPED.
+                });
+            }).show();
+    }
+
+    private void renderDevelopmentTask(JSONObject task) {
+        heading("OWNER REVIEW REQUIRED");
+        text(task.optString("goal", "A bounded development task is waiting for your review."));
+        text("Source: " + task.optString("source_sha") + "\nFiles: " + task.optJSONArray("allowed_paths")
+            + "\nModel: " + task.optString("model") + "\nMaximum cost: $" + task.optString("max_cost_usd")
+            + "\nDeadline: " + task.optString("deadline_seconds") + " seconds");
+        button("Authorize this development task", () -> confirmDevelopment(task));
+    }
+
+    private void confirmDevelopment(JSONObject task) {
+        if (state == null || busy) return;
+        new AlertDialog.Builder(this).setTitle("Authorize one development task?")
+            .setMessage("Review the exact goal, source, files, model, cost and deadline above. "
+                + "Your Android Keystore key will sign this task only; it will not activate Guardian.")
+            .setNegativeButton("Cancel", null).setPositiveButton("Authorize", (dialog, which) -> {
+                busy = true;
+                client.approveDevelopment(task, (result, error) -> {
+                    busy = false;
+                    new AlertDialog.Builder(this)
+                        .setMessage(error == null ? "Approval submitted. Guardian activation remains separate." : error)
+                        .setPositiveButton("OK", null).show();
+                    refresh();
                 });
             }).show();
     }

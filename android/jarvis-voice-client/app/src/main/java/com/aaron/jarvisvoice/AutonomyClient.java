@@ -34,6 +34,15 @@ final class AutonomyClient implements AutoCloseable {
         });
     }
 
+    void approveDevelopment(JSONObject task, Callback callback) {
+        executor.execute(() -> {
+            try { execute("/control", AutonomyControl.signedDevelopment(task), callback); }
+            catch (Exception ignored) {
+                deliver(callback, null, "The development approval could not be created. Nothing was authorized.");
+            }
+        });
+    }
+
     private void request(String path, JSONObject body, Callback callback) {
         executor.execute(() -> execute(path, body, callback));
     }
