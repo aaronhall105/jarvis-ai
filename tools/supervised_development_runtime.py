@@ -110,16 +110,33 @@ class GovernorCandidateSource:
 
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
-        rows = self.db.execute(
-            """
-            SELECT c.candidate_id, c.status, c.summary, c.failure_id,
-                   f.summary AS failure_summary, f.evidence_json, f.status AS failure_status
-            FROM improvement_candidates c
-            JOIN improvement_failures f ON f.failure_id = c.failure_id
-            WHERE c.status='queued' AND f.status IN ('queued','recorded')
-            ORDER BY c.candidate_id ASC
-            """
-        ).fetchall()
+        try:
+            rows = self.db.execute(
+                """
+                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
+                       c.development_scope_json, f.summary AS failure_summary,
+                       f.evidence_json, f.status AS failure_status
+                FROM improvement_candidates c
+                JOIN improvement_failures f ON f.failure_id = c.failure_id
+                WHERE c.status='queued' AND f.status IN ('queued','recorded')
+                ORDER BY c.candidate_id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc).lower():
+                raise
+            rows = self.db.execute(
+                """
+                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
+                       '{}' AS development_scope_json,
+                       f.summary AS failure_summary, f.evidence_json,
+                       f.status AS failure_status
+                FROM improvement_candidates c
+                JOIN improvement_failures f ON f.failure_id = c.failure_id
+                WHERE c.status='queued' AND f.status IN ('queued','recorded')
+                ORDER BY c.candidate_id ASC
+                """
+            ).fetchall()
         for row in rows:
             candidate_id = int(row["candidate_id"])
             if candidate_id in excluded:
@@ -131,6 +148,17 @@ class GovernorCandidateSource:
                 continue
             if not isinstance(evidence, dict) or not evidence:
                 continue
+            try:
+                scope = json.loads(row["development_scope_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(scope, dict) and scope:
+                # Scope attribution is candidate-local so the original
+                # Governor failure evidence remains immutable.  The binding
+                # must point back to the exact preserved failure record.
+                if scope.get("evidence_failure_id") != int(row["failure_id"]):
+                    continue
+                evidence = {**evidence, **scope}
             if len(summary) < 3:
                 continue
             if not self._is_scope_eligible(summary, evidence):

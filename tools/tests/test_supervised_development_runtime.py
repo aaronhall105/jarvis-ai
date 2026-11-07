@@ -200,6 +200,35 @@ def test_candidate_selection_survives_read_only_restart(tmp_path):
         second.close()
 
 
+def test_candidate_scope_metadata_binds_preserved_failure_evidence(tmp_path):
+    database = tmp_path / "governor.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.executescript(
+            """
+            CREATE TABLE improvement_failures(
+                failure_id INTEGER PRIMARY KEY, summary TEXT, evidence_json TEXT, status TEXT
+            );
+            CREATE TABLE improvement_candidates(
+                candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT,
+                summary TEXT, development_scope_json TEXT NOT NULL DEFAULT '{}'
+            );
+            INSERT INTO improvement_failures VALUES
+                (9,'Slow response','{"source":{"interaction_id":9}}','queued');
+            INSERT INTO improvement_candidates VALUES
+                (42,9,'queued','Reduce latency',
+                 '{"scope":"application","evidence_failure_id":9,"affected_files":["app/latency.py"]}');
+            """
+        )
+    source = GovernorCandidateSource(database)
+    try:
+        selected = source.next()
+        assert selected is not None
+        assert selected["candidate_id"] == 42
+        assert selected["allowed_paths"] == ("app/latency.py",)
+    finally:
+        source.close()
+
+
 def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
     evidence = {
         "scope": "application",

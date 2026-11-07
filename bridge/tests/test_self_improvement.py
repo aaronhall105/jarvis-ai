@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -85,6 +87,83 @@ async def test_explicit_correction_records_and_queues_failure(
     candidates = await engine.list_candidates()
     assert len(candidates) == 1
     assert candidates[0]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_evidenced_candidate_binds_existing_failure_without_rewriting_evidence(
+    tmp_path: Path,
+    actor: UserContext,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    tracked = source_root / "app" / "latency.py"
+    tracked.parent.mkdir()
+    tracked.write_text("def measure():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source_root)], check=True)
+    subprocess.run(["git", "-C", str(source_root), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(source_root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base"],
+        check=True,
+    )
+    engine = SelfImprovementEngine(
+        str(tmp_path / "improvement.db"),
+        enabled=True,
+        auto_prepare=False,
+        development_source_root=str(source_root),
+    )
+    interaction_id = await engine.observe_interaction(
+        conversation_id="usr:aaron:evidence",
+        actor=actor,
+        raw_text="The request was slow",
+        result={
+            "success": True,
+            "response": "ok",
+            "intent": "general",
+            "calls": [],
+            "timings": {"jarvis_request_total_ms": 9000},
+        },
+    )
+    failure = await engine.get_failure(1)
+    assert failure is not None
+    original = json.dumps(failure["evidence"], sort_keys=True)
+    ok, candidate_id, status = await engine.prepare_evidenced_improvement(
+        failure_id=1,
+        affected_files=["app/latency.py"],
+        summary="Reduce measured request latency",
+        actor="owner",
+    )
+    assert (ok, status) == (True, "queued")
+    assert candidate_id is not None
+    unchanged = await engine.get_failure(1)
+    assert unchanged is not None
+    assert json.dumps(unchanged["evidence"], sort_keys=True) == original
+    candidate = (await engine.list_candidates())[0]
+    scope = json.loads(candidate["development_scope_json"])
+    assert scope["evidence_failure_id"] == 1
+    assert scope["affected_files"] == ["app/latency.py"]
+
+
+@pytest.mark.asyncio
+async def test_evidenced_candidate_rejects_untracked_or_missing_failure(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    engine = SelfImprovementEngine(
+        str(tmp_path / "improvement.db"),
+        enabled=True,
+        auto_prepare=False,
+        development_source_root=str(source_root),
+    )
+    ok, candidate_id, message = await engine.prepare_evidenced_improvement(
+        failure_id=999,
+        affected_files=["app/missing.py"],
+        summary="Should fail closed",
+        actor="owner",
+    )
+    assert ok is False
+    assert candidate_id is None
+    assert "eligible" in message.lower()
 
 
 @pytest.mark.asyncio
