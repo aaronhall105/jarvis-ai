@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -112,3 +113,33 @@ def test_bounded_worker_fails_closed_when_cost_cannot_be_bounded(tmp_path):
     with pytest.raises(LifecycleError, match="pricing"):
         worker.run(_task(sha))
     assert called is False
+
+
+def test_openai_transport_disables_sdk_retries_and_makes_one_request(monkeypatch):
+    calls = []
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                output_text='{"protocol_version":1,"explanation":"ok","edits":[]}',
+                usage=SimpleNamespace(input_tokens=3, output_tokens=2, reasoning_tokens=0),
+            )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["max_retries"] == 0
+            assert kwargs["timeout"] == 7
+            self.responses = FakeResponses()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only")
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeClient))
+    worker = BoundedDevelopmentWorker(
+        Path("."), worktree_root=Path("."), input_price_per_million=1, output_price_per_million=1
+    )
+    text, usage = worker._openai_call("{}", "gpt-5.3-codex", 7)
+    assert len(calls) == 1
+    assert calls[0]["model"] == "gpt-5.3-codex"
+    assert calls[0]["store"] is False
+    assert usage["input_tokens"] == 3
+    assert '"edits":[]' in text
