@@ -140,9 +140,35 @@ class BoundedDevelopmentWorker:
         remaining = int(deadline - time.monotonic())
         if remaining <= 0:
             return {"passed": False, "checks": [], "error": "deadline_expired"}
+        changed = self._run_git("diff", "--name-only", "HEAD", cwd=workspace).splitlines()
+        changed = [path for path in changed if path]
+        test_targets = sorted(
+            path
+            for path in changed
+            if "/tests/" in f"/{path}/"
+            or path.startswith("tests/")
+            or Path(path).name.startswith("test_")
+        )
+        for path in changed:
+            stem = Path(path).stem
+            if stem.startswith("test_"):
+                continue
+            candidates = {
+                f"test_{stem}.py",
+                f"tests/test_{stem}.py",
+                f"{Path(path).parent}/tests/test_{stem}.py",
+            }
+            test_targets.extend(
+                str(candidate)
+                for candidate in candidates
+                if (workspace / candidate).is_file()
+            )
+        test_targets = sorted(set(test_targets))
+        if not test_targets:
+            return {"passed": False, "checks": [], "error": "no_relevant_tests_discovered"}
         commands = [
-            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *task.allowed_paths[1:]],
-            [sys.executable, "-m", "ruff", "check", "--no-cache", *task.allowed_paths],
+            [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *test_targets],
+            [sys.executable, "-m", "ruff", "check", "--no-cache", *changed],
         ]
         results: list[dict[str, Any]] = []
         verification_env = {**os.environ, "PYTHONPATH": str(workspace)}

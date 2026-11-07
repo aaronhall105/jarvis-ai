@@ -15,7 +15,6 @@ import sqlite3
 import subprocess
 import time
 import uuid
-import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -88,7 +87,7 @@ class GovernorCandidateSource:
         approved diagnostics files and the summary must describe diagnostics
         work; free-form conversation text or a candidate ID is never enough.
         """
-        if not isinstance(evidence, dict):
+        if not isinstance(evidence, dict) or evidence.get("scope") != "application":
             return False
         paths = evidence.get("affected_files")
         if not isinstance(paths, list) or not paths:
@@ -105,12 +104,9 @@ class GovernorCandidateSource:
             return False
         if len(set(paths)) != len(paths):
             return False
-        return bool(
-            re.search(
-                r"(?i)diagnostic|developer\s+(?:tool|result)|malformed\s+result|failed\s+count",
-                summary,
-            )
-        )
+        # Evidence, not wording, establishes scope.  The summary may describe
+        # voice, routing, performance, tools or any other supported component.
+        return bool(summary.strip())
 
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
