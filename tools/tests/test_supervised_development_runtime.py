@@ -10,9 +10,16 @@ from tools import supervised_development_controller as controller_module
 from tools.supervised_development_controller import SupervisedDevelopmentController
 from tools.supervised_development_runtime import (
     GovernorCandidateSource,
+    GOVERNOR_DATABASE,
     SupervisedDevelopmentRuntime,
 )
 from tools.supervised_development_worker import BoundedDevelopmentWorker
+
+
+def test_governor_source_is_the_authoritative_core_data_mount():
+    assert GOVERNOR_DATABASE == Path(
+        "/home/aaron/.local/share/jarvis-runtime/data/jarvis_improvement.db"
+    )
 
 
 def _source(tmp_path: Path) -> tuple[Path, str]:
@@ -59,6 +66,7 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
     controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
     source_reader = GovernorCandidateSource(governor_db)
     generation = str(uuid.uuid4())
+    active_generation = str(uuid.uuid4())
     active = {"calls": 0}
     stopped = []
     guardian_state = {"state": "STOPPED"}
@@ -67,10 +75,14 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
         active["calls"] += 1
         if active["calls"] == 2 and guardian_state["state"] == "STOPPED":
             guardian_state["state"] = "ACTIVE"
+        current_generation = (
+            generation if guardian_state["state"] == "STOPPED" else active_generation
+        )
         return {
             "state": guardian_state["state"],
             "trusted": True,
-            "generation": generation,
+            "generation": current_generation,
+            **({"previous_generation": generation} if guardian_state["state"] == "ACTIVE" else {}),
         }
 
     def admit(request):
@@ -79,7 +91,7 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
             "status": "approved",
             "authority": "jarvis-autonomy-broker",
             "expires_at": request.get("expires_at", 0) or 2_000_000_000,
-            "guardian_generation": generation,
+            "guardian_generation": active_generation,
         }
 
     monkeypatch.setattr(controller_module, "_request_protected_admission", admit)

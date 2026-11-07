@@ -40,7 +40,10 @@ from tools.supervised_development_pipeline import (
 from tools.supervised_development_review import TrustedReviewRunner
 
 
-GOVERNOR_DATABASE = CANONICAL / "data/jarvis_improvement.db"
+# Core's authoritative /app/data is the protected host bind mount below.  The
+# repository has no trusted Governor database and must never be used as a
+# substitute or populated copy.
+GOVERNOR_DATABASE = Path("/home/aaron/.local/share/jarvis-runtime/data/jarvis_improvement.db")
 WORKTREE_ROOT = Path("/var/lib/jarvis-autonomy-broker/worktrees")
 ALLOWED_PATHS = (
     "tools/developer_session_diagnostics.py",
@@ -326,7 +329,10 @@ class SupervisedDevelopmentRuntime:
                 if (
                     current_status.get("state") == "ACTIVE"
                     and current_status.get("trusted") is True
-                    and current_status.get("generation") == task.guardian_generation
+                    and (
+                        current_status.get("generation") == task.guardian_generation
+                        or current_status.get("previous_generation") == task.guardian_generation
+                    )
                 ):
                     execution_active = True
                     try:

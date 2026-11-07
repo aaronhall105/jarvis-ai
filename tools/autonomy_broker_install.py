@@ -75,7 +75,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 CURRENT_BUNDLE = "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
 # This is the fingerprint of the complete payload at this source revision,
 # including the fixed controller/publication database contract.
-UPGRADE_BUNDLE = "15e630dfdc123961d90fdf17044285c42732f17df2a1c889febca924873ebb42"
+UPGRADE_BUNDLE = "8f52ece5e7c0dbb832c984dda863aa697b1f71a1db48d5c481e123775dee4230"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -406,8 +406,12 @@ def upgrade(files: dict, policy: dict) -> None:
         source_bundle = json.loads(marker.read_text()).get("bundle")
     if source_bundle == LEGACY_BUNDLE:
         previous = _verified_legacy_install(files)
+        managed_sockets = SOCKETS[:3]
+        managed_services = SERVICES[:3]
     elif source_bundle == CURRENT_BUNDLE:
         previous = _verified_current_install(files)
+        managed_sockets = SOCKETS
+        managed_services = SERVICES
     else:
         raise Denied("upgrade_source_bundle_not_reviewed")
     controller = g.Guardian()
@@ -467,8 +471,10 @@ def upgrade(files: dict, policy: dict) -> None:
         staged[marker] = marker_stage
         # Stop all broker roles before replacing executable payloads, preventing
         # mixed-version execution. No application data or ledgers are touched.
-        command(["/usr/bin/systemctl", "disable", "--now", *SOCKETS[:2]])
-        command(["/usr/bin/systemctl", "stop", *SERVICES[:2]])
+        # Stop every unit belonging to the source bundle before replacing any
+        # executable, preventing mixed-version broker execution.
+        command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
+        command(["/usr/bin/systemctl", "stop", *managed_services])
         for path, staged_path in staged.items():
             if path.exists():
                 backups[path] = _stage(
@@ -491,8 +497,8 @@ def upgrade(files: dict, policy: dict) -> None:
         # Restore only executable payloads and manifests; retain all broker data,
         # audit records and ledgers for reconciliation.
         try:
-            command(["/usr/bin/systemctl", "disable", "--now", *SOCKETS])
-            command(["/usr/bin/systemctl", "stop", *SERVICES])
+            command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
+            command(["/usr/bin/systemctl", "stop", *managed_services])
         finally:
             for path in reversed(replaced):
                 backup = backups.get(path)
@@ -516,7 +522,7 @@ def upgrade(files: dict, policy: dict) -> None:
                 except OSError:
                     pass
             command(["/usr/bin/systemctl", "daemon-reload"])
-            command(["/usr/bin/systemctl", "enable", "--now", *SOCKETS[:2]])
+            command(["/usr/bin/systemctl", "enable", "--now", *managed_sockets])
         raise
     finally:
         for path in staged.values():

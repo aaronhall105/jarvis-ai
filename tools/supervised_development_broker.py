@@ -201,14 +201,15 @@ class DevelopmentAdmissionBroker:
             return json.loads(row[2])
         if approval["expires_at"] <= int(time.time()):
             raise Denied("development_approval_expired")
-        if not self._guardian_active(approval["guardian_generation"]):
+        active_generation = self._guardian_active(approval["guardian_generation"])
+        if active_generation is None:
             raise Denied("guardian_not_active")
         receipt = {
             **request,
             "status": "approved",
             "authority": "jarvis-autonomy-broker",
             "expires_at": approval["expires_at"],
-            "guardian_generation": approval["guardian_generation"],
+            "guardian_generation": active_generation,
         }
         with self.ledger.db:
             self.ledger.event(
@@ -226,16 +227,22 @@ class DevelopmentAdmissionBroker:
             )
         return receipt
 
-    def _guardian_active(self, generation: str) -> bool:
+    def _guardian_active(self, generation: str) -> str | None:
         try:
             status = self.guardian()
         except Exception:
             return False
-        return (
-            status.get("trusted") is True
-            and status.get("state") == "ACTIVE"
-            and status.get("generation") == generation
-        )
+        if status.get("trusted") is not True or status.get("state") != "ACTIVE":
+            return None
+        if status.get("generation") == generation:
+            return str(status["generation"])
+        # Guardian rotates its generation on STOPPED -> ACTIVE.  The signed
+        # approval binds the pre-activation generation; accepting only the
+        # immediately preceding generation preserves that binding while
+        # rejecting stale approvals after any later STOP/ACTIVE cycle.
+        if status.get("previous_generation") == generation:
+            return str(status["generation"])
+        return None
 
 
 def serve_admission_connection(
