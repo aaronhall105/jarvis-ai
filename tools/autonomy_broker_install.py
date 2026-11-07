@@ -73,7 +73,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # This is the fingerprint of the complete payload at this source revision.
 # The earlier fe48533... value belonged to the pre-read-only-controller bundle
 # and must not be accepted for the current tracked payload.
-UPGRADE_BUNDLE = "b36dfe3dff5473c39e6a8c2d31b88f418b3beab3b5afa5476b4a399aaebf904c"
+UPGRADE_BUNDLE = "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:

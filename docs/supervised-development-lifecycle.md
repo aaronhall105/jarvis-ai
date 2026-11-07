@@ -67,7 +67,7 @@ version-bound migration, `python3 tools/autonomy_broker_install.py --upgrade`.
 It accepts only the recorded installed bundle
 `b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb` and the
 current tracked destination payload
-`b36dfe3dff5473c39e6a8c2d31b88f418b3beab3b5afa5476b4a399aaebf904c`.
+`5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3`.
 The earlier `fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788`
 fingerprint represented the pre-read-only-controller payload and is rejected.
 
