@@ -203,17 +203,24 @@ async def test_non_streaming_tool_response_recovers_from_output_budget_exhaustio
         voice_mode=False,
     )
 
+    performance_timings: dict[str, int] = {}
     result = await engine._create_response(
         input_items=[{"role": "user", "content": "switch the device off"}],
         tool_definitions=[{"type": "function", "name": "search_home", "parameters": {}}],
         actor=actor,
         force_tool_name="search_home",
+        performance_timings=performance_timings,
     )
 
     assert result is completed
     assert create.await_count == 2
     assert create.await_args_list[0].kwargs["max_output_tokens"] == 240
     assert create.await_args_list[1].kwargs["max_output_tokens"] == 740
+    assert performance_timings["model_preparation_ms"] >= 0
+    assert performance_timings["provider_request_ms"] >= 0
+    assert (
+        performance_timings["provider_completion_ms"] >= performance_timings["provider_request_ms"]
+    )
 
 
 def test_reasoning_configuration_is_documented_input_item_not_ws_event() -> None:
