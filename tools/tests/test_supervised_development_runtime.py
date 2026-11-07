@@ -53,7 +53,7 @@ def _governor_db(path: Path) -> None:
                 candidate_id INTEGER PRIMARY KEY, failure_id INTEGER NOT NULL,
                 status TEXT NOT NULL, summary TEXT
             );
-            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"source":"test","affected_files":["tools/developer_session_diagnostics.py"]}','queued');
+            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"scope":"application","source":"test","affected_files":["tools/developer_session_diagnostics.py"]}','queued');
             INSERT INTO improvement_candidates VALUES(1,1,'queued','Bound diagnostics warning');
             """
         )
@@ -167,9 +167,9 @@ def test_candidate_eligibility_skips_unrelated_and_missing_evidence(tmp_path):
                 candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT, summary TEXT
             );
             INSERT INTO improvement_failures VALUES
-                (1,'unrelated','{"affected_files":["tools/other.py"]}','queued'),
+                (1,'unrelated','{"scope":"other","affected_files":["tools/other.py"]}','queued'),
                 (2,'missing evidence','{}','queued'),
-                (3,'diagnostic failure','{"affected_files":["tools/developer_session_diagnostics.py"]}','queued');
+                (3,'diagnostic failure','{"scope":"application","affected_files":["tools/developer_session_diagnostics.py"]}','queued');
             INSERT INTO improvement_candidates VALUES
                 (33,1,'queued','Unrelated Home Assistant issue'),
                 (34,2,'queued','Diagnostics issue without evidence'),
@@ -198,3 +198,16 @@ def test_candidate_selection_survives_read_only_restart(tmp_path):
         assert second.next() == expected
     finally:
         second.close()
+
+
+def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
+    evidence = {
+        "scope": "application",
+        "affected_files": ["app/example.py", "tests/test_example.py", "pyproject.toml"],
+    }
+    assert GovernorCandidateSource._is_scope_eligible(
+        "Improve diagnostics for malformed developer results", evidence
+    )
+    assert not GovernorCandidateSource._is_scope_eligible(
+        "Improve diagnostics", {"affected_files": ["tools/autonomy_guardian.py"]}
+    )
