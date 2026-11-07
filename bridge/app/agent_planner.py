@@ -1651,6 +1651,15 @@ class PersonalAgentPlanner:
                     continue
 
                 # Writes are deliberately serialized, even when independent.
+                # Reconcile durable cancellation at the final dispatch
+                # boundary.  A request may arrive after the preceding read
+                # batch completed but before this write is marked RUNNING;
+                # never start that write until the control queue is empty.
+                await self._apply_pending_controls(plan)
+                self._propagate_dependency_blocks(plan)
+                executable = self._gate_approvals(self._ready_steps(plan))
+                if not executable:
+                    continue
                 await self._execute_batch(plan, executable[:1])
                 await self._apply_pending_controls(plan)
                 self._propagate_dependency_blocks(plan)

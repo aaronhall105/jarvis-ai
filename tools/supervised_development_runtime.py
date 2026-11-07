@@ -9,7 +9,9 @@ Guardian approvals, and then invokes the bounded worker exactly once.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -110,16 +112,33 @@ class GovernorCandidateSource:
 
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
-        rows = self.db.execute(
-            """
-            SELECT c.candidate_id, c.status, c.summary, c.failure_id,
-                   f.summary AS failure_summary, f.evidence_json, f.status AS failure_status
-            FROM improvement_candidates c
-            JOIN improvement_failures f ON f.failure_id = c.failure_id
-            WHERE c.status='queued' AND f.status IN ('queued','recorded')
-            ORDER BY c.candidate_id ASC
-            """
-        ).fetchall()
+        try:
+            rows = self.db.execute(
+                """
+                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
+                       c.development_scope_json, f.summary AS failure_summary,
+                       f.evidence_json, f.status AS failure_status
+                FROM improvement_candidates c
+                JOIN improvement_failures f ON f.failure_id = c.failure_id
+                WHERE c.status='queued' AND f.status IN ('queued','recorded')
+                ORDER BY c.candidate_id ASC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such column" not in str(exc).lower():
+                raise
+            rows = self.db.execute(
+                """
+                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
+                       '{}' AS development_scope_json,
+                       f.summary AS failure_summary, f.evidence_json,
+                       f.status AS failure_status
+                FROM improvement_candidates c
+                JOIN improvement_failures f ON f.failure_id = c.failure_id
+                WHERE c.status='queued' AND f.status IN ('queued','recorded')
+                ORDER BY c.candidate_id ASC
+                """
+            ).fetchall()
         for row in rows:
             candidate_id = int(row["candidate_id"])
             if candidate_id in excluded:
@@ -131,6 +150,27 @@ class GovernorCandidateSource:
                 continue
             if not isinstance(evidence, dict) or not evidence:
                 continue
+            try:
+                scope = json.loads(row["development_scope_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(scope, dict) and scope:
+                # Scope attribution is candidate-local so the original
+                # Governor failure evidence remains immutable.  The binding
+                # must point back to the exact preserved failure record.
+                if scope.get("evidence_failure_id") != int(row["failure_id"]):
+                    continue
+                expected_evidence_hash = hashlib.sha256(
+                    json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                if scope.get("evidence_sha256") != expected_evidence_hash:
+                    continue
+                source_sha = scope.get("source_sha")
+                if not isinstance(source_sha, str) or not re.fullmatch(
+                    r"[0-9a-f]{40,64}", source_sha
+                ):
+                    continue
+                evidence = {**evidence, **scope}
             if len(summary) < 3:
                 continue
             if not self._is_scope_eligible(summary, evidence):
@@ -320,6 +360,9 @@ class SupervisedDevelopmentRuntime:
                 if candidate is None:
                     return {"status": "no_eligible_candidate"}
                 source_sha = self._source_sha()
+                bound_source_sha = str(candidate["evidence"].get("source_sha") or "")
+                if bound_source_sha and bound_source_sha != source_sha:
+                    return {"status": "no_eligible_candidate", "reason": "source_binding_mismatch"}
                 task = GovernorAdapter.from_candidate(
                     candidate,
                     owner_id=OWNER_ID,

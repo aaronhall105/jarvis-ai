@@ -7,6 +7,8 @@ import logging
 import re
 import secrets
 import sqlite3
+import os
+import subprocess
 from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -228,6 +230,7 @@ class SelfImprovementEngine:
         repeat_threshold: int = 2,
         latency_failure_ms: int = 7000,
         core_version: str = "unknown",
+        development_source_root: str | None = None,
     ) -> None:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,6 +239,8 @@ class SelfImprovementEngine:
         self.repeat_threshold = max(1, int(repeat_threshold))
         self.latency_failure_ms = max(1000, int(latency_failure_ms))
         self.core_version = core_version
+        source_root = development_source_root or os.getenv("JARVIS_DEVELOPMENT_SOURCE_ROOT")
+        self.development_source_root = Path(source_root or "/host-code/jarvis")
         self.disabled_file = self.database_path.parent / "self_improvement.disabled"
         self._initialise_database()
 
@@ -291,6 +296,7 @@ class SelfImprovementEngine:
             "deploy_lease_expires_at": "TEXT",
             "deploy_phase": "TEXT",
             "archived_at": "TEXT",
+            "development_scope_json": "TEXT NOT NULL DEFAULT '{}'",
         }
 
         for name, data_type in columns.items():
@@ -987,6 +993,185 @@ class SelfImprovementEngine:
         if await self.enabled() and self.auto_prepare:
             return await asyncio.to_thread(self._queue_failure_sync, failure_id)
         return await self.queue_failure(failure_id, actor)
+
+    @staticmethod
+    def _normalise_development_path(value: object) -> str | None:
+        if not isinstance(value, str) or not value or "\\" in value:
+            return None
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts or path == Path("."):
+            return None
+        normalised = path.as_posix()
+        if normalised != value or normalised.startswith((".git/", ".git")):
+            return None
+        if normalised.startswith(
+            (
+                "tools/autonomy_",
+                "tools/supervised_development_",
+                "tools/deploy_",
+                "systemd/",
+                ".github/",
+            )
+        ):
+            return None
+        if path.suffix not in {".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md", ".sh"}:
+            return None
+        return normalised
+
+    def _validate_development_scope(
+        self, failure: dict[str, Any], affected_files: list[str]
+    ) -> tuple[list[str], str, str] | tuple[None, str, str]:
+        if not failure or str(failure.get("status") or "") in {"resolved", "ignored"}:
+            return None, "Failure is not eligible for development preparation.", ""
+        source = failure.get("evidence") or {}
+        if not isinstance(source, dict) or not source.get("source"):
+            return None, "Failure lacks preserved source evidence.", ""
+        paths: list[str] = []
+        for raw in affected_files:
+            normalised = self._normalise_development_path(raw)
+            if normalised is None or normalised in paths:
+                return (
+                    None,
+                    "Affected files must be unique, canonical, editable application paths.",
+                    "",
+                )
+            paths.append(normalised)
+        if not paths:
+            return None, "At least one affected file is required.", ""
+        try:
+            inventory = subprocess.check_output(
+                ["git", "-C", str(self.development_source_root), "ls-files", "--stage"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).splitlines()
+        except (OSError, subprocess.SubprocessError):
+            return None, "Trusted source snapshot is unavailable.", ""
+        try:
+            status = subprocess.check_output(
+                ["git", "-C", str(self.development_source_root), "status", "--porcelain"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            source_sha = subprocess.check_output(
+                ["git", "-C", str(self.development_source_root), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.SubprocessError):
+            return None, "Trusted source snapshot is unavailable.", ""
+        if status or not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
+            return None, "Trusted source snapshot is not clean and immutable.", ""
+        tracked_modes = {
+            line.rsplit("\t", 1)[1]: line.split(" ", 1)[0] for line in inventory if "\t" in line
+        }
+        if set(paths) - tracked_modes.keys():
+            return (
+                None,
+                "Affected files are not exactly tracked by the trusted source snapshot.",
+                "",
+            )
+        if any(tracked_modes[path] not in {"100644", "100755"} for path in paths):
+            return None, "Affected files must be regular non-symlink source files.", ""
+        source_hash = hashlib.sha256(
+            json.dumps(source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        return sorted(paths), source_hash, source_sha
+
+    async def prepare_evidenced_improvement(
+        self,
+        *,
+        failure_id: int,
+        affected_files: list[str],
+        summary: str,
+        actor: str,
+    ) -> tuple[bool, int | None, str]:
+        """Queue a candidate bound to an existing failure and source snapshot.
+
+        This never rewrites ``improvement_failures.evidence_json``.  The new
+        candidate carries a separate, auditable scope record tied to the
+        preserved evidence hash and the exact tracked files.
+        """
+        if not await self.enabled():
+            return False, None, "Self-improvement is disabled."
+        failure = await self.get_failure(failure_id)
+        paths, binding, source_sha = self._validate_development_scope(failure or {}, affected_files)
+        if paths is None:
+            return False, None, binding or "Development evidence is unavailable."
+        clean_summary = self.redact_text(summary).strip()
+        if len(clean_summary) < 3:
+            return False, None, "A concise improvement summary is required."
+
+        scope_record = {
+            "scope": "application",
+            "affected_files": paths,
+            "evidence_failure_id": failure_id,
+            "evidence_sha256": binding,
+            "source_sha": source_sha,
+            "source_root": str(self.development_source_root),
+        }
+
+        def _prepare() -> tuple[int | None, str | None]:
+            now = self._utc_now()
+            with self._connection() as connection:
+                existing = connection.execute(
+                    "SELECT candidate_id,status,summary,development_scope_json "
+                    "FROM improvement_candidates WHERE failure_id = ? "
+                    "ORDER BY candidate_id DESC LIMIT 1",
+                    (failure_id,),
+                ).fetchone()
+                if existing:
+                    candidate_id = int(existing["candidate_id"])
+                    if str(existing["status"]) != "queued":
+                        return (
+                            None,
+                            "Only queued candidates may receive development scope evidence.",
+                        )
+                    existing_scope = self._load_json(existing["development_scope_json"], {})
+                    if existing_scope:
+                        if existing_scope != scope_record:
+                            return (
+                                None,
+                                "Candidate scope evidence is already bound and cannot be replaced.",
+                            )
+                        return candidate_id, None
+                    updated = connection.execute(
+                        "UPDATE improvement_candidates SET updated_at = ?, "
+                        "development_scope_json = ? WHERE candidate_id = ? AND status = 'queued'",
+                        (now, self._json(scope_record), candidate_id),
+                    )
+                    if updated.rowcount != 1:
+                        return None, "Candidate changed state during scope preparation."
+                    return candidate_id, None
+                cursor = connection.execute(
+                    "INSERT INTO improvement_candidates "
+                    "(failure_id,created_at,updated_at,status,summary,development_scope_json) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        failure_id,
+                        now,
+                        now,
+                        "queued",
+                        clean_summary,
+                        self._json(
+                            {
+                                **scope_record,
+                            }
+                        ),
+                    ),
+                )
+                return self._required_lastrowid(cursor), None
+
+        candidate_id, error = await asyncio.to_thread(_prepare)
+        if candidate_id is None:
+            return False, None, error or "Candidate scope preparation failed."
+        await self.audit(
+            "evidenced_candidate_prepared",
+            actor=actor,
+            failure_id=failure_id,
+            candidate_id=candidate_id,
+            details={"affected_files": paths, "evidence_sha256": binding},
+        )
+        return True, candidate_id, "queued"
 
     async def retry_candidate(
         self,

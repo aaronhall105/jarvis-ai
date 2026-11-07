@@ -710,6 +710,14 @@ class ImprovementCreateRequest(BaseModel):
     request: str = Field(min_length=3, max_length=2000)
 
 
+class EvidencedImprovementRequest(BaseModel):
+    """Bind a new candidate to an existing, preserved failure record."""
+
+    failure_id: int = Field(gt=0)
+    summary: str = Field(min_length=3, max_length=2000)
+    affected_files: list[str] = Field(min_length=1, max_length=32)
+
+
 class PersonalTaskMutationRequest(BaseModel):
     request_id: str | None = Field(default=None, min_length=1, max_length=255)
 
@@ -7135,6 +7143,29 @@ async def improvement_request(
 ):
     _require_improvement_token(x_jarvis_admin_token)
     ok, candidate_id, status = await improvement.request_improvement(request.request, actor="api")
+    if not ok:
+        raise HTTPException(status_code=400, detail=status)
+    return {"success": True, "candidate_id": candidate_id, "status": status}
+
+
+@app.post("/api/improvement/request/evidenced")
+async def improvement_request_evidenced(
+    request: EvidencedImprovementRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Prepare a scoped task from an existing recorded application failure.
+
+    The source failure is never rewritten.  The engine verifies the exact
+    tracked files against its configured read-only source snapshot and stores
+    the resulting evidence binding on the candidate itself.
+    """
+    _require_improvement_token(x_jarvis_admin_token)
+    ok, candidate_id, status = await improvement.prepare_evidenced_improvement(
+        failure_id=request.failure_id,
+        affected_files=request.affected_files,
+        summary=request.summary,
+        actor="api",
+    )
     if not ok:
         raise HTTPException(status_code=400, detail=status)
     return {"success": True, "candidate_id": candidate_id, "status": status}
