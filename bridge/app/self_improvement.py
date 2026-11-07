@@ -1035,25 +1035,15 @@ class SelfImprovementEngine:
                     "Affected files must be unique, canonical, editable application paths.",
                     "",
                 )
-            candidate = (self.development_source_root / normalised).resolve()
-            try:
-                candidate.relative_to(self.development_source_root.resolve())
-            except ValueError:
-                return None, "Affected file escapes the trusted source snapshot.", ""
-            if candidate.is_symlink() or not candidate.is_file():
-                return None, "Affected file is not a regular tracked source file.", ""
             paths.append(normalised)
         if not paths:
             return None, "At least one affected file is required.", ""
         try:
-            tracked = {
-                line.strip()
-                for line in subprocess.check_output(
-                    ["git", "-C", str(self.development_source_root), "ls-files", "--", *paths],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
-                ).splitlines()
-            }
+            inventory = subprocess.check_output(
+                ["git", "-C", str(self.development_source_root), "ls-files", "--stage"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).splitlines()
         except (OSError, subprocess.SubprocessError):
             return None, "Trusted source snapshot is unavailable.", ""
         try:
@@ -1071,12 +1061,17 @@ class SelfImprovementEngine:
             return None, "Trusted source snapshot is unavailable.", ""
         if status or not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
             return None, "Trusted source snapshot is not clean and immutable.", ""
-        if tracked != set(paths):
+        tracked_modes = {
+            line.rsplit("\t", 1)[1]: line.split(" ", 1)[0] for line in inventory if "\t" in line
+        }
+        if set(paths) - tracked_modes.keys():
             return (
                 None,
                 "Affected files are not exactly tracked by the trusted source snapshot.",
                 "",
             )
+        if any(tracked_modes[path] not in {"100644", "100755"} for path in paths):
+            return None, "Affected files must be regular non-symlink source files.", ""
         source_hash = hashlib.sha256(
             json.dumps(source, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
