@@ -38,10 +38,12 @@ MODULES = (
     "autonomy_broker_store",
     "autonomy_guardian",
     "supervised_development_broker",
+    "supervised_development_controller",
+    "supervised_development_publication",
 )
 UNIT_NAMES = tuple(
     "jarvis-autonomy-broker-" + role + suffix
-    for role in ("worker", "operator", "development-admission")
+    for role in ("worker", "operator", "development-admission", "development-publication")
     for suffix in (".service", ".socket")
 )
 DROPIN = UNITS / "jarvis-autonomy.service.d/broker.conf"
@@ -49,17 +51,19 @@ SOCKETS = (
     "jarvis-autonomy-broker-operator.socket",
     "jarvis-autonomy-broker-worker.socket",
     "jarvis-autonomy-broker-development-admission.socket",
+    "jarvis-autonomy-broker-development-publication.socket",
 )
 SERVICES = (
     "jarvis-autonomy-broker-operator.service",
     "jarvis-autonomy-broker-worker.service",
     "jarvis-autonomy-broker-development-admission.service",
+    "jarvis-autonomy-broker-development-publication.service",
 )
 
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "a85bd8e7e907b38a51ce10e724c13d9bb9744c87e1e5ba9ce5396c1669b9133f"
-UPGRADE_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
+UPGRADE_BUNDLE = "fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -269,9 +273,18 @@ def _verified_legacy_install(files: dict) -> dict:
         *(
             str(LIB / "tools" / (name + ".py"))
             for name in MODULES
-            if name != "supervised_development_broker"
+            if name
+            not in {
+                "supervised_development_broker",
+                "supervised_development_controller",
+                "supervised_development_publication",
+            }
         ),
-        *(str(UNITS / name) for name in UNIT_NAMES if "development-admission" not in name),
+        *(
+            str(UNITS / name)
+            for name in UNIT_NAMES
+            if "development-admission" not in name and "development-publication" not in name
+        ),
     }
     if set(recorded) != legacy_paths:
         raise Denied("upgrade_source_manifest_invalid")

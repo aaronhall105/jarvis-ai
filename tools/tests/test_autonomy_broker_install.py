@@ -118,6 +118,13 @@ def test_payload_contains_development_admission_endpoint(rehearsal):
     assert any(
         path.name == "jarvis-autonomy-broker-development-admission.service" for path in files
     )
+    assert any(path.name == "supervised_development_publication.py" for path in files)
+    assert any(
+        path.name == "jarvis-autonomy-broker-development-publication.socket" for path in files
+    )
+    assert any(
+        path.name == "jarvis-autonomy-broker-development-publication.service" for path in files
+    )
 
 
 def test_modified_protected_payload_refused(rehearsal):
@@ -218,7 +225,14 @@ def _make_legacy_install(rehearsal, monkeypatch):
     development = {
         str(path)
         for path in files
-        if "development-admission" in str(path) or path.name == "supervised_development_broker.py"
+        if "development-admission" in str(path)
+        or "development-publication" in str(path)
+        or path.name
+        in {
+            "supervised_development_broker.py",
+            "supervised_development_controller.py",
+            "supervised_development_publication.py",
+        }
     }
     for path in development:
         Path(path).unlink()

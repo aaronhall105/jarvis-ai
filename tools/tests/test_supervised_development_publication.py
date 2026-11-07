@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import socket
+import struct
 import threading
 import time
 import uuid
@@ -15,7 +16,10 @@ from tools.supervised_development_publication import PendingTaskPublisher, fetch
 def _serve_once(listener, publisher):
     connection, _ = listener.accept()
     with connection:
-        publisher.serve_connection(connection)
+        try:
+            publisher.serve_connection(connection)
+        except (PermissionError, OSError, ValueError):
+            pass
 
 
 def test_controller_task_reaches_authenticated_publication_socket(tmp_path):
@@ -93,4 +97,68 @@ def test_modified_or_expired_controller_approval_is_not_published(tmp_path):
         expires_at=int(time.time()) - 1,
     )
     assert controller.pending_owner_task() is None
+    controller.close()
+
+
+def test_publication_rejects_wrong_peer_without_controller_mutation(tmp_path):
+    controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
+    path = str(tmp_path / "development-task.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+    thread = threading.Thread(
+        target=_serve_once,
+        args=(listener, PendingTaskPublisher(controller, gateway_uid=os.getuid() + 1)),
+    )
+    thread.start()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(path)
+        connection.sendall(struct.pack("!I", len(b'{"version":1}')) + b'{"version":1}')
+        try:
+            assert connection.recv(1024) == b""
+        except ConnectionResetError:
+            pass
+    thread.join()
+    listener.close()
+    assert controller.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    controller.close()
+
+
+def test_read_only_publisher_does_not_create_or_modify_database(tmp_path):
+    database = tmp_path / "controller.sqlite3"
+    controller = SupervisedDevelopmentController(database)
+    controller.close()
+    before = database.stat()
+    reader = SupervisedDevelopmentController(database, read_only=True)
+    assert reader.pending_owner_task() is None
+    reader.close()
+    after = database.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+
+
+def test_malformed_publication_request_returns_no_task(tmp_path):
+    controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
+    path = str(tmp_path / "development-task.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(path)
+    listener.listen(1)
+    thread = threading.Thread(
+        target=_serve_once,
+        args=(listener, PendingTaskPublisher(controller, gateway_uid=os.getuid())),
+    )
+    thread.start()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(path)
+        body = b'{"version":2}'
+        connection.sendall(struct.pack("!I", len(body)) + body)
+        try:
+            assert connection.recv(4) == b""
+        except ConnectionResetError:
+            pass
+    thread.join()
+    listener.close()
     controller.close()

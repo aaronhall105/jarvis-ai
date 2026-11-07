@@ -44,6 +44,7 @@ from tools.supervised_development_broker import (
     DevelopmentAdmissionBroker,
     serve_admission_connection,
 )
+from tools.supervised_development_publication import serve_activation as serve_publication
 
 LIB = Path("/usr/local/libexec/jarvis-autonomy-broker")
 BASE = Path("/var/lib/jarvis-autonomy-broker")
@@ -515,6 +516,8 @@ def main(arguments: list[str]) -> int:
         policy = installed_policy()
         if arguments in (["worker"], ["operator"], ["development-admission"]):
             serve(arguments[0], policy)
+        elif arguments == ["development-publication"]:
+            serve_publication()
         elif len(arguments) == 2 and arguments[0] == "release":
             release_entry(arguments[1], policy)
         else:

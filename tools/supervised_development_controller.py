@@ -76,8 +76,19 @@ class SupervisedDevelopmentController:
     def __init__(
         self,
         database: Path,
+        *,
+        read_only: bool = False,
     ) -> None:
         self.database = Path(database)
+        if read_only:
+            if self.database.is_symlink() or not self.database.is_file():
+                raise LifecycleError("controller_database_unavailable")
+            self.db = sqlite3.connect(
+                f"file:{self.database.resolve()}?mode=ro", uri=True, timeout=5
+            )
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA query_only=ON")
+            return
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.database, timeout=5, isolation_level=None)
         self.database.chmod(0o600)
