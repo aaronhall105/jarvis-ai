@@ -6202,8 +6202,10 @@ class AIEngine:
         force_plan: bool = False,
         force_tool_name: str | None = None,
         executive_task_id: str | None = None,
+        performance_timings: dict[str, int] | None = None,
     ) -> Any:
         try:
+            preparation_started_at = time.monotonic()
             response_kwargs = self._response_kwargs(
                 input_items,
                 tool_definitions,
@@ -6215,11 +6217,23 @@ class AIEngine:
                 force_tool_name=force_tool_name,
             )
 
+            def record_timing(name: str, started_at: float) -> None:
+                if performance_timings is not None:
+                    performance_timings[name] = performance_timings.get(name, 0) + round(
+                        (time.monotonic() - started_at) * 1000
+                    )
+
+            record_timing("model_preparation_ms", preparation_started_at)
+
             if executive_task_id and self.executive_transport is not None:
-                return await self.executive_transport.create(
+                request_started_at = time.monotonic()
+                response = await self.executive_transport.create(
                     executive_task_id,
                     **response_kwargs,
                 )
+                record_timing("provider_request_ms", request_started_at)
+                record_timing("provider_completion_ms", request_started_at)
+                return response
 
             # Stream only when no tools are exposed. Tool-capable turns must be
             # fully inspected before any text is shown because the first model
@@ -6236,10 +6250,8 @@ class AIEngine:
                     response_kwargs.get("text"),
                 )
 
-                stream = await self.client.responses.create(
-                    **response_kwargs,
-                    stream=True,
-                )
+                stream = await self.client.responses.create(**response_kwargs, stream=True)
+                record_timing("provider_request_ms", openai_request_started_at)
 
                 stream_opened_at = time.monotonic()
 
@@ -6285,6 +6297,10 @@ class AIEngine:
                             if delta:
                                 if first_delta_at is None:
                                     first_delta_at = time.monotonic()
+                                    if performance_timings is not None:
+                                        performance_timings["provider_first_token_ms"] = round(
+                                            (first_delta_at - openai_request_started_at) * 1000
+                                        )
 
                                     logger.info(
                                         "JARVIS PERF | OPENAI FIRST DELTA | "
@@ -6359,6 +6375,7 @@ class AIEngine:
                             )
 
                 if completed_response is not None:
+                    record_timing("provider_completion_ms", openai_request_started_at)
                     return completed_response
 
                 if not self.stream_fallback_enabled:
@@ -6371,7 +6388,10 @@ class AIEngine:
                 # A transient OpenAI stream or client connection can close after
                 # some deltas have already been displayed. Retry once without
                 # streaming and continue from the common prefix where possible.
+                fallback_started_at = time.monotonic()
                 fallback_response = await self.client.responses.create(**response_kwargs)
+                record_timing("provider_request_ms", fallback_started_at)
+                record_timing("provider_completion_ms", openai_request_started_at)
                 fallback_text = str(getattr(fallback_response, "output_text", "") or "")
                 partial_text = "".join(emitted_parts)
 
@@ -6405,7 +6425,9 @@ class AIEngine:
                 )
                 return fallback_response
 
+            openai_request_started_at = time.monotonic()
             response = await self.client.responses.create(**response_kwargs)
+            record_timing("provider_request_ms", openai_request_started_at)
             incomplete = getattr(response, "incomplete_details", None)
             if (
                 str(getattr(response, "status", "") or "") == "incomplete"
@@ -6424,7 +6446,10 @@ class AIEngine:
                     )
                     runtime_metrics.increment("openai_incomplete_budget_retries")
                     response_kwargs["max_output_tokens"] = expanded_budget
+                    retry_started_at = time.monotonic()
                     response = await self.client.responses.create(**response_kwargs)
+                    record_timing("provider_request_ms", retry_started_at)
+            record_timing("provider_completion_ms", openai_request_started_at)
             return response
         except AIEngineError:
             raise
@@ -7734,6 +7759,7 @@ class AIEngine:
             raise AIEngineError("The request is too long.")
 
         started = time.monotonic()
+        performance_timings: dict[str, int] = {}
         resolved_request_id = str(request_id or uuid.uuid4())
 
         conversation = await self.conversations.ensure_conversation(
@@ -9573,6 +9599,7 @@ class AIEngine:
                     executive_task_id=(
                         executive_task_id if is_executive_round and tool_rounds == 0 else None
                     ),
+                    performance_timings=performance_timings,
                 )
                 model_rounds += 1
             except (AIEngineError, TimeoutError, RuntimeError):
@@ -9611,6 +9638,7 @@ class AIEngine:
                             explanation_choice_available=explanation_choice_available,
                             semantic_retry_count=semantic_grounding_retry_count,
                         ),
+                        performance_timings=performance_timings,
                     )
                     model_rounds += 1
                 elif completed_calls:
@@ -9853,6 +9881,7 @@ class AIEngine:
                                     runtime_metrics.increment("voice_speculation_mismatched")
                                 else:
                                     runtime_metrics.increment("voice_speculation_fallback")
+                        tool_started_at = time.monotonic()
                         if speculative_completed is None:
                             async with asyncio.timeout(
                                 self.executive_config.timeout_seconds
@@ -9873,7 +9902,13 @@ class AIEngine:
                                 )
                         else:
                             completed = speculative_completed
+                        performance_timings["tool_execution_ms"] = performance_timings.get(
+                            "tool_execution_ms", 0
+                        ) + round((time.monotonic() - tool_started_at) * 1000)
                     except TimeoutError:
+                        performance_timings["tool_execution_ms"] = performance_timings.get(
+                            "tool_execution_ms", 0
+                        ) + round((time.monotonic() - tool_started_at) * 1000)
                         tool_timed_out = True
                         completed = self._tool_failure(
                             name=name,
@@ -9987,6 +10022,7 @@ class AIEngine:
                     tool_definitions=[],
                     actor=actor,
                     on_text_delta=None,
+                    performance_timings=performance_timings,
                 )
             except AIEngineError:
                 logger.exception("Jarvis Code Awareness final synthesis failed")
@@ -10020,6 +10056,7 @@ class AIEngine:
                         len(completed_calls),
                     )
 
+        final_processing_started_at = time.monotonic()
         staged_admin_change = any(
             call.get("tool") == "propose_admin_change" for call in completed_calls
         )
@@ -10332,6 +10369,9 @@ class AIEngine:
         )
 
         home_action_envelope = _home_action_turn_envelope(completed_calls)
+        performance_timings["final_processing_ms"] = round(
+            (time.monotonic() - final_processing_started_at) * 1000
+        )
         return {
             "success": success,
             "response": final_reply,
@@ -10360,5 +10400,10 @@ class AIEngine:
                 "initial_reason_code": initial_executive_decision.reason_code.value,
                 "task_id": created_executive_task_id,
                 "fallback_count": fallback_count,
+            },
+            "timings": performance_timings,
+            "timing_correlation": {
+                "request_id": resolved_request_id,
+                "response_id": response_id,
             },
         }
