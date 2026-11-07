@@ -139,12 +139,18 @@ class BoundedDevelopmentWorker:
             [sys.executable, "-m", "ruff", "check", "--no-cache", *task.allowed_paths],
         ]
         results: list[dict[str, Any]] = []
+        verification_env = {**os.environ, "PYTHONPATH": str(workspace)}
+        for name in tuple(verification_env):
+            if name == "OPENAI_API_KEY" or any(
+                token in name.upper() for token in ("OPERATOR", "PRIVATE_KEY", "SIGNING_KEY")
+            ):
+                verification_env.pop(name, None)
         for command in commands:
             try:
                 result = subprocess.run(
                     command,
                     cwd=workspace,
-                    env={**os.environ, "PYTHONPATH": str(workspace)},
+                    env=verification_env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,

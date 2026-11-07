@@ -61,11 +61,14 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
     generation = str(uuid.uuid4())
     active = {"calls": 0}
     stopped = []
+    guardian_state = {"state": "STOPPED"}
 
     def guardian():
         active["calls"] += 1
+        if active["calls"] == 2 and guardian_state["state"] == "STOPPED":
+            guardian_state["state"] = "ACTIVE"
         return {
-            "state": "ACTIVE" if active["calls"] > 1 else "STOPPED",
+            "state": guardian_state["state"],
             "trusted": True,
             "generation": generation,
         }
@@ -97,13 +100,17 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
         output_price_per_million=10,
     )
 
+    def stop_and_mark():
+        stopped.append(True)
+        guardian_state["state"] = "STOPPED"
+
     runtime = SupervisedDevelopmentRuntime(
         source_reader,
         controller,
         source_root=source,
         worktree_root=tmp_path / "worktrees",
         guardian=guardian,
-        stop=lambda: stopped.append(True),
+        stop=stop_and_mark,
         sleep=lambda _: None,
         worker=worker,
     )

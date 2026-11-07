@@ -510,6 +510,14 @@ def serve(role: str, policy: dict) -> None:
 
 
 def main(arguments: list[str]) -> int:
+    if len(arguments) == 2 and arguments[0] == "development-worker":
+        # The coordinator is root, but development execution is deliberately
+        # delegated to the policy-pinned autonomy account.  This branch accepts
+        # only the persisted task identifier; all task parameters come from the
+        # protected controller database.
+        from tools.supervised_development_runtime import worker_main
+
+        return worker_main(arguments[1])
     if os.geteuid() != 0:
         return 1
     try:

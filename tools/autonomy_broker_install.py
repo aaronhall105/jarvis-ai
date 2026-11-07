@@ -39,8 +39,11 @@ MODULES = (
     "autonomy_guardian",
     "supervised_development_broker",
     "supervised_development_controller",
+    "supervised_development_pipeline",
     "supervised_development_publication",
+    "supervised_development_review",
     "supervised_development_runtime",
+    "supervised_development_worker",
 )
 UNIT_NAMES = tuple(
     "jarvis-autonomy-broker-" + role + suffix
@@ -70,7 +73,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # This is the fingerprint of the complete payload at this source revision.
 # The earlier fe48533... value belonged to the pre-read-only-controller bundle
 # and must not be accepted for the current tracked payload.
-UPGRADE_BUNDLE = "73b6a0cee34a436a390144ccb630345d4004d86170a241b1087035b5616d2a26"
+UPGRADE_BUNDLE = "b36dfe3dff5473c39e6a8c2d31b88f418b3beab3b5afa5476b4a399aaebf904c"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -284,8 +287,11 @@ def _verified_legacy_install(files: dict) -> dict:
             not in {
                 "supervised_development_broker",
                 "supervised_development_controller",
+                "supervised_development_pipeline",
                 "supervised_development_publication",
+                "supervised_development_review",
                 "supervised_development_runtime",
+                "supervised_development_worker",
             }
         ),
         *(
@@ -327,6 +333,27 @@ def _stage(path: Path, data: bytes, mode: int, directory: Path) -> Path:
         raise
 
 
+def _prepare_development_workspace(policy: dict) -> None:
+    """Create only the worker's bounded writable directories.
+
+    The root coordinator and autonomy account share the controller database;
+    executable broker state, credentials, ledgers and audit directories remain
+    root-owned and are never delegated to the worker.
+    """
+    work = BASE / "work"
+    worktrees = BASE / "worktrees"
+    for directory in (work, worktrees):
+        directory.mkdir(mode=0o770, parents=True, exist_ok=True)
+        directory.chmod(0o770)
+        if os.getuid() == 0:
+            os.chown(directory, int(policy["autonomy_uid"]), int(policy["autonomy_gid"]))
+    database = work / "supervised-development.sqlite3"
+    if database.exists():
+        database.chmod(0o660)
+        if os.getuid() == 0:
+            os.chown(database, int(policy["autonomy_uid"]), int(policy["autonomy_gid"]))
+
+
 def upgrade(files: dict, policy: dict) -> None:
     """Migrate only the reviewed legacy broker to the development-admission bundle."""
     if (
@@ -347,6 +374,7 @@ def upgrade(files: dict, policy: dict) -> None:
     staged: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     created_dirs: list[Path] = []
+    workspace_metadata: dict[Path, tuple[int, int, int]] = {}
     replaced: list[Path] = []
     marker = BASE / "installed.json"
     entries = dict(files)
@@ -375,6 +403,17 @@ def upgrade(files: dict, policy: dict) -> None:
                 directory.chmod(mode_bits)
                 created_dirs.append(directory)
             g.trusted(directory, directory=True)
+        for workspace_dir in (BASE / "work", BASE / "worktrees"):
+            if not workspace_dir.exists():
+                created_dirs.append(workspace_dir)
+            else:
+                info = workspace_dir.stat()
+                workspace_metadata[workspace_dir] = (info.st_uid, info.st_gid, info.st_mode & 0o777)
+        database = BASE / "work" / "supervised-development.sqlite3"
+        if database.exists():
+            info = database.stat()
+            workspace_metadata[database] = (info.st_uid, info.st_gid, info.st_mode & 0o777)
+        _prepare_development_workspace(policy)
         for path, (data, mode_bits) in entries.items():
             if path.is_symlink() or (path.exists() and not path.is_file()):
                 raise Denied("upgrade_destination_path_invalid")
@@ -416,6 +455,10 @@ def upgrade(files: dict, policy: dict) -> None:
                     os.replace(backup, path)
                 else:
                     path.unlink(missing_ok=True)
+            for path, (uid, gid, mode_bits) in workspace_metadata.items():
+                path.chmod(mode_bits)
+                if os.getuid() == 0:
+                    os.chown(path, uid, gid)
             if guardian_marker.exists():
                 replace_manifest(guardian_marker, guardian_before)
             for path in staged.values():

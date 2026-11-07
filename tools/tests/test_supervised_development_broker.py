@@ -395,3 +395,11 @@ def test_socket_protocol_uses_kernel_peer_credentials(tmp_path):
     client.close()
     server.close()
     assert response["authority"] == "jarvis-autonomy-broker"
+
+
+def test_root_worker_identity_is_rejected(tmp_path):
+    broker, _ledger, _key, _key_id, _public = make_broker(
+        tmp_path, lambda: {"state": "ACTIVE", "trusted": True, "generation": str(uuid.uuid4())}
+    )
+    with pytest.raises(Denied, match="development_admission_peer"):
+        broker.admit({}, 0)

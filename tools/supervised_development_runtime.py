@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 import time
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tools.autonomy_broker_host import CANONICAL
-from tools.autonomy_broker_runtime import emergency_stop, guardian_status
+from tools.autonomy_broker_runtime import emergency_stop, guardian_status, installed_policy
 from tools.supervised_development_controller import (
     APPROVAL_REQUESTED,
     FAILED,
@@ -47,6 +48,7 @@ ALLOWED_PATHS = (
 )
 OWNER_ID = "enrolled-operator"
 POLL_SECONDS = 2
+WORKER_ENTRY = "/usr/local/libexec/jarvis-autonomy-broker/entry.py"
 
 
 class GovernorCandidateSource:
@@ -196,82 +198,211 @@ class SupervisedDevelopmentRuntime:
             expires_at=approval.get("expires_at", 0),
         )
 
-    def run_once(self) -> dict[str, Any]:
+    def _run_worker_subprocess(self, task_id: str, task: GovernorTask) -> dict[str, Any]:
+        """Delegate execution to the policy-pinned unprivileged worker account.
+
+        The root controller never calls the admission socket itself.  Only this
+        child may perform development execution, so SO_PEERCRED observes the
+        configured autonomy UID and rejects a root-originated admission.
+        """
+        policy = installed_policy()
+        worker_uid = int(policy["autonomy_uid"])
+        worker_gid = int(policy.get("autonomy_gid", worker_uid))
+        if worker_uid <= 0 or worker_uid == 0:
+            raise LifecycleError("worker_identity_invalid")
+
+        def drop_privileges() -> None:
+            os.setgroups([])
+            os.setgid(worker_gid)
+            os.setuid(worker_uid)
+
+        environment = os.environ.copy()
+        # The worker receives only its provider configuration.  Operator and
+        # private signing material is never inherited by the development child.
+        for name in tuple(environment):
+            if any(token in name.upper() for token in ("OPERATOR", "PRIVATE_KEY", "SIGNING_KEY")):
+                environment.pop(name, None)
+        command = [
+            "/usr/bin/python3",
+            "-I",
+            WORKER_ENTRY,
+            "development-worker",
+            task_id,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=True,
+            preexec_fn=drop_privileges,
+        )
+        timeout = max(1, int(task.deadline_seconds) + 30)
+        try:
+            stdout, _stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            finally:
+                process.communicate()
+            raise LifecycleError("development_worker_timeout") from exc
+        if process.returncode != 0:
+            raise LifecycleError("development_worker_failed")
+        try:
+            result = json.loads(stdout)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise LifecycleError("development_worker_result_invalid") from exc
+        if not isinstance(result, dict) or result.get("state") not in {
+            REVIEW_REQUIRED,
+            FAILED,
+            RECONCILIATION_REQUIRED,
+        }:
+            raise LifecycleError("development_worker_result_invalid")
+        return result
+
+    def _confirm_stop(self) -> None:
+        self.stop()
         status = self.guardian()
         if status.get("state") != "STOPPED" or status.get("trusted") is not True:
-            raise LifecycleError("guardian_must_be_stopped_before_task_selection")
-        existing = self._existing_task()
-        if existing is None:
-            candidate = self.source.next(self._claimed_candidates())
-            if candidate is None:
-                return {"status": "no_eligible_candidate"}
-            source_sha = self._source_sha()
-            task = GovernorAdapter.from_candidate(
-                candidate,
-                owner_id=OWNER_ID,
-                request_ref=str(uuid.uuid4()),
-                source_sha=source_sha,
-                allowed_paths=ALLOWED_PATHS,
-                guardian_generation=str(status["generation"]),
-                expires_at=int(time.time()) + 90,
-            )
-            task_id = SupervisedDevelopmentPipeline(
+            raise LifecycleError("emergency_stop_unconfirmed")
+
+    def run_once(self) -> dict[str, Any]:
+        execution_active = False
+        stop_attempted = False
+        try:
+            status = self.guardian()
+            if status.get("state") != "STOPPED" or status.get("trusted") is not True:
+                raise LifecycleError("guardian_must_be_stopped_before_task_selection")
+            existing = self._existing_task()
+            if existing is None:
+                candidate = self.source.next(self._claimed_candidates())
+                if candidate is None:
+                    return {"status": "no_eligible_candidate"}
+                source_sha = self._source_sha()
+                task = GovernorAdapter.from_candidate(
+                    candidate,
+                    owner_id=OWNER_ID,
+                    request_ref=str(uuid.uuid4()),
+                    source_sha=source_sha,
+                    allowed_paths=ALLOWED_PATHS,
+                    guardian_generation=str(status["generation"]),
+                    expires_at=int(time.time()) + 90,
+                )
+                task_id = SupervisedDevelopmentPipeline(
+                    self.controller,
+                    self.worker or _SubmitOnlyWorker(),
+                    self.reviewer or RuntimeReview(),
+                ).submit(task)
+            else:
+                task_id, task = existing
+                if self.controller.snapshot(task_id)["state"] in {RUNNING, REVIEW_PENDING}:
+                    self.controller.recover_after_restart(task_id)
+                    return {"status": "reconciliation_required", "task_id": task_id}
+            pipeline = SupervisedDevelopmentPipeline(
                 self.controller,
-                self.worker or _SubmitOnlyWorker(),
-                self.reviewer or RuntimeReview(),
-            ).submit(task)
-        else:
-            task_id, task = existing
-            if self.controller.snapshot(task_id)["state"] in {RUNNING, REVIEW_PENDING}:
-                self.controller.recover_after_restart(task_id)
-                return {"status": "reconciliation_required", "task_id": task_id}
-        pipeline = SupervisedDevelopmentPipeline(
-            self.controller,
-            self.worker
-            or ExistingSelfDevelopmentWorker(
-                object(),
-                {
-                    "JARVIS_AUTHORITATIVE_WORKSPACE": str(self.source_root),
-                    "JARVIS_SUPERVISED_WORKTREE_ROOT": str(self.worktree_root),
-                    "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
-                        "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
-                    ),
-                    "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
-                        "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
-                    ),
-                },
-            ),
-            self.reviewer,
+                self.worker
+                or ExistingSelfDevelopmentWorker(
+                    object(),
+                    {
+                        "JARVIS_AUTHORITATIVE_WORKSPACE": str(self.source_root),
+                        "JARVIS_SUPERVISED_WORKTREE_ROOT": str(self.worktree_root),
+                        "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
+                            "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
+                        ),
+                        "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
+                            "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
+                        ),
+                    },
+                ),
+                self.reviewer,
+            )
+            while int(time.time()) < task.expires_at:
+                current = self.controller.snapshot(task_id)
+                if current["state"] in {REVIEW_REQUIRED, FAILED, RECONCILIATION_REQUIRED}:
+                    return current
+                current_status = self.guardian()
+                if (
+                    current_status.get("state") == "ACTIVE"
+                    and current_status.get("trusted") is True
+                    and current_status.get("generation") == task.guardian_generation
+                ):
+                    execution_active = True
+                    try:
+                        if self.worker is not None:
+                            result = pipeline.execute(
+                                task_id, task, current_base_sha=self._source_sha()
+                            )
+                        else:
+                            result = self._run_worker_subprocess(task_id, task)
+                    finally:
+                        stop_attempted = True
+                        self._confirm_stop()
+                        execution_active = False
+                    return result
+                self.sleep(POLL_SECONDS)
+            if self.guardian().get("state") == "ACTIVE":
+                self._confirm_stop()
+            return self.controller.snapshot(task_id)
+        except BaseException:
+            if execution_active and not stop_attempted:
+                stop_attempted = True
+                self._confirm_stop()
+            raise
+
+
+def worker_main(task_id: str) -> int:
+    """Run one persisted task as the policy-pinned unprivileged worker."""
+    if os.getuid() == 0:
+        return 1
+    controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
+    source = GovernorCandidateSource(GOVERNOR_DATABASE)
+    try:
+        runtime = SupervisedDevelopmentRuntime(
+            source,
+            controller,
+            source_root=CANONICAL,
+            worktree_root=WORKTREE_ROOT,
         )
-        while int(time.time()) < task.expires_at:
-            current = self.controller.snapshot(task_id)
-            if current["state"] in {REVIEW_REQUIRED, FAILED, RECONCILIATION_REQUIRED}:
-                return current
-            current_status = self.guardian()
-            if (
-                current_status.get("state") == "ACTIVE"
-                and current_status.get("trusted") is True
-                and current_status.get("generation") == task.guardian_generation
-            ):
-                try:
-                    result = pipeline.execute(task_id, task, current_base_sha=self._source_sha())
-                except LifecycleError:
-                    if self.controller.snapshot(task_id)["state"] != APPROVAL_REQUESTED:
-                        self.stop()
-                        raise
-                    self.sleep(POLL_SECONDS)
-                    continue
-                self.stop()
-                return result
-            self.sleep(POLL_SECONDS)
-        if self.guardian().get("state") == "ACTIVE":
-            self.stop()
-        return self.controller.snapshot(task_id)
+        existing = runtime._existing_task()
+        if existing is None or existing[0] != task_id:
+            raise LifecycleError("development_task_missing")
+        task = existing[1]
+        worker = ExistingSelfDevelopmentWorker(
+            object(),
+            {
+                "JARVIS_AUTHORITATIVE_WORKSPACE": str(CANONICAL),
+                "JARVIS_SUPERVISED_WORKTREE_ROOT": str(WORKTREE_ROOT),
+                "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
+                    "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
+                ),
+                "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
+                    "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
+                ),
+            },
+        )
+        pipeline = SupervisedDevelopmentPipeline(controller, worker, RuntimeReview())
+        result = pipeline.execute(task_id, task, current_base_sha=runtime._source_sha())
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except BaseException as exc:
+        print(json.dumps({"error": type(exc).__name__}), flush=True)
+        return 1
+    finally:
+        controller.close()
+        source.close()
 
 
 def main() -> int:
     source = GovernorCandidateSource()
-    controller = SupervisedDevelopmentController(CONTROLLER_DATABASE)
+    controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
+
+    def _shutdown(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt("controller_shutdown")
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
     try:
         result = SupervisedDevelopmentRuntime(source, controller).run_once()
         print(json.dumps({"status": result.get("status", result.get("state", "unknown"))}))

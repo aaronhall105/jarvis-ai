@@ -78,6 +78,7 @@ class SupervisedDevelopmentController:
         database: Path,
         *,
         read_only: bool = False,
+        database_mode: int = 0o600,
     ) -> None:
         self.database = Path(database)
         if read_only:
@@ -97,7 +98,9 @@ class SupervisedDevelopmentController:
             return
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.database, timeout=5, isolation_level=None)
-        self.database.chmod(0o600)
+        if database_mode not in {0o600, 0o660}:
+            raise LifecycleError("controller_database_mode_invalid")
+        self.database.chmod(database_mode)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")

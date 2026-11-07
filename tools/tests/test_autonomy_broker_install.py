@@ -232,8 +232,11 @@ def _make_legacy_install(rehearsal, monkeypatch):
         in {
             "supervised_development_broker.py",
             "supervised_development_controller.py",
+            "supervised_development_pipeline.py",
             "supervised_development_publication.py",
+            "supervised_development_review.py",
             "supervised_development_runtime.py",
+            "supervised_development_worker.py",
         }
     }
     for path in development:
@@ -269,7 +272,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.UPGRADE_BUNDLE == (
-        "73b6a0cee34a436a390144ccb630345d4004d86170a241b1087035b5616d2a26"
+        "b36dfe3dff5473c39e6a8c2d31b88f418b3beab3b5afa5476b4a399aaebf904c"
     )
 
 
