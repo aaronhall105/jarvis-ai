@@ -270,9 +270,30 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
         == "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
-    assert installer.UPGRADE_BUNDLE == (
+    assert installer.CURRENT_BUNDLE == (
         "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
     )
+    assert installer.UPGRADE_BUNDLE == (
+        "6e45d11f1d6b5625dd28d1030c452e45f3689807fbf36a26119eb0434605e2a3"
+    )
+
+
+def test_reviewed_current_bundle_migration_accepts_existing_upgraded_layout(rehearsal, monkeypatch):
+    files, policy, controller, commands, _original, paths = rehearsal
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+    installer.install(files, policy)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["bundle"] = installer.CURRENT_BUNDLE
+    marker.write_bytes(canonical(value))
+    guardian_marker = controller.base / "installed.json"
+    guardian = json.loads(guardian_marker.read_bytes())
+    guardian["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(guardian))
+    installer.upgrade(files, policy)
+    assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
+    assert controller.status()["state"] == "STOPPED"
+    assert commands.called
 
 
 def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkeypatch):

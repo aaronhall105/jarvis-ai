@@ -29,6 +29,7 @@ from tools.supervised_development_controller import (
     RECONCILIATION_REQUIRED,
     RUNNING,
     SupervisedDevelopmentController,
+    CONTROLLER_DATABASE,
 )
 from tools.supervised_development_pipeline import (
     ExistingSelfDevelopmentWorker,
@@ -39,8 +40,10 @@ from tools.supervised_development_pipeline import (
 from tools.supervised_development_review import TrustedReviewRunner
 
 
-GOVERNOR_DATABASE = CANONICAL / "data/jarvis_improvement.db"
-CONTROLLER_DATABASE = Path("/var/lib/jarvis-autonomy-broker/work/supervised-development.sqlite3")
+# Core's authoritative /app/data is the protected host bind mount below.  The
+# repository has no trusted Governor database and must never be used as a
+# substitute or populated copy.
+GOVERNOR_DATABASE = Path("/home/aaron/.local/share/jarvis-runtime/data/jarvis_improvement.db")
 WORKTREE_ROOT = Path("/var/lib/jarvis-autonomy-broker/worktrees")
 ALLOWED_PATHS = (
     "tools/developer_session_diagnostics.py",
@@ -326,7 +329,10 @@ class SupervisedDevelopmentRuntime:
                 if (
                     current_status.get("state") == "ACTIVE"
                     and current_status.get("trusted") is True
-                    and current_status.get("generation") == task.guardian_generation
+                    and (
+                        current_status.get("generation") == task.guardian_generation
+                        or current_status.get("previous_generation") == task.guardian_generation
+                    )
                 ):
                     execution_active = True
                     try:
@@ -392,6 +398,34 @@ def worker_main(task_id: str) -> int:
     finally:
         controller.close()
         source.close()
+
+
+def initialize_controller_database(policy: dict[str, Any]) -> None:
+    """Create only the empty protected controller schema, never a task.
+
+    This is an explicit owner-authenticated preparation operation.  It refuses
+    to replace an existing database so recovery cannot erase lifecycle state.
+    """
+    if os.geteuid() != 0 or os.getenv("SUDO_USER") != "aaron":
+        raise LifecycleError("owner_authenticated_initialization_required")
+    if os.getenv("SUDO_UID") != str(policy["operator_uid"]):
+        raise LifecycleError("owner_authenticated_initialization_required")
+    guardian = guardian_status()
+    if guardian.get("state") != "STOPPED" or guardian.get("trusted") is not True:
+        raise LifecycleError("guardian_must_be_trusted_stopped")
+    if CONTROLLER_DATABASE.is_symlink() or CONTROLLER_DATABASE.exists():
+        raise LifecycleError("controller_database_already_exists")
+    parent = CONTROLLER_DATABASE.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise LifecycleError("controller_database_parent_invalid")
+    controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
+    try:
+        if controller.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] != 0:
+            raise LifecycleError("controller_database_not_empty")
+    finally:
+        controller.close()
+    os.chown(CONTROLLER_DATABASE, int(policy["autonomy_uid"]), int(policy["autonomy_gid"]))
+    CONTROLLER_DATABASE.chmod(0o660)
 
 
 def main() -> int:

@@ -530,6 +530,11 @@ def main(arguments: list[str]) -> int:
             from tools.supervised_development_runtime import main as serve_controller
 
             return serve_controller()
+        elif arguments == ["development-controller-init"]:
+            from tools.supervised_development_runtime import initialize_controller_database
+
+            initialize_controller_database(policy)
+            return 0
         elif len(arguments) == 2 and arguments[0] == "release":
             release_entry(arguments[1], policy)
         else:

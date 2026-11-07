@@ -100,7 +100,13 @@ def make_broker(tmp_path, guardian):
 
 def test_signed_owner_approval_admits_exact_task(tmp_path):
     generation = str(uuid.uuid4())
-    guardian = lambda: {"state": "ACTIVE", "trusted": True, "generation": generation}
+    active_generation = str(uuid.uuid4())
+    guardian = lambda: {
+        "state": "ACTIVE",
+        "trusted": True,
+        "generation": active_generation,
+        "previous_generation": generation,
+    }
     broker, ledger, key, key_id, public = make_broker(tmp_path, guardian)
     task = make_task()
     task_id = str(uuid.uuid4())
@@ -141,8 +147,78 @@ def test_signed_owner_approval_admits_exact_task(tmp_path):
     }
     receipt = broker.admit(request, 1001)
     assert receipt["authority"] == "jarvis-autonomy-broker"
+    assert receipt["guardian_generation"] == active_generation
     assert broker.admit(request, 1001) == receipt
     assert ledger.verify_audit() == 2
+
+
+def test_signed_approval_from_prior_guardian_cycle_is_rejected(tmp_path):
+    signed_generation = str(uuid.uuid4())
+    active_generation = str(uuid.uuid4())
+    status = {
+        "state": "ACTIVE",
+        "trusted": True,
+        "generation": active_generation,
+        "previous_generation": signed_generation,
+    }
+    broker, ledger, key, key_id, public = make_broker(tmp_path, lambda: status)
+    task = make_task()
+    task_id = str(uuid.uuid4())
+    params_hash = hashlib.sha256(
+        canonical(
+            {
+                "base_sha": task.source_sha,
+                "allowed_paths": sorted(task.allowed_paths),
+                "provider": task.provider,
+                "model": task.model,
+                "max_calls": task.max_calls,
+                "max_cost_usd": task.max_cost_usd,
+                "deadline_seconds": task.deadline_seconds,
+                "goal": task.objective,
+            }
+        )
+    ).hexdigest()
+    approval, _ = signed_approval(task_id, task, "approval-stale", params_hash)
+    approval["key_id"] = key_id
+    approval["guardian_generation"] = signed_generation
+    unsigned = {key: value for key, value in approval.items() if key != "signature"}
+    approval["signature"] = base64.b64encode(
+        key.sign(DOMAIN + canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    assert broker.approve(canonical(approval), 1000)["status"] == "approved"
+    request = {
+        "task_id": task_id,
+        "approval_id": "approval-stale",
+        "source_sha": task.source_sha,
+        "parameters_sha256": params_hash,
+        "allowed_paths": sorted(task.allowed_paths),
+        "provider": task.provider,
+        "model": task.model,
+        "max_calls": task.max_calls,
+        "max_cost_usd": task.max_cost_usd,
+        "deadline_seconds": task.deadline_seconds,
+    }
+    assert broker.admit(request, 1001)["guardian_generation"] == active_generation
+
+    # A later STOP -> ACTIVE cycle must not accept the old signed generation.
+    status.update(
+        generation=str(uuid.uuid4()),
+        previous_generation=str(uuid.uuid4()),
+    )
+    # A fresh request signed against the old generation must fail after a
+    # later STOP -> ACTIVE cycle; replaying the completed request remains
+    # idempotent but cannot authorize a new admission.
+    later = dict(approval)
+    later["request_id"] = "approval-stale-replayed"
+    unsigned = {key: value for key, value in later.items() if key != "signature"}
+    later["signature"] = base64.b64encode(
+        key.sign(DOMAIN + canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    assert broker.approve(canonical(later), 1000)["status"] == "approved"
+    request["approval_id"] = "approval-stale-replayed"
+    with pytest.raises(Denied, match="guardian_not_active"):
+        broker.admit(request, 1001)
+    ledger.close()
 
 
 def test_stop_denies_admission_and_invalid_signature_is_rejected(tmp_path):
@@ -178,6 +254,43 @@ def test_stop_denies_admission_and_invalid_signature_is_rejected(tmp_path):
     approval["signature"] = base64.b64encode(b"bad").decode()
     with pytest.raises(Denied, match="development_approval_signature"):
         broker.approve(canonical(approval), 1000)
+
+
+def test_guardian_observation_failure_denies_without_admitted_transition(tmp_path):
+    def unavailable_guardian():
+        raise RuntimeError("guardian unavailable")
+
+    broker, ledger, key, key_id, public = make_broker(tmp_path, unavailable_guardian)
+    task = make_task()
+    task_id = str(uuid.uuid4())
+    params_hash = "b" * 64
+    approval, _ = signed_approval(task_id, task, "approval-guardian-error", params_hash)
+    approval["key_id"] = key_id
+    unsigned = {k: v for k, v in approval.items() if k != "signature"}
+    approval["signature"] = base64.b64encode(
+        key.sign(DOMAIN + canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    broker.approve(canonical(approval), 1000)
+    request = {
+        "task_id": task_id,
+        "approval_id": "approval-guardian-error",
+        "source_sha": task.source_sha,
+        "parameters_sha256": params_hash,
+        "allowed_paths": sorted(task.allowed_paths),
+        "provider": task.provider,
+        "model": task.model,
+        "max_calls": task.max_calls,
+        "max_cost_usd": task.max_cost_usd,
+        "deadline_seconds": task.deadline_seconds,
+    }
+    with pytest.raises(Denied, match="guardian_not_active"):
+        broker.admit(request, 1001)
+    row = ledger.db.execute(
+        "SELECT status,receipt FROM development_admissions WHERE approval_id=?",
+        ("approval-guardian-error",),
+    ).fetchone()
+    assert row == ("approved", None)
+    ledger.close()
 
 
 def test_expired_owner_approval_is_not_admitted(tmp_path):
