@@ -12,7 +12,13 @@ import uuid
 import pytest
 
 from tools.supervised_development_controller import LifecycleError, SupervisedDevelopmentController
-from tools.supervised_development_publication import PendingTaskPublisher, fetch_pending_task
+from tools.supervised_development_publication import (
+    CONTROLLER_DATABASE as PUBLICATION_DATABASE,
+    PendingTaskPublisher,
+    fetch_pending_task,
+)
+from tools.supervised_development_runtime import CONTROLLER_DATABASE as RUNTIME_DATABASE
+from tools import supervised_development_runtime as runtime
 
 
 def _serve_once(listener, publisher):
@@ -176,3 +182,56 @@ def test_read_only_publisher_rejects_damaged_database(tmp_path):
     connection.close()
     with pytest.raises(LifecycleError, match="controller_schema_invalid"):
         SupervisedDevelopmentController(database, read_only=True)
+
+
+@pytest.mark.parametrize("database_kind", ["missing", "damaged"])
+def test_unavailable_database_is_not_reported_as_empty_and_survives_requests(
+    tmp_path, database_kind
+):
+    database = tmp_path / "controller.sqlite3"
+    if database_kind == "damaged":
+        import sqlite3
+
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE unrelated(value TEXT)")
+        connection.commit()
+        connection.close()
+    publisher = PendingTaskPublisher.__new__(PendingTaskPublisher)
+    publisher.database = database
+    publisher.gateway_uid = os.getuid()
+    for _ in range(2):
+        left, right = socket.socketpair()
+        thread = threading.Thread(target=publisher.serve_connection, args=(right,))
+        thread.start()
+        left.sendall(struct.pack("!I", len(b'{"version":1}')) + b'{"version":1}')
+        header = left.recv(4)
+        size = struct.unpack("!I", header)[0]
+        assert json.loads(left.recv(size)) == {
+            "version": 1,
+            "status": "unavailable",
+            "reason": "controller_unavailable",
+        }
+        left.close()
+        thread.join()
+
+
+def test_production_components_share_one_fixed_database_path():
+    assert PUBLICATION_DATABASE == RUNTIME_DATABASE
+
+
+def test_owner_authenticated_initialization_creates_only_empty_schema(tmp_path, monkeypatch):
+    database = tmp_path / "work" / "supervised-development.sqlite3"
+    database.parent.mkdir(mode=0o700)
+    monkeypatch.setattr(runtime, "CONTROLLER_DATABASE", database)
+    monkeypatch.setattr(runtime.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(runtime.os, "chown", lambda *_args: None)
+    monkeypatch.setattr(runtime, "guardian_status", lambda: {"state": "STOPPED", "trusted": True})
+    monkeypatch.setenv("SUDO_USER", "aaron")
+    monkeypatch.setenv("SUDO_UID", "1000")
+    runtime.initialize_controller_database(
+        {"operator_uid": 1000, "autonomy_uid": 998, "autonomy_gid": 998}
+    )
+    reader = SupervisedDevelopmentController(database, read_only=True)
+    assert reader.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    reader.close()
+    assert database.stat().st_mode & 0o777 == 0o660

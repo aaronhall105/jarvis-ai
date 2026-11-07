@@ -70,10 +70,12 @@ SERVICES = (
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
-# This is the fingerprint of the complete payload at this source revision.
-# The earlier fe48533... value belonged to the pre-read-only-controller bundle
-# and must not be accepted for the current tracked payload.
-UPGRADE_BUNDLE = "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
+# Existing hosts may already contain the first upgraded bundle.  This exact
+# source is accepted for the narrowly-scoped database-contract migration only.
+CURRENT_BUNDLE = "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
+# This is the fingerprint of the complete payload at this source revision,
+# including the fixed controller/publication database contract.
+UPGRADE_BUNDLE = "15e630dfdc123961d90fdf17044285c42732f17df2a1c889febca924873ebb42"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -326,6 +328,32 @@ def _verified_legacy_install(files: dict) -> dict:
     return previous
 
 
+def _verified_current_install(files: dict) -> dict:
+    """Verify the exact previously upgraded bundle before a second migration."""
+    marker = BASE / "installed.json"
+    if marker.is_symlink() or not marker.is_file():
+        raise Denied("upgrade_source_manifest_missing")
+    g.trusted(marker)
+    previous = json.loads(marker.read_text())
+    if previous.get("bundle") != CURRENT_BUNDLE:
+        raise Denied("upgrade_source_bundle_not_reviewed")
+    recorded = previous.get("files")
+    expected_paths = {str(path) for path in files} | {
+        str(POLICY),
+        str(BASE / "docker-client/config.json"),
+    }
+    if not isinstance(recorded, dict) or set(recorded) != expected_paths:
+        raise Denied("upgrade_source_manifest_invalid")
+    for name, digest in recorded.items():
+        path = Path(name)
+        if path.is_symlink() or not path.is_file():
+            raise Denied("upgrade_source_payload_missing")
+        g.trusted(path)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise Denied("upgrade_source_payload_modified")
+    return previous
+
+
 def _stage(path: Path, data: bytes, mode: int, directory: Path) -> Path:
     fd, name = tempfile.mkstemp(prefix=".upgrade-stage-", dir=directory)
     try:
@@ -371,7 +399,17 @@ def upgrade(files: dict, policy: dict) -> None:
         raise Denied("local_operator_sudo_required")
     if fingerprint(files) != UPGRADE_BUNDLE:
         raise Denied("upgrade_destination_bundle_not_reviewed")
-    previous = _verified_legacy_install(files)
+    marker = BASE / "installed.json"
+    source_bundle = None
+    if marker.is_file() and not marker.is_symlink():
+        g.trusted(marker)
+        source_bundle = json.loads(marker.read_text()).get("bundle")
+    if source_bundle == LEGACY_BUNDLE:
+        previous = _verified_legacy_install(files)
+    elif source_bundle == CURRENT_BUNDLE:
+        previous = _verified_current_install(files)
+    else:
+        raise Denied("upgrade_source_bundle_not_reviewed")
     controller = g.Guardian()
     controller.integrity()
     if controller.status().get("state") != "STOPPED":

@@ -9,11 +9,14 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from tools.supervised_development_controller import SupervisedDevelopmentController
+from tools.supervised_development_controller import (
+    CONTROLLER_DATABASE,
+    LifecycleError,
+    SupervisedDevelopmentController,
+)
 
 SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
 MAX_FRAME = 16_384
-CONTROLLER_DATABASE = Path("/var/lib/jarvis-autonomy/work/supervised-development.sqlite3")
 
 
 def _frame(value: dict[str, Any]) -> bytes:
@@ -43,11 +46,18 @@ class PendingTaskPublisher:
         body = json.loads(_receive(connection, size))
         if body != {"version": 1}:
             raise ValueError("publication_request_schema")
-        reader = SupervisedDevelopmentController(self.database, read_only=True)
         try:
-            envelope = reader.pending_owner_task()
-        finally:
-            reader.close()
+            reader = SupervisedDevelopmentController(self.database, read_only=True)
+            try:
+                envelope = reader.pending_owner_task()
+            finally:
+                reader.close()
+        except LifecycleError:
+            # Unavailable or damaged state is never equivalent to no task.
+            connection.sendall(
+                _frame({"version": 1, "status": "unavailable", "reason": "controller_unavailable"})
+            )
+            return
         connection.sendall(_frame(envelope or {"version": 1, "status": "none"}))
 
 
@@ -65,7 +75,7 @@ def serve_listener(listener: socket.socket, *, database: Path, gateway_uid: int)
             with connection:
                 try:
                     publisher.serve_connection(connection)
-                except (OSError, PermissionError, ValueError, json.JSONDecodeError):
+                except (OSError, PermissionError, ValueError, LifecycleError, json.JSONDecodeError):
                     # A malformed or unauthorised request receives no task and
                     # never changes controller state. The next connection is
                     # independent; details are intentionally not disclosed.
