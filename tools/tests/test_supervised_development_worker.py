@@ -45,6 +45,7 @@ def _task(sha: str) -> SimpleNamespace:
 
 def test_bounded_worker_makes_one_call_and_never_integrates(tmp_path):
     root, sha = _repo(tmp_path)
+    git_metadata_before = sorted((root / ".git").rglob("*"))
     calls = []
 
     def provider(prompt, model, timeout):
@@ -74,6 +75,7 @@ def test_bounded_worker_makes_one_call_and_never_integrates(tmp_path):
         == sha
     )
     assert not (root / ".git" / "refs" / "heads" / "jarvis").exists()
+    assert sorted((root / ".git").rglob("*")) == git_metadata_before
 
 
 def test_bounded_worker_rejects_invalid_output_without_partial_edit(tmp_path):

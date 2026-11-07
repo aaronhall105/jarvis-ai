@@ -67,7 +67,7 @@ version-bound migration, `python3 tools/autonomy_broker_install.py --upgrade`.
 It accepts only the recorded installed bundle
 `b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb` and the
 current tracked destination payload
-`80e09d75cc7febce879e941b9428aad674066b66154007ffb5b7c732cf455492`.
+`73b6a0cee34a436a390144ccb630345d4004d86170a241b1087035b5616d2a26`.
 The earlier `fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788`
 fingerprint represented the pre-read-only-controller payload and is rejected.
 
@@ -79,3 +79,10 @@ ledgers, jobs and audit records. On failure it restores only executable
 payloads and manifests, leaves data and evidence untouched, and restarts the
 pre-existing operator/worker sockets for reconciliation. It never performs a
 provider call or starts autonomous development.
+
+The installed `development-controller` entrypoint is a one-shot coordinator,
+not a second scheduler. It reads the fixed Governor improvement database
+read-only, records at most one candidate in the authoritative lifecycle
+database, waits for the owner signature and separately activated Guardian
+generation, then invokes the bounded worker and trusted review runner. It does
+not activate Guardian, commit, push, merge, deploy, or select another database.

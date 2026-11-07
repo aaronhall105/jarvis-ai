@@ -157,6 +157,7 @@ class SupervisedDevelopmentController:
         max_cost_usd: float,
         deadline_seconds: int,
         goal: str,
+        candidate_id: int | None = None,
     ) -> str:
         if not _SHA.fullmatch(base_sha):
             raise LifecycleError("invalid_base_sha")
@@ -170,6 +171,8 @@ class SupervisedDevelopmentController:
             raise LifecycleError("execution_bound_violation")
         if not goal or len(goal) > 4_000:
             raise LifecycleError("invalid_goal")
+        if candidate_id is not None and (type(candidate_id) is not int or candidate_id <= 0):
+            raise LifecycleError("invalid_candidate_id")
         task_id = str(uuid.uuid4())
         parameters = {
             "base_sha": base_sha,
@@ -181,6 +184,8 @@ class SupervisedDevelopmentController:
             "deadline_seconds": deadline_seconds,
             "goal": goal,
         }
+        if candidate_id is not None:
+            parameters["candidate_id"] = candidate_id
         stamp = _now()
         self.db.execute(
             "INSERT INTO tasks(id,state,parameters,created_at,updated_at) VALUES(?,?,?,?,?)",

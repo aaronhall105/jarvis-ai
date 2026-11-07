@@ -163,6 +163,8 @@ class SupervisedDevelopmentPipeline:
             "deadline_seconds": task.deadline_seconds,
             "goal": task.objective,
         }
+        if task.candidate_id is not None:
+            payload["candidate_id"] = task.candidate_id
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -176,6 +178,7 @@ class SupervisedDevelopmentPipeline:
             max_cost_usd=task.max_cost_usd,
             deadline_seconds=task.deadline_seconds,
             goal=task.objective,
+            candidate_id=task.candidate_id,
         )
         self.controller.record_approval_request(
             task_id,

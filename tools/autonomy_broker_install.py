@@ -40,12 +40,15 @@ MODULES = (
     "supervised_development_broker",
     "supervised_development_controller",
     "supervised_development_publication",
+    "supervised_development_runtime",
 )
 UNIT_NAMES = tuple(
     "jarvis-autonomy-broker-" + role + suffix
     for role in ("worker", "operator", "development-admission", "development-publication")
     for suffix in (".service", ".socket")
 )
+CONTROLLER_UNIT = "jarvis-autonomy-broker-development-controller.service"
+UNIT_NAMES = UNIT_NAMES + (CONTROLLER_UNIT,)
 DROPIN = UNITS / "jarvis-autonomy.service.d/broker.conf"
 SOCKETS = (
     "jarvis-autonomy-broker-operator.socket",
@@ -58,6 +61,7 @@ SERVICES = (
     "jarvis-autonomy-broker-worker.service",
     "jarvis-autonomy-broker-development-admission.service",
     "jarvis-autonomy-broker-development-publication.service",
+    CONTROLLER_UNIT,
 )
 
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
@@ -66,7 +70,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # This is the fingerprint of the complete payload at this source revision.
 # The earlier fe48533... value belonged to the pre-read-only-controller bundle
 # and must not be accepted for the current tracked payload.
-UPGRADE_BUNDLE = "80e09d75cc7febce879e941b9428aad674066b66154007ffb5b7c732cf455492"
+UPGRADE_BUNDLE = "73b6a0cee34a436a390144ccb630345d4004d86170a241b1087035b5616d2a26"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -281,12 +285,20 @@ def _verified_legacy_install(files: dict) -> dict:
                 "supervised_development_broker",
                 "supervised_development_controller",
                 "supervised_development_publication",
+                "supervised_development_runtime",
             }
         ),
         *(
             str(UNITS / name)
             for name in UNIT_NAMES
-            if "development-admission" not in name and "development-publication" not in name
+            if all(
+                token not in name
+                for token in (
+                    "development-admission",
+                    "development-publication",
+                    "development-controller",
+                )
+            )
         ),
     }
     if set(recorded) != legacy_paths:

@@ -187,9 +187,19 @@ class BoundedDevelopmentWorker:
         deadline = time.monotonic() + task.deadline_seconds
         self.worktree_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         workspace = self.worktree_root / f"task-{task.request_ref}-{uuid.uuid4().hex[:8]}"
+        # Clone the immutable source into the disposable workspace instead of
+        # using `git worktree add`, which would mutate the authoritative
+        # repository's .git/worktrees metadata.
         self._run_git(
-            "worktree", "add", "--detach", str(workspace), task.source_sha, cwd=self.source_root
+            "clone",
+            "--no-local",
+            "--no-hardlinks",
+            "--no-checkout",
+            str(self.source_root),
+            str(workspace),
+            cwd=self.worktree_root,
         )
+        self._run_git("checkout", "--detach", task.source_sha, cwd=workspace)
         try:
             files = {}
             for relative in task.allowed_paths:

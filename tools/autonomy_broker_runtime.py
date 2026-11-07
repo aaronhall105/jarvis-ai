@@ -518,6 +518,10 @@ def main(arguments: list[str]) -> int:
             serve(arguments[0], policy)
         elif arguments == ["development-publication"]:
             serve_publication()
+        elif arguments == ["development-controller"]:
+            from tools.supervised_development_runtime import main as serve_controller
+
+            return serve_controller()
         elif len(arguments) == 2 and arguments[0] == "release":
             release_entry(arguments[1], policy)
         else:

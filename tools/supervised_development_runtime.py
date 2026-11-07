@@ -1,0 +1,285 @@
+"""Single production entrypoint for one owner-gated development task.
+
+The runtime is deliberately a coordinator, not a second worker or scheduler.
+It reads the existing Governor improvement database read-only, persists the
+task in the supervised controller, waits for the already-installed owner and
+Guardian approvals, and then invokes the bounded worker exactly once.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Callable
+
+from tools.autonomy_broker_host import CANONICAL
+from tools.autonomy_broker_runtime import emergency_stop, guardian_status
+from tools.supervised_development_controller import (
+    APPROVAL_REQUESTED,
+    FAILED,
+    LifecycleError,
+    REVIEW_PENDING,
+    REVIEW_REQUIRED,
+    RECONCILIATION_REQUIRED,
+    RUNNING,
+    SupervisedDevelopmentController,
+)
+from tools.supervised_development_pipeline import (
+    ExistingSelfDevelopmentWorker,
+    GovernorAdapter,
+    GovernorTask,
+    SupervisedDevelopmentPipeline,
+)
+from tools.supervised_development_review import TrustedReviewRunner
+
+
+GOVERNOR_DATABASE = CANONICAL / "data/jarvis_improvement.db"
+CONTROLLER_DATABASE = Path("/var/lib/jarvis-autonomy-broker/work/supervised-development.sqlite3")
+WORKTREE_ROOT = Path("/var/lib/jarvis-autonomy-broker/worktrees")
+ALLOWED_PATHS = (
+    "tools/developer_session_diagnostics.py",
+    "tools/tests/test_developer_session_diagnostics.py",
+)
+OWNER_ID = "enrolled-operator"
+POLL_SECONDS = 2
+
+
+class GovernorCandidateSource:
+    """Read one evidence-backed queued candidate without modifying Governor DB."""
+
+    def __init__(self, database: Path = GOVERNOR_DATABASE):
+        self.database = Path(database)
+        if self.database.is_symlink() or not self.database.is_file():
+            raise LifecycleError("governor_database_unavailable")
+        self.db = sqlite3.connect(f"file:{self.database.resolve()}?mode=ro", uri=True, timeout=5)
+        self.db.row_factory = sqlite3.Row
+        tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {"improvement_candidates", "improvement_failures"}.issubset(tables):
+            self.db.close()
+            raise LifecycleError("governor_schema_invalid")
+
+    def close(self) -> None:
+        self.db.close()
+
+    def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
+        excluded = excluded or set()
+        rows = self.db.execute(
+            """
+            SELECT c.candidate_id, c.status, c.summary, c.failure_id,
+                   f.summary AS failure_summary, f.evidence_json, f.status AS failure_status
+            FROM improvement_candidates c
+            JOIN improvement_failures f ON f.failure_id = c.failure_id
+            WHERE c.status='queued' AND f.status IN ('queued','recorded')
+            ORDER BY c.candidate_id ASC
+            """
+        ).fetchall()
+        for row in rows:
+            candidate_id = int(row["candidate_id"])
+            if candidate_id in excluded:
+                continue
+            summary = str(row["summary"] or row["failure_summary"] or "").strip()
+            try:
+                evidence = json.loads(row["evidence_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise LifecycleError("governor_evidence_invalid") from exc
+            if not isinstance(evidence, dict) or not evidence:
+                raise LifecycleError("governor_evidence_missing")
+            if len(summary) < 3:
+                raise LifecycleError("governor_candidate_summary_missing")
+            return {
+                "candidate_id": candidate_id,
+                "failure_id": int(row["failure_id"]),
+                "status": "queued",
+                "summary": summary,
+                "evidence": evidence,
+            }
+        return None
+
+
+class RuntimeReview:
+    def review(self, task: GovernorTask, evidence: dict[str, Any]) -> dict[str, Any]:
+        workspace = evidence.get("worktree")
+        if not isinstance(workspace, str):
+            raise LifecycleError("review_workspace_missing")
+        return TrustedReviewRunner(
+            Path(workspace), base_sha=task.source_sha, allowed_paths=task.allowed_paths
+        ).review(task, evidence)
+
+
+class _SubmitOnlyWorker:
+    def run(self, task: GovernorTask) -> dict[str, Any]:
+        raise LifecycleError("worker_not_initialized")
+
+
+class SupervisedDevelopmentRuntime:
+    """Coordinate exactly one durable task, then stop at REVIEW_REQUIRED."""
+
+    def __init__(
+        self,
+        source: GovernorCandidateSource,
+        controller: SupervisedDevelopmentController,
+        *,
+        source_root: Path = CANONICAL,
+        worktree_root: Path = WORKTREE_ROOT,
+        guardian: Callable[[], dict[str, Any]] = guardian_status,
+        stop: Callable[[], None] = emergency_stop,
+        sleep: Callable[[float], None] = time.sleep,
+        worker: Any | None = None,
+        reviewer: Any | None = None,
+    ):
+        self.source = source
+        self.controller = controller
+        self.source_root = Path(source_root)
+        self.worktree_root = Path(worktree_root)
+        self.guardian = guardian
+        self.stop = stop
+        self.sleep = sleep
+        self.worker = worker
+        self.reviewer = reviewer or RuntimeReview()
+
+    def _source_sha(self) -> str:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.source_root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+        return result.stdout.strip()
+
+    def _claimed_candidates(self) -> set[int]:
+        claimed: set[int] = set()
+        for row in self.controller.db.execute("SELECT parameters FROM tasks").fetchall():
+            try:
+                candidate_id = json.loads(row[0]).get("candidate_id")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if type(candidate_id) is int:
+                claimed.add(candidate_id)
+        return claimed
+
+    def _existing_task(self) -> tuple[str, GovernorTask] | None:
+        row = self.controller.db.execute(
+            "SELECT id,state,parameters,approval FROM tasks "
+            "WHERE state IN (?,?,?,?) ORDER BY created_at,id LIMIT 1",
+            (APPROVAL_REQUESTED, RUNNING, REVIEW_PENDING, RECONCILIATION_REQUIRED),
+        ).fetchone()
+        if row is None:
+            return None
+        params = json.loads(row["parameters"])
+        approval = json.loads(row["approval"] or "{}")
+        return row["id"], GovernorTask(
+            objective=params["goal"],
+            source_sha=params["base_sha"],
+            allowed_paths=tuple(params["allowed_paths"]),
+            provider=params["provider"],
+            model=params["model"],
+            max_calls=params["max_calls"],
+            max_cost_usd=params["max_cost_usd"],
+            deadline_seconds=params["deadline_seconds"],
+            owner_id=approval.get("owner_id", OWNER_ID),
+            request_ref=approval.get("request_ref", ""),
+            candidate_id=params.get("candidate_id"),
+            guardian_generation=approval.get("guardian_generation", ""),
+            expires_at=approval.get("expires_at", 0),
+        )
+
+    def run_once(self) -> dict[str, Any]:
+        status = self.guardian()
+        if status.get("state") != "STOPPED" or status.get("trusted") is not True:
+            raise LifecycleError("guardian_must_be_stopped_before_task_selection")
+        existing = self._existing_task()
+        if existing is None:
+            candidate = self.source.next(self._claimed_candidates())
+            if candidate is None:
+                return {"status": "no_eligible_candidate"}
+            source_sha = self._source_sha()
+            task = GovernorAdapter.from_candidate(
+                candidate,
+                owner_id=OWNER_ID,
+                request_ref=str(uuid.uuid4()),
+                source_sha=source_sha,
+                allowed_paths=ALLOWED_PATHS,
+                guardian_generation=str(status["generation"]),
+                expires_at=int(time.time()) + 90,
+            )
+            task_id = SupervisedDevelopmentPipeline(
+                self.controller,
+                self.worker or _SubmitOnlyWorker(),
+                self.reviewer or RuntimeReview(),
+            ).submit(task)
+        else:
+            task_id, task = existing
+            if self.controller.snapshot(task_id)["state"] in {RUNNING, REVIEW_PENDING}:
+                self.controller.recover_after_restart(task_id)
+                return {"status": "reconciliation_required", "task_id": task_id}
+        pipeline = SupervisedDevelopmentPipeline(
+            self.controller,
+            self.worker
+            or ExistingSelfDevelopmentWorker(
+                object(),
+                {
+                    "JARVIS_AUTHORITATIVE_WORKSPACE": str(self.source_root),
+                    "JARVIS_SUPERVISED_WORKTREE_ROOT": str(self.worktree_root),
+                    "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
+                        "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
+                    ),
+                    "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
+                        "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
+                    ),
+                },
+            ),
+            self.reviewer,
+        )
+        while int(time.time()) < task.expires_at:
+            current = self.controller.snapshot(task_id)
+            if current["state"] in {REVIEW_REQUIRED, FAILED, RECONCILIATION_REQUIRED}:
+                return current
+            current_status = self.guardian()
+            if (
+                current_status.get("state") == "ACTIVE"
+                and current_status.get("trusted") is True
+                and current_status.get("generation") == task.guardian_generation
+            ):
+                try:
+                    result = pipeline.execute(task_id, task, current_base_sha=self._source_sha())
+                except LifecycleError:
+                    if self.controller.snapshot(task_id)["state"] != APPROVAL_REQUESTED:
+                        self.stop()
+                        raise
+                    self.sleep(POLL_SECONDS)
+                    continue
+                self.stop()
+                return result
+            self.sleep(POLL_SECONDS)
+        if self.guardian().get("state") == "ACTIVE":
+            self.stop()
+        return self.controller.snapshot(task_id)
+
+
+def main() -> int:
+    source = GovernorCandidateSource()
+    controller = SupervisedDevelopmentController(CONTROLLER_DATABASE)
+    try:
+        result = SupervisedDevelopmentRuntime(source, controller).run_once()
+        print(json.dumps({"status": result.get("status", result.get("state", "unknown"))}))
+        return 0
+    finally:
+        controller.close()
+        source.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
