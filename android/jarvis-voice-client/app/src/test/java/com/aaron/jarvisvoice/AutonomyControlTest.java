@@ -40,10 +40,16 @@ public class AutonomyControlTest {
         AutonomyControl.signedDevelopment(task);
     }
 
+    @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsExpiredApproval() throws Exception {
+        JSONObject task = developmentTask().put("expires_at", 1L);
+        AutonomyControl.signedDevelopment(task);
+    }
+
     private JSONObject developmentTask() throws Exception {
         return new JSONObject().put("version", 1).put("action", "approve_development")
             .put("task_id", GENERATION).put("source_sha", "a".repeat(40))
             .put("parameters_sha256", "b".repeat(64))
+            .put("request_ref", REQUEST).put("expires_at", System.currentTimeMillis() / 1000 + 45)
             .put("allowed_paths", new org.json.JSONArray().put("tools/developer_session_diagnostics.py")
                 .put("tools/tests/test_developer_session_diagnostics.py"))
             .put("provider", "openai").put("model", "gpt-5.3-codex").put("max_calls", 1)

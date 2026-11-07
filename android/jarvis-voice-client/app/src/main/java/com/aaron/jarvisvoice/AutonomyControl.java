@@ -50,8 +50,8 @@ final class AutonomyControl {
         TreeMap<String, Object> fields = developmentFields(task);
         KeyStore store = operatorStore();
         fields.put("key_id", keyId(store));
-        fields.put("request_id", UUID.randomUUID().toString());
-        fields.put("expires_at", System.currentTimeMillis() / 1000 + 45);
+        fields.put("request_id", task.getString("request_ref"));
+        fields.put("expires_at", task.getLong("expires_at"));
         return sign(store, DEVELOPMENT_DOMAIN, canonical(fields));
     }
 
@@ -60,14 +60,21 @@ final class AutonomyControl {
         Set<String> names = new HashSet<>();
         Iterator<String> iterator = task.keys();
         while (iterator.hasNext()) names.add(iterator.next());
-        Set<String> withGoal = new HashSet<>(DEVELOPMENT_FIELDS);
-        withGoal.add("goal");
-        if (!names.equals(DEVELOPMENT_FIELDS) && !names.equals(withGoal))
+        Set<String> taskFields = new HashSet<>(DEVELOPMENT_FIELDS);
+        taskFields.add("request_ref"); taskFields.add("expires_at");
+        Set<String> withGoal = new HashSet<>(taskFields); withGoal.add("goal");
+        if (!names.equals(taskFields) && !names.equals(withGoal))
             throw new IllegalArgumentException("unexpected task fields");
         if (task.optInt("version", -1) != 1 || !"approve_development".equals(task.optString("action")))
             throw new IllegalArgumentException("invalid development action");
         UUID.fromString(task.getString("task_id"));
         UUID.fromString(task.getString("guardian_generation"));
+        String requestRef = task.getString("request_ref");
+        if (requestRef.isEmpty() || requestRef.length() > 200
+            || !requestRef.matches("[A-Za-z0-9._:-]+")) throw new IllegalArgumentException("invalid request");
+        long expires = task.getLong("expires_at");
+        long now = System.currentTimeMillis() / 1000;
+        if (expires <= now || expires > now + 120) throw new IllegalArgumentException("invalid expiry");
         if (!SHA40.matcher(task.getString("source_sha")).matches()
             || !SHA64.matcher(task.getString("parameters_sha256")).matches())
             throw new IllegalArgumentException("invalid source binding");
