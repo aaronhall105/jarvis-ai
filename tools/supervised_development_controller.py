@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import socket
+import stat
 import struct
 import time
 import uuid
@@ -100,11 +101,25 @@ class SupervisedDevelopmentController:
                 self.db.close()
                 raise LifecycleError("controller_schema_invalid")
             return
+        if self.database.exists():
+            # The production coordinator runs without CAP_FOWNER while the
+            # database is owned by the unprivileged autonomy account.  Do not
+            # attempt to chmod an existing file: verify its exact required
+            # mode and fail closed if an operator must repair it instead.
+            if self.database.is_symlink() or not self.database.is_file():
+                raise LifecycleError("controller_database_path_untrusted")
+            if stat.S_IMODE(self.database.stat().st_mode) != database_mode:
+                raise LifecycleError("controller_database_mode_invalid")
+            database_exists = True
+        else:
+            database_exists = False
+
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.database, timeout=5, isolation_level=None)
         if database_mode not in {0o600, 0o660}:
             raise LifecycleError("controller_database_mode_invalid")
-        self.database.chmod(database_mode)
+        if not database_exists:
+            self.database.chmod(database_mode)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")

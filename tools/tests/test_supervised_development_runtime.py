@@ -295,6 +295,54 @@ def test_candidate_scope_metadata_rejects_tampered_evidence_binding(tmp_path):
         source.close()
 
 
+def test_candidate_scope_skips_source_drift_before_task_creation(tmp_path, monkeypatch):
+    database = tmp_path / "governor.sqlite3"
+    evidence = {"source": {"interaction_id": 7}}
+    evidence_hash = hashlib.sha256(
+        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    with sqlite3.connect(database) as db:
+        db.executescript(
+            """
+            CREATE TABLE improvement_failures(
+                failure_id INTEGER PRIMARY KEY, summary TEXT, evidence_json TEXT, status TEXT
+            );
+            CREATE TABLE improvement_candidates(
+                candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT,
+                summary TEXT, development_scope_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO improvement_failures VALUES (?,?,?,?)",
+            (1, "Owner-requested improvement", json.dumps(evidence), "queued"),
+        )
+        db.execute(
+            "INSERT INTO improvement_candidates VALUES (?,?,?,?,?)",
+            (
+                74,
+                1,
+                "queued",
+                "Reduce response latency",
+                json.dumps(
+                    {
+                        "scope": "application",
+                        "evidence_failure_id": 1,
+                        "evidence_sha256": evidence_hash,
+                        "source_sha": "a" * 40,
+                        "affected_files": ["bridge/app/ai_engine.py"],
+                    }
+                ),
+            ),
+        )
+    source = GovernorCandidateSource(database)
+    monkeypatch.setattr(source, "_current_source_sha", lambda: "b" * 40)
+    try:
+        assert source.next() is None
+    finally:
+        source.close()
+
+
 def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
     evidence = {
         "scope": "application",
