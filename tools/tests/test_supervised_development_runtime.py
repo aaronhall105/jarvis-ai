@@ -201,7 +201,10 @@ def test_candidate_selection_survives_read_only_restart(tmp_path):
 
 
 def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
-    evidence = {"scope": "application", "affected_files": ["app/example.py", "tests/test_example.py", "pyproject.toml"]}
+    evidence = {
+        "scope": "application",
+        "affected_files": ["app/example.py", "tests/test_example.py", "pyproject.toml"],
+    }
     assert GovernorCandidateSource._is_scope_eligible(
         "Improve diagnostics for malformed developer results", evidence
     )

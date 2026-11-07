@@ -159,9 +159,7 @@ class BoundedDevelopmentWorker:
                 f"{Path(path).parent}/tests/test_{stem}.py",
             }
             test_targets.extend(
-                str(candidate)
-                for candidate in candidates
-                if (workspace / candidate).is_file()
+                str(candidate) for candidate in candidates if (workspace / candidate).is_file()
             )
         test_targets = sorted(set(test_targets))
         if not test_targets:
