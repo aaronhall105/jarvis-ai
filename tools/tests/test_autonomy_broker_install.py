@@ -274,7 +274,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
         "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
     )
     assert installer.UPGRADE_BUNDLE == (
-        "8f52ece5e7c0dbb832c984dda863aa697b1f71a1db48d5c481e123775dee4230"
+        "6e45d11f1d6b5625dd28d1030c452e45f3689807fbf36a26119eb0434605e2a3"
     )
 
 

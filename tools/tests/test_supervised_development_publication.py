@@ -184,7 +184,7 @@ def test_read_only_publisher_rejects_damaged_database(tmp_path):
         SupervisedDevelopmentController(database, read_only=True)
 
 
-@pytest.mark.parametrize("database_kind", ["missing", "damaged"])
+@pytest.mark.parametrize("database_kind", ["missing", "damaged", "corrupt-bytes"])
 def test_unavailable_database_is_not_reported_as_empty_and_survives_requests(
     tmp_path, database_kind
 ):
@@ -196,6 +196,8 @@ def test_unavailable_database_is_not_reported_as_empty_and_survives_requests(
         connection.execute("CREATE TABLE unrelated(value TEXT)")
         connection.commit()
         connection.close()
+    elif database_kind == "corrupt-bytes":
+        database.write_bytes(b"not a sqlite database and not a valid header")
     publisher = PendingTaskPublisher.__new__(PendingTaskPublisher)
     publisher.database = database
     publisher.gateway_uid = os.getuid()

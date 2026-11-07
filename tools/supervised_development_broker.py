@@ -231,7 +231,9 @@ class DevelopmentAdmissionBroker:
         try:
             status = self.guardian()
         except Exception:
-            return False
+            # Observation failure is an authentication failure.  Never allow
+            # an unavailable Guardian to authorize a development admission.
+            return None
         if status.get("trusted") is not True or status.get("state") != "ACTIVE":
             return None
         if status.get("generation") == generation:

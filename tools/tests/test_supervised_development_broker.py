@@ -256,6 +256,43 @@ def test_stop_denies_admission_and_invalid_signature_is_rejected(tmp_path):
         broker.approve(canonical(approval), 1000)
 
 
+def test_guardian_observation_failure_denies_without_admitted_transition(tmp_path):
+    def unavailable_guardian():
+        raise RuntimeError("guardian unavailable")
+
+    broker, ledger, key, key_id, public = make_broker(tmp_path, unavailable_guardian)
+    task = make_task()
+    task_id = str(uuid.uuid4())
+    params_hash = "b" * 64
+    approval, _ = signed_approval(task_id, task, "approval-guardian-error", params_hash)
+    approval["key_id"] = key_id
+    unsigned = {k: v for k, v in approval.items() if k != "signature"}
+    approval["signature"] = base64.b64encode(
+        key.sign(DOMAIN + canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    broker.approve(canonical(approval), 1000)
+    request = {
+        "task_id": task_id,
+        "approval_id": "approval-guardian-error",
+        "source_sha": task.source_sha,
+        "parameters_sha256": params_hash,
+        "allowed_paths": sorted(task.allowed_paths),
+        "provider": task.provider,
+        "model": task.model,
+        "max_calls": task.max_calls,
+        "max_cost_usd": task.max_cost_usd,
+        "deadline_seconds": task.deadline_seconds,
+    }
+    with pytest.raises(Denied, match="guardian_not_active"):
+        broker.admit(request, 1001)
+    row = ledger.db.execute(
+        "SELECT status,receipt FROM development_admissions WHERE approval_id=?",
+        ("approval-guardian-error",),
+    ).fetchone()
+    assert row == ("approved", None)
+    ledger.close()
+
+
 def test_expired_owner_approval_is_not_admitted(tmp_path):
     generation = str(uuid.uuid4())
     broker, _ledger, key, key_id, public = make_broker(

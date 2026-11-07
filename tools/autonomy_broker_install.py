@@ -75,7 +75,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 CURRENT_BUNDLE = "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
 # This is the fingerprint of the complete payload at this source revision,
 # including the fixed controller/publication database contract.
-UPGRADE_BUNDLE = "8f52ece5e7c0dbb832c984dda863aa697b1f71a1db48d5c481e123775dee4230"
+UPGRADE_BUNDLE = "6e45d11f1d6b5625dd28d1030c452e45f3689807fbf36a26119eb0434605e2a3"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:

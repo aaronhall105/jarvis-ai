@@ -128,6 +128,14 @@ Latest payload fingerprint superseding the earlier one below:
 
 ## Important limits and next action
 
+### Publisher and Guardian-generation correction
+
+The current PR #119 payload additionally fails closed when Guardian observation
+raises an exception and reports controller SQLite corruption as `unavailable`
+rather than an empty task state. The reviewed payload fingerprint for this
+revision is:
+`6e45d11f1d6b5625dd28d1030c452e45f3689807fbf36a26119eb0434605e2a3`.
+
 - Initial policy has no enrolled remote operator keys or independent reviewer
   IDs. Remote controls and release admission remain DENIED until provisioned.
   Existing local host controls remain authoritative. No self-resume authority.

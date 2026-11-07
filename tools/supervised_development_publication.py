@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import struct
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ class PendingTaskPublisher:
                 envelope = reader.pending_owner_task()
             finally:
                 reader.close()
-        except LifecycleError:
+        except (LifecycleError, sqlite3.DatabaseError):
             # Unavailable or damaged state is never equivalent to no task.
             connection.sendall(
                 _frame({"version": 1, "status": "unavailable", "reason": "controller_unavailable"})
@@ -75,7 +76,14 @@ def serve_listener(listener: socket.socket, *, database: Path, gateway_uid: int)
             with connection:
                 try:
                     publisher.serve_connection(connection)
-                except (OSError, PermissionError, ValueError, LifecycleError, json.JSONDecodeError):
+                except (
+                    OSError,
+                    PermissionError,
+                    ValueError,
+                    LifecycleError,
+                    sqlite3.DatabaseError,
+                    json.JSONDecodeError,
+                ):
                     # A malformed or unauthorised request receives no task and
                     # never changes controller state. The next connection is
                     # independent; details are intentionally not disclosed.
