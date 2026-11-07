@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import time
 import uuid
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -76,6 +77,30 @@ class GovernorCandidateSource:
     def close(self) -> None:
         self.db.close()
 
+    @staticmethod
+    def _is_scope_eligible(summary: str, evidence: object) -> bool:
+        """Require explicit evidence binding a candidate to the edit scope.
+
+        Governor records remain untouched.  The evidence must name one or both
+        approved diagnostics files and the summary must describe diagnostics
+        work; free-form conversation text or a candidate ID is never enough.
+        """
+        if not isinstance(evidence, dict):
+            return False
+        paths = evidence.get("affected_files")
+        if not isinstance(paths, list) or not paths:
+            return False
+        if any(type(path) is not str or path not in ALLOWED_PATHS for path in paths):
+            return False
+        if len(set(paths)) != len(paths):
+            return False
+        return bool(
+            re.search(
+                r"(?i)diagnostic|developer\s+(?:tool|result)|malformed\s+result|failed\s+count",
+                summary,
+            )
+        )
+
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
         rows = self.db.execute(
@@ -95,12 +120,14 @@ class GovernorCandidateSource:
             summary = str(row["summary"] or row["failure_summary"] or "").strip()
             try:
                 evidence = json.loads(row["evidence_json"])
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise LifecycleError("governor_evidence_invalid") from exc
+            except (TypeError, json.JSONDecodeError):
+                continue
             if not isinstance(evidence, dict) or not evidence:
-                raise LifecycleError("governor_evidence_missing")
+                continue
             if len(summary) < 3:
-                raise LifecycleError("governor_candidate_summary_missing")
+                continue
+            if not self._is_scope_eligible(summary, evidence):
+                continue
             return {
                 "candidate_id": candidate_id,
                 "failure_id": int(row["failure_id"]),
