@@ -14,6 +14,8 @@ import java.util.UUID;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Set;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.regex.Pattern;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -30,9 +32,14 @@ final class AutonomyControl {
         "guardian_generation"));
     private static final Pattern SHA40 = Pattern.compile("[a-f0-9]{40}");
     private static final Pattern SHA64 = Pattern.compile("[a-f0-9]{64}");
-    private static final String[] REQUIRED_PATHS = {
-        "tools/developer_session_diagnostics.py",
-        "tools/tests/test_developer_session_diagnostics.py"};
+    private static final Set<String> PROTECTED_SCOPE_PREFIXES = Collections.unmodifiableSet(
+        new HashSet<>(Arrays.asList(
+            ".github/", "systemd/", "developer_gateway/",
+            "tools/autonomy_", "tools/supervised_development_", "tools/deploy_",
+            "tools/guardian", "tools/operator", "tools/auth", "tools/owner",
+            "tools/patch", "tools/structured_edit")));
+    private static final Set<String> EDITABLE_EXTENSIONS = Collections.unmodifiableSet(
+        new HashSet<>(Arrays.asList(".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md", ".sh")));
     private AutonomyControl() {}
 
     static JSONObject signed(String action, String generation) throws Exception {
@@ -55,7 +62,7 @@ final class AutonomyControl {
         return sign(store, DEVELOPMENT_DOMAIN, canonical(fields));
     }
 
-    private static TreeMap<String, Object> developmentFields(JSONObject task) throws Exception {
+    static TreeMap<String, Object> developmentFields(JSONObject task) throws Exception {
         if (task == null) throw new IllegalArgumentException("missing task");
         Set<String> names = new HashSet<>();
         Iterator<String> iterator = task.keys();
@@ -84,13 +91,33 @@ final class AutonomyControl {
             || task.getDouble("max_cost_usd") < 0 || task.getDouble("max_cost_usd") > 1
             || task.getInt("deadline_seconds") < 1 || task.getInt("deadline_seconds") > 120)
             throw new IllegalArgumentException("invalid development limits");
+        String goal = task.optString("goal", "").trim();
+        if (goal.isEmpty() || goal.length() > 4000) throw new IllegalArgumentException("invalid goal");
         JSONArray paths = task.getJSONArray("allowed_paths");
-        if (paths.length() != REQUIRED_PATHS.length) throw new IllegalArgumentException("invalid scope");
-        for (int i = 0; i < REQUIRED_PATHS.length; i++)
-            if (!REQUIRED_PATHS[i].equals(paths.getString(i))) throw new IllegalArgumentException("invalid scope");
+        if (paths.length() == 0 || paths.length() > 64) throw new IllegalArgumentException("invalid scope");
+        String previous = null;
+        for (int i = 0; i < paths.length(); i++) {
+            String path = paths.getString(i);
+            if (!isCanonicalEditablePath(path)
+                || (previous != null && previous.compareTo(path) >= 0))
+                throw new IllegalArgumentException("invalid scope");
+            previous = path;
+        }
         TreeMap<String, Object> fields = new TreeMap<>();
         for (String field : DEVELOPMENT_FIELDS) fields.put(field, task.get(field));
         return fields;
+    }
+
+    private static boolean isCanonicalEditablePath(String path) {
+        if (path.isEmpty() || path.startsWith("/") || path.startsWith("./")
+            || path.endsWith("/") || path.contains("\\") || path.contains("//")
+            || path.indexOf('\0') >= 0 || !EDITABLE_EXTENSIONS.stream().anyMatch(path::endsWith))
+            return false;
+        for (String part : path.split("/", -1))
+            if (part.isEmpty() || part.equals(".") || part.equals("..")) return false;
+        for (String prefix : PROTECTED_SCOPE_PREFIXES)
+            if (path.startsWith(prefix)) return false;
+        return true;
     }
 
     /** Public SPKI and proof of possession only; never serializes the private key.
