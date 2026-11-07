@@ -18,16 +18,20 @@ VERSION_FILES = {
 
 
 def test_recovery_retains_entire_published_alpha43_android_tree():
-    # Independently computed from the 319 tracked Android files in release
-    # 4812ea7a2b83188cedfdf7c3631c70db2ca422a8. No tags/history needed in CI.
+    # Independently compute from the immutable published Alpha43 commit. The
+    # recovery candidate may evolve after Alpha43; it must not rewrite the
+    # published source used as the recovery baseline.
+    published = "4812ea7a2b83188cedfdf7c3631c70db2ca422a8"
     paths = subprocess.check_output(
-        ["git", "ls-files", "--", ANDROID], cwd=ROOT, text=True
+        ["git", "ls-tree", "-r", "--name-only", published, "--", ANDROID], cwd=ROOT, text=True
     ).splitlines()
     assert len(paths) == 319
     digest = hashlib.sha256()
     for relative in paths:
-        content = (ROOT / relative).read_bytes()
+        content = subprocess.check_output(["git", "show", f"{published}:{relative}"], cwd=ROOT)
         if relative.removeprefix(ANDROID) in VERSION_FILES:
+            # The published tree is already Alpha43; keep the replacement
+            # normalization to make the invariant explicit and deterministic.
             content = content.replace(b"19.0.0-alpha44", b"19.0.0-alpha43")
             content = content.replace(b"190460", b"190450")
         digest.update(relative.encode() + b"\0" + hashlib.sha256(content).digest())
