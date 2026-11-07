@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sqlite3
 import uuid
@@ -202,6 +203,10 @@ def test_candidate_selection_survives_read_only_restart(tmp_path):
 
 def test_candidate_scope_metadata_binds_preserved_failure_evidence(tmp_path):
     database = tmp_path / "governor.sqlite3"
+    failure_evidence = {"source": {"interaction_id": 9}}
+    evidence_hash = hashlib.sha256(
+        json.dumps(failure_evidence, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     with sqlite3.connect(database) as db:
         db.executescript(
             """
@@ -212,12 +217,29 @@ def test_candidate_scope_metadata_binds_preserved_failure_evidence(tmp_path):
                 candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT,
                 summary TEXT, development_scope_json TEXT NOT NULL DEFAULT '{}'
             );
-            INSERT INTO improvement_failures VALUES
-                (9,'Slow response','{"source":{"interaction_id":9}}','queued');
-            INSERT INTO improvement_candidates VALUES
-                (42,9,'queued','Reduce latency',
-                 '{"scope":"application","evidence_failure_id":9,"affected_files":["app/latency.py"]}');
             """
+        )
+        db.execute(
+            "INSERT INTO improvement_failures VALUES (?,?,?,?)",
+            (9, "Slow response", json.dumps(failure_evidence), "queued"),
+        )
+        db.execute(
+            "INSERT INTO improvement_candidates VALUES (?,?,?,?,?)",
+            (
+                42,
+                9,
+                "queued",
+                "Reduce latency",
+                json.dumps(
+                    {
+                        "scope": "application",
+                        "evidence_failure_id": 9,
+                        "evidence_sha256": evidence_hash,
+                        "source_sha": "a" * 40,
+                        "affected_files": ["app/latency.py"],
+                    }
+                ),
+            ),
         )
     source = GovernorCandidateSource(database)
     try:
@@ -225,6 +247,50 @@ def test_candidate_scope_metadata_binds_preserved_failure_evidence(tmp_path):
         assert selected is not None
         assert selected["candidate_id"] == 42
         assert selected["allowed_paths"] == ("app/latency.py",)
+    finally:
+        source.close()
+
+
+def test_candidate_scope_metadata_rejects_tampered_evidence_binding(tmp_path):
+    database = tmp_path / "governor.sqlite3"
+    evidence = {"source": {"interaction_id": 1}}
+    with sqlite3.connect(database) as db:
+        db.executescript(
+            """
+            CREATE TABLE improvement_failures(
+                failure_id INTEGER PRIMARY KEY, summary TEXT, evidence_json TEXT, status TEXT
+            );
+            CREATE TABLE improvement_candidates(
+                candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT,
+                summary TEXT, development_scope_json TEXT NOT NULL DEFAULT '{}'
+            );
+            """
+        )
+        db.execute(
+            "INSERT INTO improvement_failures VALUES (?,?,?,?)",
+            (1, "Failure", json.dumps(evidence), "queued"),
+        )
+        db.execute(
+            "INSERT INTO improvement_candidates VALUES (?,?,?,?,?)",
+            (
+                1,
+                1,
+                "queued",
+                "Tampered",
+                json.dumps(
+                    {
+                        "scope": "application",
+                        "evidence_failure_id": 1,
+                        "evidence_sha256": "0" * 64,
+                        "source_sha": "a" * 40,
+                        "affected_files": ["app/example.py"],
+                    }
+                ),
+            ),
+        )
+    source = GovernorCandidateSource(database)
+    try:
+        assert source.next() is None
     finally:
         source.close()
 

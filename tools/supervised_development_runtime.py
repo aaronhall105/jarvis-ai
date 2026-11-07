@@ -9,7 +9,9 @@ Guardian approvals, and then invokes the bounded worker exactly once.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -157,6 +159,16 @@ class GovernorCandidateSource:
                 # Governor failure evidence remains immutable.  The binding
                 # must point back to the exact preserved failure record.
                 if scope.get("evidence_failure_id") != int(row["failure_id"]):
+                    continue
+                expected_evidence_hash = hashlib.sha256(
+                    json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                if scope.get("evidence_sha256") != expected_evidence_hash:
+                    continue
+                source_sha = scope.get("source_sha")
+                if not isinstance(source_sha, str) or not re.fullmatch(
+                    r"[0-9a-f]{40,64}", source_sha
+                ):
                     continue
                 evidence = {**evidence, **scope}
             if len(summary) < 3:
@@ -348,6 +360,9 @@ class SupervisedDevelopmentRuntime:
                 if candidate is None:
                     return {"status": "no_eligible_candidate"}
                 source_sha = self._source_sha()
+                bound_source_sha = str(candidate["evidence"].get("source_sha") or "")
+                if bound_source_sha and bound_source_sha != source_sha:
+                    return {"status": "no_eligible_candidate", "reason": "source_binding_mismatch"}
                 task = GovernorAdapter.from_candidate(
                     candidate,
                     owner_id=OWNER_ID,

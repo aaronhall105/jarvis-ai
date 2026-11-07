@@ -178,6 +178,84 @@ async def test_evidenced_candidate_rejects_untracked_or_missing_failure(
 
 
 @pytest.mark.asyncio
+async def test_evidenced_candidate_attaches_scope_to_existing_queued_candidate(
+    tmp_path: Path,
+    actor: UserContext,
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    tracked = source_root / "app" / "latency.py"
+    tracked.parent.mkdir()
+    tracked.write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(source_root)], check=True)
+    subprocess.run(["git", "-C", str(source_root), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "base",
+        ],
+        check=True,
+    )
+    engine = SelfImprovementEngine(
+        str(tmp_path / "improvement.db"),
+        enabled=True,
+        auto_prepare=False,
+        development_source_root=str(source_root),
+    )
+    interaction_id = await engine.observe_interaction(
+        conversation_id="usr:aaron:queued",
+        actor=actor,
+        raw_text="The request was slow",
+        result={
+            "success": True,
+            "response": "ok",
+            "intent": "general",
+            "calls": [],
+            "timings": {"jarvis_request_total_ms": 9000},
+        },
+    )
+    failure = await engine.get_failure(1)
+    assert failure is not None
+    await engine.queue_failure(1, actor="test")
+    before = json.dumps(failure["evidence"], sort_keys=True)
+    ok, candidate_id, status = await engine.prepare_evidenced_improvement(
+        failure_id=1,
+        affected_files=["app/latency.py"],
+        summary="Reduce measured request latency",
+        actor="owner",
+    )
+    assert (ok, status) == (True, "queued")
+    assert candidate_id is not None
+    candidate = (await engine.list_candidates())[0]
+    assert json.loads(candidate["development_scope_json"])["evidence_failure_id"] == 1
+    unchanged = await engine.get_failure(1)
+    assert unchanged is not None
+    assert json.dumps(unchanged["evidence"], sort_keys=True) == before
+
+    with engine._connect() as connection:  # noqa: SLF001 - state transition fixture
+        connection.execute(
+            "UPDATE improvement_candidates SET status = 'approved' WHERE candidate_id = ?",
+            (candidate_id,),
+        )
+    rejected, _, message = await engine.prepare_evidenced_improvement(
+        failure_id=1,
+        affected_files=["app/latency.py"],
+        summary="Do not replace approved scope",
+        actor="owner",
+    )
+    assert rejected is False
+    assert "queued" in message.lower()
+
+
+@pytest.mark.asyncio
 async def test_failed_tool_is_recorded(
     engine: SelfImprovementEngine,
     actor: UserContext,

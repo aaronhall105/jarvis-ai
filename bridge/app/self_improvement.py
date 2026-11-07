@@ -1101,16 +1101,47 @@ class SelfImprovementEngine:
         if len(clean_summary) < 3:
             return False, None, "A concise improvement summary is required."
 
-        def _prepare() -> int:
+        scope_record = {
+            "scope": "application",
+            "affected_files": paths,
+            "evidence_failure_id": failure_id,
+            "evidence_sha256": binding,
+            "source_sha": source_sha,
+            "source_root": str(self.development_source_root),
+        }
+
+        def _prepare() -> tuple[int | None, str | None]:
             now = self._utc_now()
             with self._connection() as connection:
                 existing = connection.execute(
-                    "SELECT candidate_id FROM improvement_candidates WHERE failure_id = ? "
-                    "AND status NOT IN ('rejected','failed','rolled_back') LIMIT 1",
+                    "SELECT candidate_id,status,summary,development_scope_json "
+                    "FROM improvement_candidates WHERE failure_id = ? "
+                    "ORDER BY candidate_id DESC LIMIT 1",
                     (failure_id,),
                 ).fetchone()
                 if existing:
-                    return int(existing["candidate_id"])
+                    candidate_id = int(existing["candidate_id"])
+                    if str(existing["status"]) != "queued":
+                        return (
+                            None,
+                            "Only queued candidates may receive development scope evidence.",
+                        )
+                    existing_scope = self._load_json(existing["development_scope_json"], {})
+                    if existing_scope:
+                        if existing_scope != scope_record:
+                            return (
+                                None,
+                                "Candidate scope evidence is already bound and cannot be replaced.",
+                            )
+                        return candidate_id, None
+                    updated = connection.execute(
+                        "UPDATE improvement_candidates SET updated_at = ?, "
+                        "development_scope_json = ? WHERE candidate_id = ? AND status = 'queued'",
+                        (now, self._json(scope_record), candidate_id),
+                    )
+                    if updated.rowcount != 1:
+                        return None, "Candidate changed state during scope preparation."
+                    return candidate_id, None
                 cursor = connection.execute(
                     "INSERT INTO improvement_candidates "
                     "(failure_id,created_at,updated_at,status,summary,development_scope_json) "
@@ -1123,19 +1154,16 @@ class SelfImprovementEngine:
                         clean_summary,
                         self._json(
                             {
-                                "scope": "application",
-                                "affected_files": paths,
-                                "evidence_failure_id": failure_id,
-                                "evidence_sha256": binding,
-                                "source_sha": source_sha,
-                                "source_root": str(self.development_source_root),
+                                **scope_record,
                             }
                         ),
                     ),
                 )
-                return self._required_lastrowid(cursor)
+                return self._required_lastrowid(cursor), None
 
-        candidate_id = await asyncio.to_thread(_prepare)
+        candidate_id, error = await asyncio.to_thread(_prepare)
+        if candidate_id is None:
+            return False, None, error or "Candidate scope preparation failed."
         await self.audit(
             "evidenced_candidate_prepared",
             actor=actor,
