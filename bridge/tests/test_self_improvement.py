@@ -102,7 +102,18 @@ async def test_evidenced_candidate_binds_existing_failure_without_rewriting_evid
     subprocess.run(["git", "init", "-q", str(source_root)], check=True)
     subprocess.run(["git", "-C", str(source_root), "add", "."], check=True)
     subprocess.run(
-        ["git", "-C", str(source_root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base"],
+        [
+            "git",
+            "-C",
+            str(source_root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "base",
+        ],
         check=True,
     )
     engine = SelfImprovementEngine(

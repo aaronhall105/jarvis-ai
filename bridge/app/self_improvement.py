@@ -1006,7 +1006,15 @@ class SelfImprovementEngine:
         normalised = path.as_posix()
         if normalised != value or normalised.startswith((".git/", ".git")):
             return None
-        if normalised.startswith(("tools/autonomy_", "tools/supervised_development_", "tools/deploy_", "systemd/", ".github/")):
+        if normalised.startswith(
+            (
+                "tools/autonomy_",
+                "tools/supervised_development_",
+                "tools/deploy_",
+                "systemd/",
+                ".github/",
+            )
+        ):
             return None
         if path.suffix not in {".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md", ".sh"}:
             return None
@@ -1024,7 +1032,11 @@ class SelfImprovementEngine:
         for raw in affected_files:
             normalised = self._normalise_development_path(raw)
             if normalised is None or normalised in paths:
-                return None, "Affected files must be unique, canonical, editable application paths.", ""
+                return (
+                    None,
+                    "Affected files must be unique, canonical, editable application paths.",
+                    "",
+                )
             candidate = (self.development_source_root / normalised).resolve()
             try:
                 candidate.relative_to(self.development_source_root.resolve())
@@ -1062,7 +1074,11 @@ class SelfImprovementEngine:
         if status or not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
             return None, "Trusted source snapshot is not clean and immutable.", ""
         if tracked != set(paths):
-            return None, "Affected files are not exactly tracked by the trusted source snapshot.", ""
+            return (
+                None,
+                "Affected files are not exactly tracked by the trusted source snapshot.",
+                "",
+            )
         source_hash = hashlib.sha256(
             json.dumps(source, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -1085,9 +1101,7 @@ class SelfImprovementEngine:
         if not await self.enabled():
             return False, None, "Self-improvement is disabled."
         failure = await self.get_failure(failure_id)
-        paths, binding, source_sha = self._validate_development_scope(
-            failure or {}, affected_files
-        )
+        paths, binding, source_sha = self._validate_development_scope(failure or {}, affected_files)
         if paths is None:
             return False, None, binding or "Development evidence is unavailable."
         clean_summary = self.redact_text(summary).strip()
@@ -1114,14 +1128,16 @@ class SelfImprovementEngine:
                         now,
                         "queued",
                         clean_summary,
-                        self._json({
-                            "scope": "application",
-                            "affected_files": paths,
-                            "evidence_failure_id": failure_id,
-                            "evidence_sha256": binding,
-                            "source_sha": source_sha,
-                            "source_root": str(self.development_source_root),
-                        }),
+                        self._json(
+                            {
+                                "scope": "application",
+                                "affected_files": paths,
+                                "evidence_failure_id": failure_id,
+                                "evidence_sha256": binding,
+                                "source_sha": source_sha,
+                                "source_root": str(self.development_source_root),
+                            }
+                        ),
                     ),
                 )
                 return self._required_lastrowid(cursor)
