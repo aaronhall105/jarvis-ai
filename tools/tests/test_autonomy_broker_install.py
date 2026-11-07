@@ -118,6 +118,13 @@ def test_payload_contains_development_admission_endpoint(rehearsal):
     assert any(
         path.name == "jarvis-autonomy-broker-development-admission.service" for path in files
     )
+    assert any(path.name == "supervised_development_publication.py" for path in files)
+    assert any(
+        path.name == "jarvis-autonomy-broker-development-publication.socket" for path in files
+    )
+    assert any(
+        path.name == "jarvis-autonomy-broker-development-publication.service" for path in files
+    )
 
 
 def test_modified_protected_payload_refused(rehearsal):
@@ -218,7 +225,19 @@ def _make_legacy_install(rehearsal, monkeypatch):
     development = {
         str(path)
         for path in files
-        if "development-admission" in str(path) or path.name == "supervised_development_broker.py"
+        if "development-admission" in str(path)
+        or "development-publication" in str(path)
+        or "development-controller" in str(path)
+        or path.name
+        in {
+            "supervised_development_broker.py",
+            "supervised_development_controller.py",
+            "supervised_development_pipeline.py",
+            "supervised_development_publication.py",
+            "supervised_development_review.py",
+            "supervised_development_runtime.py",
+            "supervised_development_worker.py",
+        }
     }
     for path in development:
         Path(path).unlink()
@@ -244,6 +263,17 @@ def test_reviewed_legacy_upgrade_adds_development_endpoint_atomically(rehearsal,
     assert upgraded["bundle"] == installer.UPGRADE_BUNDLE
     assert any("development-admission" in name for name in upgraded["files"])
     assert all("docker-client/config.json" not in str(call) for call in commands.call_args_list)
+
+
+def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
+    assert (
+        installer.LEGACY_BUNDLE
+        == "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
+    )
+    assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
+    assert installer.UPGRADE_BUNDLE == (
+        "5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3"
+    )
 
 
 def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkeypatch):

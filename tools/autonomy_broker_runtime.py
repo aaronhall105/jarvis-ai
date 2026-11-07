@@ -44,6 +44,7 @@ from tools.supervised_development_broker import (
     DevelopmentAdmissionBroker,
     serve_admission_connection,
 )
+from tools.supervised_development_publication import serve_activation as serve_publication
 
 LIB = Path("/usr/local/libexec/jarvis-autonomy-broker")
 BASE = Path("/var/lib/jarvis-autonomy-broker")
@@ -509,12 +510,26 @@ def serve(role: str, policy: dict) -> None:
 
 
 def main(arguments: list[str]) -> int:
+    if len(arguments) == 2 and arguments[0] == "development-worker":
+        # The coordinator is root, but development execution is deliberately
+        # delegated to the policy-pinned autonomy account.  This branch accepts
+        # only the persisted task identifier; all task parameters come from the
+        # protected controller database.
+        from tools.supervised_development_runtime import worker_main
+
+        return worker_main(arguments[1])
     if os.geteuid() != 0:
         return 1
     try:
         policy = installed_policy()
         if arguments in (["worker"], ["operator"], ["development-admission"]):
             serve(arguments[0], policy)
+        elif arguments == ["development-publication"]:
+            serve_publication()
+        elif arguments == ["development-controller"]:
+            from tools.supervised_development_runtime import main as serve_controller
+
+            return serve_controller()
         elif len(arguments) == 2 and arguments[0] == "release":
             release_entry(arguments[1], policy)
         else:

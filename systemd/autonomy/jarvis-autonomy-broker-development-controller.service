@@ -1,0 +1,39 @@
+[Unit]
+Description=Owner-gated Jarvis supervised development controller
+Requires=jarvis-autonomy-guardian.service
+After=jarvis-autonomy-guardian.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py development-controller
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/jarvis-autonomy-broker/work /var/lib/jarvis-autonomy-broker/worktrees
+ReadOnlyPaths=/home/aaron/jarvis-unified-production-worktree /var/lib/jarvis-autonomy /var/lib/jarvis-autonomy-guardian /etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=32
+MemoryMax=512M
+CPUQuota=100%
+TimeoutStartSec=infinity
+TimeoutStopSec=30
+KillMode=control-group
+StandardOutput=null
+StandardError=journal

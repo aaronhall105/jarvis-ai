@@ -10,10 +10,9 @@ installed and owner admission is authenticated there.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
-import sys
 import uuid
+import time
 from dataclasses import dataclass
 from pathlib import Path
 import re
@@ -48,6 +47,8 @@ class GovernorTask:
     owner_id: str
     request_ref: str
     candidate_id: int | None = None
+    guardian_generation: str = ""
+    expires_at: int = 0
 
 
 class GovernorAdapter:
@@ -67,6 +68,8 @@ class GovernorAdapter:
         source_sha: str,
         allowed_paths: tuple[str, ...],
         model: str = "gpt-5.3-codex",
+        guardian_generation: str = "",
+        expires_at: int = 0,
     ) -> GovernorTask:
         if candidate.get("status") not in {"queued", "recorded"}:
             raise LifecycleError("governor_candidate_not_queued")
@@ -96,44 +99,43 @@ class GovernorAdapter:
             owner_id=owner_id,
             request_ref=request_ref,
             candidate_id=candidate_id,
+            guardian_generation=guardian_generation,
+            expires_at=expires_at,
         )
 
 
 class ExistingSelfDevelopmentWorker:
-    """Adapter for the certified worker; it never grants lifecycle authority."""
+    """Compatibility adapter that routes supervised work to the bounded worker.
+
+    The historical repair-loop worker is deliberately not used here: it can
+    plan, retry, review and integrate through legacy paths.  Supervised tasks
+    must provide an immutable authoritative workspace and use the one-call
+    worker below.
+    """
 
     def __init__(self, config: Any, env_values: dict[str, str]) -> None:
         self.config = config
         self.env_values = dict(env_values)
 
     def run(self, task: GovernorTask) -> dict[str, Any]:
-        if task.candidate_id is None:
-            raise LifecycleError("worker_candidate_missing")
-        tools_dir = str(Path(__file__).resolve().parent)
-        if tools_dir not in sys.path:
-            sys.path.insert(0, tools_dir)
-        worker = importlib.import_module("self_development_worker")
+        from tools.supervised_development_worker import BoundedDevelopmentWorker
 
-        candidate = worker.base.fetch_candidate_by_id(task.candidate_id)
-        if candidate is None:
-            raise LifecycleError("worker_candidate_not_found")
-        worker.process_development_candidate(candidate, self.config, self.env_values)
-        final = worker.base.fetch_candidate_by_id(task.candidate_id)
-        if not final or final.get("status") != "awaiting_approval":
-            raise LifecycleError("worker_did_not_produce_reviewable_proposal")
-        diff = final.get("diff_stats_json") or {}
-        tests = final.get("test_results_json") or {}
-        security = final.get("security_results_json") or {}
-        return {
-            "proposal": str(final.get("summary") or task.objective),
-            "diff_sha256": str(
-                final.get("validated_patch_sha256") or diff.get("patch_sha256") or ""
-            ),
-            "tests": tests if isinstance(tests, dict) else {},
-            "security": security if isinstance(security, dict) else {},
-            "changed_files": final.get("changed_files_json") or [],
-            "candidate_id": task.candidate_id,
-        }
+        source = self.env_values.get("JARVIS_AUTHORITATIVE_WORKSPACE", "")
+        worktrees = self.env_values.get("JARVIS_SUPERVISED_WORKTREE_ROOT", "")
+        if not source or not worktrees:
+            raise LifecycleError("bounded_worker_workspace_unconfigured")
+        try:
+            input_price = float(self.env_values["JARVIS_GPT53_INPUT_USD_PER_MILLION"])
+            output_price = float(self.env_values["JARVIS_GPT53_OUTPUT_USD_PER_MILLION"])
+        except (KeyError, ValueError) as exc:
+            raise LifecycleError("provider_pricing_unverified") from exc
+        worker = BoundedDevelopmentWorker(
+            Path(source),
+            worktree_root=Path(worktrees),
+            input_price_per_million=input_price,
+            output_price_per_million=output_price,
+        )
+        return worker.run(task)
 
 
 class SupervisedDevelopmentPipeline:
@@ -161,6 +163,8 @@ class SupervisedDevelopmentPipeline:
             "deadline_seconds": task.deadline_seconds,
             "goal": task.objective,
         }
+        if task.candidate_id is not None:
+            payload["candidate_id"] = task.candidate_id
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
@@ -174,26 +178,36 @@ class SupervisedDevelopmentPipeline:
             max_cost_usd=task.max_cost_usd,
             deadline_seconds=task.deadline_seconds,
             goal=task.objective,
+            candidate_id=task.candidate_id,
         )
         self.controller.record_approval_request(
             task_id,
             owner_id=task.owner_id,
             parameters_sha256=self._parameters_hash(task),
             request_ref=task.request_ref,
+            guardian_generation=task.guardian_generation,
+            expires_at=task.expires_at or None,
         )
         return task_id
 
     def execute(self, task_id: str, task: GovernorTask, *, current_base_sha: str) -> dict[str, Any]:
         """Run exactly one admitted worker call and stop at a review handoff."""
+        started = time.monotonic()
         self.controller.start(task_id, current_base_sha=current_base_sha)
         call_id = str(uuid.uuid4())
         if not self.controller.reserve_provider_call(task_id, call_id=call_id):
             raise LifecycleError("provider_call_already_reserved")
         try:
             evidence = self.worker.run(task)
+            if time.monotonic() - started > task.deadline_seconds:
+                raise LifecycleError("whole_cycle_deadline_expired")
             self.controller.finish_provider_call(task_id, call_id=call_id, outcome="completed")
             self.controller.record_evidence(task_id, evidence=evidence)
+            if time.monotonic() - started > task.deadline_seconds:
+                raise LifecycleError("whole_cycle_deadline_expired")
             review = self.reviewer.review(task, evidence)
+            if time.monotonic() - started > task.deadline_seconds:
+                raise LifecycleError("whole_cycle_deadline_expired")
             self.controller.record_review(task_id, review=review)
         except BaseException:
             try:

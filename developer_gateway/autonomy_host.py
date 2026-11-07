@@ -155,11 +155,17 @@ def _unique_fields(pairs):
 
 def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
     fields = {"version", "action", "key_id", "request_id", "expires_at", "generation", "signature"}
-    if (
-        set(body) != fields
-        or not isinstance(body.get("action"), str)
-        or body["action"] not in {"status", "stop", "resume"}
-    ):
+    action = body.get("action")
+    if not isinstance(action, str):
+        return {"ok": False, "category": "request_denied"}
+    # Development approvals use a separate domain and are validated in the
+    # root-owned development broker. The relay only transports them; it never
+    # authenticates or authorizes their task fields.
+    if action not in {"approve_development", "status", "stop", "resume"}:
+        return {"ok": False, "category": "request_denied"}
+    if action != "approve_development" and set(body) != fields:
+        return {"ok": False, "category": "request_denied"}
+    if action == "approve_development" and len(body) > 32:
         return {"ok": False, "category": "request_denied"}
     raw = json.dumps(body, separators=(",", ":")).encode()
     if len(raw) > 8192:
@@ -175,12 +181,22 @@ def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError("Invalid frame")
             result = json.loads(_receive(connection, length))
         # Never propagate arbitrary broker error content or identifiers to logs.
-        return {
-            "ok": result.get("ok") is True,
-            "category": "accepted" if result.get("ok") is True else "request_denied",
-        }
+        accepted = result.get("ok") is True or (
+            action == "approve_development" and result.get("status") == "approved"
+        )
+        return {"ok": accepted, "category": "accepted" if accepted else "request_denied"}
     except Exception:
         return {"ok": False, "category": "operator_unavailable"}
+
+
+def pending_development_task() -> dict[str, Any] | None:
+    """Read only the fixed controller publication socket; never a DB path."""
+    try:
+        from .pending_task_client import fetch_pending_task
+
+        return fetch_pending_task()
+    except Exception:
+        return {"status": "unavailable", "reason": "publisher_unavailable"}
 
 
 def _receive(connection: socket.socket, size: int) -> bytes:

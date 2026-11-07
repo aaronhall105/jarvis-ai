@@ -3,8 +3,8 @@
 This controller is durable lifecycle/state orchestration. The
 `SupervisedDevelopmentPipeline` joins it to the existing development worker and
 review interface, but execution is admitted only by the fixed protected-broker
-socket. The current production broker does not yet install that development
-admission endpoint, so production execution remains fail-closed.
+socket. The protected installer carries the endpoint, while live installation
+and activation remain separately authorised.
 
 The existing certified Phase 2 harness remains responsible for provider budget,
 credential separation, deadlines, structured JSON validation, source checksums,
@@ -64,10 +64,12 @@ An existing protected broker installation from the pre-development bundle must
 not be overwritten with the normal installer: it is intentionally rejected as
 `different_reviewed_broker_bundle`. The canonical installer exposes one
 version-bound migration, `python3 tools/autonomy_broker_install.py --upgrade`.
-It accepts only the recorded legacy bundle
-`a85bd8e7e907b38a51ce10e724c13d9bb9744c87e1e5ba9ce5396c1669b9133f` and the
-reviewed destination bundle
-`b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb`.
+It accepts only the recorded installed bundle
+`b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb` and the
+current tracked destination payload
+`5d75a23a9b4010770a6f05a93499e94d9501db07aa534818cf30652ddc429ff3`.
+The earlier `fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788`
+fingerprint represented the pre-read-only-controller payload and is rejected.
 
 The migration stages and hashes the complete replacement payload, briefly
 stops broker sockets to prevent mixed-version execution, atomically updates the
@@ -77,3 +79,14 @@ ledgers, jobs and audit records. On failure it restores only executable
 payloads and manifests, leaves data and evidence untouched, and restarts the
 pre-existing operator/worker sockets for reconciliation. It never performs a
 provider call or starts autonomous development.
+
+The installed `development-controller` entrypoint is a bounded coordinator,
+not a second scheduler. It reads the fixed Governor improvement database
+read-only, records at most one candidate in the authoritative lifecycle
+database, waits for the owner signature and separately activated Guardian
+generation, then delegates execution to a child running as the policy-pinned
+autonomy account. Only that unprivileged child connects to the admission socket;
+the root coordinator retains emergency STOP authority and never performs
+development edits. The service remains alive through approval waiting, while
+the child is bounded by the task deadline plus bounded cleanup. It does not
+activate Guardian, commit, push, merge, deploy, or select another database.

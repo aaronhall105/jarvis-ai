@@ -11,6 +11,11 @@ import java.security.Signature;
 import java.security.spec.ECGenParameterSpec;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Set;
+import java.util.regex.Pattern;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 /** Device-held operator key. Public key enrollment is a separate host operation.
@@ -18,6 +23,16 @@ import org.json.JSONObject;
  */
 final class AutonomyControl {
     private static final String ALIAS = "jarvis.autonomy.operator.v1";
+    private static final String DEVELOPMENT_DOMAIN = "jarvis-development-admission-v1\n";
+    private static final Set<String> DEVELOPMENT_FIELDS = new HashSet<>(java.util.Arrays.asList(
+        "version", "action", "task_id", "source_sha", "parameters_sha256", "allowed_paths",
+        "provider", "model", "max_calls", "max_cost_usd", "deadline_seconds",
+        "guardian_generation"));
+    private static final Pattern SHA40 = Pattern.compile("[a-f0-9]{40}");
+    private static final Pattern SHA64 = Pattern.compile("[a-f0-9]{64}");
+    private static final String[] REQUIRED_PATHS = {
+        "tools/developer_session_diagnostics.py",
+        "tools/tests/test_developer_session_diagnostics.py"};
     private AutonomyControl() {}
 
     static JSONObject signed(String action, String generation) throws Exception {
@@ -27,6 +42,55 @@ final class AutonomyControl {
         String canonical = unsigned(action, generation, keyId(store),
             UUID.randomUUID().toString(), System.currentTimeMillis() / 1000 + 45);
         return sign(store, "jarvis-autonomy-control-v1\n", canonical);
+    }
+
+    /** Signs a broker-approved task envelope. The private key never leaves
+     * Android Keystore; the display-only goal is bound by parameters_sha256. */
+    static JSONObject signedDevelopment(JSONObject task) throws Exception {
+        TreeMap<String, Object> fields = developmentFields(task);
+        KeyStore store = operatorStore();
+        fields.put("key_id", keyId(store));
+        fields.put("request_id", task.getString("request_ref"));
+        fields.put("expires_at", task.getLong("expires_at"));
+        return sign(store, DEVELOPMENT_DOMAIN, canonical(fields));
+    }
+
+    private static TreeMap<String, Object> developmentFields(JSONObject task) throws Exception {
+        if (task == null) throw new IllegalArgumentException("missing task");
+        Set<String> names = new HashSet<>();
+        Iterator<String> iterator = task.keys();
+        while (iterator.hasNext()) names.add(iterator.next());
+        Set<String> taskFields = new HashSet<>(DEVELOPMENT_FIELDS);
+        taskFields.add("request_ref"); taskFields.add("expires_at");
+        Set<String> withGoal = new HashSet<>(taskFields); withGoal.add("goal");
+        if (!names.equals(taskFields) && !names.equals(withGoal))
+            throw new IllegalArgumentException("unexpected task fields");
+        if (task.optInt("version", -1) != 1 || !"approve_development".equals(task.optString("action")))
+            throw new IllegalArgumentException("invalid development action");
+        UUID.fromString(task.getString("task_id"));
+        UUID.fromString(task.getString("guardian_generation"));
+        String requestRef = task.getString("request_ref");
+        if (requestRef.isEmpty() || requestRef.length() > 200
+            || !requestRef.matches("[A-Za-z0-9._:-]+")) throw new IllegalArgumentException("invalid request");
+        long expires = task.getLong("expires_at");
+        long now = System.currentTimeMillis() / 1000;
+        if (expires <= now || expires > now + 120) throw new IllegalArgumentException("invalid expiry");
+        if (!SHA40.matcher(task.getString("source_sha")).matches()
+            || !SHA64.matcher(task.getString("parameters_sha256")).matches())
+            throw new IllegalArgumentException("invalid source binding");
+        if (!"openai".equals(task.getString("provider"))
+            || !"gpt-5.3-codex".equals(task.getString("model"))
+            || task.getInt("max_calls") != 1
+            || task.getDouble("max_cost_usd") < 0 || task.getDouble("max_cost_usd") > 1
+            || task.getInt("deadline_seconds") < 1 || task.getInt("deadline_seconds") > 120)
+            throw new IllegalArgumentException("invalid development limits");
+        JSONArray paths = task.getJSONArray("allowed_paths");
+        if (paths.length() != REQUIRED_PATHS.length) throw new IllegalArgumentException("invalid scope");
+        for (int i = 0; i < REQUIRED_PATHS.length; i++)
+            if (!REQUIRED_PATHS[i].equals(paths.getString(i))) throw new IllegalArgumentException("invalid scope");
+        TreeMap<String, Object> fields = new TreeMap<>();
+        for (String field : DEVELOPMENT_FIELDS) fields.put(field, task.get(field));
+        return fields;
     }
 
     /** Public SPKI and proof of possession only; never serializes the private key.

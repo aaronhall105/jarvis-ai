@@ -63,17 +63,44 @@ def _now() -> int:
     return int(time.time())
 
 
+def _is_uuid(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+
 class SupervisedDevelopmentController:
     """State machine for one owner-approved, bounded development task."""
 
     def __init__(
         self,
         database: Path,
+        *,
+        read_only: bool = False,
+        database_mode: int = 0o600,
     ) -> None:
         self.database = Path(database)
+        if read_only:
+            if self.database.is_symlink() or not self.database.is_file():
+                raise LifecycleError("controller_database_unavailable")
+            if any(parent.is_symlink() for parent in self.database.parents):
+                raise LifecycleError("controller_database_path_untrusted")
+            self.db = sqlite3.connect(
+                f"file:{self.database.resolve()}?mode=ro", uri=True, timeout=5
+            )
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA query_only=ON")
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)").fetchall()}
+            if not {"id", "state", "parameters", "approval"}.issubset(columns):
+                self.db.close()
+                raise LifecycleError("controller_schema_invalid")
+            return
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.database, timeout=5, isolation_level=None)
-        self.database.chmod(0o600)
+        if database_mode not in {0o600, 0o660}:
+            raise LifecycleError("controller_database_mode_invalid")
+        self.database.chmod(database_mode)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -133,6 +160,7 @@ class SupervisedDevelopmentController:
         max_cost_usd: float,
         deadline_seconds: int,
         goal: str,
+        candidate_id: int | None = None,
     ) -> str:
         if not _SHA.fullmatch(base_sha):
             raise LifecycleError("invalid_base_sha")
@@ -146,6 +174,8 @@ class SupervisedDevelopmentController:
             raise LifecycleError("execution_bound_violation")
         if not goal or len(goal) > 4_000:
             raise LifecycleError("invalid_goal")
+        if candidate_id is not None and (type(candidate_id) is not int or candidate_id <= 0):
+            raise LifecycleError("invalid_candidate_id")
         task_id = str(uuid.uuid4())
         parameters = {
             "base_sha": base_sha,
@@ -157,6 +187,8 @@ class SupervisedDevelopmentController:
             "deadline_seconds": deadline_seconds,
             "goal": goal,
         }
+        if candidate_id is not None:
+            parameters["candidate_id"] = candidate_id
         stamp = _now()
         self.db.execute(
             "INSERT INTO tasks(id,state,parameters,created_at,updated_at) VALUES(?,?,?,?,?)",
@@ -165,7 +197,14 @@ class SupervisedDevelopmentController:
         return task_id
 
     def record_approval_request(
-        self, task_id: str, *, owner_id: str, parameters_sha256: str, request_ref: str
+        self,
+        task_id: str,
+        *,
+        owner_id: str,
+        parameters_sha256: str,
+        request_ref: str,
+        guardian_generation: str = "",
+        expires_at: int | None = None,
     ) -> None:
         """Persist an untrusted request; this never grants execution authority."""
         if not owner_id or len(owner_id) > 200 or not request_ref or len(request_ref) > 200:
@@ -186,6 +225,8 @@ class SupervisedDevelopmentController:
                 "requested_at": _now(),
                 "parameters_sha256": expected_hash,
                 "request_ref": request_ref,
+                "guardian_generation": guardian_generation,
+                "expires_at": expires_at or _now() + 90,
             }
             encoded = _json(request)
             self._transition(task_id, APPROVAL_REQUESTED)
@@ -198,6 +239,51 @@ class SupervisedDevelopmentController:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
             raise
+
+    def pending_owner_task(self) -> dict[str, Any] | None:
+        """Return only the one current, unexpired approval envelope.
+
+        This is the sole publication source for the owner UI; observer plans
+        and caller-provided JSON never enter this method.
+        """
+        row = self.db.execute(
+            "SELECT * FROM tasks WHERE state=? ORDER BY created_at,id LIMIT 1",
+            (APPROVAL_REQUESTED,),
+        ).fetchone()
+        if row is None:
+            return None
+        task = json.loads(row["parameters"])
+        approval = json.loads(row["approval"] or "{}")
+        expires = approval.get("expires_at")
+        if (
+            approval.get("task_id") != row["id"]
+            or not isinstance(approval.get("request_ref"), str)
+            or not isinstance(expires, int)
+            or expires <= _now()
+            or not isinstance(approval.get("guardian_generation"), str)
+            or not _is_uuid(approval["guardian_generation"])
+        ):
+            return None
+        expected = hashlib.sha256(str(row["parameters"]).encode()).hexdigest()
+        if approval.get("parameters_sha256") != expected:
+            return None
+        return {
+            "version": 1,
+            "action": "approve_development",
+            "goal": task["goal"],
+            "task_id": row["id"],
+            "request_ref": approval["request_ref"],
+            "source_sha": task["base_sha"],
+            "parameters_sha256": expected,
+            "allowed_paths": task["allowed_paths"],
+            "provider": task["provider"],
+            "model": task["model"],
+            "max_calls": task["max_calls"],
+            "max_cost_usd": task["max_cost_usd"],
+            "deadline_seconds": task["deadline_seconds"],
+            "expires_at": expires,
+            "guardian_generation": approval["guardian_generation"],
+        }
 
     def start(self, task_id: str, *, current_base_sha: str) -> None:
         """Admit execution only after the installed protected broker attests it.
