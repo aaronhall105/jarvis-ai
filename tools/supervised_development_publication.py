@@ -26,7 +26,9 @@ class PendingTaskPublisher:
         self.gateway_uid = gateway_uid
 
     def serve_connection(self, connection: socket.socket) -> None:
-        _, uid, _ = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+        _, uid, _ = struct.unpack(
+            "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+        )
         if uid != self.gateway_uid:
             raise PermissionError("publication_peer_denied")
         header = connection.recv(4)
@@ -61,9 +63,21 @@ def fetch_pending_task(path: str = SOCKET) -> dict[str, Any] | None:
     if body.get("status") == "none":
         return None
     required = {
-        "version", "action", "goal", "task_id", "request_ref", "source_sha",
-        "parameters_sha256", "allowed_paths", "provider", "model", "max_calls",
-        "max_cost_usd", "deadline_seconds", "expires_at", "guardian_generation",
+        "version",
+        "action",
+        "goal",
+        "task_id",
+        "request_ref",
+        "source_sha",
+        "parameters_sha256",
+        "allowed_paths",
+        "provider",
+        "model",
+        "max_calls",
+        "max_cost_usd",
+        "deadline_seconds",
+        "expires_at",
+        "guardian_generation",
     }
     if set(body) != required or body.get("action") != "approve_development":
         raise ValueError("publication_envelope_schema")

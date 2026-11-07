@@ -172,8 +172,14 @@ class SupervisedDevelopmentController:
         return task_id
 
     def record_approval_request(
-        self, task_id: str, *, owner_id: str, parameters_sha256: str, request_ref: str,
-        guardian_generation: str = "", expires_at: int | None = None
+        self,
+        task_id: str,
+        *,
+        owner_id: str,
+        parameters_sha256: str,
+        request_ref: str,
+        guardian_generation: str = "",
+        expires_at: int | None = None,
     ) -> None:
         """Persist an untrusted request; this never grants execution authority."""
         if not owner_id or len(owner_id) > 200 or not request_ref or len(request_ref) > 200:
@@ -253,6 +259,7 @@ class SupervisedDevelopmentController:
             "expires_at": expires,
             "guardian_generation": approval["guardian_generation"],
         }
+
     def start(self, task_id: str, *, current_base_sha: str) -> None:
         """Admit execution only after the installed protected broker attests it.
 
