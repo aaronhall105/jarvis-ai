@@ -83,11 +83,17 @@ class SupervisedDevelopmentController:
         if read_only:
             if self.database.is_symlink() or not self.database.is_file():
                 raise LifecycleError("controller_database_unavailable")
+            if any(parent.is_symlink() for parent in self.database.parents):
+                raise LifecycleError("controller_database_path_untrusted")
             self.db = sqlite3.connect(
                 f"file:{self.database.resolve()}?mode=ro", uri=True, timeout=5
             )
             self.db.row_factory = sqlite3.Row
             self.db.execute("PRAGMA query_only=ON")
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(tasks)").fetchall()}
+            if not {"id", "state", "parameters", "approval"}.issubset(columns):
+                self.db.close()
+                raise LifecycleError("controller_schema_invalid")
             return
         self.database.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.database, timeout=5, isolation_level=None)

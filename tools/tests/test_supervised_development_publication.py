@@ -9,7 +9,9 @@ import threading
 import time
 import uuid
 
-from tools.supervised_development_controller import SupervisedDevelopmentController
+import pytest
+
+from tools.supervised_development_controller import LifecycleError, SupervisedDevelopmentController
 from tools.supervised_development_publication import PendingTaskPublisher, fetch_pending_task
 
 
@@ -162,3 +164,15 @@ def test_malformed_publication_request_returns_no_task(tmp_path):
     thread.join()
     listener.close()
     controller.close()
+
+
+def test_read_only_publisher_rejects_damaged_database(tmp_path):
+    database = tmp_path / "damaged.sqlite3"
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    connection.execute("CREATE TABLE unrelated(value TEXT)")
+    connection.commit()
+    connection.close()
+    with pytest.raises(LifecycleError, match="controller_schema_invalid"):
+        SupervisedDevelopmentController(database, read_only=True)
