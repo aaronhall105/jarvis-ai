@@ -112,6 +112,7 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
     result = runtime.run_once()
     assert result["state"] == "REVIEW_REQUIRED"
     assert result["provider_calls"] == 1
+    assert worker.actual_provider_calls == 1
     assert stopped
     assert controller.snapshot(result["id"])["parameters"]["candidate_id"] == 1
 
