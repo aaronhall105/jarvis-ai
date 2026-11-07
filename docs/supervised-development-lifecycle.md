@@ -64,10 +64,12 @@ An existing protected broker installation from the pre-development bundle must
 not be overwritten with the normal installer: it is intentionally rejected as
 `different_reviewed_broker_bundle`. The canonical installer exposes one
 version-bound migration, `python3 tools/autonomy_broker_install.py --upgrade`.
-It accepts only the recorded legacy bundle
-`a85bd8e7e907b38a51ce10e724c13d9bb9744c87e1e5ba9ce5396c1669b9133f` and the
-reviewed destination bundle
-`b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb`.
+It accepts only the recorded installed bundle
+`b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb` and the
+current tracked destination payload
+`80e09d75cc7febce879e941b9428aad674066b66154007ffb5b7c732cf455492`.
+The earlier `fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788`
+fingerprint represented the pre-read-only-controller payload and is rejected.
 
 The migration stages and hashes the complete replacement payload, briefly
 stops broker sockets to prevent mixed-version execution, atomically updates the

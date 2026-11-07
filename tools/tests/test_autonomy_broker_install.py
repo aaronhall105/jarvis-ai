@@ -260,6 +260,17 @@ def test_reviewed_legacy_upgrade_adds_development_endpoint_atomically(rehearsal,
     assert all("docker-client/config.json" not in str(call) for call in commands.call_args_list)
 
 
+def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
+    assert (
+        installer.LEGACY_BUNDLE
+        == "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
+    )
+    assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
+    assert installer.UPGRADE_BUNDLE != (
+        "fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788"
+    )
+
+
 def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkeypatch):
     files, policy, controller, commands, paths = _make_legacy_install(rehearsal, monkeypatch)
     marker = paths["BASE"] / "installed.json"

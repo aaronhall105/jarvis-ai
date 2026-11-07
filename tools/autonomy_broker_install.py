@@ -62,8 +62,11 @@ SERVICES = (
 
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
-LEGACY_BUNDLE = "a85bd8e7e907b38a51ce10e724c13d9bb9744c87e1e5ba9ce5396c1669b9133f"
-UPGRADE_BUNDLE = "fe48533ebca7b9d824b87bd2382c6065e0cc8e01ce96ba3cec73294a67c3c788"
+LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
+# This is the fingerprint of the complete payload at this source revision.
+# The earlier fe48533... value belonged to the pre-read-only-controller bundle
+# and must not be accepted for the current tracked payload.
+UPGRADE_BUNDLE = "80e09d75cc7febce879e941b9428aad674066b66154007ffb5b7c732cf455492"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
