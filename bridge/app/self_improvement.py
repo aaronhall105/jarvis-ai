@@ -239,10 +239,8 @@ class SelfImprovementEngine:
         self.repeat_threshold = max(1, int(repeat_threshold))
         self.latency_failure_ms = max(1000, int(latency_failure_ms))
         self.core_version = core_version
-        self.development_source_root = Path(
-            development_source_root
-            or os.getenv("JARVIS_DEVELOPMENT_SOURCE_ROOT", "/host-code/jarvis")
-        )
+        source_root = development_source_root or os.getenv("JARVIS_DEVELOPMENT_SOURCE_ROOT")
+        self.development_source_root = Path(source_root or "/host-code/jarvis")
         self.disabled_file = self.database_path.parent / "self_improvement.disabled"
         self._initialise_database()
 
