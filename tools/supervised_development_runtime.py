@@ -62,8 +62,9 @@ WORKER_ENTRY = "/usr/local/libexec/jarvis-autonomy-broker/entry.py"
 class GovernorCandidateSource:
     """Read one evidence-backed queued candidate without modifying Governor DB."""
 
-    def __init__(self, database: Path = GOVERNOR_DATABASE):
+    def __init__(self, database: Path = GOVERNOR_DATABASE, source_root: Path | None = None):
         self.database = Path(database)
+        self.source_root = Path(source_root) if source_root is not None else None
         if self.database.is_symlink() or not self.database.is_file():
             raise LifecycleError("governor_database_unavailable")
         self.db = sqlite3.connect(f"file:{self.database.resolve()}?mode=ro", uri=True, timeout=5)
@@ -80,6 +81,26 @@ class GovernorCandidateSource:
 
     def close(self) -> None:
         self.db.close()
+
+    def _current_source_sha(self) -> str | None:
+        if self.source_root is None:
+            return None
+        try:
+            status = subprocess.check_output(
+                ["git", "-C", str(self.source_root), "status", "--porcelain"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+            source_sha = subprocess.check_output(
+                ["git", "-C", str(self.source_root), "rev-parse", "HEAD"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise LifecycleError("trusted_source_snapshot_unavailable") from exc
+        if status or not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
+            raise LifecycleError("trusted_source_snapshot_unavailable")
+        return source_sha
 
     @staticmethod
     def _is_scope_eligible(summary: str, evidence: object) -> bool:
@@ -112,6 +133,7 @@ class GovernorCandidateSource:
 
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
+        current_source_sha = self._current_source_sha()
         try:
             rows = self.db.execute(
                 """
@@ -169,6 +191,8 @@ class GovernorCandidateSource:
                 if not isinstance(source_sha, str) or not re.fullmatch(
                     r"[0-9a-f]{40,64}", source_sha
                 ):
+                    continue
+                if current_source_sha is not None and source_sha != current_source_sha:
                     continue
                 evidence = {**evidence, **scope}
             if len(summary) < 3:
@@ -442,7 +466,7 @@ def worker_main(task_id: str) -> int:
     if os.getuid() == 0:
         return 1
     controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
-    source = GovernorCandidateSource(GOVERNOR_DATABASE)
+    source = GovernorCandidateSource(GOVERNOR_DATABASE, source_root=CANONICAL)
     try:
         runtime = SupervisedDevelopmentRuntime(
             source,
@@ -508,7 +532,7 @@ def initialize_controller_database(policy: dict[str, Any]) -> None:
 
 
 def main() -> int:
-    source = GovernorCandidateSource()
+    source = GovernorCandidateSource(source_root=CANONICAL)
     controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
 
     def _shutdown(_signum: int, _frame: Any) -> None:

@@ -53,6 +53,27 @@ def test_approval_request_is_durable_but_cannot_execute(tmp_path):
         controller.start(task, current_base_sha=SHA)
 
 
+def test_existing_database_mode_is_verified_without_chmod(tmp_path, monkeypatch):
+    database = tmp_path / "state" / "tasks.sqlite3"
+    first = SupervisedDevelopmentController(database, database_mode=0o660)
+    first.close()
+
+    def chmod_must_not_run(_self, _mode):
+        raise AssertionError("existing controller databases must not be chmodded")
+
+    monkeypatch.setattr(type(database), "chmod", chmod_must_not_run)
+    second = SupervisedDevelopmentController(database, database_mode=0o660)
+    try:
+        assert second.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    finally:
+        second.close()
+
+    monkeypatch.undo()
+    database.chmod(0o600)
+    with pytest.raises(LifecycleError, match="controller_database_mode_invalid"):
+        SupervisedDevelopmentController(database, database_mode=0o660)
+
+
 def test_missing_or_wrong_approval_request_is_rejected(tmp_path):
     controller = make_controller(tmp_path)
     task = make_task(controller)
