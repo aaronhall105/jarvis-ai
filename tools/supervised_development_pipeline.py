@@ -48,6 +48,8 @@ class GovernorTask:
     owner_id: str
     request_ref: str
     candidate_id: int | None = None
+    guardian_generation: str = ""
+    expires_at: int = 0
 
 
 class GovernorAdapter:
@@ -67,6 +69,8 @@ class GovernorAdapter:
         source_sha: str,
         allowed_paths: tuple[str, ...],
         model: str = "gpt-5.3-codex",
+        guardian_generation: str = "",
+        expires_at: int = 0,
     ) -> GovernorTask:
         if candidate.get("status") not in {"queued", "recorded"}:
             raise LifecycleError("governor_candidate_not_queued")
@@ -96,6 +100,8 @@ class GovernorAdapter:
             owner_id=owner_id,
             request_ref=request_ref,
             candidate_id=candidate_id,
+            guardian_generation=guardian_generation,
+            expires_at=expires_at,
         )
 
 
@@ -180,6 +186,8 @@ class SupervisedDevelopmentPipeline:
             owner_id=task.owner_id,
             parameters_sha256=self._parameters_hash(task),
             request_ref=task.request_ref,
+            guardian_generation=task.guardian_generation,
+            expires_at=task.expires_at or None,
         )
         return task_id
 

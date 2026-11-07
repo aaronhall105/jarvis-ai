@@ -6,7 +6,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from .autonomy import Governor
-from .autonomy_host import collect_report, guardian_status, relay_operator
+from .autonomy_host import collect_report, guardian_status, pending_development_task, relay_operator
 
 
 def router(governor: Callable[[], Governor | None], authorised: Callable) -> APIRouter:
@@ -24,10 +24,12 @@ def router(governor: Callable[[], Governor | None], authorised: Callable) -> API
     async def status(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         current = require(authorization)
         guardian = await asyncio.to_thread(guardian_status)
+        pending = await asyncio.to_thread(pending_development_task)
         return {
             **current.snapshot(guardian),
             "guardian_generation": guardian.get("generation"),
             "operator_control": "signed_operator_required",
+            "development_task": pending,
         }
 
     @routes.post("/observe")

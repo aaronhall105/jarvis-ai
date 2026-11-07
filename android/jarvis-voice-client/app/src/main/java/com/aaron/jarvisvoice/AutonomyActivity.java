@@ -151,9 +151,12 @@ public final class AutonomyActivity extends Activity {
     private void renderDevelopmentTask(JSONObject task) {
         heading("OWNER REVIEW REQUIRED");
         text(task.optString("goal", "A bounded development task is waiting for your review."));
-        text("Source: " + task.optString("source_sha") + "\nFiles: " + task.optJSONArray("allowed_paths")
-            + "\nModel: " + task.optString("model") + "\nMaximum cost: $" + task.optString("max_cost_usd")
-            + "\nDeadline: " + task.optString("deadline_seconds") + " seconds");
+        text("Task: " + task.optString("task_id") + "\nApproval: " + task.optString("request_ref")
+            + "\nSource: " + task.optString("source_sha") + "\nParameters: "
+            + task.optString("parameters_sha256") + "\nFiles: " + task.optJSONArray("allowed_paths")
+            + "\nProvider/model: " + task.optString("provider") + "/" + task.optString("model")
+            + "\nMaximum cost: $" + task.optString("max_cost_usd") + "\nDeadline: "
+            + task.optString("deadline_seconds") + " seconds\nExpires: " + task.optString("expires_at"));
         button("Authorize this development task", () -> confirmDevelopment(task));
     }
 

@@ -189,6 +189,16 @@ def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "category": "operator_unavailable"}
 
 
+def pending_development_task() -> dict[str, Any] | None:
+    """Read only the fixed controller publication socket; never a DB path."""
+    try:
+        from tools.supervised_development_publication import fetch_pending_task
+
+        return fetch_pending_task()
+    except Exception:
+        return None
+
+
 def _receive(connection: socket.socket, size: int) -> bytes:
     result = b""
     while len(result) < size:

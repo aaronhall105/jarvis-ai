@@ -63,6 +63,13 @@ def _now() -> int:
     return int(time.time())
 
 
+def _is_uuid(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+
 class SupervisedDevelopmentController:
     """State machine for one owner-approved, bounded development task."""
 
@@ -165,7 +172,8 @@ class SupervisedDevelopmentController:
         return task_id
 
     def record_approval_request(
-        self, task_id: str, *, owner_id: str, parameters_sha256: str, request_ref: str
+        self, task_id: str, *, owner_id: str, parameters_sha256: str, request_ref: str,
+        guardian_generation: str = "", expires_at: int | None = None
     ) -> None:
         """Persist an untrusted request; this never grants execution authority."""
         if not owner_id or len(owner_id) > 200 or not request_ref or len(request_ref) > 200:
@@ -186,6 +194,8 @@ class SupervisedDevelopmentController:
                 "requested_at": _now(),
                 "parameters_sha256": expected_hash,
                 "request_ref": request_ref,
+                "guardian_generation": guardian_generation,
+                "expires_at": expires_at or _now() + 90,
             }
             encoded = _json(request)
             self._transition(task_id, APPROVAL_REQUESTED)
@@ -199,6 +209,50 @@ class SupervisedDevelopmentController:
                 self.db.execute("ROLLBACK")
             raise
 
+    def pending_owner_task(self) -> dict[str, Any] | None:
+        """Return only the one current, unexpired approval envelope.
+
+        This is the sole publication source for the owner UI; observer plans
+        and caller-provided JSON never enter this method.
+        """
+        row = self.db.execute(
+            "SELECT * FROM tasks WHERE state=? ORDER BY created_at,id LIMIT 1",
+            (APPROVAL_REQUESTED,),
+        ).fetchone()
+        if row is None:
+            return None
+        task = json.loads(row["parameters"])
+        approval = json.loads(row["approval"] or "{}")
+        expires = approval.get("expires_at")
+        if (
+            approval.get("task_id") != row["id"]
+            or not isinstance(approval.get("request_ref"), str)
+            or not isinstance(expires, int)
+            or expires <= _now()
+            or not isinstance(approval.get("guardian_generation"), str)
+            or not _is_uuid(approval["guardian_generation"])
+        ):
+            return None
+        expected = hashlib.sha256(str(row["parameters"]).encode()).hexdigest()
+        if approval.get("parameters_sha256") != expected:
+            return None
+        return {
+            "version": 1,
+            "action": "approve_development",
+            "goal": task["goal"],
+            "task_id": row["id"],
+            "request_ref": approval["request_ref"],
+            "source_sha": task["base_sha"],
+            "parameters_sha256": expected,
+            "allowed_paths": task["allowed_paths"],
+            "provider": task["provider"],
+            "model": task["model"],
+            "max_calls": task["max_calls"],
+            "max_cost_usd": task["max_cost_usd"],
+            "deadline_seconds": task["deadline_seconds"],
+            "expires_at": expires,
+            "guardian_generation": approval["guardian_generation"],
+        }
     def start(self, task_id: str, *, current_base_sha: str) -> None:
         """Admit execution only after the installed protected broker attests it.
 
