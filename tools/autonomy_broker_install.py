@@ -280,6 +280,11 @@ def _verified_legacy_install(files: dict) -> dict:
         str(LIB / "entry.py"),
         str(LIB / "deploy_unified_core.sh"),
         str(LIB / "tools/__init__.py"),
+        # The installed legacy bundle already contains the original
+        # development-admission broker and its socket-activated service.  The
+        # upgrade adds the controller/publication runtime; these three paths
+        # are therefore part of the exact accepted 24-file source layout.
+        str(LIB / "tools" / "supervised_development_broker.py"),
         *(
             str(LIB / "tools" / (name + ".py"))
             for name in MODULES
@@ -306,14 +311,16 @@ def _verified_legacy_install(files: dict) -> dict:
                 )
             )
         ),
+        str(UNITS / "jarvis-autonomy-broker-development-admission.service"),
+        str(UNITS / "jarvis-autonomy-broker-development-admission.socket"),
     }
     if set(recorded) != legacy_paths:
         raise Denied("upgrade_source_manifest_invalid")
     for name, digest in recorded.items():
         path = Path(name)
-        g.trusted(path)
         if path.is_symlink() or not path.is_file():
             raise Denied("upgrade_source_payload_missing")
+        g.trusted(path)
         if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise Denied("upgrade_source_payload_modified")
     return previous
