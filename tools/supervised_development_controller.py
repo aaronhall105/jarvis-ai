@@ -35,6 +35,10 @@ _SECRET = re.compile(
 _MAX_JSON = 64_000
 _MAX_ADMISSION_RESPONSE = 16_384
 ADMISSION_SOCKET = "/run/jarvis-autonomy-broker/development-admission.sock"
+# One protected database is shared by the root coordinator, the unprivileged
+# worker, and the read-only publication service.  Callers cannot substitute a
+# path for production execution or publication.
+CONTROLLER_DATABASE = Path("/var/lib/jarvis-autonomy-broker/work/supervised-development.sqlite3")
 _TRANSITIONS = {
     PROPOSED: {APPROVAL_REQUESTED, FAILED},
     APPROVAL_REQUESTED: {RUNNING, FAILED},

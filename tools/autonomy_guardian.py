@@ -151,6 +151,10 @@ class Guardian:
             or value.get("version") != 1
             or value.get("state") not in {"ACTIVE", "STOPPED"}
             or str(uuid.UUID(value["generation"])) != value["generation"]
+            or (
+                value.get("previous_generation") is not None
+                and str(uuid.UUID(value["previous_generation"])) != value["previous_generation"]
+            )
         ):
             raise UnsafeState("Invalid Guardian state")
         return value
@@ -175,7 +179,10 @@ class Guardian:
             self.policy()
             self.integrity()
             value = self.state()
-            return {"state": value["state"], "generation": value["generation"], "trusted": True}
+            result = {"state": value["state"], "generation": value["generation"], "trusted": True}
+            if value.get("previous_generation") is not None:
+                result["previous_generation"] = value["previous_generation"]
+            return result
         except (OSError, ValueError, KeyError, TypeError, UnsafeState):
             return {"state": "STOPPED", "trusted": False, "reason": "Guardian validation failed"}
 
@@ -192,12 +199,22 @@ class Guardian:
         if state not in {"ACTIVE", "STOPPED"}:
             raise UnsafeState("Unknown state")
         self.secure(self.base, directory=True)
+        previous_generation = None
+        if state == "ACTIVE":
+            try:
+                previous = self.state()
+            except (OSError, ValueError, KeyError, TypeError, UnsafeState):
+                previous = None
+            if previous and previous["state"] == "STOPPED":
+                previous_generation = previous["generation"]
         value = {
             "version": 1,
             "state": state,
             "generation": str(uuid.uuid4()),
             "changed_at": int(time.time()),
         }
+        if previous_generation is not None:
+            value["previous_generation"] = previous_generation
         fd, name = tempfile.mkstemp(prefix=".state-", dir=self.base)
         try:
             with os.fdopen(fd, "w") as handle:
