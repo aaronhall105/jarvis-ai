@@ -225,12 +225,10 @@ def _make_legacy_install(rehearsal, monkeypatch):
     development = {
         str(path)
         for path in files
-        if "development-admission" in str(path)
-        or "development-publication" in str(path)
+        if "development-publication" in str(path)
         or "development-controller" in str(path)
         or path.name
         in {
-            "supervised_development_broker.py",
             "supervised_development_controller.py",
             "supervised_development_pipeline.py",
             "supervised_development_publication.py",
@@ -250,6 +248,7 @@ def _make_legacy_install(rehearsal, monkeypatch):
         guardian["files"].pop(path, None)
     guardian["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
     guardian_marker.write_bytes(canonical(guardian))
+    assert len(current["files"]) == 24
     monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
     return files, policy, controller, commands, paths
 
@@ -291,6 +290,34 @@ def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkey
     commands.assert_not_called()
 
 
+def test_upgrade_rejects_missing_real_legacy_path(rehearsal, monkeypatch):
+    files, policy, _controller, _commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    missing = paths["UNITS"] / "jarvis-autonomy-broker-development-admission.socket"
+    missing.unlink()
+    with pytest.raises(Denied, match="upgrade_source_payload_missing"):
+        installer.upgrade(files, policy)
+
+
+def test_upgrade_rejects_extra_real_legacy_path(rehearsal, monkeypatch):
+    files, policy, _controller, _commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    extra = paths["BASE"] / "unexpected-legacy-payload"
+    extra.write_bytes(b"unexpected")
+    value["files"][str(extra)] = hashlib.sha256(extra.read_bytes()).hexdigest()
+    marker.write_bytes(canonical(value))
+    with pytest.raises(Denied, match="upgrade_source_manifest_invalid"):
+        installer.upgrade(files, policy)
+
+
+def test_upgrade_rejects_modified_real_legacy_path(rehearsal, monkeypatch):
+    files, policy, _controller, _commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    target = paths["UNITS"] / "jarvis-autonomy-broker-development-admission.service"
+    target.write_bytes(target.read_bytes() + b"\n# modified\n")
+    with pytest.raises(Denied, match="upgrade_source_payload_modified"):
+        installer.upgrade(files, policy)
+
+
 def test_upgrade_activation_failure_restores_payload_and_manifest(rehearsal, monkeypatch):
     files, policy, controller, _, paths = _make_legacy_install(rehearsal, monkeypatch)
     marker = paths["BASE"] / "installed.json"
@@ -309,7 +336,22 @@ def test_upgrade_activation_failure_restores_payload_and_manifest(rehearsal, mon
     assert marker.read_bytes() == before_marker
     assert (controller.base / "installed.json").read_bytes() == before_guardian
     assert controller.status()["state"] == "STOPPED"
-    assert not any(path.exists() for path in files if "development-admission" in str(path))
+    assert not any(
+        path.exists()
+        for path in files
+        if "development-publication" in str(path)
+        or "development-controller" in str(path)
+        or path.name
+        in {
+            "supervised_development_controller.py",
+            "supervised_development_pipeline.py",
+            "supervised_development_publication.py",
+            "supervised_development_review.py",
+            "supervised_development_runtime.py",
+            "supervised_development_worker.py",
+        }
+    )
+    assert any(path.exists() for path in files if "development-admission" in str(path))
     assert calls
 
 
