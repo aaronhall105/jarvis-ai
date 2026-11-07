@@ -53,7 +53,7 @@ def _governor_db(path: Path) -> None:
                 candidate_id INTEGER PRIMARY KEY, failure_id INTEGER NOT NULL,
                 status TEXT NOT NULL, summary TEXT
             );
-            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"source":"test"}','queued');
+            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"source":"test","affected_files":["tools/developer_session_diagnostics.py"]}','queued');
             INSERT INTO improvement_candidates VALUES(1,1,'queued','Bound diagnostics warning');
             """
         )
@@ -153,3 +153,48 @@ def test_runtime_has_no_execution_without_eligible_governor_candidate(tmp_path):
     )
     assert runtime.run_once() == {"status": "no_eligible_candidate"}
     assert controller.db.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_candidate_eligibility_skips_unrelated_and_missing_evidence(tmp_path):
+    database = tmp_path / "governor.sqlite3"
+    with sqlite3.connect(database) as db:
+        db.executescript(
+            """
+            CREATE TABLE improvement_failures(
+                failure_id INTEGER PRIMARY KEY, summary TEXT, evidence_json TEXT, status TEXT
+            );
+            CREATE TABLE improvement_candidates(
+                candidate_id INTEGER PRIMARY KEY, failure_id INTEGER, status TEXT, summary TEXT
+            );
+            INSERT INTO improvement_failures VALUES
+                (1,'unrelated','{"affected_files":["tools/other.py"]}','queued'),
+                (2,'missing evidence','{}','queued'),
+                (3,'diagnostic failure','{"affected_files":["tools/developer_session_diagnostics.py"]}','queued');
+            INSERT INTO improvement_candidates VALUES
+                (33,1,'queued','Unrelated Home Assistant issue'),
+                (34,2,'queued','Diagnostics issue without evidence'),
+                (35,3,'queued','Bound diagnostics warning');
+            """
+        )
+    source = GovernorCandidateSource(database)
+    try:
+        selected = source.next()
+        assert selected is not None and selected["candidate_id"] == 35
+        assert source.next({35}) is None
+    finally:
+        source.close()
+
+
+def test_candidate_selection_survives_read_only_restart(tmp_path):
+    database = tmp_path / "governor.sqlite3"
+    _governor_db(database)
+    first = GovernorCandidateSource(database)
+    try:
+        expected = first.next()
+    finally:
+        first.close()
+    second = GovernorCandidateSource(database)
+    try:
+        assert second.next() == expected
+    finally:
+        second.close()
