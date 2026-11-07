@@ -126,7 +126,13 @@ class BoundedDevelopmentWorker:
     ) -> tuple[str, list[str], str]:
         from tools import self_development_worker as legacy
 
-        config = SimpleNamespace(max_patch_lines=8, max_changed_files=len(task.allowed_paths))
+        max_patch_lines = int(os.environ.get("JARVIS_SUPERVISED_MAX_PATCH_LINES", "400"))
+        if max_patch_lines < 1 or max_patch_lines > 2_000:
+            raise LifecycleError("worker_patch_policy_invalid")
+        config = SimpleNamespace(
+            max_patch_lines=max_patch_lines,
+            max_changed_files=len(task.allowed_paths),
+        )
         policy = {"allowed_edit_paths": list(task.allowed_paths), "forbidden_paths": []}
         return legacy._apply_incremental_edits(workspace, payload, policy, config)
 

@@ -46,9 +46,12 @@ from tools.supervised_development_review import TrustedReviewRunner
 # substitute or populated copy.
 GOVERNOR_DATABASE = Path("/home/aaron/.local/share/jarvis-runtime/data/jarvis_improvement.db")
 WORKTREE_ROOT = Path("/var/lib/jarvis-autonomy-broker/worktrees")
-ALLOWED_PATHS = (
-    "tools/developer_session_diagnostics.py",
-    "tools/tests/test_developer_session_diagnostics.py",
+PROTECTED_SCOPE_PREFIXES = (
+    "tools/autonomy_",
+    "tools/supervised_development_",
+    "tools/deploy_",
+    "systemd/",
+    ".github/",
 )
 OWNER_ID = "enrolled-operator"
 POLL_SECONDS = 2
@@ -90,7 +93,15 @@ class GovernorCandidateSource:
         paths = evidence.get("affected_files")
         if not isinstance(paths, list) or not paths:
             return False
-        if any(type(path) is not str or path not in ALLOWED_PATHS for path in paths):
+        if any(
+            type(path) is not str
+            or not path
+            or path.startswith("/")
+            or ".." in Path(path).parts
+            or path.startswith(PROTECTED_SCOPE_PREFIXES)
+            or not (path.endswith(".py") or path.endswith(".toml") or path.endswith(".yaml"))
+            for path in paths
+        ):
             return False
         if len(set(paths)) != len(paths):
             return False
@@ -128,12 +139,14 @@ class GovernorCandidateSource:
                 continue
             if not self._is_scope_eligible(summary, evidence):
                 continue
+            paths = evidence["affected_files"]
             return {
                 "candidate_id": candidate_id,
                 "failure_id": int(row["failure_id"]),
                 "status": "queued",
                 "summary": summary,
                 "evidence": evidence,
+                "allowed_paths": tuple(sorted(set(paths))),
             }
         return None
 
@@ -316,7 +329,7 @@ class SupervisedDevelopmentRuntime:
                     owner_id=OWNER_ID,
                     request_ref=str(uuid.uuid4()),
                     source_sha=source_sha,
-                    allowed_paths=ALLOWED_PATHS,
+                    allowed_paths=tuple(candidate["allowed_paths"]),
                     guardian_generation=str(status["generation"]),
                     expires_at=int(time.time()) + 90,
                 )
