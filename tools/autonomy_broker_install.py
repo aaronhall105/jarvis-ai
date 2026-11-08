@@ -72,10 +72,10 @@ SERVICES = (
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
 # Existing hosts may already contain the first upgraded bundle.  This exact
 # source is accepted for the narrowly-scoped database-contract migration only.
-CURRENT_BUNDLE = "74d952ba719969c98452deed7172e40ce14f6e2f11957e427759c2747ca11d7a"
+CURRENT_BUNDLE = "e2bddef85f38db5fed032a168816d6e7ad168deb2aa6f65f56f4319154767731"
 # This is the fingerprint of the complete payload at this source revision,
 # including the fixed controller/publication database contract.
-UPGRADE_BUNDLE = "e2bddef85f38db5fed032a168816d6e7ad168deb2aa6f65f56f4319154767731"
+UPGRADE_BUNDLE = "fe7a881ca8c0c4c727827995899a3e057a5b9290cb03171033eebbd4d6d87676"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
