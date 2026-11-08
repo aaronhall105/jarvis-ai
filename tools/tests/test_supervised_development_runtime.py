@@ -354,3 +354,47 @@ def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
     assert not GovernorCandidateSource._is_scope_eligible(
         "Improve diagnostics", {"affected_files": ["tools/autonomy_guardian.py"]}
     )
+
+
+def test_controller_uses_pinned_git_for_source_queries(tmp_path, monkeypatch):
+    from tools import supervised_development_runtime as runtime
+
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    requests = []
+
+    def checked_run(command, **kwargs):
+        requests.append((command, kwargs))
+        assert command[:2] == ["/usr/bin/git", "--no-optional-locks"]
+        assert ["-c", "safe.directory=" + str(source_root)] == command[2:4]
+        assert ["-c", "core.fsmonitor=false"] == command[4:6]
+        assert ["-c", "core.hooksPath=/dev/null"] == command[6:8]
+        assert ["-c", "core.attributesFile=/dev/null"] == command[8:10]
+        assert command[10:12] == ["-C", str(source_root)]
+        assert kwargs["env"] == runtime.SAFE_ENV
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(command, 0, b"a" * 40 + b"\n", b"")
+
+    monkeypatch.setattr(runtime.subprocess, "run", checked_run)
+    assert runtime._trusted_source_git(source_root, "rev-parse", "HEAD") == "a" * 40
+    assert requests[-1][0][-2:] == ["rev-parse", "HEAD"]
+    assert runtime._trusted_source_git(source_root, "status", "--porcelain") == "a" * 40
+    assert requests[-1][0][-2:] == ["status", "--porcelain"]
+
+
+def test_controller_git_rejects_failed_or_untrusted_checkout(tmp_path, monkeypatch):
+    import pytest
+    from tools import supervised_development_runtime as runtime
+    from tools.supervised_development_controller import LifecycleError
+
+    root = tmp_path / "source"
+    root.mkdir()
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda command, **kw: subprocess.CompletedProcess(command, 128, b"", b"dubious ownership"),
+    )
+    with pytest.raises(LifecycleError, match="trusted_source_snapshot_unavailable"):
+        runtime._trusted_source_git(root, "rev-parse", "HEAD")
+    with pytest.raises(LifecycleError, match="trusted_source_snapshot_unavailable"):
+        runtime._trusted_source_git(tmp_path / "missing", "rev-parse", "HEAD")

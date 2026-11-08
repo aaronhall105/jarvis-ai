@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from tools.autonomy_broker_host import CANONICAL
+from tools.autonomy_broker_host import CANONICAL, SAFE_ENV
 from tools.autonomy_broker_runtime import emergency_stop, guardian_status, installed_policy
 from tools.supervised_development_controller import (
     APPROVAL_REQUESTED,
@@ -59,6 +59,48 @@ POLL_SECONDS = 2
 WORKER_ENTRY = "/usr/local/libexec/jarvis-autonomy-broker/entry.py"
 
 
+def _trusted_source_git(source_root: Path, *arguments: str) -> str:
+    """Read the fixed source without trusting the process user's Git config.
+
+    Production supplies the protected CANONICAL path. Root lacks the owner's
+    repository safe.directory trust; grant only this exact checkout for this
+    invocation, matching the existing protected broker inspection pattern.
+    """
+    root = Path(source_root)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise LifecycleError("trusted_source_snapshot_unavailable")
+    command = [
+        "/usr/bin/git",
+        "--no-optional-locks",
+        "-c",
+        "safe.directory=" + str(root),
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.attributesFile=/dev/null",
+        "-C",
+        str(root),
+        *arguments,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            env=SAFE_ENV,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode != 0 or len(result.stdout) > 65536:
+            raise LifecycleError("trusted_source_snapshot_unavailable")
+        return result.stdout.decode("utf-8", "strict").strip()
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise LifecycleError("trusted_source_snapshot_unavailable") from exc
+
+
 class GovernorCandidateSource:
     """Read one evidence-backed queued candidate without modifying Governor DB."""
 
@@ -85,19 +127,8 @@ class GovernorCandidateSource:
     def _current_source_sha(self) -> str | None:
         if self.source_root is None:
             return None
-        try:
-            status = subprocess.check_output(
-                ["git", "-C", str(self.source_root), "status", "--porcelain"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-            source_sha = subprocess.check_output(
-                ["git", "-C", str(self.source_root), "rev-parse", "HEAD"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip()
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise LifecycleError("trusted_source_snapshot_unavailable") from exc
+        status = _trusted_source_git(self.source_root, "status", "--porcelain")
+        source_sha = _trusted_source_git(self.source_root, "rev-parse", "HEAD")
         if status or not re.fullmatch(r"[0-9a-f]{40,64}", source_sha):
             raise LifecycleError("trusted_source_snapshot_unavailable")
         return source_sha
@@ -253,16 +284,7 @@ class SupervisedDevelopmentRuntime:
         self.reviewer = reviewer or RuntimeReview()
 
     def _source_sha(self) -> str:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self.source_root,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-        )
-        return result.stdout.strip()
+        return _trusted_source_git(self.source_root, "rev-parse", "HEAD")
 
     def _claimed_candidates(self) -> set[int]:
         claimed: set[int] = set()
