@@ -36,7 +36,37 @@ public class AutonomyControlTest {
 
     @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsOutOfScopePath() throws Exception {
         JSONObject task = developmentTask(); task.put("allowed_paths", new org.json.JSONArray()
-            .put("tools/developer_session_diagnostics.py").put("../outside.py"));
+            .put("bridge/app/ai_engine.py").put("../outside.py"));
+        AutonomyControl.signedDevelopment(task);
+    }
+
+    @Test public void developmentTaskAcceptsCandidate75Scope() throws Exception {
+        TreeMap<String, Object> fields = AutonomyControl.developmentFields(developmentTask());
+        org.json.JSONArray paths = (org.json.JSONArray) fields.get("allowed_paths");
+        assertEquals("bridge/app/ai_engine.py", paths.getString(0));
+        assertEquals("bridge/tests/test_executive_agent.py", paths.getString(1));
+    }
+
+    @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsProtectedPolicyPath() throws Exception {
+        JSONObject task = developmentTask().put("allowed_paths", new org.json.JSONArray()
+            .put("tools/supervised_development_worker.py"));
+        AutonomyControl.signedDevelopment(task);
+    }
+
+    @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsNonCanonicalPath() throws Exception {
+        JSONObject task = developmentTask().put("allowed_paths", new org.json.JSONArray()
+            .put("bridge//app/ai_engine.py"));
+        AutonomyControl.signedDevelopment(task);
+    }
+
+    @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsProviderAndCallLimitTampering() throws Exception {
+        JSONObject task = developmentTask().put("provider", "other").put("max_calls", 2);
+        AutonomyControl.signedDevelopment(task);
+    }
+
+    @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsMissingBinding() throws Exception {
+        JSONObject task = developmentTask();
+        task.remove("parameters_sha256");
         AutonomyControl.signedDevelopment(task);
     }
 
@@ -47,11 +77,12 @@ public class AutonomyControlTest {
 
     private JSONObject developmentTask() throws Exception {
         return new JSONObject().put("version", 1).put("action", "approve_development")
+            .put("goal", "Reduce response latency safely")
             .put("task_id", GENERATION).put("source_sha", "a".repeat(40))
             .put("parameters_sha256", "b".repeat(64))
             .put("request_ref", REQUEST).put("expires_at", System.currentTimeMillis() / 1000 + 45)
-            .put("allowed_paths", new org.json.JSONArray().put("tools/developer_session_diagnostics.py")
-                .put("tools/tests/test_developer_session_diagnostics.py"))
+            .put("allowed_paths", new org.json.JSONArray().put("bridge/app/ai_engine.py")
+                .put("bridge/tests/test_executive_agent.py"))
             .put("provider", "openai").put("model", "gpt-5.3-codex").put("max_calls", 1)
             .put("max_cost_usd", 1.0).put("deadline_seconds", 120)
             .put("guardian_generation", REQUEST);
