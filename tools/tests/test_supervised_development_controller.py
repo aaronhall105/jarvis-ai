@@ -117,6 +117,22 @@ def test_restart_preserves_request_and_denial(tmp_path):
         reopened.start(task, current_base_sha=SHA)
 
 
+def test_expired_approval_is_terminal_and_does_not_block_new_tasks(tmp_path):
+    controller = make_controller(tmp_path)
+    task = make_task(controller)
+    request_approval(controller, task)
+    expired = controller.expire_stale_approval_requests(now=2_000_000_000)
+    assert expired == [task]
+    snapshot = controller.snapshot(task)
+    assert snapshot["state"] == "FAILED"
+    assert snapshot["approval"] is not None
+    assert snapshot["evidence"] == {
+        "failure": "approval_expired",
+        "expired_at": snapshot["approval"]["expires_at"],
+    }
+    assert controller.expire_stale_approval_requests(now=2_000_000_001) == []
+
+
 def test_modified_state_cannot_grant_execution(tmp_path):
     controller = make_controller(tmp_path)
     task = make_task(controller)

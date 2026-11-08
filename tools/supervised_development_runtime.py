@@ -400,6 +400,7 @@ class SupervisedDevelopmentRuntime:
             status = self.guardian()
             if status.get("state") != "STOPPED" or status.get("trusted") is not True:
                 raise LifecycleError("guardian_must_be_stopped_before_task_selection")
+            self.controller.expire_stale_approval_requests()
             existing = self._existing_task()
             if existing is None:
                 candidate = self.source.next(self._claimed_candidates())

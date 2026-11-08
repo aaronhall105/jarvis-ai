@@ -59,8 +59,11 @@ final class AutonomyClient implements AutoCloseable {
                     .header("Authorization", "Bearer " + store.developerToken())
                     .post(RequestBody.create(body.toString(), MediaType.get("application/json"))).build();
                 try (Response response = http.newCall(request).execute()) {
+                    if (response.code() == 410) {
+                        deliver(callback, null, "This development approval expired. Refresh for a new task."); return;
+                    }
                     if (response.code() == 401 || response.code() == 403) {
-                        deliver(callback, null, "Operator authorization is required. No state change was confirmed."); return;
+                        deliver(callback, null, "Development approval was rejected. No state change was confirmed."); return;
                     }
                     if (!response.isSuccessful() || response.body() == null) {
                         if (!AutonomyPresentation.retryHttpFailure(path)) {

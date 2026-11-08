@@ -149,6 +149,17 @@ public final class AutonomyActivity extends Activity {
     }
 
     private void renderDevelopmentTask(JSONObject task) {
+        long expires = task.optLong("expires_at", 0);
+        if ("unavailable".equals(task.optString("status"))) {
+            heading("OWNER REVIEW UNAVAILABLE");
+            text("The protected task publisher is unavailable. Refresh later; no approval is possible.");
+            return;
+        }
+        if (expires <= System.currentTimeMillis() / 1000) {
+            heading("OWNER REVIEW EXPIRED");
+            text("This development approval expired. Refresh for a new task; no approval is possible.");
+            return;
+        }
         heading("OWNER REVIEW REQUIRED");
         text(task.optString("goal", "A bounded development task is waiting for your review."));
         text("Task: " + task.optString("task_id") + "\nApproval: " + task.optString("request_ref")
@@ -156,7 +167,7 @@ public final class AutonomyActivity extends Activity {
             + task.optString("parameters_sha256") + "\nFiles: " + task.optJSONArray("allowed_paths")
             + "\nProvider/model: " + task.optString("provider") + "/" + task.optString("model")
             + "\nMaximum cost: $" + task.optString("max_cost_usd") + "\nDeadline: "
-            + task.optString("deadline_seconds") + " seconds\nExpires: " + task.optString("expires_at"));
+            + task.optString("deadline_seconds") + " seconds\nExpires: " + expires);
         button("Authorize this development task", () -> confirmDevelopment(task));
     }
 

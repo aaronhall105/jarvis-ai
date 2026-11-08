@@ -61,7 +61,12 @@ def router(governor: Callable[[], Governor | None], authorised: Callable) -> API
             raise HTTPException(403, "Activation is unavailable in observe-only Phase 1")
         result = await asyncio.to_thread(relay_operator, body)
         if not result["ok"]:
-            raise HTTPException(403, "Signed operator authorization required or unavailable")
+            category = result.get("category")
+            if category == "approval_expired":
+                raise HTTPException(410, "Development approval expired; refresh the task")
+            if category == "operator_unavailable":
+                raise HTTPException(503, "Protected operator service unavailable")
+            raise HTTPException(403, "Signed operator authorization was rejected")
         return result
 
     return routes

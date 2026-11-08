@@ -62,3 +62,14 @@ def test_gateway_reports_publisher_unavailable(monkeypatch):
         "status": "unavailable",
         "reason": "publisher_unavailable",
     }
+
+
+def test_expired_development_approval_is_rejected_before_socket_use(monkeypatch):
+    monkeypatch.setattr(autonomy_host.time, "time", lambda: 2_000)
+    result = autonomy_host.relay_operator(
+        {
+            "action": "approve_development",
+            "expires_at": 1_999,
+        }
+    )
+    assert result == {"ok": False, "category": "approval_expired"}

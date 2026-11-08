@@ -304,6 +304,43 @@ class SupervisedDevelopmentController:
             "guardian_generation": approval["guardian_generation"],
         }
 
+    def expire_stale_approval_requests(self, *, now: int | None = None) -> list[str]:
+        """Terminally retire expired approval requests without deleting them."""
+        cutoff = _now() if now is None else int(now)
+        expired: list[str] = []
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.db.execute(
+                "SELECT id,approval FROM tasks WHERE state=?",
+                (APPROVAL_REQUESTED,),
+            ).fetchall()
+            for row in rows:
+                try:
+                    approval = json.loads(row["approval"] or "")
+                    expires_at = approval.get("expires_at")
+                except (TypeError, json.JSONDecodeError):
+                    expires_at = cutoff
+                if not isinstance(expires_at, int) or expires_at > cutoff:
+                    continue
+                self.db.execute(
+                    "UPDATE tasks SET state=?, evidence=?, updated_at=? WHERE id=? AND state=?",
+                    (
+                        FAILED,
+                        _json({"failure": "approval_expired", "expired_at": expires_at}),
+                        cutoff,
+                        row["id"],
+                        APPROVAL_REQUESTED,
+                    ),
+                )
+                if self.db.execute("SELECT changes()").fetchone()[0] == 1:
+                    expired.append(str(row["id"]))
+            self.db.execute("COMMIT")
+        except Exception:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
+        return expired
+
     def start(self, task_id: str, *, current_base_sha: str) -> None:
         """Admit execution only after the installed protected broker attests it.
 
