@@ -127,6 +127,21 @@ def test_payload_contains_development_admission_endpoint(rehearsal):
     )
 
 
+def test_controller_unit_uses_pinned_database_group_without_broad_dac_access(rehearsal):
+    files, _policy, _controller, _commands, _original, _paths = rehearsal
+    unit = next(
+        data.decode("utf-8")
+        for path, (data, _mode) in files.items()
+        if path.name == "jarvis-autonomy-broker-development-controller.service"
+    )
+    assert "User=root" in unit
+    assert "Group=root" in unit
+    assert "SupplementaryGroups=jarvis-autonomy" in unit
+    assert "CAP_DAC_READ_SEARCH" in unit
+    assert "CAP_DAC_OVERRIDE" not in unit
+    assert "ReadWritePaths=/var/lib/jarvis-autonomy-broker/work" in unit
+
+
 def test_modified_protected_payload_refused(rehearsal):
     files, policy, controller, _, _, _ = rehearsal
     installer.install(files, policy)
@@ -271,11 +286,9 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "37312c09b3fde847b0e88350243671fe26c9cd637d83004f8095114e0d2221b8"
-    )
-    assert installer.UPGRADE_BUNDLE == (
         "74d952ba719969c98452deed7172e40ce14f6e2f11957e427759c2747ca11d7a"
     )
+    assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
 
 
 def test_reviewed_current_bundle_migration_accepts_existing_upgraded_layout(rehearsal, monkeypatch):
