@@ -9,6 +9,7 @@ StartLimitBurst=3
 Type=simple
 User=root
 Group=root
+SupplementaryGroups=jarvis-autonomy
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py development-controller
 UMask=0077
 NoNewPrivileges=true
