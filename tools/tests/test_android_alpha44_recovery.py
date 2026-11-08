@@ -1,4 +1,4 @@
-"""Pin the recovery source to published Alpha43, not a speculative rollback."""
+"""Pin the recovery source to published Alpha43 and validate Alpha45 metadata."""
 
 import hashlib
 from pathlib import Path
@@ -42,13 +42,13 @@ def test_recovery_retains_entire_published_alpha43_android_tree():
 
 def test_recovery_has_new_monotonic_identity_and_matching_release_notes():
     release = load_manifest()["current_release"]
-    assert release["version_name"] == "19.0.0-alpha44"
-    assert release["version_code"] == 190460
-    assert release["version_code"] > max(190420, 190430, 190440, 190450)
+    assert release["version_name"] == "19.0.0-alpha45"
+    assert release["version_code"] == 190470
+    assert release["version_code"] > max(190420, 190430, 190440, 190450, 190460)
     assert release["phone_package"] == "com.aaron.jarvisvoice"
     for component in ("app", "wear"):
         gradle = (ROOT / ANDROID / component / "build.gradle.kts").read_text()
         assert 'applicationId = "com.aaron.jarvisvoice"' in gradle
-    notes = (ROOT / "docs/releases/CHANGES_V19_0_0_ALPHA44.md").read_text()
-    assert "190460" in notes
+    notes = (ROOT / "docs/releases/CHANGES_V19_0_0_ALPHA45.md").read_text()
+    assert "190470" in notes
     assert "No storage migration" in notes
