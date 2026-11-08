@@ -7,8 +7,8 @@ android {
         applicationId = "com.aaron.jarvisvoice"
         minSdk = 30
         targetSdk = 36
-        versionCode = 190460
-        versionName = "19.0.0-alpha44"
+        versionCode = 190470
+        versionName = "19.0.0-alpha45"
     }
     buildTypes {
         release {
