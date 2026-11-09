@@ -127,10 +127,22 @@ def test_expired_approval_is_terminal_and_does_not_block_new_tasks(tmp_path):
     assert snapshot["state"] == "FAILED"
     assert snapshot["approval"] is not None
     assert snapshot["evidence"] == {
-        "failure": "approval_expired",
-        "expired_at": snapshot["approval"]["expires_at"],
+        "approval_expired": {"expired_at": snapshot["approval"]["expires_at"]},
     }
     assert controller.expire_stale_approval_requests(now=2_000_000_001) == []
+
+
+def test_expiry_preserves_existing_task_evidence(tmp_path):
+    controller = make_controller(tmp_path)
+    task = make_task(controller)
+    request_approval(controller, task)
+    original = {"review": "preserve", "checks": ["unit"]}
+    controller.db.execute("UPDATE tasks SET evidence=? WHERE id=?", (json.dumps(original), task))
+    controller.expire_stale_approval_requests(now=2_000_000_000)
+    assert controller.snapshot(task)["evidence"] == {
+        **original,
+        "approval_expired": {"expired_at": controller.snapshot(task)["approval"]["expires_at"]},
+    }
 
 
 def test_modified_state_cannot_grant_execution(tmp_path):

@@ -286,7 +286,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "e2bddef85f38db5fed032a168816d6e7ad168deb2aa6f65f56f4319154767731"
+        "fe7a881ca8c0c4c727827995899a3e057a5b9290cb03171033eebbd4d6d87676"
     )
     assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
 
