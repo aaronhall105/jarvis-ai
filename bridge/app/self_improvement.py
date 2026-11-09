@@ -23,10 +23,12 @@ from app.user_context import UserContext
 logger = logging.getLogger("jarvis-core.improvement")
 
 
+# Questions asking why an action happened are not, by themselves, error reports.
+# Do not assign an unverified action to the immediately preceding read-only turn.
 _CORRECTION_PATTERN = re.compile(
     r"\b(?:that(?:'s| is| was)? wrong|you got (?:that|it) wrong|wrong device|"
     r"not what i meant|i meant|no[, ]+i meant|that didn['’]?t work|"
-    r"it didn['’]? work|why did you|you should have|that was the wrong|"
+    r"it didn['’]? work|you should have|that was the wrong|"
     r"you misunderstood|you didn['’]?t understand|record that as a mistake|"
     r"learn from that)\b",
     re.I,
@@ -528,7 +530,9 @@ class SelfImprovementEngine:
 
         if intent == "improvement_request":
             return "requested_improvement"
-        if "notification" in text or "notification" in intent or "notify" in tool_names:
+        # Classify from observed intent/tools; a generic prompt may mention
+        # notifications as incidental household vocabulary.
+        if "notification" in intent or "notification" in tool_names or "notify" in tool_names:
             return "notification"
         if any(word in text for word in ("wrong device", "light", "switch", "tv", "speaker")):
             return "device_resolution"
