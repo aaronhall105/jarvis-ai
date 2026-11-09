@@ -91,6 +91,18 @@ def emergency_stop() -> None:
 
 def forward_development_approval(raw: bytes) -> dict:
     """Forward a signed approval from the protected operator service only."""
+    try:
+        body = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        raise Denied("development_approval_denied") from None
+    if (
+        not isinstance(body, dict)
+        or body.get("action") != "approve_development"
+        or not isinstance(body.get("expires_at"), int)
+    ):
+        raise Denied("development_approval_denied")
+    if body["expires_at"] <= int(time.time()):
+        raise Denied("development_approval_expired")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(5)
         connection.connect("/run/jarvis-autonomy-broker/development-admission.sock")

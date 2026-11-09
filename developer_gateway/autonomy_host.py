@@ -167,6 +167,10 @@ def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "category": "request_denied"}
     if action == "approve_development" and len(body) > 32:
         return {"ok": False, "category": "request_denied"}
+    if action == "approve_development":
+        expires_at = body.get("expires_at")
+        if not isinstance(expires_at, int) or expires_at <= int(time.time()):
+            return {"ok": False, "category": "approval_expired"}
     raw = json.dumps(body, separators=(",", ":")).encode()
     if len(raw) > 8192:
         return {"ok": False, "category": "request_denied"}
