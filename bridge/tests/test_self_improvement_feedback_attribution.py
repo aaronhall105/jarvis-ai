@@ -2,6 +2,7 @@
 
 These tests deliberately create no production tasks, approvals or home actions.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -107,9 +108,12 @@ async def test_explanation_question_not_automatically_logged_as_failure(
 def test_notification_category_requires_actual_intent_or_tool_provenance(
     intent: str, raw_text: str, calls: list[dict], expected: str
 ) -> None:
-    assert SelfImprovementEngine._category_for_interaction(
-        {"intent": intent, "raw_text": raw_text, "tool_calls": calls}
-    ) == expected
+    assert (
+        SelfImprovementEngine._category_for_interaction(
+            {"intent": intent, "raw_text": raw_text, "tool_calls": calls}
+        )
+        == expected
+    )
 
 
 @pytest.mark.asyncio
@@ -126,9 +130,7 @@ async def test_unambiguous_correction_still_records_failure(
             "success": True,
             "response": "Kitchen light on.",
             "intent": "control_now",
-            "calls": [
-                {"tool": "control_device", "result": {"success": True}}
-            ],
+            "calls": [{"tool": "control_device", "result": {"success": True}}],
             "timings": {"jarvis_request_total_ms": 100},
         },
     )
