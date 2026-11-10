@@ -1356,6 +1356,7 @@ class WorkingContextService:
             "response": response,
             "action_attempted": False,
             "write_performed": False,
+            "receipt_id": selected.get("receipt_id"),
             "referenced_action_status": selected.get("verification_status")
             or selected.get("receipt_status"),
             "source_turn_index": selected.get("source_turn_index"),

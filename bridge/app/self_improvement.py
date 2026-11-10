@@ -17,6 +17,7 @@ from typing import Any, Iterator
 
 from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
+from app.feedback_attribution import attribute_feedback
 from app.tool_outcomes import has_blocking_tool_failure
 from app.user_context import UserContext
 
@@ -500,25 +501,36 @@ class SelfImprovementEngine:
         source: dict[str, Any],
         correction: str | None,
     ) -> str:
-        tool_names = []
-        for call in source.get("tool_calls", []):
-            if isinstance(call, dict):
-                name = str(call.get("tool") or call.get("name") or "")
-                if name:
-                    tool_names.append(name)
-        raw = "|".join(
-            [
-                category,
-                str(source.get("intent") or ""),
-                self._normalise_signature_text(str(source.get("raw_text") or "")),
-                ",".join(sorted(set(tool_names))),
-                self._normalise_signature_text(correction or ""),
-            ]
-        )
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        # Event identity, not a fuzzy topic, is the deduplication boundary.
+        # Keep numeric corrections and distinct actions/interactions separate.
+        identity = {
+            "version": 2,
+            "user_key": source.get("user_key"),
+            "conversation_id": source.get("conversation_id"),
+            "interaction_id": source.get("interaction_id"),
+            "feedback_attribution": source.get("feedback_attribution"),
+            "source": source if source.get("interaction_id") is None else None,
+            "category": category,
+            "correction": correction,
+        }
+        return hashlib.sha256(
+            json.dumps(identity, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
 
     @staticmethod
     def _category_for_interaction(source: dict[str, Any], correction: str | None = None) -> str:
+        attribution = source.get("feedback_attribution") or {}
+        if attribution.get("status") == "review_required":
+            return "feedback_review"
+        receipt = attribution.get("receipt") or {}
+        if receipt:
+            operation = str(receipt.get("requested_operation") or "")
+            if operation == "send_mobile_notification":
+                return "notification"
+            result = receipt.get("result") or {}
+            if isinstance(result, dict) and result.get("parameter") in {"volume", "volume_level"}:
+                return "media_volume"
+            return "device_resolution"
         text = f"{source.get('raw_text', '')} {correction or ''}".casefold()
         intent = str(source.get("intent") or "").casefold()
         calls = source.get("tool_calls", [])
@@ -803,9 +815,20 @@ class SelfImprovementEngine:
     ) -> int | None:
         if not _CORRECTION_PATTERN.search(raw_text):
             return None
-        source = await self.last_interaction(conversation_id)
-        if source is None:
+
+        def recent() -> list[dict[str, Any]]:
+            with self._connection() as connection:
+                rows = connection.execute(
+                    "SELECT * FROM improvement_interactions WHERE conversation_id = ? "
+                    "AND user_key = ? ORDER BY interaction_id DESC LIMIT 50",
+                    (conversation_id, actor.user_key),
+                ).fetchall()
+            return [self._interaction_from_row(row) for row in rows]
+
+        history = await asyncio.to_thread(recent)
+        if not history:
             return None
+        source = attribute_feedback(history[0], history, self.redact_text(raw_text))
         return await self.record_failure(
             source=source,
             correction=raw_text,
@@ -844,40 +867,19 @@ class SelfImprovementEngine:
                 "core_version": source.get("core_version"),
             },
             "correction": self.redact_text(correction or "") or None,
+            "feedback_attribution": source.get("feedback_attribution"),
         }
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT failure_id, occurrences, status FROM improvement_failures WHERE signature = ?",
                 (signature,),
             ).fetchone()
             if row:
                 failure_id = int(row["failure_id"])
-                occurrences = int(row["occurrences"]) + 1
-                existing_status = str(row["status"])
-                next_status = existing_status
-                if existing_status in {"resolved", "ignored"}:
-                    next_status = "recorded"
-                connection.execute(
-                    """
-                    UPDATE improvement_failures SET
-                        updated_at = ?, last_seen_at = ?, occurrences = ?,
-                        explicit = MAX(explicit, ?), severity = ?, summary = ?,
-                        evidence_json = ?, status = ?
-                    WHERE failure_id = ?
-                    """,
-                    (
-                        now,
-                        now,
-                        occurrences,
-                        1 if explicit else 0,
-                        severity,
-                        summary,
-                        self._json(evidence),
-                        next_status,
-                        failure_id,
-                    ),
-                )
-                return failure_id, occurrences, next_status
+                # An identical event retry must not overwrite historical evidence
+                # or count as a second occurrence.
+                return failure_id, int(row["occurrences"]), str(row["status"])
 
             cursor = connection.execute(
                 """
@@ -941,6 +943,7 @@ class SelfImprovementEngine:
     def _queue_failure_sync(self, failure_id: int) -> tuple[bool, int | None, str]:
         now = self._utc_now()
         with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             failure = connection.execute(
                 "SELECT status FROM improvement_failures WHERE failure_id = ?",
                 (failure_id,),
@@ -977,7 +980,7 @@ class SelfImprovementEngine:
         clean = self.redact_text(text).strip()
         if len(clean) < 3:
             return False, None, "Improvement request is too short."
-        source = {
+        source: dict[str, Any] = {
             "raw_text": clean,
             "interpreted_text": clean,
             "intent": "improvement_request",
@@ -988,6 +991,22 @@ class SelfImprovementEngine:
             "timings": {},
             "user_key": actor,
         }
+        interaction_id = await asyncio.to_thread(
+            self._insert_interaction_sync,
+            conversation_id=f"improvement:{actor}",
+            user_key=actor,
+            raw_text=clean,
+            interpreted_text=clean,
+            intent="improvement_request",
+            success=True,
+            response="Requested from Improvement Center.",
+            tool_calls=[],
+            understanding=source["understanding"],
+            timings={},
+            tone={},
+            failure_like=False,
+        )
+        source = await self.get_interaction(interaction_id) or source
         failure_id = await self.record_failure(
             source=source,
             correction=clean,
@@ -1000,7 +1019,11 @@ class SelfImprovementEngine:
 
     @staticmethod
     def _normalise_development_path(value: object) -> str | None:
-        if not isinstance(value, str) or not value or "\\" in value:
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", value)
+            or "\\" in value
+        ):
             return None
         path = Path(value)
         if path.is_absolute() or ".." in path.parts or path == Path("."):
@@ -1010,6 +1033,7 @@ class SelfImprovementEngine:
             return None
         if normalised.startswith(
             (
+                "developer_gateway/",
                 "tools/autonomy_",
                 "tools/supervised_development_",
                 "tools/deploy_",
@@ -1028,7 +1052,11 @@ class SelfImprovementEngine:
         if not failure or str(failure.get("status") or "") in {"resolved", "ignored"}:
             return None, "Failure is not eligible for development preparation.", ""
         source = failure.get("evidence") or {}
-        if not isinstance(source, dict) or not source.get("source"):
+        if (
+            not isinstance(source, dict)
+            or not isinstance(source.get("source"), dict)
+            or not source["source"]
+        ):
             return None, "Failure lacks preserved source evidence.", ""
         paths: list[str] = []
         for raw in affected_files:
@@ -1088,6 +1116,8 @@ class SelfImprovementEngine:
         affected_files: list[str],
         summary: str,
         actor: str,
+        review: dict[str, Any] | None = None,
+        reevaluate_candidate_id: int | None = None,
     ) -> tuple[bool, int | None, str]:
         """Queue a candidate bound to an existing failure and source snapshot.
 
@@ -1105,6 +1135,24 @@ class SelfImprovementEngine:
         if len(clean_summary) < 3:
             return False, None, "A concise improvement summary is required."
 
+        # File names plus conversation feedback are not proof of a software
+        # defect. An authenticated reviewer must reproduce it at this snapshot
+        # and explain the connection to every proposed file.
+        review = review if isinstance(review, dict) else {}
+        findings = review.get("file_findings")
+        if (
+            not actor.strip()
+            or review.get("source_sha") != source_sha
+            or review.get("evidence_sha256") != binding
+            or not isinstance(review.get("reproduction"), str)
+            or len(review["reproduction"].strip()) < 10
+            or not isinstance(findings, dict)
+            or set(findings) != set(paths)
+            or any(
+                not isinstance(value, str) or len(value.strip()) < 10 for value in findings.values()
+            )
+        ):
+            return False, None, "Current-source reproduction and per-file review evidence required."
         scope_record = {
             "scope": "application",
             "affected_files": paths,
@@ -1112,18 +1160,90 @@ class SelfImprovementEngine:
             "evidence_sha256": binding,
             "source_sha": source_sha,
             "source_root": str(self.development_source_root),
+            "review": {
+                "reviewed_by": actor,
+                "source_sha": source_sha,
+                "evidence_sha256": binding,
+                "reproduction": self.redact_text(review["reproduction"]),
+                "file_findings": {path: self.redact_text(findings[path]) for path in paths},
+            },
         }
 
         def _prepare() -> tuple[int | None, str | None]:
             now = self._utc_now()
+
+            def audit_review(connection: sqlite3.Connection, identifier: int) -> None:
+                connection.execute(
+                    "INSERT INTO improvement_audit "
+                    "(created_at,event_type,actor,failure_id,candidate_id,details_json) VALUES (?,?,?,?,?,?)",
+                    (
+                        now,
+                        "candidate_reviewed",
+                        actor,
+                        failure_id,
+                        identifier,
+                        self._json(scope_record),
+                    ),
+                )
+
             with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current_failure = connection.execute(
+                    "SELECT evidence_json,status FROM improvement_failures WHERE failure_id=?",
+                    (failure_id,),
+                ).fetchone()
+                if current_failure is None or current_failure["status"] in {"resolved", "ignored"}:
+                    return None, "Failure changed during review."
+                current_hash = hashlib.sha256(
+                    json.dumps(
+                        self._load_json(current_failure["evidence_json"], {}),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                if current_hash != binding:
+                    return None, "Failure evidence changed during review."
+                if reevaluate_candidate_id is not None:
+                    previous = connection.execute(
+                        "SELECT * FROM improvement_candidates WHERE candidate_id=? AND failure_id=?",
+                        (reevaluate_candidate_id, failure_id),
+                    ).fetchone()
+                    if previous is None:
+                        return None, "Original candidate not found for this failure."
+                    if previous["status"] != "queued" or previous["archived_at"]:
+                        return None, "Only an unarchived queued candidate may be re-evaluated."
+                    previous_scope = self._load_json(previous["development_scope_json"], {})
+                    if (
+                        not isinstance(previous_scope, dict)
+                        or not isinstance(previous_scope.get("source_sha"), str)
+                        or not re.fullmatch(r"[0-9a-f]{40}", previous_scope["source_sha"])
+                        or previous_scope["source_sha"] == source_sha
+                    ):
+                        return None, "Re-evaluation requires a historical source binding."
+                    if (
+                        previous_scope.get("evidence_failure_id") != failure_id
+                        or previous_scope.get("evidence_sha256") != binding
+                    ):
+                        return None, "Historical failure evidence is stale; investigate separately."
+                    scope_record["reevaluation"] = {
+                        "candidate_id": reevaluate_candidate_id,
+                        "original_scope": previous_scope,
+                        "original_scope_sha256": hashlib.sha256(
+                            previous["development_scope_json"].encode()
+                        ).hexdigest(),
+                    }
                 existing = connection.execute(
                     "SELECT candidate_id,status,summary,development_scope_json "
                     "FROM improvement_candidates WHERE failure_id = ? "
                     "ORDER BY candidate_id DESC LIMIT 1",
                     (failure_id,),
                 ).fetchone()
-                if existing:
+                if existing and reevaluate_candidate_id is not None:
+                    if str(existing["status"]) != "queued":
+                        return None, "Latest candidate is not queued; separate review is required."
+                    if self._load_json(existing["development_scope_json"], {}) == scope_record:
+                        return int(existing["candidate_id"]), None
+                if existing and reevaluate_candidate_id is None:
                     candidate_id = int(existing["candidate_id"])
                     if str(existing["status"]) != "queued":
                         return (
@@ -1145,6 +1265,7 @@ class SelfImprovementEngine:
                     )
                     if updated.rowcount != 1:
                         return None, "Candidate changed state during scope preparation."
+                    audit_review(connection, candidate_id)
                     return candidate_id, None
                 cursor = connection.execute(
                     "INSERT INTO improvement_candidates "
@@ -1163,7 +1284,9 @@ class SelfImprovementEngine:
                         ),
                     ),
                 )
-                return self._required_lastrowid(cursor), None
+                new_id = self._required_lastrowid(cursor)
+                audit_review(connection, new_id)
+                return new_id, None
 
         candidate_id, error = await asyncio.to_thread(_prepare)
         if candidate_id is None:

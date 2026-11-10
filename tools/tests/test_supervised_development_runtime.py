@@ -54,9 +54,49 @@ def _governor_db(path: Path) -> None:
                 candidate_id INTEGER PRIMARY KEY, failure_id INTEGER NOT NULL,
                 status TEXT NOT NULL, summary TEXT
             );
-            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"scope":"application","source":"test","affected_files":["tools/developer_session_diagnostics.py"]}','queued');
+            INSERT INTO improvement_failures VALUES(1,'diagnostic failure','{"scope":"application","source":{"fixture":"test"},"affected_files":["tools/developer_session_diagnostics.py"]}','queued');
             INSERT INTO improvement_candidates VALUES(1,1,'queued','Bound diagnostics warning');
             """
+        )
+
+
+def _bind_review(database, root, candidate_id=1):
+    with sqlite3.connect(database) as db:
+        if "development_scope_json" not in {
+            r[1] for r in db.execute("PRAGMA table_info(improvement_candidates)")
+        }:
+            db.execute(
+                "ALTER TABLE improvement_candidates ADD COLUMN development_scope_json TEXT DEFAULT '{}'"
+            )
+        failure_id, raw = db.execute(
+            "SELECT c.failure_id,f.evidence_json FROM improvement_candidates c JOIN improvement_failures f ON c.failure_id=f.failure_id WHERE c.candidate_id=?",
+            (candidate_id,),
+        ).fetchone()
+        evidence = json.loads(raw)
+        binding = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        sha = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+        paths = ["tools/developer_session_diagnostics.py"]
+        scope = {
+            "scope": "application",
+            "evidence_failure_id": failure_id,
+            "evidence_sha256": binding,
+            "source_sha": sha,
+            "affected_files": paths,
+            "review": {
+                "reviewed_by": "fixture",
+                "source_sha": sha,
+                "evidence_sha256": binding,
+                "reproduction": "Disposable diagnostics test demonstrates the failure.",
+                "file_findings": {paths[0]: "The fixture diagnostic returns an incorrect value."},
+            },
+        }
+        db.execute(
+            "UPDATE improvement_candidates SET development_scope_json=? WHERE candidate_id=?",
+            (json.dumps(scope), candidate_id),
         )
 
 
@@ -65,7 +105,8 @@ def test_runtime_entrypoint_reaches_review_required_once(tmp_path, monkeypatch):
     governor_db = tmp_path / "governor.sqlite3"
     _governor_db(governor_db)
     controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
-    source_reader = GovernorCandidateSource(governor_db)
+    _bind_review(governor_db, source)
+    source_reader = GovernorCandidateSource(governor_db, source)
     generation = str(uuid.uuid4())
     active_generation = str(uuid.uuid4())
     active = {"calls": 0}
@@ -180,7 +221,7 @@ def test_candidate_eligibility_skips_unrelated_and_missing_evidence(tmp_path):
     source = GovernorCandidateSource(database)
     try:
         selected = source.next()
-        assert selected is not None and selected["candidate_id"] == 35
+        assert selected is None  # Legacy conversation fields are not verified scope.
         assert source.next({35}) is None
     finally:
         source.close()
@@ -189,12 +230,14 @@ def test_candidate_eligibility_skips_unrelated_and_missing_evidence(tmp_path):
 def test_candidate_selection_survives_read_only_restart(tmp_path):
     database = tmp_path / "governor.sqlite3"
     _governor_db(database)
-    first = GovernorCandidateSource(database)
+    root, _ = _source(tmp_path)
+    _bind_review(database, root)
+    first = GovernorCandidateSource(database, root)
     try:
         expected = first.next()
     finally:
         first.close()
-    second = GovernorCandidateSource(database)
+    second = GovernorCandidateSource(database, root)
     try:
         assert second.next() == expected
     finally:
@@ -241,12 +284,14 @@ def test_candidate_scope_metadata_binds_preserved_failure_evidence(tmp_path):
                 ),
             ),
         )
-    source = GovernorCandidateSource(database)
+    root, _ = _source(tmp_path)
+    _bind_review(database, root, 42)
+    source = GovernorCandidateSource(database, root)
     try:
         selected = source.next()
         assert selected is not None
         assert selected["candidate_id"] == 42
-        assert selected["allowed_paths"] == ("app/latency.py",)
+        assert selected["allowed_paths"] == ("tools/developer_session_diagnostics.py",)
     finally:
         source.close()
 

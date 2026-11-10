@@ -1,0 +1,173 @@
+[
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 0
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":0,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 1
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":1,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 0.09
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":0.09,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 0.0001
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":0.0001,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 1e-05
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":1e-05,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 1e-06
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":1e-06,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "version": 1,
+      "action": "approve_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "gpt-5.3-codex",
+      "max_calls": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000002",
+      "request_id": "fixture-only",
+      "expires_at": 2000000030,
+      "key_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "max_cost_usd": 0.30000000000000004
+    },
+    "canonical": "{\"action\":\"approve_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"deadline_seconds\":120,\"expires_at\":2000000030,\"guardian_generation\":\"00000000-0000-4000-8000-000000000002\",\"key_id\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"max_calls\":1,\"max_cost_usd\":0.30000000000000004,\"model\":\"gpt-5.3-codex\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"provider\":\"openai\",\"request_id\":\"fixture-only\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}"
+  },
+  {
+    "fields": {
+      "allowed_paths": [
+        "bridge/app/caf\u00e9.py",
+        "test_\ud83d\ude00.py"
+      ],
+      "request_id": "quote\"\\line\n\t\u007f"
+    },
+    "canonical": "{\"allowed_paths\":[\"bridge/app/caf\\u00e9.py\",\"test_\\ud83d\\ude00.py\"],\"request_id\":\"quote\\\"\\\\line\\n\\t\\u007f\"}"
+  }
+]

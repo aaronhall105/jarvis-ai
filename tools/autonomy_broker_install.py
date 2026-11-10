@@ -70,12 +70,11 @@ SERVICES = (
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
-# Existing hosts may already contain the first upgraded bundle.  This exact
-# source is accepted for the narrowly-scoped database-contract migration only.
-CURRENT_BUNDLE = "fe7a881ca8c0c4c727827995899a3e057a5b9290cb03171033eebbd4d6d87676"
-# This is the fingerprint of the complete payload at this source revision,
-# including the fixed controller/publication database contract.
-UPGRADE_BUNDLE = "2d0da2c88fabcfe81d2dad65954888fd5e9831830f792dc462c73a22e7e03701"
+# Reviewed installed PR #129 bundle, verified against the canonical base payload.
+# Retain the exact-version migration and all existing integrity/rollback checks.
+CURRENT_BUNDLE = "2d0da2c88fabcfe81d2dad65954888fd5e9831830f792dc462c73a22e7e03701"
+# Complete destination payload, including evidence-bound Governor selection.
+UPGRADE_BUNDLE = "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:

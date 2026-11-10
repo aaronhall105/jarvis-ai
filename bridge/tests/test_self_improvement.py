@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -8,6 +9,22 @@ import pytest
 
 from app.self_improvement import SelfImprovementEngine
 from app.user_context import UserContext
+
+
+def reviewed_scope(engine, failure_id=1):
+    evidence = engine._get_failure_sync(failure_id)["evidence"]
+    return {
+        "source_sha": subprocess.check_output(
+            ["git", "-C", str(engine.development_source_root), "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "evidence_sha256": hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "reproduction": "Fixture reproduces measured latency exceeding the request budget.",
+        "file_findings": {
+            "app/latency.py": "Measured delay originates in this application latency function."
+        },
+    }
 
 
 @pytest.fixture
@@ -82,7 +99,7 @@ async def test_explicit_correction_records_and_queues_failure(
     assert failure_id is not None
     failure = await engine.get_failure(failure_id)
     assert failure is not None
-    assert failure["category"] == "device_resolution"
+    assert failure["category"] == "feedback_review"
     assert failure["explicit"] is True
     candidates = await engine.list_candidates()
     assert len(candidates) == 1
@@ -140,6 +157,7 @@ async def test_evidenced_candidate_binds_existing_failure_without_rewriting_evid
     ok, candidate_id, status = await engine.prepare_evidenced_improvement(
         failure_id=1,
         affected_files=["app/latency.py"],
+        review=reviewed_scope(engine),
         summary="Reduce measured request latency",
         actor="owner",
     )
@@ -229,6 +247,7 @@ async def test_evidenced_candidate_attaches_scope_to_existing_queued_candidate(
     ok, candidate_id, status = await engine.prepare_evidenced_improvement(
         failure_id=1,
         affected_files=["app/latency.py"],
+        review=reviewed_scope(engine),
         summary="Reduce measured request latency",
         actor="owner",
     )
@@ -248,6 +267,7 @@ async def test_evidenced_candidate_attaches_scope_to_existing_queued_candidate(
     rejected, _, message = await engine.prepare_evidenced_improvement(
         failure_id=1,
         affected_files=["app/latency.py"],
+        review=reviewed_scope(engine),
         summary="Do not replace approved scope",
         actor="owner",
     )

@@ -716,6 +716,8 @@ class EvidencedImprovementRequest(BaseModel):
     failure_id: int = Field(gt=0)
     summary: str = Field(min_length=3, max_length=2000)
     affected_files: list[str] = Field(min_length=1, max_length=32)
+    review: dict[str, Any] | None = None
+    reevaluate_candidate_id: int | None = Field(default=None, gt=0)
 
 
 class PersonalTaskMutationRequest(BaseModel):
@@ -7163,6 +7165,8 @@ async def improvement_request_evidenced(
     ok, candidate_id, status = await improvement.prepare_evidenced_improvement(
         failure_id=request.failure_id,
         affected_files=request.affected_files,
+        review=request.review,
+        reevaluate_candidate_id=request.reevaluate_candidate_id,
         summary=request.summary,
         actor="api",
     )
