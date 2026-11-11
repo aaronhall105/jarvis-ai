@@ -8,7 +8,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: android-ota-${{ github.ref }}
+  # Serialize different release tags too: they share mutable channel pointers.
+  group: jarvis-android-ota-publication
   cancel-in-progress: false
 
 jobs:
@@ -55,6 +56,11 @@ jobs:
           test "$(git rev-list -n1 "$GITHUB_REF_NAME")" = "$GITHUB_SHA"
           python tools/verify_product_baseline.py --skip-ref
           git diff --check
+      - name: Verify immutable publication and existing channel prerequisites
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JARVIS_RELEASE_SETTINGS_READ_TOKEN: ${{ secrets.JARVIS_RELEASE_SETTINGS_READ_TOKEN }}
+        run: python -m tools.publish_android_ota preflight --state "$RUNNER_TEMP/ota-publication.json"
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -69,7 +75,8 @@ jobs:
           python -m ruff format --check bridge/app bridge/tests developer_gateway tools
           python -m mypy bridge/app developer_gateway tools/generate_ota_manifest.py \
             tools/generate_product_release_manifest.py tools/verify_product_baseline.py
-          python -m bandit -q -lll tools/generate_ota_manifest.py tools/generate_product_release_manifest.py
+          python -m mypy --explicit-package-bases tools/publish_android_ota.py
+          python -m bandit -q -lll tools/generate_ota_manifest.py tools/generate_product_release_manifest.py tools/publish_android_ota.py
       - name: Android and Wear unit tests and lint
         working-directory: android/jarvis-voice-client
         run: >-
@@ -212,44 +219,23 @@ jobs:
             --version-code "$code" --source-sha "$GITHUB_SHA" \
             --signer-sha256 "${actual,,}" --output product-release-manifest.json
       - name: Publish immutable release assets
-        env: {GH_TOKEN: '${{ github.token }}'}
-        run: |
-          set -Eeuo pipefail
-          version="${GITHUB_REF_NAME#v}"; apk="jarvis-assistant-v${version}-release.apk"
-          prerelease=""; [[ "$version" == *-* ]] && prerelease="--prerelease"
-          wear_apk="jarvis-wear-v${version}-release.apk"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json product-release-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt wear-apk-inspection.txt --clobber
-            gh release edit "$GITHUB_REF_NAME" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
-          else
-            gh release create "$GITHUB_REF_NAME" "$apk" "$apk.sha256" "$wear_apk" SHA256SUMS.txt update-manifest.json product-release-manifest.json signing-report.txt wear-signing-report.txt apk-inspection.txt wear-apk-inspection.txt \
-              --verify-tag --target "$GITHUB_SHA" --title "Jarvis $version" --notes-file release-notes.txt $prerelease
-          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JARVIS_RELEASE_SETTINGS_READ_TOKEN: ${{ secrets.JARVIS_RELEASE_SETTINGS_READ_TOKEN }}
+        run: python -m tools.publish_android_ota publish --state "$RUNNER_TEMP/ota-publication.json"
       - name: Publish validated release-hosted channel feeds
-        env: {GH_TOKEN: '${{ github.token }}'}
-        run: |
-          set -Eeuo pipefail
-          channel="$(python -c 'import json; print(json.load(open("update-manifest.json"))["channel"])')"
-          promote() {
-            local target="$1" tag="jarvis-$1-feed" previous="$RUNNER_TEMP/$1-previous.json"
-            if gh release view "$tag" >/dev/null 2>&1; then
-              gh release download "$tag" --pattern update-manifest.json --output "$previous"
-              python - "$previous" update-manifest.json <<'PY'
-          import json, sys
-          old, new = (json.load(open(path)) for path in sys.argv[1:])
-          if new["versionCode"] <= old["versionCode"]:
-              raise SystemExit("OTA channel refuses a reused or decreasing versionCode")
-          PY
-              gh release upload "$tag" update-manifest.json --clobber
-            else
-              gh release create "$tag" update-manifest.json --target "$GITHUB_SHA" --prerelease \
-                --title "Jarvis ${target^} OTA channel" \
-                --notes "Machine-readable OTA channel generated only by approved unified-production release tags."
-            fi
-          }
-          promote "$channel"
-          if [[ "$channel" == stable ]]; then promote beta; promote alpha; fi
-          if [[ "$channel" == beta ]]; then promote alpha; fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JARVIS_RELEASE_SETTINGS_READ_TOKEN: ${{ secrets.JARVIS_RELEASE_SETTINGS_READ_TOKEN }}
+        run: python -m tools.publish_android_ota promote --state "$RUNNER_TEMP/ota-publication.json"
+      - name: Preserve publication reconciliation record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jarvis-ota-publication-state-${{ github.run_id }}
+          path: ${{ runner.temp }}/ota-publication.json
+          if-no-files-found: warn
+          retention-days: 90
       - uses: actions/upload-artifact@v4
         with:
           name: jarvis-ota-${{ github.ref_name }}
