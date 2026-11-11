@@ -135,110 +135,144 @@ class GovernorCandidateSource:
 
     @staticmethod
     def _is_scope_eligible(summary: str, evidence: object) -> bool:
-        """Require explicit evidence binding a candidate to the edit scope.
-
-        Governor records remain untouched.  The evidence must name one or both
-        approved diagnostics files and the summary must describe diagnostics
-        work; free-form conversation text or a candidate ID is never enough.
-        """
+        """Validate explicit canonical application paths, never infer them from text."""
         if not isinstance(evidence, dict) or evidence.get("scope") != "application":
             return False
         paths = evidence.get("affected_files")
-        if not isinstance(paths, list) or not paths:
+        if not isinstance(paths, list) or not paths or len(paths) > 32:
             return False
-        if any(
-            type(path) is not str
-            or not path
-            or path.startswith("/")
-            or ".." in Path(path).parts
-            or path.startswith(PROTECTED_SCOPE_PREFIXES)
-            or not (path.endswith(".py") or path.endswith(".toml") or path.endswith(".yaml"))
-            for path in paths
+        for path in paths:
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\\" in path
+                or not re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", path)
+                or path.startswith(("/", ".git", "developer_gateway/"))
+                or any(part in {"", ".", ".."} for part in path.split("/"))
+                or path.startswith(PROTECTED_SCOPE_PREFIXES)
+                or Path(path).suffix
+                not in {".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md", ".sh"}
+            ):
+                return False
+        return len(set(paths)) == len(paths) and len(summary.strip()) >= 3
+
+    def review_queue(self) -> list[dict[str, Any]]:
+        """Read-only classification; historical rows and evidence are never repaired in place.
+
+        This is also the admission decision used by next(), so the review report
+        cannot disagree with execution eligibility. No database migrations.
+        """
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(improvement_candidates)")}
+        scope_column = "c.development_scope_json" if "development_scope_json" in columns else "'{}'"
+        archived_column = "c.archived_at" if "archived_at" in columns else "NULL"
+        rows = self.db.execute(
+            f"SELECT c.candidate_id,c.failure_id,c.status,c.summary,{scope_column} AS scope_json,"
+            f"{archived_column} AS archived_at,f.summary AS failure_summary,f.evidence_json,"
+            "f.status AS failure_status FROM improvement_candidates c "
+            "LEFT JOIN improvement_failures f ON f.failure_id=c.failure_id "
+            "WHERE c.status='queued' ORDER BY c.candidate_id"
+        ).fetchall()
+        try:
+            current_sha = self._current_source_sha()
+        except LifecycleError:
+            current_sha = None
+        reports = []
+        for row in rows:
+            report: dict[str, Any] = {
+                "candidate_id": int(row["candidate_id"]),
+                "failure_id": int(row["failure_id"]),
+                "status": row["status"],
+                "summary": str(row["summary"] or row["failure_summary"] or "").strip(),
+                "eligible": False,
+                "classification": "review_required",
+                "current_source_sha": current_sha,
+            }
+            try:
+                evidence = json.loads(row["evidence_json"])
+                scope = json.loads(row["scope_json"] or "{}")
+            except (TypeError, ValueError):
+                report["classification"] = "malformed_evidence"
+                reports.append(report)
+                continue
+            reason = self._classification(row, report["summary"], evidence, scope, current_sha)
+            report["classification"] = reason
+            if isinstance(scope, dict):
+                report["bound_source_sha"] = scope.get("source_sha")
+            if reason == "eligible":
+                report.update(
+                    eligible=True,
+                    evidence={**evidence, **scope},
+                    allowed_paths=tuple(scope["affected_files"]),
+                )
+            reports.append(report)
+        return reports
+
+    def _classification(self, row, summary, evidence, scope, current_sha) -> str:
+        if row["archived_at"] or row["failure_status"] not in {"queued", "recorded"}:
+            return "inactive_failure_or_candidate"
+        if (
+            not isinstance(evidence, dict)
+            or not isinstance(evidence.get("source"), dict)
+            or not evidence["source"]
         ):
-            return False
-        if len(set(paths)) != len(paths):
-            return False
-        # Evidence, not wording, establishes scope.  The summary may describe
-        # voice, routing, performance, tools or any other supported component.
-        return bool(summary.strip())
+            return "missing_source_evidence"
+        if not isinstance(scope, dict) or not scope:
+            return "unscoped_review_required"
+        if not self._is_scope_eligible(summary, scope):
+            return "invalid_application_scope"
+        binding = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if (
+            type(scope.get("evidence_failure_id")) is not int
+            or scope["evidence_failure_id"] != row["failure_id"]
+            or scope.get("evidence_sha256") != binding
+        ):
+            return "stale_failure_evidence"
+        source_sha = scope.get("source_sha")
+        if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+            return "missing_source_binding"
+        if current_sha is None:
+            return "source_snapshot_unavailable"
+        if source_sha != current_sha:
+            return "historical_source_review_required"
+        inventory: dict[str, str] = {}
+        if self.source_root is not None:
+            try:
+                for line in _trusted_source_git(
+                    self.source_root, "ls-tree", "-r", current_sha, "--", *scope["affected_files"]
+                ).splitlines():
+                    metadata, name = line.split("\t", 1)
+                    inventory[name] = metadata.split()[0]
+            except (LifecycleError, ValueError):
+                return "source_snapshot_unavailable"
+        if any(inventory.get(path) not in {"100644", "100755"} for path in scope["affected_files"]):
+            return "untracked_or_nonregular_scope"
+        review = scope.get("review")
+        if not isinstance(review, dict):
+            return "scope_review_required"
+        findings = review.get("file_findings")
+        if (
+            not isinstance(review.get("reviewed_by"), str)
+            or not review["reviewed_by"].strip()
+            or review.get("source_sha") != source_sha
+            or review.get("evidence_sha256") != binding
+            or not isinstance(review.get("reproduction"), str)
+            or len(review["reproduction"].strip()) < 10
+            or not isinstance(findings, dict)
+            or set(findings) != set(scope["affected_files"])
+            or any(
+                not isinstance(value, str) or len(value.strip()) < 10 for value in findings.values()
+            )
+        ):
+            return "scope_review_required"
+        return "eligible"
 
     def next(self, excluded: set[int] | None = None) -> dict[str, Any] | None:
         excluded = excluded or set()
-        current_source_sha = self._current_source_sha()
-        try:
-            rows = self.db.execute(
-                """
-                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
-                       c.development_scope_json, f.summary AS failure_summary,
-                       f.evidence_json, f.status AS failure_status
-                FROM improvement_candidates c
-                JOIN improvement_failures f ON f.failure_id = c.failure_id
-                WHERE c.status='queued' AND f.status IN ('queued','recorded')
-                ORDER BY c.candidate_id ASC
-                """
-            ).fetchall()
-        except sqlite3.OperationalError as exc:
-            if "no such column" not in str(exc).lower():
-                raise
-            rows = self.db.execute(
-                """
-                SELECT c.candidate_id, c.status, c.summary, c.failure_id,
-                       '{}' AS development_scope_json,
-                       f.summary AS failure_summary, f.evidence_json,
-                       f.status AS failure_status
-                FROM improvement_candidates c
-                JOIN improvement_failures f ON f.failure_id = c.failure_id
-                WHERE c.status='queued' AND f.status IN ('queued','recorded')
-                ORDER BY c.candidate_id ASC
-                """
-            ).fetchall()
-        for row in rows:
-            candidate_id = int(row["candidate_id"])
-            if candidate_id in excluded:
-                continue
-            summary = str(row["summary"] or row["failure_summary"] or "").strip()
-            try:
-                evidence = json.loads(row["evidence_json"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(evidence, dict) or not evidence:
-                continue
-            try:
-                scope = json.loads(row["development_scope_json"] or "{}")
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if isinstance(scope, dict) and scope:
-                # Scope attribution is candidate-local so the original
-                # Governor failure evidence remains immutable.  The binding
-                # must point back to the exact preserved failure record.
-                if scope.get("evidence_failure_id") != int(row["failure_id"]):
-                    continue
-                expected_evidence_hash = hashlib.sha256(
-                    json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest()
-                if scope.get("evidence_sha256") != expected_evidence_hash:
-                    continue
-                source_sha = scope.get("source_sha")
-                if not isinstance(source_sha, str) or not re.fullmatch(
-                    r"[0-9a-f]{40,64}", source_sha
-                ):
-                    continue
-                if current_source_sha is not None and source_sha != current_source_sha:
-                    continue
-                evidence = {**evidence, **scope}
-            if len(summary) < 3:
-                continue
-            if not self._is_scope_eligible(summary, evidence):
-                continue
-            paths = evidence["affected_files"]
-            return {
-                "candidate_id": candidate_id,
-                "failure_id": int(row["failure_id"]),
-                "status": "queued",
-                "summary": summary,
-                "evidence": evidence,
-                "allowed_paths": tuple(sorted(set(paths))),
-            }
+        for report in self.review_queue():
+            if report["eligible"] and report["candidate_id"] not in excluded:
+                return report
         return None
 
 

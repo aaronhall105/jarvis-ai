@@ -183,11 +183,69 @@ final class AutonomyControl {
         StringBuilder canonical = new StringBuilder("{");
         for (java.util.Map.Entry<String, Object> entry : fields.entrySet()) {
             if (canonical.length() > 1) canonical.append(',');
-            canonical.append(JSONObject.quote(entry.getKey())).append(':');
-            canonical.append(entry.getValue() instanceof String
-                ? JSONObject.quote((String) entry.getValue()) : entry.getValue().toString());
+            canonical.append(canonicalString(entry.getKey())).append(':');
+            canonical.append(canonicalValue(entry.getValue()));
         }
         canonical.append('}');
         return canonical.toString();
+    }
+
+    private static String canonicalValue(Object value) {
+        if (value instanceof String) return canonicalString((String) value);
+        if (value instanceof JSONArray) {
+            JSONArray values = (JSONArray) value;
+            StringBuilder result = new StringBuilder("[");
+            for (int i = 0; i < values.length(); i++) {
+                if (i > 0) result.append(',');
+                try { result.append(canonicalValue(values.get(i))); }
+                catch (org.json.JSONException invalid) { throw new IllegalArgumentException(invalid); }
+            }
+            return result.append(']').toString();
+        }
+        if (value instanceof Number) {
+            // Sign the numeric value that JSONObject actually sends. In particular
+            // an integral Double is transmitted as 1, not the signed text 1.0.
+            try {
+                String wire = JSONObject.numberToString((Number) value);
+                if (!wire.contains(".") && !wire.contains("e") && !wire.contains("E"))
+                    return new java.math.BigInteger(wire).toString();
+                double number = Double.parseDouble(wire);
+                if (!Double.isFinite(number)) throw new IllegalArgumentException("non-finite number");
+                if (number == (long) number && Math.abs(number) < Long.MAX_VALUE)
+                    return Long.toString((long) number);
+                java.math.BigDecimal decimal = java.math.BigDecimal.valueOf(number).stripTrailingZeros();
+                int exponent = decimal.precision() - decimal.scale() - 1;
+                if (exponent < -4 || exponent >= 16) {
+                    String coefficient = decimal.movePointLeft(exponent).toPlainString();
+                    return coefficient + "e" + (exponent < 0 ? "-" : "+")
+                        + String.format(java.util.Locale.ROOT, "%02d", Math.abs(exponent));
+                }
+                String plain = decimal.toPlainString();
+                return plain.contains(".") ? plain : plain + ".0";
+            } catch (org.json.JSONException invalid) { throw new IllegalArgumentException(invalid); }
+        }
+        throw new IllegalArgumentException("unsupported approval field");
+    }
+
+    private static String canonicalString(String value) {
+        // Python broker json.dumps(ensure_ascii=True) does not escape '/'.
+        // Android framework org.json does, unlike the JVM test dependency.
+        StringBuilder result = new StringBuilder("\"");
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '"': result.append("\\\""); break;
+                case '\\': result.append("\\\\"); break;
+                case '\b': result.append("\\b"); break;
+                case '\f': result.append("\\f"); break;
+                case '\n': result.append("\\n"); break;
+                case '\r': result.append("\\r"); break;
+                case '\t': result.append("\\t"); break;
+                default:
+                    if (c < 0x20 || c > 0x7e) result.append(String.format(java.util.Locale.ROOT, "\\u%04x", (int) c));
+                    else result.append(c);
+            }
+        }
+        return result.append('"').toString();
     }
 }

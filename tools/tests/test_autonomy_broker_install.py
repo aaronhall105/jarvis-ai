@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -286,9 +287,24 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "fe7a881ca8c0c4c727827995899a3e057a5b9290cb03171033eebbd4d6d87676"
+        "2d0da2c88fabcfe81d2dad65954888fd5e9831830f792dc462c73a22e7e03701"
     )
     assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
+    baseline_files = dict(installer.payload())
+    runtime = next(p for p in baseline_files if p.name == "supervised_development_runtime.py")
+    baseline_files[runtime] = (
+        subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(installer.ROOT),
+                "show",
+                "0fdc16f5987d8f1b17c7ec29819caf57ff881134:tools/supervised_development_runtime.py",
+            ]
+        ),
+        baseline_files[runtime][1],
+    )
+    assert installer.fingerprint(baseline_files) == installer.CURRENT_BUNDLE
 
 
 def test_reviewed_current_bundle_migration_accepts_existing_upgraded_layout(rehearsal, monkeypatch):
@@ -322,6 +338,87 @@ def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkey
     assert marker.read_bytes() == before
     assert controller.status()["state"] == "STOPPED"
     commands.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [None, "activation", "modified", "unknown"])
+def test_installed_pr129_payload_to_repair_preserves_history(rehearsal, monkeypatch, failure):
+    files, policy, guardian, commands, _original, paths = rehearsal
+    old_files = dict(files)
+    target = next(p for p in files if p.name == "supervised_development_runtime.py")
+    old_data = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(installer.ROOT),
+            "show",
+            "0fdc16f5987d8f1b17c7ec29819caf57ff881134:tools/supervised_development_runtime.py",
+        ]
+    )
+    assert old_data != files[target][0]
+    old_files[target] = (old_data, files[target][1])
+    installer.install(old_files, policy)
+    marker = paths["BASE"] / "installed.json"
+    previous = json.loads(marker.read_bytes())
+    previous["bundle"] = installer.CURRENT_BUNDLE
+    if failure == "unknown":
+        previous["bundle"] = "unreviewed"
+    marker.write_bytes(canonical(previous))
+    guardian_marker = guardian.base / "installed.json"
+    manifest = json.loads(guardian_marker.read_bytes())
+    manifest["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(manifest))
+    # Preserve opaque fixture data; no production databases or keys are opened.
+    data = {}
+    for relative in (
+        "work/supervised-development.sqlite3",
+        "operator/operations.sqlite3",
+        "development-admission/operations.sqlite3",
+        "records/retained.json",
+    ):
+        path = paths["BASE"] / relative
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(b"preserved fixture history")
+        path.chmod(0o660 if relative.startswith("work/") else 0o600)
+        data[path] = (path.read_bytes(), path.stat().st_mode)
+    before_files = {p: p.read_bytes() for p in old_files}
+    before_marker = marker.read_bytes()
+    before_guardian = guardian_marker.read_bytes()
+    before_policy = paths["POLICY"].read_bytes()
+    generation = guardian.state()["generation"]
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+    commands.reset_mock()
+    if failure == "modified":
+        target.write_bytes(old_data + b"# tampered\n")
+    if failure == "activation":
+        failed = False
+
+        def activate(argv):
+            nonlocal failed
+            if not failed and "enable" in argv:
+                failed = True
+                raise OSError("fixture activation failed")
+
+        commands.side_effect = activate
+    if failure:
+        expected = OSError if failure == "activation" else Denied
+        with pytest.raises(expected):
+            installer.upgrade(files, policy)
+        assert marker.read_bytes() == before_marker
+        assert guardian_marker.read_bytes() == before_guardian
+        if failure == "activation":
+            assert {p: p.read_bytes() for p in old_files} == before_files
+        else:
+            commands.assert_not_called()
+    else:
+        installer.upgrade(files, policy)
+        assert target.read_bytes() == files[target][0]
+        assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
+    assert paths["POLICY"].read_bytes() == before_policy
+    assert guardian.state()["state"] == "STOPPED"
+    assert guardian.state()["generation"] == generation
+    for path, (contents, mode) in data.items():
+        assert path.read_bytes() == contents
+        assert path.stat().st_mode == mode
 
 
 def test_upgrade_rejects_missing_real_legacy_path(rehearsal, monkeypatch):

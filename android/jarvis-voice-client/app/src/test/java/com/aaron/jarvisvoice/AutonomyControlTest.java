@@ -75,6 +75,47 @@ public class AutonomyControlTest {
         AutonomyControl.signedDevelopment(task);
     }
 
+    @Test public void developmentSignatureNumbersSurviveJsonTransport() throws Exception {
+        for (double cost : new double[] {0.0, -0.0, 1.0, 0.09, 0.00001, 0.000001}) {
+            TreeMap<String, Object> fields = AutonomyControl.developmentFields(
+                developmentTask().put("max_cost_usd", cost));
+            String signedBytes = AutonomyControl.canonical(fields);
+            JSONObject transmitted = new JSONObject(new JSONObject(signedBytes).toString());
+            TreeMap<String, Object> received = new TreeMap<>();
+            java.util.Iterator<String> keys = transmitted.keys();
+            while (keys.hasNext()) { String key = keys.next(); received.put(key, transmitted.get(key)); }
+            assertEquals(signedBytes, AutonomyControl.canonical(received));
+            assertFalse(signedBytes.contains("\"max_cost_usd\":1.0"));
+        }
+    }
+
+    @Test public void developmentCanonicalBytesMatchPythonVectors() throws Exception {
+        try (java.io.InputStream input = getClass().getResourceAsStream("/development_canonical_vectors.json")) {
+            assertNotNull(input);
+            org.json.JSONArray vectors = new org.json.JSONArray(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            for (int i = 0; i < vectors.length(); i++) {
+                JSONObject vector = vectors.getJSONObject(i);
+                JSONObject values = vector.getJSONObject("fields");
+                TreeMap<String, Object> fields = new TreeMap<>();
+                java.util.Iterator<String> keys = values.keys();
+                while (keys.hasNext()) { String key = keys.next(); fields.put(key, values.get(key)); }
+                assertEquals(vector.getString("canonical"), AutonomyControl.canonical(fields));
+            }
+        }
+    }
+
+    @Test public void pathsDoNotUsePlatformJsonArraySerialization() throws Exception {
+        // Android framework JSONStringer escapes '/' while the JVM dependency
+        // does not. A signature serializer must not use either implementation.
+        org.json.JSONArray paths = new org.json.JSONArray() {
+            @Override public String toString() { throw new AssertionError("platform JSON used for signature"); }
+        };
+        paths.put("bridge/app/ai_engine.py");
+        TreeMap<String, Object> fields = new TreeMap<>();
+        fields.put("allowed_paths", paths);
+        assertEquals("{\"allowed_paths\":[\"bridge/app/ai_engine.py\"]}", AutonomyControl.canonical(fields));
+    }
+
     private JSONObject developmentTask() throws Exception {
         return new JSONObject().put("version", 1).put("action", "approve_development")
             .put("goal", "Reduce response latency safely")
