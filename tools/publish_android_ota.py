@@ -232,6 +232,40 @@ def fence(gh: GitHub, state: dict) -> None:
     )
 
 
+def verify_signer_report(raw: bytes) -> None:
+    """Validate apksigner's legacy and scheme-qualified signer report formats.
+
+    The workflow has already executed apksigner verify successfully on each APK.
+    This independent evidence check is strict about signer identity, not the
+    Android Build Tools version's human-readable signer label.
+    """
+    try:
+        report = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PublicationError("signer_report_mismatch") from exc
+    lines = [line.strip() for line in report.splitlines()]
+    require(
+        "Verifies" in lines and "DOES NOT VERIFY" not in report,
+        "signer_report_mismatch",
+    )
+    counts = [line for line in lines if line.startswith("Number of signers:")]
+    require(counts == ["Number of signers: 1"], "signer_report_mismatch")
+    fingerprints = [line for line in lines if "certificate SHA-256" in line]
+    require(bool(fingerprints), "signer_report_mismatch")
+    pattern = re.compile(
+        r"(?:Signer #(?P<legacy_id>[1-9][0-9]*)|V[0-9]+(?:\.[0-9]+)? Signer:)"
+        r" certificate SHA-256 digest: (?P<sha256>[0-9a-fA-F]{64})"
+    )
+    for line in fingerprints:
+        match = pattern.fullmatch(line)
+        if (
+            match is None
+            or match.group("legacy_id") not in (None, "1")
+            or match.group("sha256").lower() != CERT
+        ):
+            raise PublicationError("signer_report_mismatch")
+
+
 def local_assets(directory: Path, state: dict) -> dict[str, bytes]:
     version = state["tag"][1:]
     phone = f"jarvis-assistant-v{version}-release.apk"
@@ -302,12 +336,7 @@ def local_assets(directory: Path, state: dict) -> dict[str, bytes]:
         "checksum_file_mismatch",
     )
     for name in ["signing-report.txt", "wear-signing-report.txt"]:
-        certificates = re.findall(
-            r"Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)", files[name].decode()
-        )
-        require(
-            len(certificates) == 1 and certificates[0].lower() == CERT, "signer_report_mismatch"
-        )
+        verify_signer_report(files[name])
     return files
 
 

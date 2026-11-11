@@ -15,8 +15,8 @@ from tools.generate_ota_manifest import generate
 from tools.generate_product_release_manifest import build_manifest
 
 SHA = "1" * 40
-TAG = "v19.0.0-alpha47"
-CODE = 190490
+TAG = "v19.0.0-alpha48"
+CODE = 190500
 
 
 class GitHubFixture:
@@ -177,7 +177,12 @@ def make_candidate(tmp_path, version):
     (tmp_path / "SHA256SUMS.txt").write_text("".join(sums))
     (tmp_path / (phone.name + ".sha256")).write_text(sums[0])
     for name in ["signing-report.txt", "wear-signing-report.txt"]:
-        (tmp_path / name).write_text("Signer #1 certificate SHA-256 digest: " + ota.CERT)
+        (tmp_path / name).write_text(
+            "Verifies\n"
+            "Verified using v2 scheme (APK Signature Scheme v2): true\n"
+            "Number of signers: 1\n"
+            f"Signer #1 certificate SHA-256 digest: {ota.CERT}\n"
+        )
     for name in ["apk-inspection.txt", "wear-apk-inspection.txt", "release-notes.txt"]:
         (tmp_path / name).write_text("Fixture verification record")
     history = []
@@ -379,7 +384,7 @@ def test_changed_channel_and_failed_promotion_require_reconciliation(candidate):
 
 
 def test_channel_isolation():
-    assert ota.targets("19.0.0-alpha47") == ["alpha"]
+    assert ota.targets("19.0.0-alpha48") == ["alpha"]
     assert ota.targets("19.0.0-beta1") == ["beta", "alpha"]
     assert ota.targets("19.0.0") == ["stable", "beta", "alpha"]
 
