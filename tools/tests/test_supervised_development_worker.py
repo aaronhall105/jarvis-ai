@@ -443,7 +443,7 @@ def test_actual_openai_http_transport_never_retries_or_follows_redirects(
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(encoded)))
             if status == 307:
-                self.send_header("Location", self.path + "/redirect")
+                self.send_header("Location", "/redirect")
             self.end_headers()
             self.wfile.write(encoded)
 
