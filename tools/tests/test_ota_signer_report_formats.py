@@ -6,9 +6,7 @@ from tools.publish_android_ota import CERT, PublicationError, verify_signer_repo
 
 
 def report(*lines: str, signer_count: str = "1") -> bytes:
-    return "\n".join(
-        ("Verifies", f"Number of signers: {signer_count}", *lines, "")
-    ).encode()
+    return "\n".join(("Verifies", f"Number of signers: {signer_count}", *lines, "")).encode()
 
 
 @pytest.mark.parametrize(

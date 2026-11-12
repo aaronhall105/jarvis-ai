@@ -44,7 +44,9 @@ def test_recovery_has_new_monotonic_identity_and_matching_release_notes():
     release = load_manifest()["current_release"]
     assert release["version_name"] == "19.0.0-alpha48"
     assert release["version_code"] == 190500
-    assert release["version_code"] > max(190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490)
+    assert release["version_code"] > max(
+        190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490
+    )
     assert release["phone_package"] == "com.aaron.jarvisvoice"
     for component in ("app", "wear"):
         gradle = (ROOT / ANDROID / component / "build.gradle.kts").read_text()
