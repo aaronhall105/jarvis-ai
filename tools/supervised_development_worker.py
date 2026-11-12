@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Protocol
 from tools.supervised_development_controller import LifecycleError
 from tools.supervised_development_edits import StructuredEditError, apply_incremental_edits
+from tools.supervised_development_environment import CACHE_DIRECTORY, worker_python_arguments
 from tools.supervised_development_scope import editable_path
 
 ProviderCall = Callable[[str, str, int], tuple[str, dict[str, Any]]]
@@ -219,8 +220,14 @@ class BoundedDevelopmentWorker:
             "--cap-drop",
             "ALL",
             "--ro-bind",
-            "/usr",
-            "/usr",
+            "/usr/bin",
+            "/usr/bin",
+            "--ro-bind",
+            "/usr/lib",
+            "/usr/lib",
+            "--ro-bind",
+            "/usr/lib64",
+            "/usr/lib64",
             "--symlink",
             "usr/bin",
             "/bin",
@@ -230,7 +237,13 @@ class BoundedDevelopmentWorker:
             "--symlink",
             "usr/lib64",
             "/lib64",
-            "--proc",
+            # A fresh proc mount is denied below systemd's locked /proc
+            # submounts (ProtectKernelTunables/ProtectControlGroups). Verifiers
+            # need no process inventory: keep proc empty and read-only, never
+            # bind host proc or relax the parent's restrictions.
+            "--tmpfs",
+            "/proc",
+            "--remount-ro",
             "/proc",
             "--dev",
             "/dev",
@@ -240,7 +253,28 @@ class BoundedDevelopmentWorker:
             "/home",
         ]
         prefix = Path(sys.prefix).resolve()
-        if not prefix.is_relative_to("/usr"):
+        if command and command[0] == sys.executable:
+            # -B alone prevents writes, but still reads timestamp-based .pyc
+            # files. Every fresh verifier interpreter must use the same empty,
+            # read-only cache prefix as the sealed worker. Local test virtual
+            # environments may omit it: their entire prefix is mounted RO, so
+            # the absent cache cannot be populated from inside this namespace.
+            cache = prefix / CACHE_DIRECTORY
+            try:
+                if cache.is_symlink() or (
+                    cache.exists() and (not cache.is_dir() or any(cache.iterdir()))
+                ):
+                    raise LifecycleError("verification_bytecode_cache_untrusted")
+            except OSError as exc:
+                raise LifecycleError("verification_bytecode_cache_untrusted") from exc
+            command = [
+                command[0],
+                *worker_python_arguments(prefix / "bin" / "python"),
+                *command[1:],
+            ]
+        if prefix != Path("/usr") and not any(
+            prefix.is_relative_to(root) for root in ("/usr/bin", "/usr/lib", "/usr/lib64")
+        ):
             args += ["--ro-bind", str(prefix), str(prefix)]
         return args + [
             "--ro-bind",

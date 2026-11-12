@@ -1,9 +1,9 @@
 """Opt-in real controller/worker process rehearsal with disposable root fixtures.
 
 Requires the existing host ``runc`` AppArmor profile and test virtualenv. Only
-the disposable outer container permits nested user/network namespaces and an
-unmasked proc mount; the actual worker still uses its fail-closed bubblewrap
-jail. This exercises production entrypoints, identities and fixed IPC, not the
+the disposable outer container permits nested user/network namespaces; its
+default masked proc mounts and NoNewPrivileges remain enabled. The actual
+worker uses its fail-closed bubblewrap jail. This exercises production entrypoints, identities and fixed IPC, not the
 host's systemd service manager. It never changes host profiles or sysctls.
 """
 
@@ -20,10 +20,13 @@ import pytest
     os.environ.get("JARVIS_PROCESS_DOCKER_TEST") != "1",
     reason="explicit disposable Docker/root-identity rehearsal opt-in required",
 )
-@pytest.mark.parametrize("outcome", ["success", "disconnect", "sandbox-denied", "terminated"])
+@pytest.mark.parametrize(
+    "outcome", ["success", "disconnect", "sandbox-denied", "terminated", "guardian-stopped"]
+)
 def test_actual_controller_process_signed_admission_iterative_worker_review_stop(outcome, tmp_path):
     root = Path(__file__).resolve().parents[2]
     name = "jarvis-development-rehearsal-" + uuid.uuid4().hex[:12]
+    wheelhouse = Path(os.environ["JARVIS_WORKER_TEST_WHEELHOUSE"]).resolve(strict=True)
     command = [
         "docker",
         "run",
@@ -42,19 +45,25 @@ def test_actual_controller_process_signed_admission_iterative_worker_review_stop
         "SETGID",
         "--cap-add",
         "CHOWN",
-        "--security-opt",
-        "seccomp=unconfined",
+        "--cap-add",
+        "DAC_READ_SEARCH",
+        *(["--security-opt", "seccomp=unconfined"] if outcome != "sandbox-denied" else []),
         "--security-opt",
         "apparmor=runc",
-        *(["--security-opt", "systempaths=unconfined"] if outcome != "sandbox-denied" else []),
+        "--security-opt",
+        "no-new-privileges=true",
         "--mount",
         "type=bind,src=/usr,dst=/usr,readonly",
+        "--mount",
+        "type=bind,src=/etc/python3.14,dst=/etc/python3.14,readonly",
         "--tmpfs",
         "/usr/local/libexec/jarvis-autonomy-broker:rw,nosuid,nodev,mode=755",
         "--mount",
         "type=bind,src=/home/aaron/.venvs/jarvis-phase2,dst=/home/aaron/.venvs/jarvis-phase2,readonly",
         "--mount",
         f"type=bind,src={root},dst=/opt/jarvis-source,readonly",
+        "--mount",
+        f"type=bind,src={wheelhouse},dst=/fixture-wheelhouse,readonly",
         "--entrypoint",
         "/usr/libexec/docker/docker-init",
         "python:3.12-slim",
@@ -64,13 +73,16 @@ def test_actual_controller_process_signed_admission_iterative_worker_review_stop
         "fixture-run",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=190)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
         assert result.returncode == 0, result.stderr[-5000:]
         evidence = json.loads(result.stdout)
         assert evidence["guardian"]["state"] == "STOPPED"
         assert evidence["guardian"]["trusted"] is True
         assert evidence["gateway_uid"] == 1000
         assert evidence["worker_uid"] == 600
+        assert evidence["coordinator_interpreter"] == "/usr/bin/python3"
+        assert evidence["worker_interpreter"].startswith("/opt/jarvis-supervised-worker-")
+        assert evidence["worker_interpreter"].endswith("/bin/python3.14")
         if outcome == "success":
             assert evidence["state"] == "REVIEW_REQUIRED", json.dumps(evidence, sort_keys=True)
             assert evidence["provider_requests"] == 2
@@ -104,6 +116,8 @@ def test_actual_controller_process_signed_admission_iterative_worker_review_stop
             "guardian": {key: evidence["guardian"][key] for key in ("state", "trusted")},
             "restart": evidence["restart"]["status"],
             "controller_returncode": evidence["controller_returncode"],
+            "worker_interpreter": evidence["worker_interpreter"],
+            "coordinator_interpreter": evidence["coordinator_interpreter"],
         }
         receipt_path = tmp_path / "rehearsal-evidence.json"
         receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")

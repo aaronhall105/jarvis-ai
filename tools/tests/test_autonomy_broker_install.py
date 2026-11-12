@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 from pathlib import Path
 from unittest.mock import Mock
@@ -11,16 +12,18 @@ from tools import autonomy_broker_install as installer
 from tools import autonomy_guardian as g
 from tools.autonomy_broker import Denied, canonical
 
-INSTALLED_SOURCE = "93bba11f1287328a7d297653dcf08ad9c38b0b44"
-ADDED_MODULES = {"supervised_development_edits.py", "supervised_development_scope.py"}
+INSTALLED_SOURCE = "8140346f5e5c05c34445b0c7ea3137f39c7f35ee"
+ADDED_MODULES = {
+    "supervised_development_environment.py",
+    "supervised_development_environment.lock.json",
+}
 
 
 def _reviewed_source_payload(files):
     """Reconstruct ALL old payload bytes, never relabel the new bundle as old."""
     previous = {}
-    for path, (_data, mode) in files.items():
-        if path.name in ADDED_MODULES:
-            continue
+    for path in installer.current_payload_paths():
+        mode = 0o644
         if path == installer.LIB / "tools/__init__.py":
             data = b"# Protected broker package.\n"
         else:
@@ -30,6 +33,8 @@ def _reviewed_source_payload(files):
                 source = "systemd/autonomy/" + path.name
             elif path == installer.LIB / "entry.py":
                 source = "tools/autonomy_broker_entry.py"
+            elif path.name == "supervised_development_scope.py":
+                source = "bridge/app/development_scope.py"
             else:
                 source = "tools/" + path.name
             data = subprocess.check_output(
@@ -106,6 +111,17 @@ def rehearsal(tmp_path, monkeypatch):
     monkeypatch.setenv("SUDO_UID", "1000")
     commands = Mock()
     monkeypatch.setattr(installer, "command", commands)
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[:2] == ["/usr/bin/systemctl", "show"]:
+            active = "active" if argv[-1].endswith(".socket") else "inactive"
+            return subprocess.CompletedProcess(
+                argv, 0, f"LoadState=loaded\nUnitFileState=enabled\nActiveState={active}\n", ""
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
     files = installer.payload()
     policy = {"operator_uid": 1000, "autonomy_uid": 995}
     return files, policy, controller, commands, original_manifest, locations
@@ -274,6 +290,8 @@ def _make_legacy_install(rehearsal, monkeypatch):
         in {
             "supervised_development_controller.py",
             "supervised_development_edits.py",
+            "supervised_development_environment.py",
+            "supervised_development_environment.lock.json",
             "supervised_development_pipeline.py",
             "supervised_development_publication.py",
             "supervised_development_review.py",
@@ -316,7 +334,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
+        "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
     )
     assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
     baseline_files = _reviewed_source_payload(installer.payload())
@@ -325,7 +343,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
 
 def test_actual_installed_payload_identity_is_reconstructed_completely():
     baseline = _reviewed_source_payload(installer.payload())
-    assert len(baseline) == 31  # Plus retained private configuration and policy = 33.
+    assert len(baseline) == 33  # Plus retained private configuration and policy = 35.
     assert installer.fingerprint(baseline) == installer.CURRENT_BUNDLE
 
 
@@ -493,16 +511,17 @@ def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkey
 @pytest.mark.parametrize(
     "failure", [None, "activation", "modified", "unknown", "missing", "extra", "permission"]
 )
-def test_installed_pr132_payload_to_repair_preserves_history(rehearsal, monkeypatch, failure):
+def test_installed_pr135_payload_to_worker_runtime_preserves_history(
+    rehearsal, monkeypatch, failure
+):
     files, policy, guardian, commands, _original, paths = rehearsal
     old_files = _reviewed_source_payload(files)
     target = next(p for p in files if p.name == "supervised_development_runtime.py")
     old_data = old_files[target][0]
-    assert old_data != files[target][0]
     installer.install(old_files, policy)
     marker = paths["BASE"] / "installed.json"
     previous = json.loads(marker.read_bytes())
-    assert len(previous["files"]) == 33
+    assert len(previous["files"]) == 35
     previous["bundle"] = installer.CURRENT_BUNDLE
     if failure == "unknown":
         previous["bundle"] = "unreviewed"
@@ -573,13 +592,249 @@ def test_installed_pr132_payload_to_repair_preserves_history(rehearsal, monkeypa
         installer.upgrade(files, policy)
         assert target.read_bytes() == files[target][0]
         assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
-        assert len(json.loads(marker.read_bytes())["files"]) == 35
+        assert len(json.loads(marker.read_bytes())["files"]) == len(files) + 2
     assert paths["POLICY"].read_bytes() == before_policy
     assert guardian.state()["state"] == "STOPPED"
     assert guardian.state()["generation"] == generation
     for path, (contents, mode) in data.items():
         assert path.read_bytes() == contents
         assert path.stat().st_mode == mode
+
+
+def test_current_source_fingerprint_rejects_self_consistent_tampered_manifest(
+    rehearsal, monkeypatch
+):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    target = paths["LIB"] / "tools/supervised_development_worker.py"
+    target.write_bytes(target.read_bytes() + b"\n# unreviewed bytes\n")
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["files"][str(target)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    marker.write_bytes(canonical(value))
+    before = marker.read_bytes()
+    with pytest.raises(Denied, match="upgrade_source_bundle_not_reviewed"):
+        installer.upgrade(files, policy)
+    assert marker.read_bytes() == before
+    assert guardian.status()["state"] == "STOPPED"
+    commands.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "unit_state,reason",
+    [
+        (
+            "LoadState=loaded\nUnitFileState=disabled\nActiveState=active\n",
+            "socket_not_enabled_active",
+        ),
+        (
+            "LoadState=loaded\nUnitFileState=enabled\nActiveState=inactive\n",
+            "socket_not_enabled_active",
+        ),
+        ("LoadState=not-found\n", "service_state_unverified"),
+    ],
+)
+def test_upgrade_requires_verified_source_socket_state(rehearsal, monkeypatch, unit_state, reason):
+    files, policy, _guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    before = (paths["BASE"] / "installed.json").read_bytes()
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, unit_state, ""),
+    )
+    with pytest.raises(Denied, match=reason):
+        installer.upgrade(files, policy)
+    assert (paths["BASE"] / "installed.json").read_bytes() == before
+    assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+    commands.assert_not_called()
+
+
+def test_upgrade_never_terminates_an_active_controller_as_a_precondition(rehearsal, monkeypatch):
+    files, policy, _guardian, commands, _paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, "LoadState=loaded\nUnitFileState=enabled\nActiveState=active\n", ""
+        ),
+    )
+    with pytest.raises(Denied, match="upgrade_controller_must_be_inactive"):
+        installer.upgrade(files, policy)
+    commands.assert_not_called()
+
+
+def test_uncertain_rollback_preserves_backups_and_blocks_retry(rehearsal, monkeypatch):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    old_marker = (paths["BASE"] / "installed.json").read_bytes()
+    activation_failed = False
+
+    def fail(argv):
+        nonlocal activation_failed
+        if "enable" in argv:
+            activation_failed = True
+            raise OSError("activation uncertain")
+        if activation_failed and "stop" in argv:
+            raise OSError("cannot confirm service stopped")
+
+    commands.side_effect = fail
+    with pytest.raises(Denied, match="upgrade_service_reconciliation_required"):
+        installer.upgrade(files, policy)
+    transaction_path = paths["BASE"] / "upgrade-transaction.json"
+    transaction = json.loads(transaction_path.read_bytes())
+    assert transaction["source_bundle"] == installer.CURRENT_BUNDLE
+    assert transaction["target_bundle"] == installer.UPGRADE_BUNDLE
+    assert transaction_path.stat().st_mode & 0o777 == 0o600
+    assert all(Path(path).is_file() for path in transaction["backups"].values())
+    marker_backup = Path(transaction["backups"][str(paths["BASE"] / "installed.json")])
+    assert marker_backup.read_bytes() == old_marker
+    # No rollback executable replacement while quiescence is uncertain.
+    assert all(path.read_bytes() == contents for path, (contents, _mode) in files.items())
+    commands.reset_mock()
+    with pytest.raises(Denied, match="upgrade_reconciliation_required"):
+        installer.upgrade(files, policy)
+    commands.assert_not_called()
+    assert guardian.status()["state"] == "STOPPED"
+
+
+def test_successful_upgrade_clears_only_its_own_transaction_artifacts(rehearsal, monkeypatch):
+    files, policy, guardian, _commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    retained = paths["BASE"] / "owner-audit-history"
+    retained.write_bytes(b"immutable fixture audit evidence")
+    installer.upgrade(files, policy)
+    assert retained.read_bytes() == b"immutable fixture audit evidence"
+    assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+    assert not list(paths["BASE"].rglob(".upgrade-stage-*"))
+    assert guardian.status()["state"] == "STOPPED"
+
+
+@pytest.mark.parametrize("fail_activation", [False, True])
+def test_initialized_controller_sqlite_and_policy_bytes_survive_migration(
+    rehearsal, monkeypatch, fail_activation
+):
+    from tools.supervised_development_controller import SupervisedDevelopmentController
+
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    database = paths["BASE"] / "work/supervised-development.sqlite3"
+    controller = SupervisedDevelopmentController(database, database_mode=0o660)
+    controller.db.close()
+    before_database = database.read_bytes()
+    before_info = database.stat()
+    policy["operator_public_keys"] = {"fixture-owner": "retained fixture public identity"}
+    policy["reviewer_ids"] = ["retained-reviewer"]
+    policy_bytes = json.dumps(policy, indent=2).encode() + b"\n"
+    paths["POLICY"].write_bytes(policy_bytes)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["files"][str(paths["POLICY"])] = hashlib.sha256(policy_bytes).hexdigest()
+    marker.write_bytes(canonical(value))
+    guardian_marker = guardian.base / "installed.json"
+    manifest = json.loads(guardian_marker.read_bytes())
+    manifest["files"][str(paths["POLICY"])] = hashlib.sha256(policy_bytes).hexdigest()
+    manifest["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(manifest))
+    failed = False
+
+    def command(argv):
+        nonlocal failed
+        if fail_activation and not failed and "enable" in argv:
+            failed = True
+            raise OSError("fixture activation failure")
+
+    commands.side_effect = command
+    if fail_activation:
+        with pytest.raises(OSError, match="fixture activation failure"):
+            installer.upgrade(files, policy)
+    else:
+        installer.upgrade(files, policy)
+    assert paths["POLICY"].read_bytes() == policy_bytes
+    assert database.read_bytes() == before_database
+    after_info = database.stat()
+    assert (after_info.st_ino, after_info.st_uid, after_info.st_gid, after_info.st_mode) == (
+        before_info.st_ino,
+        before_info.st_uid,
+        before_info.st_gid,
+        before_info.st_mode,
+    )
+    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as check:
+        assert check.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert check.execute("SELECT count(*) FROM tasks").fetchone() == (0,)
+    assert guardian.status()["state"] == "STOPPED"
+
+
+@pytest.mark.parametrize("failure", ["manifest", "interrupted"])
+def test_interrupted_or_manifest_failed_upgrade_restores_exact_protected_bundle(
+    rehearsal, monkeypatch, failure
+):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    old_files = {path: path.read_bytes() for path in installer.current_payload_paths()}
+    old_marker = (paths["BASE"] / "installed.json").read_bytes()
+    old_guardian = (guardian.base / "installed.json").read_bytes()
+    replace_manifest = installer.replace_manifest
+    failed = False
+
+    def fail_manifest(path, raw):
+        nonlocal failed
+        if failure == "manifest" and not failed:
+            failed = True
+            raise OSError("fixture manifest write failed")
+        replace_manifest(path, raw)
+
+    def fail_command(argv):
+        nonlocal failed
+        if failure == "interrupted" and not failed and "daemon-reload" in argv:
+            failed = True
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(installer, "replace_manifest", fail_manifest)
+    commands.side_effect = fail_command
+    with pytest.raises(OSError if failure == "manifest" else KeyboardInterrupt):
+        installer.upgrade(files, policy)
+    assert failed
+    assert all(path.read_bytes() == data for path, data in old_files.items())
+    assert all(not p.exists() for p in files if p.name in ADDED_MODULES)
+    assert (paths["BASE"] / "installed.json").read_bytes() == old_marker
+    assert (guardian.base / "installed.json").read_bytes() == old_guardian
+    assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+    assert guardian.status()["state"] == "STOPPED"
+
+
+def test_unknown_interrupted_transaction_prevents_all_automatic_retry(rehearsal, monkeypatch):
+    files, policy, _guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    record = paths["BASE"] / "upgrade-transaction.json"
+    record.write_bytes(b"interrupted owner reconciliation evidence")
+    before = record.read_bytes()
+    with pytest.raises(Denied, match="upgrade_reconciliation_required"):
+        installer.upgrade(files, policy)
+    assert record.read_bytes() == before
+    commands.assert_not_called()
+
+
+def test_concurrent_transaction_record_is_never_removed_by_losing_installer(rehearsal, monkeypatch):
+    files, policy, _guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    transaction = paths["BASE"] / "upgrade-transaction.json"
+    foreign = b'{"owner":"concurrent-reviewed-upgrade"}\n'
+
+    def create(path, _data, _mode):
+        assert path == transaction
+        path.write_bytes(foreign)
+        raise FileExistsError("another upgrade reserved the transaction")
+
+    monkeypatch.setattr(installer, "exclusive", create)
+    with pytest.raises(FileExistsError):
+        installer.upgrade(files, policy)
+    assert transaction.read_bytes() == foreign
+    commands.assert_not_called()
+
+
+def test_worker_environment_is_reviewed_payload_not_root_interpreter_or_auto_provision(rehearsal):
+    files, _policy, _guardian, _commands, _original, paths = rehearsal
+    assert paths["LIB"] / "tools/supervised_development_environment.py" in files
+    assert paths["LIB"] / "tools/supervised_development_environment.lock.json" in files
+    for path, (contents, _mode) in files.items():
+        if path.suffix == ".service":
+            assert b"ExecStart=/usr/bin/python3 -I " in contents
+            assert b"ExecStart=/opt/" not in contents
+    assert len(installer.current_payload_paths()) == 33
+    assert len(files) == 35
 
 
 def test_upgrade_rejects_missing_real_legacy_path(rehearsal, monkeypatch):

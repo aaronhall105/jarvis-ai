@@ -40,6 +40,7 @@ MODULES = (
     "supervised_development_broker",
     "supervised_development_controller",
     "supervised_development_edits",
+    "supervised_development_environment",
     "supervised_development_pipeline",
     "supervised_development_publication",
     "supervised_development_review",
@@ -72,11 +73,59 @@ SERVICES = (
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
-# Reviewed installed PR #132 bundle, verified against the canonical base payload.
+# Reviewed installed PR #135 bundle, verified against the canonical base payload.
 # Retain the exact-version migration and all existing integrity/rollback checks.
-CURRENT_BUNDLE = "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
+CURRENT_BUNDLE = "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
 # Complete destination payload, including evidence-bound Governor selection.
-UPGRADE_BUNDLE = "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
+UPGRADE_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
+
+# Exact installed source inventory, independent of future destination additions.
+CURRENT_MODULES = (
+    "autonomy_broker",
+    "autonomy_broker_data",
+    "autonomy_broker_evidence",
+    "autonomy_broker_host",
+    "autonomy_broker_ipc",
+    "autonomy_broker_operator",
+    "autonomy_broker_release",
+    "autonomy_broker_runtime",
+    "autonomy_broker_snapshot",
+    "autonomy_broker_store",
+    "autonomy_guardian",
+    "supervised_development_broker",
+    "supervised_development_controller",
+    "supervised_development_edits",
+    "supervised_development_pipeline",
+    "supervised_development_publication",
+    "supervised_development_review",
+    "supervised_development_runtime",
+    "supervised_development_scope",
+    "supervised_development_worker",
+)
+CURRENT_UNIT_NAMES = tuple(
+    "jarvis-autonomy-broker-" + role + suffix
+    for role in ("worker", "operator", "development-admission", "development-publication")
+    for suffix in (".service", ".socket")
+) + ("jarvis-autonomy-broker-development-controller.service",)
+
+
+def current_payload_paths() -> dict[Path, Path]:
+    """Map exact installed payload paths to their fixed fingerprint identities."""
+    fixed_lib = Path("/usr/local/libexec/jarvis-autonomy-broker")
+    fixed_units = Path("/etc/systemd/system")
+    result = {
+        LIB / "tools" / (name + ".py"): fixed_lib / "tools" / (name + ".py")
+        for name in CURRENT_MODULES
+    }
+    result.update(
+        {
+            LIB / name: fixed_lib / name
+            for name in ("tools/__init__.py", "entry.py", "deploy_unified_core.sh")
+        }
+    )
+    result.update({UNITS / name: fixed_units / name for name in CURRENT_UNIT_NAMES})
+    result[DROPIN] = fixed_units / "jarvis-autonomy.service.d/broker.conf"
+    return result
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -89,6 +138,10 @@ def payload() -> dict[Path, tuple[bytes, int]]:
     # identity/credential is deliberately NOT part of the root broker bundle.
     files[LIB / "tools/supervised_development_scope.py"] = (
         (ROOT / "bridge/app/development_scope.py").read_bytes(),
+        0o644,
+    )
+    files[LIB / "tools/supervised_development_environment.lock.json"] = (
+        (ROOT / "tools/supervised_development_environment.lock.json").read_bytes(),
         0o644,
     )
     files[LIB / "tools/__init__.py"] = (b"# Protected broker package.\n", 0o644)
@@ -297,7 +350,7 @@ def _verified_legacy_install(files: dict) -> dict:
         str(LIB / "tools" / "supervised_development_broker.py"),
         *(
             str(LIB / "tools" / (name + ".py"))
-            for name in MODULES
+            for name in CURRENT_MODULES
             if name
             not in {
                 "supervised_development_broker",
@@ -345,29 +398,58 @@ def _verified_current_install(files: dict) -> dict:
         raise Denied("upgrade_source_manifest_missing")
     g.trusted(marker)
     previous = json.loads(marker.read_text())
-    if previous.get("bundle") != CURRENT_BUNDLE:
+    if previous.get("version") != 1 or previous.get("bundle") != CURRENT_BUNDLE:
         raise Denied("upgrade_source_bundle_not_reviewed")
     recorded = previous.get("files")
-    # This exact installed source has 33 files and predates these two modules.
-    # Do not infer its inventory from the new destination's inventory unchanged.
-    additions = {
-        LIB / "tools/supervised_development_edits.py",
-        LIB / "tools/supervised_development_scope.py",
-    }
-    expected_paths = {str(path) for path in files if path not in additions} | {
+    source_paths = current_payload_paths()
+    expected_paths = {str(path) for path in source_paths} | {
         str(POLICY),
         str(BASE / "docker-client/config.json"),
     }
     if not isinstance(recorded, dict) or set(recorded) != expected_paths:
         raise Denied("upgrade_source_manifest_invalid")
+    verified_payload = {}
     for name, digest in recorded.items():
         path = Path(name)
         if path.is_symlink() or not path.is_file():
             raise Denied("upgrade_source_payload_missing")
         g.trusted(path)
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
             raise Denied("upgrade_source_payload_modified")
+        if path in source_paths:
+            verified_payload[source_paths[path]] = (data, stat.S_IMODE(path.stat().st_mode))
+    # A self-consistent modified marker is not the reviewed source bundle.
+    if fingerprint(verified_payload) != CURRENT_BUNDLE:
+        raise Denied("upgrade_source_bundle_not_reviewed")
     return previous
+
+
+def _upgrade_service_preconditions(sockets: tuple[str, ...], services: tuple[str, ...]) -> None:
+    """Read-only checks make the documented rollback activation state explicit."""
+    for unit in (*sockets, *([CONTROLLER_UNIT] if CONTROLLER_UNIT in services else [])):
+        result = subprocess.run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState,UnitFileState,ActiveState",
+                unit,
+            ],
+            env=SAFE_ENV,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        state = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if state.get("LoadState") != "loaded":
+            raise Denied("upgrade_source_service_state_unverified")
+        if unit in sockets:
+            if state.get("UnitFileState") != "enabled" or state.get("ActiveState") != "active":
+                raise Denied("upgrade_source_socket_not_enabled_active")
+        elif state.get("ActiveState") not in {"inactive", "failed"}:
+            raise Denied("upgrade_controller_must_be_inactive")
 
 
 def _stage(path: Path, data: bytes, mode: int, directory: Path) -> Path:
@@ -445,6 +527,9 @@ def upgrade(files: dict, policy: dict) -> None:
         raise Denied("local_operator_sudo_required")
     if fingerprint(files) != UPGRADE_BUNDLE:
         raise Denied("upgrade_destination_bundle_not_reviewed")
+    transaction = BASE / "upgrade-transaction.json"
+    if os.path.lexists(transaction):
+        raise Denied("upgrade_reconciliation_required")
     marker = BASE / "installed.json"
     source_bundle = None
     if marker.is_file() and not marker.is_symlink():
@@ -464,8 +549,10 @@ def upgrade(files: dict, policy: dict) -> None:
         raise Denied("upgrade_source_bundle_not_reviewed")
     controller = g.Guardian()
     controller.integrity()
+    verify_guardian_audit(controller)
     if controller.status().get("state") != "STOPPED":
         raise Denied("guardian_must_be_trusted_stopped")
+    _upgrade_service_preconditions(managed_sockets, managed_services)
     guardian_marker = controller.base / "installed.json"
     guardian_before = guardian_marker.read_bytes()
     staged: dict[Path, Path] = {}
@@ -475,9 +562,14 @@ def upgrade(files: dict, policy: dict) -> None:
     replaced: list[Path] = []
     services_touched = False
     guardian_manifest_touched = False
+    retain_reconciliation = False
+    transaction_owned = False
     marker = BASE / "installed.json"
     entries = dict(files)
-    entries[POLICY] = (canonical(policy), 0o644)
+    policy_bytes = POLICY.read_bytes()
+    if json.loads(policy_bytes) != policy:
+        raise Denied("upgrade_policy_changed")
+    entries[POLICY] = (policy_bytes, stat.S_IMODE(POLICY.stat().st_mode))
     # Preserve the existing private broker configuration and its recorded hash.
     private = BASE / "docker-client/config.json"
     if private.is_symlink() or not private.is_file():
@@ -512,6 +604,43 @@ def upgrade(files: dict, policy: dict) -> None:
             staged[path] = _stage(path, data, mode_bits, path.parent)
         marker_stage = _stage(marker, new_marker, 0o644, marker.parent)
         staged[marker] = marker_stage
+        # Retain every executable/manifest backup durably before any service or
+        # payload mutation. A crash or uncertain rollback never self-retries.
+        for path in staged:
+            if path.exists():
+                backups[path] = _stage(
+                    path, path.read_bytes(), stat.S_IMODE(path.stat().st_mode), path.parent
+                )
+        guardian_backup = _stage(guardian_marker, guardian_before, 0o644, guardian_marker.parent)
+        backups[guardian_marker] = guardian_backup
+        for directory in {path.parent for path in (*staged.values(), *backups.values())}:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        exclusive(
+            transaction,
+            canonical(
+                {
+                    "version": 1,
+                    "source_bundle": source_bundle,
+                    "target_bundle": UPGRADE_BUNDLE,
+                    "backups": {str(path): str(backup) for path, backup in backups.items()},
+                    "staged": {str(path): str(stage) for path, stage in staged.items()},
+                    "source_digests": previous["files"],
+                    "guardian_manifest_sha256": hashlib.sha256(guardian_before).hexdigest(),
+                }
+            ),
+            0o600,
+        )
+        transaction_owned = True
+        retain_reconciliation = True
+        descriptor = os.open(BASE, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         # Stop all broker roles before replacing executable payloads, preventing
         # mixed-version execution. No application data or ledgers are touched.
         # Stop every unit belonging to the source bundle before replacing any
@@ -522,10 +651,6 @@ def upgrade(files: dict, policy: dict) -> None:
         for path, (_descriptor, info) in workspace_metadata.items():
             _workspace_identity(path, info)
         for path, staged_path in staged.items():
-            if path.exists():
-                backups[path] = _stage(
-                    path, path.read_bytes(), path.stat().st_mode & 0o777, path.parent
-                )
             os.replace(staged_path, path)
             replaced.append(path)
         old_manifest = json.loads(guardian_before)
@@ -540,14 +665,19 @@ def upgrade(files: dict, policy: dict) -> None:
         controller.integrity()
         if controller.status().get("state") != "STOPPED":
             raise Denied("upgrade_did_not_remain_stopped")
+        retain_reconciliation = False
     except BaseException:
         # Restore only executable payloads and manifests; retain all broker data,
         # audit records and ledgers for reconciliation.
-        try:
-            if services_touched:
+        if services_touched:
+            try:
                 command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
                 command(["/usr/bin/systemctl", "stop", *managed_services])
-        finally:
+            except BaseException as error:
+                # Never restore executable bytes underneath a possibly live
+                # process, and never destroy the only rollback evidence.
+                raise Denied("upgrade_service_reconciliation_required") from error
+        try:
             for path in reversed(replaced):
                 backup = backups.get(path)
                 if backup and backup.exists():
@@ -570,10 +700,6 @@ def upgrade(files: dict, policy: dict) -> None:
                     workspace_reconciliation = True
             if guardian_manifest_touched and guardian_marker.exists():
                 replace_manifest(guardian_marker, guardian_before)
-            for path in staged.values():
-                path.unlink(missing_ok=True)
-            for path in backups.values():
-                path.unlink(missing_ok=True)
             for directory in reversed(created_dirs):
                 try:
                     directory.rmdir()
@@ -585,14 +711,20 @@ def upgrade(files: dict, policy: dict) -> None:
                 raise Denied("upgrade_workspace_reconciliation_required")
             if services_touched:
                 command(["/usr/bin/systemctl", "enable", "--now", *managed_sockets])
+            retain_reconciliation = False
+        except BaseException:
+            raise
         raise
     finally:
         for descriptor, _info in workspace_metadata.values():
             os.close(descriptor)
-        for path in staged.values():
-            path.unlink(missing_ok=True)
-        for path in backups.values():
-            path.unlink(missing_ok=True)
+        if not retain_reconciliation:
+            for path in staged.values():
+                path.unlink(missing_ok=True)
+            for path in backups.values():
+                path.unlink(missing_ok=True)
+            if transaction_owned:
+                transaction.unlink(missing_ok=True)
     print("Protected broker upgraded; development admission endpoint installed; autonomy STOPPED.")
 
 

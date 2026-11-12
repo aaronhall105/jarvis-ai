@@ -15,12 +15,14 @@ import re
 import signal
 import sqlite3
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from tools.autonomy_broker_host import CANONICAL, SAFE_ENV
+from tools.autonomy_guardian import identity as worker_identity
 from tools.autonomy_broker_runtime import emergency_stop, guardian_status, installed_policy
 from tools.supervised_development_controller import (
     APPROVAL_REQUESTED,
@@ -41,6 +43,10 @@ from tools.supervised_development_pipeline import (
 )
 from tools.supervised_development_review import TrustedReviewRunner
 from tools.supervised_development_scope import editable_path
+from tools.supervised_development_environment import (
+    verify_worker_environment,
+    worker_python_arguments,
+)
 
 
 # Core's authoritative /app/data is the protected host bind mount below.  The
@@ -57,6 +63,7 @@ PROTECTED_SCOPE_PREFIXES = (
 )
 OWNER_ID = "enrolled-operator"
 POLL_SECONDS = 2
+WORKER_FENCE_SECONDS = 0.25
 WORKER_ENTRY = "/usr/local/libexec/jarvis-autonomy-broker/entry.py"
 
 
@@ -396,11 +403,15 @@ class SupervisedDevelopmentRuntime:
         child may perform development execution, so SO_PEERCRED observes the
         configured autonomy UID and rejects a root-originated admission.
         """
+        generation = self._worker_generation(task)
         policy = installed_policy()
         worker_uid = int(policy["autonomy_uid"])
         worker_gid = int(policy.get("autonomy_gid", worker_uid))
         if worker_uid <= 0 or worker_uid == 0:
             raise LifecycleError("worker_identity_invalid")
+        # Read/hash the fixed root-owned environment before dropping identity;
+        # never import SDK/package code into the privileged broker interpreter.
+        worker_python = verify_worker_environment()
 
         def drop_privileges() -> None:
             os.setgroups([])
@@ -414,12 +425,14 @@ class SupervisedDevelopmentRuntime:
             if name in os.environ:
                 environment[name] = os.environ[name]
         command = [
-            "/usr/bin/python3",
-            "-I",
+            str(worker_python),
+            *worker_python_arguments(worker_python),
             WORKER_ENTRY,
             "development-worker",
             task_id,
         ]
+        if self._worker_generation(task) != generation:
+            raise LifecycleError("development_worker_generation_changed")
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -434,8 +447,24 @@ class SupervisedDevelopmentRuntime:
         # Kill a blocked SDK/validation child at the signed wall-clock ceiling;
         # authoritative STOP and reap happen afterward, without another call.
         timeout = max(1, int(task.deadline_seconds))
+        deadline = time.monotonic() + timeout
         try:
-            stdout, _stderr = process.communicate(timeout=timeout)
+            while True:
+                # The independent Guardian also terminates the protected UID.
+                # This fence additionally catches STOP/untrusted observation or
+                # a new activation cycle while an SDK request is blocked.
+                if self._worker_generation(task) != generation:
+                    raise LifecycleError("development_worker_generation_changed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    stdout, _stderr = process.communicate(
+                        timeout=min(WORKER_FENCE_SECONDS, remaining)
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         except BaseException as exc:
             # Cancellation/service shutdown must not leave the paid worker
             # alive while the coordinator records STOP. Nested verification
@@ -489,6 +518,23 @@ class SupervisedDevelopmentRuntime:
         }:
             raise LifecycleError("development_worker_result_invalid")
         return result
+
+    def _worker_generation(self, task: GovernorTask) -> str:
+        """Observation can only deny; signed broker admission is still required."""
+        try:
+            status = self.guardian()
+            generation = status["generation"]
+            if (
+                status.get("state") != "ACTIVE"
+                or status.get("trusted") is not True
+                or not isinstance(generation, str)
+                or str(uuid.UUID(generation)) != generation
+                or task.guardian_generation not in (generation, status.get("previous_generation"))
+            ):
+                raise ValueError("inactive or unrelated Guardian cycle")
+            return generation
+        except Exception as exc:
+            raise LifecycleError("development_worker_guardian_denied") from exc
 
     def _confirm_stop(self) -> None:
         self.stop()
@@ -599,7 +645,24 @@ class SupervisedDevelopmentRuntime:
 
 def worker_main(task_id: str) -> int:
     """Run one persisted task as the policy-pinned unprivileged worker."""
-    if os.getuid() == 0:
+    # A direct invocation cannot select a different Python/package environment
+    # or start development while the independent Guardian is stopped/untrusted.
+    try:
+        if os.getuid() == 0 or os.getuid() != worker_identity():
+            return 1
+        status = guardian_status()
+        generation = status.get("generation")
+        if (
+            status.get("state") != "ACTIVE"
+            or status.get("trusted") is not True
+            or not isinstance(generation, str)
+            or str(uuid.UUID(generation)) != generation
+            or Path(sys.executable) != verify_worker_environment()
+            or not sys.dont_write_bytecode
+            or sys.pycache_prefix != str(Path(sys.executable).parent.parent / "bytecode-disabled")
+        ):
+            return 1
+    except Exception:
         return 1
     controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
     source = GovernorCandidateSource(GOVERNOR_DATABASE, source_root=CANONICAL)

@@ -30,11 +30,10 @@ SOURCE = (
     else Path("/opt/jarvis-source")
 )
 VENV = Path("/home/aaron/.venvs/jarvis-phase2")
-sys.path[:0] = [str(SOURCE), str(VENV / "lib/python3.14/site-packages")]
-# The fixture image uses the already-installed test environment, not a new SDK
-# download or a mutable application-controlled Python path.
-sys.prefix = str(VENV)
-sys.executable = str(VENV / "bin/python")
+sys.path.insert(0, str(SOURCE))
+# Coordinator and broker use the actual OS interpreter. Only fixture owner/HTTP
+# helpers use the test venv; the coding child must use the sealed production
+# worker environment. Never disguise a test venv as the privileged interpreter.
 
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
@@ -78,8 +77,11 @@ def child_identity(uid):
 
 
 def run_child(role, *, uid=0, env=None, wait=True):
+    interpreter = (
+        "/usr/bin/python3" if role == "development-controller" else str(VENV / "bin/python")
+    )
     process = subprocess.Popen(
-        [str(VENV / "bin/python"), str(ENTRY), role],
+        [interpreter, "-I", "-B", str(ENTRY), role],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -139,6 +141,24 @@ def create_fixture():
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(contents)
         target.chmod(mode)
+    # Real owner-only offline provisioning, inside this disposable filesystem.
+    # The coordinator retains /usr/bin/python3; SDK and verification packages
+    # are installed solely into the new sealed, lock-derived worker path.
+    provision = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-B",
+            str(ENTRY.parent / "tools/supervised_development_environment.py"),
+            "--install-wheelhouse",
+            "/fixture-wheelhouse",
+        ],
+        env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8"},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert provision.returncode == 0, provision.stderr[-3000:]
     # Fixture-only bootstrap adds local SDK endpoint/test dependencies. All
     # production payload modules are installed unchanged by the real manifest.
     ENTRY.write_text(Path(__file__).read_text())
@@ -442,7 +462,7 @@ def provider_server():
             type(self).transmitted.set()
             number = type(self).calls
             assert number <= 2
-            if os.environ.get("JARVIS_FIXTURE_OUTCOME") == "terminated":
+            if os.environ.get("JARVIS_FIXTURE_OUTCOME") in {"terminated", "guardian-stopped"}:
                 type(self).release.wait(20)
                 self.close_connection = True
                 return
@@ -524,13 +544,21 @@ def orchestrate():
         # Actual root client is denied even after genuine activation.
         root_denial = exchange(SOCKETS / "development-admission.sock", owner["admission"])
         assert root_denial["error"] == "development_admission_peer"
-        if os.environ.get("JARVIS_FIXTURE_OUTCOME") == "terminated":
+        if os.environ.get("JARVIS_FIXTURE_OUTCOME") in {"terminated", "guardian-stopped"}:
             assert provider.transmitted.wait(15)
-            controller.terminate()
+            if os.environ.get("JARVIS_FIXTURE_OUTCOME") == "terminated":
+                controller.terminate()
+            else:
+                # Actual protected operator STOP route. Fixture callback changes
+                # Guardian state but deliberately does not kill the worker: the
+                # coordinator's independent in-flight fence must observe STOP,
+                # terminate the child and preserve its uncertain call record.
+                stopped = exchange(SOCKETS / "operator.sock", {"emergency_stop": True})
+                assert stopped["ok"] is True and stopped["result"]["state"] == "STOPPED"
         stdout, stderr = controller.communicate(timeout=140)
         assert Guardian().status()["state"] == "STOPPED", stderr
         assert Guardian().status()["trusted"] is True
-        if os.environ.get("JARVIS_FIXTURE_OUTCOME") == "terminated":
+        if os.environ.get("JARVIS_FIXTURE_OUTCOME") in {"terminated", "guardian-stopped"}:
             for directory in Path("/proc").iterdir():
                 if not directory.name.isdigit():
                     continue
@@ -594,6 +622,17 @@ def orchestrate():
         assert provider.calls == calls_before_restart
         installed_policy()
         error_file = Path("/tmp/fixture-worker-error")
+        worker_interpreter = subprocess.check_output(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-B",
+                str(ENTRY.parent / "tools/supervised_development_environment.py"),
+                "--verify",
+            ],
+            text=True,
+            timeout=30,
+        ).strip()
         output = {
             "state": result["state"],
             "provider_requests": provider.calls,
@@ -602,6 +641,8 @@ def orchestrate():
             "guardian": Guardian().status(),
             "gateway_uid": owner["gateway_uid"],
             "worker_uid": WORKER_UID,
+            "worker_interpreter": worker_interpreter,
+            "coordinator_interpreter": "/usr/bin/python3",
             "controller_returncode": controller.returncode,
             "controller_output": stdout.strip(),
             "stderr": stderr[-1500:],
