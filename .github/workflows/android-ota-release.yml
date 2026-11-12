@@ -111,7 +111,7 @@ jobs:
           wear_source="android/jarvis-voice-client/wear/build/outputs/apk/release/wear-release.apk"
           apk="jarvis-assistant-v${version}-release.apk"
           wear_apk="jarvis-wear-v${version}-release.apk"
-          build_tools="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -V | tail -1)"
+          build_tools="36.0.0"
           apksigner="$ANDROID_HOME/build-tools/$build_tools/apksigner"
           aapt="$ANDROID_HOME/build-tools/$build_tools/aapt"
           test -x "$apksigner" && test -x "$aapt"
