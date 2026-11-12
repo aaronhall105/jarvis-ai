@@ -39,6 +39,34 @@ service activation, an approval request, Guardian activation or provider use.
 
 ## Ordered deployment, requiring separate owner authorisation
 
+### Public/private manifest correction required before migration
+
+The installer merged in `dfb38228dc27f002e07c1e9976ebc4e39b2c9b26` copied
+all destination hashes into the public Guardian manifest, including the private
+Docker client configuration. **Do not execute that staged installer.** The
+corrected installer excludes only the exact, verified private configuration
+entry, including when an earlier manifest already exposed it. The private file
+remains hashed by the root-verified broker manifest; Guardian continues to pin
+that complete broker manifest and every public payload. An unexpected private
+hash is rejected rather than silently removed.
+
+This correction changes installer source, not installed payload bytes. The
+source bundle remains `73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489`
+and destination remains `8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3`.
+The corrected source commit/tree/archive identities must nevertheless be
+approved and staged anew after merge; the old archive checksum is not approval
+of the corrected installer. Verify every extracted file against its Git object,
+including Git executable bits, root ownership, non-writable ancestors and the
+absence of untracked or additional executable content. A matching archive hash
+and file count alone do not verify the extracted installation source. Preserve
+the previous stage; never execute root Python from the development checkout.
+
+Regression coverage includes already-repaired and previously-exposed public
+manifests, actual root and UID 995 readers in a disposable container, private
+read denial, private/manifest tamper rejection, exact rollback after manifest
+failure/interruption, and unchanged Guardian state, generation and audit bytes.
+These are isolated tests, not evidence of a completed live migration.
+
 1. Require exact-head protected CI/CodeQL and owner merge approval. Record the
    resulting canonical SHA. Retain the current source, broker payload, manifests
    and previous worker environment. Do not run root Python from a writable

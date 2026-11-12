@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -410,6 +411,267 @@ def _current_workspace_fixture(rehearsal, monkeypatch):
     return files, policy, guardian, commands, paths
 
 
+@pytest.mark.parametrize("source", ["legacy", "current"])
+@pytest.mark.parametrize("previously_exposed", [False, True])
+def test_upgrade_preserves_public_guardian_and_private_broker_integrity(
+    rehearsal, monkeypatch, source, previously_exposed
+):
+    create = _make_legacy_install if source == "legacy" else _current_workspace_fixture
+    files, policy, guardian, _commands, paths = create(rehearsal, monkeypatch)
+    private = paths["BASE"] / "docker-client/config.json"
+    marker = paths["BASE"] / "installed.json"
+    guardian_marker = guardian.base / "installed.json"
+    manifest = json.loads(guardian_marker.read_bytes())
+    private_before = private.read_bytes()
+    private_info = private.stat()
+    private_digest = hashlib.sha256(private_before).hexdigest()
+    if previously_exposed:
+        manifest["files"][str(private)] = private_digest
+        installer.replace_manifest(guardian_marker, canonical(manifest))
+    state_before = (guardian.base / "state.json").read_bytes()
+    audit_before = (guardian.base / "audit/events.jsonl").read_bytes()
+
+    installer.upgrade(files, policy)
+
+    public = json.loads(guardian_marker.read_bytes())["files"]
+    broker = json.loads(marker.read_bytes())["files"]
+    assert str(private) not in public
+    assert broker[str(private)] == private_digest
+    assert public[str(marker)] == hashlib.sha256(marker.read_bytes()).hexdigest()
+    assert all(public[name] == digest for name, digest in broker.items() if name != str(private))
+    assert private.read_bytes() == private_before
+    assert (private.stat().st_ino, private.stat().st_mode) == (
+        private_info.st_ino,
+        private_info.st_mode,
+    )
+    assert (guardian.base / "state.json").read_bytes() == state_before
+    assert (guardian.base / "audit/events.jsonl").read_bytes() == audit_before
+    assert installer.checked_existing(files, policy)[0] == "REPEAT"
+
+    # Reproduce the public reader's inability to enter the private directory.
+    secure = guardian.secure
+
+    def public_secure(path, **kwargs):
+        if path == private:
+            raise PermissionError("private configuration is not public")
+        return secure(path, **kwargs)
+
+    monkeypatch.setattr(guardian, "secure", public_secure)
+    assert guardian.status()["trusted"] is True
+    assert guardian.status()["state"] == "STOPPED"
+
+    # Private tampering remains detectable by root's full broker verification.
+    private.write_bytes(b'{"unreviewed":"fixture"}\n')
+    broker_before_check = marker.read_bytes()
+    guardian_before_check = guardian_marker.read_bytes()
+    with pytest.raises(Denied, match="modified_protected_payload"):
+        installer.checked_existing(files, policy)
+    assert private.read_bytes() == b'{"unreviewed":"fixture"}\n'
+    assert marker.read_bytes() == broker_before_check
+    assert guardian_marker.read_bytes() == guardian_before_check
+    private.write_bytes(private_before)
+    # Even a self-consistent rewritten broker marker is pinned by Guardian.
+    rewritten = json.loads(marker.read_bytes())
+    rewritten["files"][str(private)] = "0" * 64
+    marker.write_bytes(canonical(rewritten))
+    assert guardian.status()["trusted"] is False
+    assert marker.read_bytes() == canonical(rewritten)
+    assert guardian_marker.read_bytes() == guardian_before_check
+    assert (guardian.base / "state.json").read_bytes() == state_before
+    assert (guardian.base / "audit/events.jsonl").read_bytes() == audit_before
+
+
+def test_public_manifest_filter_only_removes_exact_verified_private_path(rehearsal):
+    _files, _policy, _guardian, _commands, _original, paths = rehearsal
+    private = str(paths["BASE"] / "docker-client/config.json")
+    other = str(paths["BASE"] / "other/config.json")
+    records = {private: "a" * 64, other: "b" * 64}
+    assert installer._public_guardian_files(records, "a" * 64) == {other: "b" * 64}
+    assert records == {private: "a" * 64, other: "b" * 64}
+    with pytest.raises(Denied, match="unexpected_private_configuration"):
+        installer._public_guardian_files(records, "c" * 64)
+
+
+@pytest.mark.skipif(
+    os.environ.get("JARVIS_INSTALLER_DOCKER_TEST") != "1",
+    reason="explicit disposable root/unprivileged Guardian migration rehearsal required",
+)
+def test_real_root_and_unprivileged_guardian_reads_after_manifest_migration():
+    """Actual DAC checks; no host writable mounts, services or protected records."""
+    source = Path(__file__).resolve().parents[2]
+    prefix = Path(sys.prefix).resolve()
+    previous = _reviewed_source_payload(installer.payload())
+    old_payload = [
+        {"path": str(path), "data": data.hex(), "mode": mode}
+        for path, (data, mode) in previous.items()
+    ]
+    script = r"""
+import hashlib, json, os, pathlib, sys
+sys.path.insert(0, '/source')
+from tools import autonomy_broker_install as install
+from tools import autonomy_guardian as guardian_module
+from tools.autonomy_broker import canonical
+Guardian = guardian_module.Guardian
+original = {name: getattr(install, name) for name in ('BASE','LIB','POLICY','JOBS','UNITS','DROPIN')}
+old_payload = json.load(sys.stdin)
+os.environ.update(SUDO_USER='aaron', SUDO_UID='1000')
+results = []
+
+def public_read(guardian, private):
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        try:
+            os.setgroups([])
+            os.setgid(995)
+            os.setuid(995)
+            try:
+                private.read_bytes()
+                private_denied = False
+            except PermissionError:
+                private_denied = True
+            output = {'uid':os.getuid(), 'private_denied':private_denied,
+                      'status':guardian.status()}
+            os.write(write_fd, json.dumps(output).encode())
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    os.close(write_fd)
+    output = os.read(read_fd, 4096)
+    os.close(read_fd)
+    assert os.waitpid(child, 0)[1] == 0
+    result = json.loads(output)
+    assert result['uid'] == 995 and result['private_denied']
+    return result['status']
+
+for exposed in (False, True):
+    root = pathlib.Path('/fixture') / str(int(exposed))
+    root.mkdir(mode=0o755)
+    for name, relative in {'BASE':'broker','LIB':'lib','POLICY':'broker.json',
+                          'JOBS':'jobs','UNITS':'units','DROPIN':'units/dropin/broker.conf'}.items():
+        setattr(install, name, root / relative)
+    install.UNITS.mkdir(mode=0o755)
+    base = root / 'guardian'
+    base.mkdir(mode=0o755)
+    (base / 'audit').mkdir(mode=0o700)
+    for name in ('control.lock','audit/events.jsonl'):
+        (base / name).touch(mode=0o600)
+    guardian_policy = root / 'guardian.json'
+    guardian_policy.write_bytes(canonical({'version':1,'operator_uid':1000,
+        'autonomy_account':'jarvis-autonomy','privileged_operations':[]}))
+    guardian_policy.chmod(0o644)
+    guardian_marker = base / 'installed.json'
+    guardian_marker.write_bytes(canonical({'version':1,'bundle':'fixture-guardian',
+        'files':{str(guardian_policy):hashlib.sha256(guardian_policy.read_bytes()).hexdigest()}}))
+    guardian_marker.chmod(0o644)
+    guardian = Guardian(base, guardian_policy)
+    guardian.write_state('STOPPED')
+    stop = guardian.stop
+    guardian.stop = lambda actor, stop=stop: stop(actor, lambda: None)
+    install.g.Guardian = lambda: guardian
+    install.g.identity = lambda: 995
+    install.command = lambda args: None
+    install._upgrade_service_preconditions = lambda *args: None
+    policy = {'operator_uid':1000,'autonomy_uid':995,'autonomy_gid':995}
+    baseline = {}
+    for item in old_payload:
+        path = pathlib.Path(item['path'])
+        if path == original['DROPIN']:
+            target = install.DROPIN
+        elif path.is_relative_to(original['LIB']):
+            target = install.LIB / path.relative_to(original['LIB'])
+        elif path.is_relative_to(original['UNITS']):
+            target = install.UNITS / path.relative_to(original['UNITS'])
+        else:
+            raise AssertionError('unexpected source payload')
+        baseline[target] = (bytes.fromhex(item['data']), item['mode'])
+    install.install(baseline, policy)
+    marker = install.BASE / 'installed.json'
+    prior = json.loads(marker.read_bytes())
+    prior['bundle'] = install.CURRENT_BUNDLE
+    marker.write_bytes(canonical(prior))
+    manifest = json.loads(guardian_marker.read_bytes())
+    manifest['files'][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    private = install.BASE / 'docker-client/config.json'
+    private_before = private.read_bytes()
+    if exposed:
+        manifest['files'][str(private)] = hashlib.sha256(private_before).hexdigest()
+    install.replace_manifest(guardian_marker, canonical(manifest))
+    state_before = (base / 'state.json').read_bytes()
+    assert guardian.status()['trusted']
+    assert public_read(guardian, private)['trusted'] is (not exposed)
+    files = install.payload()
+    install.UPGRADE_BUNDLE = install.fingerprint(files)
+    install.upgrade(files, policy)
+    assert install.checked_existing(files, policy)[0] == 'REPEAT'
+    assert guardian.status()['trusted']
+    status = public_read(guardian, private)
+    assert status['trusted'] and status['state'] == 'STOPPED'
+    assert private.read_bytes() == private_before
+    assert private.stat().st_uid == 0 and private.stat().st_mode & 0o777 == 0o600
+    assert (base / 'state.json').read_bytes() == state_before
+    manifest = json.loads(guardian_marker.read_bytes())
+    assert str(private) not in manifest['files']
+    assert manifest['files'][str(marker)] == hashlib.sha256(marker.read_bytes()).hexdigest()
+    results.append({'previously_exposed':exposed,'root_trusted':True,'uid995_trusted':True,
+                    'private_read_denied':True,'state_unchanged':True})
+print(json.dumps({'verified':results}))
+"""
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--pull",
+        "never",
+        "--read-only",
+        "--network",
+        "none",
+        "--cap-drop",
+        "ALL",
+        "--cap-add",
+        "SETUID",
+        "--cap-add",
+        "SETGID",
+        "--cap-add",
+        "CHOWN",
+        "--security-opt",
+        "no-new-privileges=true",
+        "--pids-limit",
+        "32",
+        "--memory",
+        "256m",
+        "--tmpfs",
+        "/fixture:rw,nosuid,nodev,mode=755,size=64m",
+        "--mount",
+        f"type=bind,src={source},dst=/source,readonly",
+        "--mount",
+        "type=bind,src=/usr,dst=/usr,readonly",
+        "--mount",
+        f"type=bind,src={prefix},dst={prefix},readonly",
+        "-i",
+        "python:3.12-slim",
+        sys.executable,
+        "-I",
+        "-B",
+        "-c",
+        script,
+    ]
+    result = subprocess.run(
+        command, input=json.dumps(old_payload), capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr[-5000:]
+    evidence = json.loads(result.stdout.splitlines()[-1])["verified"]
+    assert len(evidence) == 2
+    assert all(
+        item["root_trusted"]
+        and item["uid995_trusted"]
+        and item["private_read_denied"]
+        and item["state_unchanged"]
+        for item in evidence
+    )
+
+
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
 def test_current_upgrade_rejects_untrusted_database_inode_without_changing_target(
     rehearsal, monkeypatch, kind
@@ -760,11 +1022,21 @@ def test_initialized_controller_sqlite_and_policy_bytes_survive_migration(
     assert guardian.status()["state"] == "STOPPED"
 
 
-@pytest.mark.parametrize("failure", ["manifest", "interrupted"])
+@pytest.mark.parametrize("failure", ["manifest", "interrupted", "activation"])
+@pytest.mark.parametrize("previously_exposed", [False, True])
 def test_interrupted_or_manifest_failed_upgrade_restores_exact_protected_bundle(
-    rehearsal, monkeypatch, failure
+    rehearsal, monkeypatch, failure, previously_exposed
 ):
     files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    private = paths["BASE"] / "docker-client/config.json"
+    private_before = private.read_bytes()
+    if previously_exposed:
+        guardian_marker = guardian.base / "installed.json"
+        manifest = json.loads(guardian_marker.read_bytes())
+        manifest["files"][str(private)] = hashlib.sha256(private_before).hexdigest()
+        installer.replace_manifest(guardian_marker, canonical(manifest))
+    state_before = (guardian.base / "state.json").read_bytes()
+    audit_before = (guardian.base / "audit/events.jsonl").read_bytes()
     old_files = {path: path.read_bytes() for path in installer.current_payload_paths()}
     old_marker = (paths["BASE"] / "installed.json").read_bytes()
     old_guardian = (guardian.base / "installed.json").read_bytes()
@@ -783,16 +1055,23 @@ def test_interrupted_or_manifest_failed_upgrade_restores_exact_protected_bundle(
         if failure == "interrupted" and not failed and "daemon-reload" in argv:
             failed = True
             raise KeyboardInterrupt
+        if failure == "activation" and not failed and "enable" in argv:
+            failed = True
+            raise OSError("fixture activation failed")
 
     monkeypatch.setattr(installer, "replace_manifest", fail_manifest)
     commands.side_effect = fail_command
-    with pytest.raises(OSError if failure == "manifest" else KeyboardInterrupt):
+    with pytest.raises(KeyboardInterrupt if failure == "interrupted" else OSError):
         installer.upgrade(files, policy)
     assert failed
     assert all(path.read_bytes() == data for path, data in old_files.items())
     assert all(not p.exists() for p in files if p.name in ADDED_MODULES)
     assert (paths["BASE"] / "installed.json").read_bytes() == old_marker
     assert (guardian.base / "installed.json").read_bytes() == old_guardian
+    assert private.read_bytes() == private_before
+    assert private.stat().st_mode & 0o777 == 0o600
+    assert (guardian.base / "state.json").read_bytes() == state_before
+    assert (guardian.base / "audit/events.jsonl").read_bytes() == audit_before
     assert not (paths["BASE"] / "upgrade-transaction.json").exists()
     assert guardian.status()["state"] == "STOPPED"
 
