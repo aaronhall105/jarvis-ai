@@ -11,6 +11,33 @@ from tools import autonomy_broker_install as installer
 from tools import autonomy_guardian as g
 from tools.autonomy_broker import Denied, canonical
 
+INSTALLED_SOURCE = "93bba11f1287328a7d297653dcf08ad9c38b0b44"
+ADDED_MODULES = {"supervised_development_edits.py", "supervised_development_scope.py"}
+
+
+def _reviewed_source_payload(files):
+    """Reconstruct ALL old payload bytes, never relabel the new bundle as old."""
+    previous = {}
+    for path, (_data, mode) in files.items():
+        if path.name in ADDED_MODULES:
+            continue
+        if path == installer.LIB / "tools/__init__.py":
+            data = b"# Protected broker package.\n"
+        else:
+            if path == installer.DROPIN:
+                source = "systemd/autonomy/broker-worker-access.conf"
+            elif path.parent == installer.UNITS:
+                source = "systemd/autonomy/" + path.name
+            elif path == installer.LIB / "entry.py":
+                source = "tools/autonomy_broker_entry.py"
+            else:
+                source = "tools/" + path.name
+            data = subprocess.check_output(
+                ["git", "-C", str(installer.ROOT), "show", INSTALLED_SOURCE + ":" + source]
+            )
+        previous[path] = (data, mode)
+    return previous
+
 
 @pytest.fixture
 def rehearsal(tmp_path, monkeypatch):
@@ -246,10 +273,12 @@ def _make_legacy_install(rehearsal, monkeypatch):
         or path.name
         in {
             "supervised_development_controller.py",
+            "supervised_development_edits.py",
             "supervised_development_pipeline.py",
             "supervised_development_publication.py",
             "supervised_development_review.py",
             "supervised_development_runtime.py",
+            "supervised_development_scope.py",
             "supervised_development_worker.py",
         }
     }
@@ -287,30 +316,46 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "2d0da2c88fabcfe81d2dad65954888fd5e9831830f792dc462c73a22e7e03701"
+        "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
     )
     assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
-    baseline_files = dict(installer.payload())
-    runtime = next(p for p in baseline_files if p.name == "supervised_development_runtime.py")
-    baseline_files[runtime] = (
-        subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(installer.ROOT),
-                "show",
-                "0fdc16f5987d8f1b17c7ec29819caf57ff881134:tools/supervised_development_runtime.py",
-            ]
-        ),
-        baseline_files[runtime][1],
-    )
+    baseline_files = _reviewed_source_payload(installer.payload())
     assert installer.fingerprint(baseline_files) == installer.CURRENT_BUNDLE
+
+
+def test_actual_installed_payload_identity_is_reconstructed_completely():
+    baseline = _reviewed_source_payload(installer.payload())
+    assert len(baseline) == 31  # Plus retained private configuration and policy = 33.
+    assert installer.fingerprint(baseline) == installer.CURRENT_BUNDLE
+
+
+def test_installed_edit_scope_is_dependency_free_not_mutable_core_import(tmp_path):
+    files = installer.payload()
+    target = installer.LIB / "tools/supervised_development_scope.py"
+    assert files[target][0] == (installer.ROOT / "bridge/app/development_scope.py").read_bytes()
+    assert b"from bridge" not in files[target][0]
+    assert all(path.name != "supervised_development_integration.py" for path in files)
+    standalone = tmp_path / "installed_scope.py"
+    standalone.write_bytes(files[target][0])
+    script = (
+        "import importlib.util,sys; "
+        "s=importlib.util.spec_from_file_location('installed_scope',sys.argv[1]); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "assert m.editable_path('bridge/app/ai_engine.py'); "
+        "assert not m.editable_path('bridge/app/main.py')"
+    )
+    subprocess.run(
+        ["/usr/bin/python3", "-I", "-c", script, str(standalone)],
+        cwd=tmp_path,
+        check=True,
+        timeout=10,
+    )
 
 
 def test_reviewed_current_bundle_migration_accepts_existing_upgraded_layout(rehearsal, monkeypatch):
     files, policy, controller, commands, _original, paths = rehearsal
     monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
-    installer.install(files, policy)
+    installer.install(_reviewed_source_payload(files), policy)
     marker = paths["BASE"] / "installed.json"
     value = json.loads(marker.read_bytes())
     value["bundle"] = installer.CURRENT_BUNDLE
@@ -323,6 +368,111 @@ def test_reviewed_current_bundle_migration_accepts_existing_upgraded_layout(rehe
     assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
     assert controller.status()["state"] == "STOPPED"
     assert commands.called
+
+
+def _current_workspace_fixture(rehearsal, monkeypatch):
+    files, policy, guardian, commands, _original, paths = rehearsal
+    installer.install(_reviewed_source_payload(files), policy)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["bundle"] = installer.CURRENT_BUNDLE
+    marker.write_bytes(canonical(value))
+    guardian_marker = guardian.base / "installed.json"
+    manifest = json.loads(guardian_marker.read_bytes())
+    manifest["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(manifest))
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+    work = paths["BASE"] / "work"
+    work.mkdir(mode=0o770)
+    work.chmod(0o770)
+    worktrees = paths["BASE"] / "worktrees"
+    worktrees.mkdir(mode=0o770)
+    worktrees.chmod(0o770)
+    commands.reset_mock()
+    return files, policy, guardian, commands, paths
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
+def test_current_upgrade_rejects_untrusted_database_inode_without_changing_target(
+    rehearsal, monkeypatch, kind
+):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    victim = paths["BASE"].parent / "unrelated-protected-fixture"
+    victim.write_bytes(b"unchanged unrelated contents")
+    victim.chmod(0o640)
+    before = victim.stat()
+    database = paths["BASE"] / "work/supervised-development.sqlite3"
+    if kind == "symlink":
+        database.symlink_to(victim)
+    elif kind == "hardlink":
+        os.link(victim, database)
+    else:
+        os.mkfifo(database)
+    before_guardian = (guardian.base / "installed.json").read_bytes()
+    with pytest.raises(Denied, match="upgrade_workspace_metadata_untrusted"):
+        installer.upgrade(files, policy)
+    assert victim.read_bytes() == b"unchanged unrelated contents"
+    assert (victim.stat().st_mode, victim.stat().st_uid, victim.stat().st_gid) == (
+        before.st_mode,
+        before.st_uid,
+        before.st_gid,
+    )
+    assert (guardian.base / "installed.json").read_bytes() == before_guardian
+    commands.assert_not_called()
+
+
+def test_database_swap_during_metadata_change_never_chmods_symlink_target(rehearsal, monkeypatch):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    database = paths["BASE"] / "work/supervised-development.sqlite3"
+    database.write_bytes(b"preserve original database")
+    database.chmod(0o640)
+    original_inode = database.stat().st_ino
+    retained = database.with_name("retained-database")
+    victim = paths["BASE"].parent / "unrelated-protected-fixture"
+    victim.write_bytes(b"untouched")
+    victim.chmod(0o600)
+    original_chmod = os.fchmod
+    swapped = False
+
+    def race(descriptor, mode):
+        nonlocal swapped
+        original_chmod(descriptor, mode)
+        if not swapped and os.fstat(descriptor).st_ino == original_inode:
+            swapped = True
+            database.rename(retained)
+            database.symlink_to(victim)
+
+    monkeypatch.setattr(installer.os, "fchmod", race)
+    before_marker = (paths["BASE"] / "installed.json").read_bytes()
+    with pytest.raises(Denied, match="upgrade_workspace_reconciliation_required"):
+        installer.upgrade(files, policy)
+    assert swapped
+    assert victim.read_bytes() == b"untouched"
+    assert victim.stat().st_mode & 0o777 == 0o600
+    assert retained.read_bytes() == b"preserve original database"
+    assert retained.stat().st_mode & 0o777 == 0o640
+    assert (paths["BASE"] / "installed.json").read_bytes() == before_marker
+    assert guardian.status()["state"] == "STOPPED"
+    commands.assert_not_called()
+
+
+def test_correct_existing_workspace_permissions_need_no_metadata_changes(rehearsal, monkeypatch):
+    _files, policy, _guardian, _commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    database = paths["BASE"] / "work/supervised-development.sqlite3"
+    database.write_bytes(b"unchanged")
+    database.chmod(0o660)
+    chmod = Mock(wraps=os.fchmod)
+    chown = Mock(wraps=os.fchown)
+    monkeypatch.setattr(installer.os, "fchmod", chmod)
+    monkeypatch.setattr(installer.os, "fchown", chown)
+    metadata = {}
+    try:
+        installer._prepare_development_workspace(policy, metadata)
+    finally:
+        for descriptor, _info in metadata.values():
+            os.close(descriptor)
+    chmod.assert_not_called()
+    chown.assert_not_called()
 
 
 def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkeypatch):
@@ -340,28 +490,27 @@ def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkey
     commands.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", [None, "activation", "modified", "unknown"])
-def test_installed_pr129_payload_to_repair_preserves_history(rehearsal, monkeypatch, failure):
+@pytest.mark.parametrize(
+    "failure", [None, "activation", "modified", "unknown", "missing", "extra", "permission"]
+)
+def test_installed_pr132_payload_to_repair_preserves_history(rehearsal, monkeypatch, failure):
     files, policy, guardian, commands, _original, paths = rehearsal
-    old_files = dict(files)
+    old_files = _reviewed_source_payload(files)
     target = next(p for p in files if p.name == "supervised_development_runtime.py")
-    old_data = subprocess.check_output(
-        [
-            "git",
-            "-C",
-            str(installer.ROOT),
-            "show",
-            "0fdc16f5987d8f1b17c7ec29819caf57ff881134:tools/supervised_development_runtime.py",
-        ]
-    )
+    old_data = old_files[target][0]
     assert old_data != files[target][0]
-    old_files[target] = (old_data, files[target][1])
     installer.install(old_files, policy)
     marker = paths["BASE"] / "installed.json"
     previous = json.loads(marker.read_bytes())
+    assert len(previous["files"]) == 33
     previous["bundle"] = installer.CURRENT_BUNDLE
     if failure == "unknown":
         previous["bundle"] = "unreviewed"
+    if failure == "extra":
+        extra = paths["BASE"] / "unreviewed.py"
+        extra.write_bytes(b"unreviewed fixture")
+        extra.chmod(0o644)
+        previous["files"][str(extra)] = hashlib.sha256(extra.read_bytes()).hexdigest()
     marker.write_bytes(canonical(previous))
     guardian_marker = guardian.base / "installed.json"
     manifest = json.loads(guardian_marker.read_bytes())
@@ -389,6 +538,10 @@ def test_installed_pr129_payload_to_repair_preserves_history(rehearsal, monkeypa
     commands.reset_mock()
     if failure == "modified":
         target.write_bytes(old_data + b"# tampered\n")
+    if failure == "missing":
+        target.unlink()
+    if failure == "permission":
+        target.chmod(0o666)
     if failure == "activation":
         failed = False
 
@@ -400,19 +553,27 @@ def test_installed_pr129_payload_to_repair_preserves_history(rehearsal, monkeypa
 
         commands.side_effect = activate
     if failure:
-        expected = OSError if failure == "activation" else Denied
+        expected = (
+            OSError
+            if failure == "activation"
+            else g.UnsafeState
+            if failure == "permission"
+            else Denied
+        )
         with pytest.raises(expected):
             installer.upgrade(files, policy)
         assert marker.read_bytes() == before_marker
         assert guardian_marker.read_bytes() == before_guardian
         if failure == "activation":
             assert {p: p.read_bytes() for p in old_files} == before_files
+            assert all(not p.exists() for p in files if p.name in ADDED_MODULES)
         else:
             commands.assert_not_called()
     else:
         installer.upgrade(files, policy)
         assert target.read_bytes() == files[target][0]
         assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
+        assert len(json.loads(marker.read_bytes())["files"]) == 35
     assert paths["POLICY"].read_bytes() == before_policy
     assert guardian.state()["state"] == "STOPPED"
     assert guardian.state()["generation"] == generation

@@ -161,7 +161,7 @@ def test_malformed_publication_request_returns_no_task(tmp_path):
     thread.start()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.connect(path)
-        body = b'{"version":2}'
+        body = b'{"version":3}'
         connection.sendall(struct.pack("!I", len(body)) + body)
         try:
             assert connection.recv(4) == b""

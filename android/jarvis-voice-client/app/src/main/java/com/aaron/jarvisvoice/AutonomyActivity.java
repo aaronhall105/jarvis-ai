@@ -69,6 +69,8 @@ public final class AutonomyActivity extends Activity {
             text(AutonomyPresentation.progress(state));
         }
         JSONObject developmentTask = state.optJSONObject("development_task");
+        heading("SUPERVISED DEVELOPMENT TASK");
+        text(AutonomyPresentation.developmentStatus(state.optJSONObject("development_status")));
         if (developmentTask != null) renderDevelopmentTask(developmentTask);
         heading("WHAT I'M PLANNING");
         JSONArray plans = state.optJSONArray("plans");
@@ -160,19 +162,25 @@ public final class AutonomyActivity extends Activity {
             text("This development approval expired. Refresh for a new task; no approval is possible.");
             return;
         }
+        if (!AutonomyPresentation.developmentApprovalAvailable(task)) {
+            heading("OWNER REVIEW BLOCKED");
+            text("The task envelope is incomplete or outside the signed approval policy. No approval is possible.");
+            return;
+        }
         heading("OWNER REVIEW REQUIRED");
         text(task.optString("goal", "A bounded development task is waiting for your review."));
         text("Task: " + task.optString("task_id") + "\nApproval: " + task.optString("request_ref")
             + "\nSource: " + task.optString("source_sha") + "\nParameters: "
             + task.optString("parameters_sha256") + "\nFiles: " + task.optJSONArray("allowed_paths")
             + "\nProvider/model: " + task.optString("provider") + "/" + task.optString("model")
+            + "\nMaximum provider requests: " + task.optInt("max_calls")
             + "\nMaximum cost: $" + task.optString("max_cost_usd") + "\nDeadline: "
             + task.optString("deadline_seconds") + " seconds\nExpires: " + expires);
         button("Authorize this development task", () -> confirmDevelopment(task));
     }
 
     private void confirmDevelopment(JSONObject task) {
-        if (state == null || busy) return;
+        if (state == null || busy || !AutonomyPresentation.developmentApprovalAvailable(task)) return;
         new AlertDialog.Builder(this).setTitle("Authorize one development task?")
             .setMessage("Review the exact goal, source, files, model, cost and deadline above. "
                 + "Your Android Keystore key will sign this task only; it will not activate Guardian.")

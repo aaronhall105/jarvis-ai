@@ -7,6 +7,7 @@ import os
 import socket
 import sqlite3
 import struct
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,74 @@ from tools.supervised_development_controller import (
 
 SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
 MAX_FRAME = 16_384
+
+
+def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
+    """Observe one durable lifecycle without mutating, expiring or approving it.
+
+    Version 2 is presentation-only. The signed approval envelope remains version
+    1 and is returned only when the controller validates it in this same SQLite
+    read transaction. No goals, raw evidence, approval signatures or error text
+    are exposed outside that envelope.
+    """
+    reader.db.execute("BEGIN")
+    try:
+        live = reader.db.execute(
+            "SELECT * FROM tasks WHERE state NOT IN (?,?,?) ORDER BY created_at DESC,id DESC LIMIT 2",
+            ("FAILED", "REVIEW_REQUIRED", "RECONCILIATION_REQUIRED"),
+        ).fetchall()
+        result: dict[str, Any] = {
+            "version": 2,
+            "status": "idle",
+            "task_id": None,
+            "lifecycle_state": None,
+            "provider_calls": 0,
+            "development_task": None,
+        }
+        if len(live) > 1:
+            return {**result, "status": "blocked", "reason": "multiple_active_tasks"}
+        row = (
+            live[0]
+            if live
+            else reader.db.execute(
+                "SELECT * FROM tasks ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 1"
+            ).fetchone()
+        )
+        if row is None:
+            return result
+        state = row["state"]
+        calls = row["provider_calls"]
+        if not isinstance(calls, int) or calls < 0:
+            raise LifecycleError("controller_state_invalid")
+        result.update(task_id=row["id"], lifecycle_state=state, provider_calls=calls)
+        mapped = {
+            "PROPOSED": "pending",
+            "RUNNING": "running",
+            "REVIEW_PENDING": "review_pending",
+            "REVIEW_REQUIRED": "review_required",
+            "FAILED": "failed",
+            "RECONCILIATION_REQUIRED": "blocked",
+        }
+        if state == "APPROVAL_REQUESTED":
+            approval = json.loads(row["approval"] or "null")
+            if not isinstance(approval, dict) or type(approval.get("expires_at")) is not int:
+                raise LifecycleError("controller_approval_invalid")
+            if approval["expires_at"] <= int(time.time()):
+                return {**result, "status": "expired"}
+            envelope = reader.pending_owner_task()
+            if envelope is None or envelope.get("task_id") != row["id"]:
+                return {**result, "status": "blocked", "reason": "invalid_approval_request"}
+            return {**result, "status": "approval_requested", "development_task": envelope}
+        if state not in mapped:
+            raise LifecycleError("controller_state_invalid")
+        if state == "FAILED":
+            evidence = json.loads(row["evidence"] or "null")
+            if isinstance(evidence, dict) and "approval_expired" in evidence:
+                return {**result, "status": "expired"}
+        result["status"] = mapped[state]
+        return result
+    finally:
+        reader.db.execute("ROLLBACK")
 
 
 def _frame(value: dict[str, Any]) -> bytes:
@@ -45,18 +114,30 @@ class PendingTaskPublisher:
         if size <= 0 or size > MAX_FRAME:
             raise ValueError("publication_request_size")
         body = json.loads(_receive(connection, size))
-        if body != {"version": 1}:
+        if (
+            not isinstance(body, dict)
+            or type(body.get("version")) is not int
+            or body not in ({"version": 1}, {"version": 2})
+        ):
             raise ValueError("publication_request_schema")
         try:
             reader = SupervisedDevelopmentController(self.database, read_only=True)
             try:
-                envelope = reader.pending_owner_task()
+                envelope = (
+                    lifecycle_view(reader) if body["version"] == 2 else reader.pending_owner_task()
+                )
             finally:
                 reader.close()
-        except (LifecycleError, sqlite3.DatabaseError):
+        except (LifecycleError, sqlite3.DatabaseError, ValueError, TypeError, KeyError):
             # Unavailable or damaged state is never equivalent to no task.
             connection.sendall(
-                _frame({"version": 1, "status": "unavailable", "reason": "controller_unavailable"})
+                _frame(
+                    {
+                        "version": body["version"],
+                        "status": "unavailable",
+                        "reason": "controller_unavailable",
+                    }
+                )
             )
             return
         connection.sendall(_frame(envelope or {"version": 1, "status": "none"}))
@@ -88,7 +169,11 @@ def serve_listener(listener: socket.socket, *, database: Path, gateway_uid: int)
                     # never changes controller state. The next connection is
                     # independent; details are intentionally not disclosed.
                     try:
-                        connection.sendall(_frame({"version": 1, "status": "none"}))
+                        connection.sendall(
+                            _frame(
+                                {"version": 1, "status": "unavailable", "reason": "request_denied"}
+                            )
+                        )
                     except OSError:
                         pass
     finally:

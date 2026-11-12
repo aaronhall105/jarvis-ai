@@ -5,6 +5,21 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class AutonomyPresentationTest {
+    @Test public void durableLifecycleStatesDoNotImplyMergeDeploymentOrApproval() throws Exception {
+        String[] states = {"idle", "pending", "approval_requested", "expired", "blocked", "running",
+            "review_pending", "review_required", "failed"};
+        java.util.Set<String> descriptions = new java.util.HashSet<>();
+        for (String state : states) {
+            String description = AutonomyPresentation.developmentStatus(new JSONObject().put("status", state));
+            assertFalse(description.contains("unavailable"));
+            assertTrue(descriptions.add(description));
+        }
+        assertEquals("Protected task status unavailable", AutonomyPresentation.developmentStatus(
+            new JSONObject().put("status", "approved")));
+        assertTrue(AutonomyPresentation.developmentStatus(
+            new JSONObject().put("status", "review_required")).contains("not merged or deployed"));
+        assertEquals("Status unavailable", AutonomyPresentation.developmentStatus(null));
+    }
     @Test public void phaseOneCannotOfferActivation() throws Exception {
         for (String phase : new String[]{"observe_only", "engineering", ""})
             assertFalse(AutonomyPresentation.resumeAvailable(new JSONObject().put("phase", phase)));

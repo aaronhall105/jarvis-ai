@@ -18,7 +18,9 @@ SHA = "a" * 40
 
 
 class Worker:
-    def run(self, task: GovernorTask):
+    def run(self, task: GovernorTask, *, call_ledger):
+        call_ledger.reserve("fixture-provider-call", 0.02)
+        call_ledger.completed("fixture-provider-call", 0.01)
         return {
             "proposal": task.objective,
             "diff_sha256": "b" * 64,
@@ -118,7 +120,9 @@ def test_worker_failure_becomes_reconciliation_required(tmp_path, monkeypatch):
     monkeypatch.setattr(controller_module, "_request_protected_admission", admission)
 
     class FailingWorker:
-        def run(self, task):
+        def run(self, task, *, call_ledger):
+            call_ledger.reserve("uncertain-fixture-call", 0.02)
+            call_ledger.uncertain("uncertain-fixture-call")
             raise OSError("lost worker acknowledgement")
 
     controller = SupervisedDevelopmentController(tmp_path / "state.sqlite3")

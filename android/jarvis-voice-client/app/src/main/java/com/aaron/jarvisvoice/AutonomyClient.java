@@ -62,8 +62,14 @@ final class AutonomyClient implements AutoCloseable {
                     if (response.code() == 410) {
                         deliver(callback, null, "This development approval expired. Refresh for a new task."); return;
                     }
-                    if (response.code() == 401 || response.code() == 403) {
+                    if (response.code() == 401) {
+                        deliver(callback, null, "Developer authentication is required. Check the existing connection settings."); return;
+                    }
+                    if (response.code() == 403) {
                         deliver(callback, null, "Development approval was rejected. No state change was confirmed."); return;
+                    }
+                    if (response.code() == 503 && path.equals("/control")) {
+                        deliver(callback, null, "Protected operator service is unavailable. No approval confirmation was received; refresh before retrying."); return;
                     }
                     if (!response.isSuccessful() || response.body() == null) {
                         if (!AutonomyPresentation.retryHttpFailure(path)) {

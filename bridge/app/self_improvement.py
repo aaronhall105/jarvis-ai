@@ -18,6 +18,7 @@ from typing import Any, Iterator
 from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
 from app.feedback_attribution import attribute_feedback
+from app.development_scope import editable_path
 from app.tool_outcomes import has_blocking_tool_failure
 from app.user_context import UserContext
 
@@ -1019,6 +1020,8 @@ class SelfImprovementEngine:
 
     @staticmethod
     def _normalise_development_path(value: object) -> str | None:
+        if not editable_path(value):
+            return None
         if (
             not isinstance(value, str)
             or not re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", value)

@@ -34,6 +34,10 @@ jobs:
           python -m pip install -r requirements-improver.txt
       - name: Compile Core
         run: python -m compileall -q bridge/app developer_gateway
+      - name: Install isolated verification sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap
       - name: Core tests
         env:
           PYTHONPATH: bridge

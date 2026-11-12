@@ -34,12 +34,20 @@ final class AutonomyControl {
     private static final Pattern SHA64 = Pattern.compile("[a-f0-9]{64}");
     private static final Set<String> PROTECTED_SCOPE_PREFIXES = Collections.unmodifiableSet(
         new HashSet<>(Arrays.asList(
-            ".github/", "systemd/", "developer_gateway/",
-            "tools/autonomy_", "tools/supervised_development_", "tools/deploy_",
-            "tools/guardian", "tools/operator", "tools/auth", "tools/owner",
-            "tools/patch", "tools/structured_edit")));
+            ".", "data/", "logs/", "systemd/", "developer_gateway/", "updates/",
+            "docs/JARVIS_PRODUCT_BASELINE.json", "docs/releases/",
+            "tools/autonomy_", "tools/supervised_development_", "tools/self_improvement",
+            "tools/self_development", "tools/deploy_", "tools/install_", "tools/enroll_",
+            "tools/artifact_signing", "tools/publish_", "tools/generate_ota",
+            "tools/verify_", "tools/check_", "tools/prepare_",
+            "bridge/app/main.py", "bridge/app/config.py", "bridge/app/admin_engine.py",
+            "bridge/app/self_improvement.py", "bridge/app/development_scope.py")));
+    private static final Pattern PROTECTED_WORDS = Pattern.compile(
+        "(?:^|[/_.-])(?:auth(?:entication|orization)?|security|secrets?|credentials?|passwords?|"
+        + "tokens?|signing|keystore|guardian|broker|policy|policies|deploy(?:ment)?|sudoers|"
+        + "permissions?|approvals?|patch_validation)(?:$|[/_.-])", Pattern.CASE_INSENSITIVE);
     private static final Set<String> EDITABLE_EXTENSIONS = Collections.unmodifiableSet(
-        new HashSet<>(Arrays.asList(".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md", ".sh")));
+        new HashSet<>(Arrays.asList(".py", ".pyi", ".toml", ".yaml", ".yml", ".json", ".md")));
     private AutonomyControl() {}
 
     static JSONObject signed(String action, String generation) throws Exception {
@@ -85,16 +93,20 @@ final class AutonomyControl {
         if (!SHA40.matcher(task.getString("source_sha")).matches()
             || !SHA64.matcher(task.getString("parameters_sha256")).matches())
             throw new IllegalArgumentException("invalid source binding");
+        Object rawCalls = task.get("max_calls");
+        if (!(rawCalls instanceof Number) || !Double.isFinite(((Number) rawCalls).doubleValue())
+            || ((Number) rawCalls).doubleValue() != ((Number) rawCalls).intValue())
+            throw new IllegalArgumentException("invalid call limit");
         if (!"openai".equals(task.getString("provider"))
-            || !"gpt-5.3-codex".equals(task.getString("model"))
-            || task.getInt("max_calls") != 1
+            || !task.getString("model").matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+            || task.getInt("max_calls") < 1 || task.getInt("max_calls") > 4
             || task.getDouble("max_cost_usd") < 0 || task.getDouble("max_cost_usd") > 1
             || task.getInt("deadline_seconds") < 1 || task.getInt("deadline_seconds") > 120)
             throw new IllegalArgumentException("invalid development limits");
         String goal = task.optString("goal", "").trim();
         if (goal.isEmpty() || goal.length() > 4000) throw new IllegalArgumentException("invalid goal");
         JSONArray paths = task.getJSONArray("allowed_paths");
-        if (paths.length() == 0 || paths.length() > 64) throw new IllegalArgumentException("invalid scope");
+        if (paths.length() == 0) throw new IllegalArgumentException("invalid scope");
         String previous = null;
         for (int i = 0; i < paths.length(); i++) {
             String path = paths.getString(i);
@@ -108,13 +120,20 @@ final class AutonomyControl {
         return fields;
     }
 
-    private static boolean isCanonicalEditablePath(String path) {
-        if (path.isEmpty() || path.startsWith("/") || path.startsWith("./")
+    static boolean isCanonicalEditablePath(String path) {
+        if (path == null || !path.matches("[A-Za-z0-9_./-]{1,240}")
+            || PROTECTED_WORDS.matcher(path).find() || path.startsWith("/") || path.startsWith("./")
             || path.endsWith("/") || path.contains("\\") || path.contains("//")
             || path.indexOf('\0') >= 0 || !EDITABLE_EXTENSIONS.stream().anyMatch(path::endsWith))
             return false;
-        for (String part : path.split("/", -1))
-            if (part.isEmpty() || part.equals(".") || part.equals("..")) return false;
+        String[] parts = path.split("/", -1);
+        for (String part : parts)
+            if (part.isEmpty() || part.startsWith(".")) return false;
+        String basename = parts[parts.length - 1];
+        if (basename.startsWith("compose.") || basename.startsWith("docker-compose.")
+            || Arrays.asList("Dockerfile", "requirements.txt", "pyproject.toml", "conftest.py",
+                "sitecustomize.py", "usercustomize.py", "pytest.ini", "setup.cfg", "ruff.toml").contains(basename))
+            return false;
         for (String prefix : PROTECTED_SCOPE_PREFIXES)
             if (path.startsWith(prefix)) return false;
         return true;

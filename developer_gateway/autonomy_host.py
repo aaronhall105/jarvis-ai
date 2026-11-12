@@ -203,6 +203,20 @@ def pending_development_task() -> dict[str, Any] | None:
         return {"status": "unavailable", "reason": "publisher_unavailable"}
 
 
+def development_lifecycle() -> dict[str, Any]:
+    """A failed or older publisher is unavailable, never an idle task queue."""
+    try:
+        from .pending_task_client import fetch_lifecycle
+
+        return fetch_lifecycle()
+    except Exception:
+        return {
+            "status": "unavailable",
+            "reason": "publisher_unavailable",
+            "development_task": None,
+        }
+
+
 def _receive(connection: socket.socket, size: int) -> bytes:
     result = b""
     while len(result) < size:

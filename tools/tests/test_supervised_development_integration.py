@@ -41,6 +41,7 @@ def test_controller_publication_gateway_approval_worker_review_flow(tmp_path, mo
         ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
     ).strip()
     generation = str(uuid.uuid4())
+    active_generation = str(uuid.uuid4())
     task = GovernorAdapter.from_candidate(
         {"candidate_id": 1, "status": "queued", "summary": "Bound diagnostics warning."},
         owner_id="owner",
@@ -93,7 +94,12 @@ def test_controller_publication_gateway_approval_worker_review_flow(tmp_path, mo
         relay_uid=1000,
         worker_uid=1001,
         public_keys={key_id: public},
-        guardian=lambda: {"state": "ACTIVE", "trusted": True, "generation": generation},
+        guardian=lambda: {
+            "state": "ACTIVE",
+            "trusted": True,
+            "generation": active_generation,
+            "previous_generation": generation,
+        },
     )
     assert broker.approve(canonical(approval), 1000)["status"] == "approved"
     monkeypatch.setattr(

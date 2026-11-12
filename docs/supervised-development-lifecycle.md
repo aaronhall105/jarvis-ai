@@ -1,5 +1,10 @@
 # Supervised development lifecycle contract
 
+Current integration, test evidence, deployment gates and known live blockers:
+[unified-development-integration.md](unified-development-integration.md).
+The historical upgrade identities below are retained for provenance, not as
+instructions for upgrading the currently installed host.
+
 This controller is durable lifecycle/state orchestration. The
 `SupervisedDevelopmentPipeline` joins it to the existing development worker and
 review interface, but execution is admitted only by the fixed protected-broker
@@ -58,7 +63,7 @@ but the protected broker socket and its systemd installation require a separate
 security-reviewed deployment approval. Independent review must be supplied by
 the trusted review runner, not by model output.
 
-## Reviewed upgrade path
+## Historical reviewed upgrade path
 
 An existing protected broker installation from the pre-development bundle must
 not be overwritten with the normal installer: it is intentionally rejected as
