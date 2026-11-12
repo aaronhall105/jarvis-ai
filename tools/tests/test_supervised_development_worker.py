@@ -301,10 +301,20 @@ def test_actual_namespace_hides_credentials_filesystem_git_and_network(tmp_path,
     monkeypatch.setenv("UNRELATED_DATABASE_PASSWORD", "test-only-secret")
     worker = _worker(tmp_path, root, lambda *args: None)
     probe = (
-        "import os,pathlib,socket,subprocess; "
+        "import os,pathlib,socket,subprocess,ctypes,sys; "
+        "assert sys.flags.isolated and sys.dont_write_bytecode; "
+        f"assert sys.pycache_prefix == {str(Path(sys.prefix).resolve() / 'bytecode-disabled')!r}; "
         "assert 'UNRELATED_DATABASE_PASSWORD' not in os.environ; "
         f"assert not pathlib.Path({str(outside)!r}).exists(); "
         "assert not pathlib.Path('/workspace/.git/HEAD').exists(); "
+        "assert not pathlib.Path('/proc/self').exists(); "
+        "assert not pathlib.Path('/usr/local/libexec/jarvis-autonomy-broker').exists(); "
+        "assert not pathlib.Path('/etc/jarvis-autonomy').exists(); "
+        "libc=ctypes.CDLL(None); header=(ctypes.c_uint32*2)(0x20080522,0); "
+        "caps=(ctypes.c_uint32*6)(); "
+        "assert libc.capget(ctypes.byref(header),ctypes.byref(caps))==0; "
+        "assert caps[0]==caps[1]==caps[3]==caps[4]==0; "
+        "assert libc.prctl(39,0,0,0,0)==1; "
         "assert all(n == 'lo' for _, n in socket.if_nameindex()); "
         "assert subprocess.run(['/usr/bin/git','commit','-am','forbidden'],capture_output=True).returncode != 0; "
         "assert subprocess.run(['/usr/bin/git','push'],capture_output=True).returncode != 0; "
@@ -315,6 +325,52 @@ def test_actual_namespace_hides_credentials_filesystem_git_and_network(tmp_path,
     assert code == 0, output
     assert not (root / "forbidden").exists()
     assert outside.read_text() == "private fixture"
+
+
+@pytest.mark.parametrize("cache_exists", [False, True])
+def test_each_verifier_python_uses_fixed_empty_cache_prefix(tmp_path, monkeypatch, cache_exists):
+    prefix = tmp_path / "python-environment"
+    prefix.mkdir()
+    cache = prefix / "bytecode-disabled"
+    if cache_exists:
+        cache.mkdir()
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    command = BoundedDevelopmentWorker._sandbox_command(
+        tmp_path / "source", [sys.executable, "-I", "-m", "pytest"]
+    )
+    child = command[command.index("--") + 1 :]
+    assert child == [
+        sys.executable,
+        "-I",
+        "-B",
+        "-X",
+        "pycache_prefix=" + str(cache),
+        "-I",
+        "-m",
+        "pytest",
+    ]
+    assert cache.exists() is cache_exists
+    if cache_exists:
+        assert list(cache.iterdir()) == []
+
+
+@pytest.mark.parametrize("cache_state", ["symlink", "file", "populated"])
+def test_verifier_rejects_untrusted_bytecode_cache(tmp_path, monkeypatch, cache_state):
+    prefix = tmp_path / "python-environment"
+    prefix.mkdir()
+    cache = prefix / "bytecode-disabled"
+    if cache_state == "symlink":
+        cache.symlink_to(tmp_path / "absent")
+    elif cache_state == "file":
+        cache.write_text("not a cache directory")
+    else:
+        cache.mkdir()
+        (cache / "untrusted.pyc").write_bytes(b"not trusted bytecode")
+    monkeypatch.setattr(sys, "prefix", str(prefix))
+    with pytest.raises(LifecycleError, match="verification_bytecode_cache_untrusted"):
+        BoundedDevelopmentWorker._sandbox_command(
+            tmp_path / "source", [sys.executable, "-I", "-m", "pytest"]
+        )
 
 
 def test_missing_sandbox_denies_before_provider(tmp_path, monkeypatch):

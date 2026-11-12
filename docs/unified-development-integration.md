@@ -4,6 +4,11 @@ Source repair based on `93bba11f1287328a7d297653dcf08ad9c38b0b44`.
 No deployment, production task, owner signature or Guardian activation is
 authorised by this document. Tests use disposable state and provider fixtures.
 
+This records the PR #135 integration baseline. For the subsequent migration from
+the installed `73e84548…` bundle to the dedicated worker environment, use
+[the worker-runtime migration procedure](supervised-worker-runtime.md); do not
+reuse this historical document's earlier source-bundle identity.
+
 ## Authority and handoffs
 
 | Component | Authoritative input / transport | Output and next boundary | Recovery / authority |
