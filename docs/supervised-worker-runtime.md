@@ -136,8 +136,13 @@ copies or replaced. Policy bytes, including enrollment, are retained exactly.
 
 On a handled failure, all affected roles must first be confirmed stopped. Only
 then are previous executable/configuration bytes and manifests restored. The
-original four sockets are re-enabled; individual socket-activated services are
-not forced to their former active state, and the controller is not started.
+original source sockets are re-enabled; individual socket-activated services
+are not forced to their former active state, and the controller is not started.
+Once destination activation is attempted, rollback first stops all destination
+roles, including the publication role absent from the older three-role legacy
+source. A partially successful activation must not leave that new service using
+executable files while they are restored or removed. Failure to confirm this
+quiescence retains the transaction for reconciliation.
 Successful rollback removes only this transaction's staging and backup files.
 
 If service quiescence or restoration is uncertain, no executable restoration or

@@ -561,6 +561,7 @@ def upgrade(files: dict, policy: dict) -> None:
     workspace_metadata: dict[Path, tuple[int, os.stat_result]] = {}
     replaced: list[Path] = []
     services_touched = False
+    destination_activation_attempted = False
     guardian_manifest_touched = False
     retain_reconciliation = False
     transaction_owned = False
@@ -665,6 +666,7 @@ def upgrade(files: dict, policy: dict) -> None:
             replace_manifest(guardian_marker, canonical(old_manifest))
         command(["/usr/bin/systemd-analyze", "verify", *[str(UNITS / name) for name in UNIT_NAMES]])
         command(["/usr/bin/systemctl", "daemon-reload"])
+        destination_activation_attempted = True
         command(["/usr/bin/systemctl", "enable", "--now", *SOCKETS])
         controller.integrity()
         if controller.status().get("state") != "STOPPED":
@@ -675,8 +677,15 @@ def upgrade(files: dict, policy: dict) -> None:
         # audit records and ledgers for reconciliation.
         if services_touched:
             try:
-                command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
-                command(["/usr/bin/systemctl", "stop", *managed_services])
+                # Activation can partially succeed before systemctl fails.
+                # The legacy source lacks publication/controller units, but
+                # destination roles may now be running the replacement code.
+                rollback_sockets = SOCKETS if destination_activation_attempted else managed_sockets
+                rollback_services = (
+                    SERVICES if destination_activation_attempted else managed_services
+                )
+                command(["/usr/bin/systemctl", "disable", "--now", *rollback_sockets])
+                command(["/usr/bin/systemctl", "stop", *rollback_services])
             except BaseException as error:
                 # Never restore executable bytes underneath a possibly live
                 # process, and never destroy the only rollback evidence.

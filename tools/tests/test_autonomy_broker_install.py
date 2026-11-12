@@ -1181,6 +1181,115 @@ def test_upgrade_activation_failure_restores_payload_and_manifest(rehearsal, mon
     assert calls
 
 
+@pytest.mark.parametrize("stop_failure", [None, "disable", "stop"])
+def test_legacy_partial_publication_activation_is_quiesced_before_payload_rollback(
+    rehearsal, monkeypatch, stop_failure
+):
+    files, policy, guardian, commands, paths = _make_legacy_install(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    guardian_marker = guardian.base / "installed.json"
+    before_marker = marker.read_bytes()
+    before_guardian = guardian_marker.read_bytes()
+    before_files = {path: path.read_bytes() for path in files if path.exists()}
+    state_before = (guardian.base / "state.json").read_bytes()
+    commands.reset_mock()
+    attempted = False
+    publication_running = False
+    restorations = []
+    replace = installer.os.replace
+
+    def command(argv):
+        nonlocal attempted, publication_running
+        if "enable" in argv and not attempted:
+            assert argv == ["/usr/bin/systemctl", "enable", "--now", *installer.SOCKETS]
+            attempted = True
+            publication_running = True
+            raise OSError("partial destination publication activation")
+        if attempted and "disable" in argv:
+            assert argv == ["/usr/bin/systemctl", "disable", "--now", *installer.SOCKETS]
+            if stop_failure == "disable":
+                raise OSError("publication socket shutdown uncertain")
+        if attempted and "stop" in argv:
+            assert argv == ["/usr/bin/systemctl", "stop", *installer.SERVICES]
+            if stop_failure == "stop":
+                raise OSError("publication service shutdown uncertain")
+            publication_running = False
+
+    def replace_only_when_quiescent(source, destination):
+        if attempted:
+            assert not publication_running, "must not restore under live destination code"
+            restorations.append(Path(destination))
+        return replace(source, destination)
+
+    commands.side_effect = command
+    monkeypatch.setattr(installer.os, "replace", replace_only_when_quiescent)
+    if stop_failure:
+        with pytest.raises(Denied, match="upgrade_service_reconciliation_required"):
+            installer.upgrade(files, policy)
+        assert publication_running and not restorations
+        assert json.loads(marker.read_bytes())["bundle"] == installer.UPGRADE_BUNDLE
+        assert all(path.read_bytes() == data for path, (data, _mode) in files.items())
+        transaction = paths["BASE"] / "upgrade-transaction.json"
+        retained = json.loads(transaction.read_bytes())
+        assert retained["source_bundle"] == installer.LEGACY_BUNDLE
+        assert all(Path(path).exists() for path in retained["backups"].values())
+        assert Path(retained["backups"][str(marker)]).read_bytes() == before_marker
+        assert Path(retained["backups"][str(guardian_marker)]).read_bytes() == before_guardian
+        before_retry_calls = list(commands.call_args_list)
+        with pytest.raises(Denied, match="upgrade_reconciliation_required"):
+            installer.upgrade(files, policy)
+        assert commands.call_args_list == before_retry_calls
+    else:
+        with pytest.raises(OSError, match="partial destination publication activation"):
+            installer.upgrade(files, policy)
+        assert attempted and not publication_running and restorations
+        assert marker.read_bytes() == before_marker
+        assert guardian_marker.read_bytes() == before_guardian
+        assert all(path.read_bytes() == data for path, data in before_files.items())
+        assert all(not path.exists() for path in files if path not in before_files)
+        assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+        assert commands.call_args_list[-1].args[0] == [
+            "/usr/bin/systemctl",
+            "enable",
+            "--now",
+            *installer.SOCKETS[:3],
+        ]
+    assert (guardian.base / "state.json").read_bytes() == state_before
+    assert guardian.status()["state"] == "STOPPED"
+    assert guardian.status()["trusted"] is True
+
+
+@pytest.mark.parametrize("source", ["legacy", "current"])
+def test_failure_before_destination_activation_only_stops_source_units(
+    rehearsal, monkeypatch, source
+):
+    create = _make_legacy_install if source == "legacy" else _current_workspace_fixture
+    files, policy, _guardian, commands, _paths = create(rehearsal, monkeypatch)
+    commands.reset_mock()
+
+    def fail_validation(argv):
+        if argv[0] == "/usr/bin/systemd-analyze":
+            raise OSError("destination unit validation failed")
+
+    commands.side_effect = fail_validation
+    with pytest.raises(OSError, match="destination unit validation failed"):
+        installer.upgrade(files, policy)
+    source_sockets = installer.SOCKETS[:3] if source == "legacy" else installer.SOCKETS
+    source_services = installer.SERVICES[:3] if source == "legacy" else installer.SERVICES
+    assert [call.args[0] for call in commands.call_args_list if "disable" in call.args[0]] == [
+        ["/usr/bin/systemctl", "disable", "--now", *source_sockets]
+    ] * 2
+    assert [call.args[0] for call in commands.call_args_list if "stop" in call.args[0]] == [
+        ["/usr/bin/systemctl", "stop", *source_services]
+    ] * 2
+    assert commands.call_args_list[-1].args[0] == [
+        "/usr/bin/systemctl",
+        "enable",
+        "--now",
+        *source_sockets,
+    ]
+
+
 @pytest.fixture
 def legacy_private_manifest(rehearsal, monkeypatch):
     from tools.autonomy_broker_store import Records
