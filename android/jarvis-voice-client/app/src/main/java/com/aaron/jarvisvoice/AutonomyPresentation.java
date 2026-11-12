@@ -6,6 +6,31 @@ import org.json.JSONObject;
 final class AutonomyPresentation {
     private AutonomyPresentation() {}
 
+    static boolean developmentApprovalAvailable(JSONObject task) {
+        try {
+            // Reuse the exact signer validation, but never access the Keystore
+            // or generate a signature merely to display the review screen.
+            AutonomyControl.developmentFields(task);
+            return true;
+        } catch (Exception invalid) { return false; }
+    }
+
+    static String developmentStatus(JSONObject lifecycle) {
+        if (lifecycle == null) return "Status unavailable";
+        switch (lifecycle.optString("status")) {
+            case "idle": return "No supervised task recorded";
+            case "pending": return "Proposed; no owner approval requested";
+            case "approval_requested": return "Waiting for signed owner approval";
+            case "expired": return "Owner approval expired; no execution authorized";
+            case "blocked": return "Blocked; protected reconciliation required";
+            case "running": return "Admitted development task running";
+            case "review_pending": return "Independent evidence verification pending";
+            case "review_required": return "Verified proposal ready for owner review; not merged or deployed";
+            case "failed": return "Task failed; no automatic retry";
+            default: return "Protected task status unavailable";
+        }
+    }
+
     static boolean resumeAvailable(JSONObject state) {
         // This candidate contains only the Phase 1 observer. Future engineering
         // phases need an explicit release/control policy, not a UI-only toggle.

@@ -391,13 +391,16 @@ def test_candidate_scope_skips_source_drift_before_task_creation(tmp_path, monke
 def test_candidate_scope_supports_multiple_normal_files_and_rejects_protected():
     evidence = {
         "scope": "application",
-        "affected_files": ["app/example.py", "tests/test_example.py", "pyproject.toml"],
+        "affected_files": ["app/example.py", "tests/test_example.py", "config/ui.json"],
     }
     assert GovernorCandidateSource._is_scope_eligible(
         "Improve diagnostics for malformed developer results", evidence
     )
     assert not GovernorCandidateSource._is_scope_eligible(
         "Improve diagnostics", {"affected_files": ["tools/autonomy_guardian.py"]}
+    )
+    assert not GovernorCandidateSource._is_scope_eligible(
+        "Improve diagnostics", {"scope": "application", "affected_files": ["pyproject.toml"]}
     )
 
 

@@ -11,6 +11,7 @@ import struct
 import threading
 import time
 import uuid
+from dataclasses import replace
 
 import pytest
 from cryptography.hazmat.primitives import hashes, serialization
@@ -29,10 +30,95 @@ from tools.supervised_development_pipeline import (
     GovernorTask,
     SupervisedDevelopmentPipeline,
 )
-from tools.supervised_development_review import TrustedReviewRunner
 
 
 SHA = "a" * 40
+
+
+def approved_request(tmp_path, status, *, max_calls=2):
+    broker, ledger, key, key_id, _ = make_broker(tmp_path, lambda: status)
+    task = replace(make_task(), max_calls=max_calls)
+    approval, _ = signed_approval(str(uuid.uuid4()), task, "reviewed", "a" * 64)
+    approval["key_id"] = key_id
+    approval["guardian_generation"] = status.get("previous_generation", str(uuid.uuid4()))
+    unsigned = {key: value for key, value in approval.items() if key != "signature"}
+    approval["signature"] = base64.b64encode(
+        key.sign(DOMAIN + canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    ).decode()
+    broker.approve(canonical(approval), 1000)
+    request = {
+        name: unsigned[name]
+        for name in (
+            "task_id",
+            "source_sha",
+            "parameters_sha256",
+            "allowed_paths",
+            "provider",
+            "model",
+            "max_calls",
+            "max_cost_usd",
+            "deadline_seconds",
+        )
+    }
+    request["approval_id"] = unsigned["request_id"]
+    return broker, ledger, request
+
+
+def test_receipt_retry_cannot_cross_stop_or_activation_cycle(tmp_path):
+    status = {
+        "state": "ACTIVE",
+        "trusted": True,
+        "generation": str(uuid.uuid4()),
+        "previous_generation": str(uuid.uuid4()),
+    }
+    broker, ledger, request = approved_request(tmp_path, status)
+    receipt = broker.admit(request, 1001)
+    assert receipt["max_calls"] == 2
+    assert ledger.verify_audit() == 2
+    status["state"] = "STOPPED"
+    with pytest.raises(Denied, match="guardian_not_active"):
+        broker.admit(request, 1001)
+    status["state"] = "ACTIVE"
+    status["generation"] = str(uuid.uuid4())
+    with pytest.raises(Denied, match="stale_cycle"):
+        broker.admit(request, 1001)
+    assert ledger.verify_audit() == 2
+    ledger.close()
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        None,
+        {},
+        {"state": "ACTIVE", "trusted": True, "generation": "malformed"},
+        {"state": "STOPPED", "trusted": True},
+        "throws",
+    ],
+)
+def test_uncertain_guardian_never_persists_admission(tmp_path, observation):
+    status = {
+        "state": "ACTIVE",
+        "trusted": True,
+        "generation": str(uuid.uuid4()),
+        "previous_generation": str(uuid.uuid4()),
+    }
+    broker, ledger, request = approved_request(tmp_path, status)
+
+    def observe():
+        if observation == "throws":
+            raise OSError("fixture observation unavailable")
+        return observation
+
+    broker.guardian = observe
+    with pytest.raises(Denied, match="guardian_not_active"):
+        broker.admit(request, 1001)
+    assert ledger.db.execute("SELECT status,receipt FROM development_admissions").fetchone() == (
+        "approved",
+        None,
+    )
+    assert ledger.verify_audit() == 1
+    ledger.close()
 
 
 def signed_approval(task_id: str, task: GovernorTask, approval_id: str, parameters_hash: str):
@@ -77,6 +163,49 @@ def make_task() -> GovernorTask:
         owner_id="owner",
         request_ref="approval-1",
     )
+
+
+@pytest.mark.parametrize("model", ["", " model", "model\n", "../model", "x" * 129])
+def test_signed_approval_rejects_noncanonical_model_before_recording(tmp_path, model):
+    body, keys = signed_approval("task", replace(make_task(), model=model), "approval", "a" * 64)
+    ledger = Ledger(tmp_path / "model.sqlite3", os.getuid())
+    broker = DevelopmentAdmissionBroker(
+        ledger,
+        relay_uid=1000,
+        worker_uid=1001,
+        public_keys=keys,
+        guardian=lambda: {"state": "STOPPED", "trusted": True},
+    )
+    try:
+        with pytest.raises(Denied, match="development_approval_limits"):
+            broker.approve(canonical(body), 1000)
+        assert ledger.db.execute("SELECT COUNT(*) FROM development_admissions").fetchone()[0] == 0
+        assert ledger.verify_audit() == 0
+    finally:
+        ledger.close()
+
+
+def test_signed_approval_accepts_exact_configurable_model_without_activation(tmp_path):
+    task = replace(make_task(), model="approved-model_1:bounded")
+    body, keys = signed_approval("task", task, "approval", "a" * 64)
+    ledger = Ledger(tmp_path / "model.sqlite3", os.getuid())
+    broker = DevelopmentAdmissionBroker(
+        ledger,
+        relay_uid=1000,
+        worker_uid=1001,
+        public_keys=keys,
+        guardian=lambda: {"state": "STOPPED", "trusted": True},
+    )
+    try:
+        assert broker.approve(canonical(body), 1000)["status"] == "approved"
+        stored, status, receipt = ledger.db.execute(
+            "SELECT payload,status,receipt FROM development_admissions"
+        ).fetchone()
+        assert json.loads(stored)["model"] == task.model
+        assert status == "approved"
+        assert receipt is None
+    finally:
+        ledger.close()
 
 
 def make_broker(tmp_path, guardian):
@@ -350,8 +479,10 @@ def test_pipeline_uses_signed_broker_admission_and_reaches_review(tmp_path, monk
     task = make_task()
 
     class Worker:
-        def run(self, selected):
+        def run(self, selected, *, call_ledger):
             assert selected.objective == task.objective
+            call_ledger.reserve("fixture-provider-call", 0.02)
+            call_ledger.completed("fixture-provider-call", 0.01)
             return {
                 "proposal": selected.objective,
                 "diff_sha256": "c" * 64,
@@ -385,6 +516,9 @@ def test_pipeline_uses_signed_broker_admission_and_reaches_review(tmp_path, monk
 
 
 def test_complete_governor_broker_worker_review_vertical_slice(tmp_path, monkeypatch):
+    from tools.supervised_development_runtime import RuntimeReview
+    from tools.supervised_development_worker import BoundedDevelopmentWorker
+
     workspace = tmp_path / "source"
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     subprocess.run(
@@ -393,7 +527,10 @@ def test_complete_governor_broker_worker_review_vertical_slice(tmp_path, monkeyp
     subprocess.run(["git", "-C", str(workspace), "config", "user.name", "Test"], check=True)
     target = workspace / "diagnostic.py"
     target.write_text("VALUE = 1\n")
-    subprocess.run(["git", "-C", str(workspace), "add", "diagnostic.py"], check=True)
+    (workspace / "test_diagnostic.py").write_text(
+        "from diagnostic import VALUE\n\n\ndef test_value():\n    assert VALUE == 2\n"
+    )
+    subprocess.run(["git", "-C", str(workspace), "add", "."], check=True)
     subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "base"], check=True)
     source_sha = subprocess.check_output(
         ["git", "-C", str(workspace), "rev-parse", "HEAD"], text=True
@@ -410,21 +547,33 @@ def test_complete_governor_broker_worker_review_vertical_slice(tmp_path, monkeyp
         allowed_paths=("diagnostic.py",),
     )
 
-    class Worker:
-        def run(self, selected):
-            target.write_text("VALUE = 2\n")
-            diff = subprocess.check_output(["git", "-C", str(workspace), "diff", "--binary"])
-            return {
-                "proposal": selected.objective,
-                "diff_sha256": hashlib.sha256(diff).hexdigest(),
-                "tests": {"passed": True},
-                "security": {"passed": True},
-                "changed_files": ["diagnostic.py"],
-            }
+    def provider(prompt, model, timeout):
+        return (
+            json.dumps(
+                {
+                    "protocol_version": 1,
+                    "explanation": "Fix the recorded diagnostic.",
+                    "edits": [
+                        {
+                            "path": "diagnostic.py",
+                            "old_text": "VALUE = 1\n",
+                            "new_text": "VALUE = 2\n",
+                        }
+                    ],
+                }
+            ),
+            {"input_tokens": 100, "output_tokens": 40},
+        )
 
-    reviewer = TrustedReviewRunner(workspace, base_sha=source_sha, allowed_paths=("diagnostic.py",))
+    worker = BoundedDevelopmentWorker(
+        workspace,
+        worktree_root=tmp_path / "worktrees",
+        provider_call=provider,
+        input_price_per_million=10,
+        output_price_per_million=10,
+    )
     controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
-    pipeline = SupervisedDevelopmentPipeline(controller, Worker(), reviewer)
+    pipeline = SupervisedDevelopmentPipeline(controller, worker, RuntimeReview())
     task_id = pipeline.submit(task)
     params_hash = pipeline._parameters_hash(task)
     approval, _ = signed_approval(task_id, task, task.request_ref, params_hash)
@@ -443,6 +592,9 @@ def test_complete_governor_broker_worker_review_vertical_slice(tmp_path, monkeyp
     result = pipeline.execute(task_id, task, current_base_sha=source_sha)
     assert result["state"] == "REVIEW_REQUIRED"
     assert result["evidence"]["independent_review"]["verified"] is True
+    assert worker.actual_provider_calls == 1
+    assert result["evidence"]["verification_receipt_sha256"]
+    assert target.read_text() == "VALUE = 1\n"
 
 
 def test_socket_protocol_uses_kernel_peer_credentials(tmp_path):

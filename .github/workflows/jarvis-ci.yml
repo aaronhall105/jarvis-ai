@@ -34,6 +34,26 @@ jobs:
           python -m pip install -r requirements-improver.txt
       - name: Compile Core
         run: python -m compileall -q bridge/app developer_gateway
+      - name: Install isolated verification sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y bubblewrap apparmor-profiles
+          # Ubuntu 24.04 mediates capabilities inside unprivileged user namespaces.
+          # Use Ubuntu's bwrap-only profile: namespace setup is allowed, while
+          # executed children lose capabilities. Never disable AppArmor or its
+          # system-wide userns restrictions to make the real sandbox tests pass.
+          if [ ! -f /etc/apparmor.d/bwrap-userns-restrict ]; then
+            sudo install -o root -g root -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc \
+            --unshare-uts --die-with-parent --new-session --cap-drop ALL \
+            --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+            --symlink usr/lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp \
+            -- /usr/bin/python3 -I -c \
+            'import os,socket; assert os.getuid() != 0; assert [name for _,name in socket.if_nameindex()] == ["lo"]'
       - name: Core tests
         env:
           PYTHONPATH: bridge

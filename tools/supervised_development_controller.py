@@ -9,6 +9,7 @@ tests and separate from production state.
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import re
 import sqlite3
@@ -19,6 +20,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from tools.supervised_development_scope import editable_path
 
 
 PROPOSED = "PROPOSED"
@@ -149,6 +152,10 @@ class SupervisedDevelopmentController:
                 FOREIGN KEY(task_id) REFERENCES tasks(id)
             )"""
         )
+        call_columns = {row[1] for row in self.db.execute("PRAGMA table_info(calls)")}
+        for column in ("reserved_cost_usd", "actual_cost_usd"):
+            if column not in call_columns:
+                self.db.execute(f"ALTER TABLE calls ADD COLUMN {column} REAL")
 
     def close(self) -> None:
         self.db.close()
@@ -183,13 +190,22 @@ class SupervisedDevelopmentController:
     ) -> str:
         if not _SHA.fullmatch(base_sha):
             raise LifecycleError("invalid_base_sha")
-        if not allowed_paths or any(
-            not p or p.startswith("/") or ".." in Path(p).parts for p in allowed_paths
-        ):
+        if not allowed_paths or not all(editable_path(p) for p in allowed_paths):
             raise LifecycleError("invalid_allow_list")
-        if provider != "openai" or not model or max_calls < 1 or max_calls > 1:
+        if (
+            provider != "openai"
+            or not model
+            or type(max_calls) is not int
+            or not 1 <= max_calls <= 4
+        ):
             raise LifecycleError("provider_policy_violation")
-        if max_cost_usd <= 0 or max_cost_usd > 1 or deadline_seconds <= 0 or deadline_seconds > 120:
+        if (
+            type(max_cost_usd) not in {int, float}
+            or not math.isfinite(max_cost_usd)
+            or not 0 < max_cost_usd <= 1
+            or type(deadline_seconds) is not int
+            or not 0 < deadline_seconds <= 120
+        ):
             raise LifecycleError("execution_bound_violation")
         if not goal or len(goal) > 4_000:
             raise LifecycleError("invalid_goal")
@@ -397,6 +413,7 @@ class SupervisedDevelopmentController:
                 raise LifecycleError("execution_admission_race")
             if (
                 current["parameters"] != row["parameters"]
+                or current["approval"] != row["approval"]
                 or hashlib.sha256(str(current["parameters"]).encode()).hexdigest()
                 != request["parameters_sha256"]
             ):
@@ -422,8 +439,15 @@ class SupervisedDevelopmentController:
             self._transition(task_id, FAILED)
             raise LifecycleError("deadline_expired")
 
-    def reserve_provider_call(self, task_id: str, *, call_id: str) -> bool:
-        if not call_id:
+    def reserve_provider_call(
+        self, task_id: str, *, call_id: str, reserved_cost_usd: float = 0
+    ) -> bool:
+        if (
+            not call_id
+            or type(reserved_cost_usd) not in {int, float}
+            or not math.isfinite(reserved_cost_usd)
+            or reserved_cost_usd < 0
+        ):
             raise LifecycleError("invalid_call_id")
         try:
             self.db.execute("BEGIN IMMEDIATE")
@@ -438,12 +462,23 @@ class SupervisedDevelopmentController:
             if existing is not None:
                 self.db.execute("ROLLBACK")
                 return False
+            prior = self.db.execute(
+                "SELECT outcome,reserved_cost_usd,actual_cost_usd FROM calls WHERE task_id=?",
+                (task_id,),
+            ).fetchall()
+            if any(call["outcome"] != "completed" for call in prior):
+                raise LifecycleError("provider_effect_requires_reconciliation")
+            if any(call["actual_cost_usd"] is None for call in prior):
+                raise LifecycleError("provider_cost_unverified")
+            spent = sum(float(call["actual_cost_usd"]) for call in prior)
+            if spent + reserved_cost_usd > float(params["max_cost_usd"]) + 1e-12:
+                raise LifecycleError("provider_spending_budget_exhausted")
             if int(row["provider_calls"]) >= int(params["max_calls"]):
                 self.db.execute("ROLLBACK")
                 raise LifecycleError("provider_budget_exhausted")
             self.db.execute(
-                "INSERT INTO calls(task_id,call_id,outcome,created_at) VALUES(?,?,?,?)",
-                (task_id, call_id, "reserved", _now()),
+                "INSERT INTO calls(task_id,call_id,outcome,created_at,reserved_cost_usd) VALUES(?,?,?,?,?)",
+                (task_id, call_id, "reserved", _now(), reserved_cost_usd),
             )
             self.db.execute(
                 "UPDATE tasks SET provider_calls=provider_calls+1,updated_at=? WHERE id=?",
@@ -462,18 +497,43 @@ class SupervisedDevelopmentController:
                 self.db.execute("ROLLBACK")
             raise
 
-    def finish_provider_call(self, task_id: str, *, call_id: str, outcome: str) -> None:
+    def finish_provider_call(
+        self, task_id: str, *, call_id: str, outcome: str, actual_cost_usd: float | None = None
+    ) -> None:
         if outcome not in {"completed", "failed", "uncertain"}:
             raise LifecycleError("invalid_call_outcome")
-        self._check_deadline(task_id)
-        changed = self.db.execute(
-            "UPDATE calls SET outcome=? WHERE task_id=? AND call_id=? AND outcome='reserved'",
-            (outcome, task_id, call_id),
-        ).rowcount
-        if not changed:
-            raise LifecycleError("call_not_reserved")
-        if outcome == "uncertain":
-            self._transition(task_id, RECONCILIATION_REQUIRED)
+        if actual_cost_usd is not None and (
+            type(actual_cost_usd) not in {int, float}
+            or not math.isfinite(actual_cost_usd)
+            or actual_cost_usd < 0
+        ):
+            raise LifecycleError("provider_cost_invalid")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            changed = self.db.execute(
+                "UPDATE calls SET outcome=?,actual_cost_usd=? WHERE task_id=? AND call_id=? AND outcome='reserved'",
+                (outcome, actual_cost_usd, task_id, call_id),
+            ).rowcount
+            if not changed:
+                raise LifecycleError("call_not_reserved")
+            row = self._task(task_id)
+            params = json.loads(row["parameters"])
+            cost = (
+                self.db.execute(
+                    "SELECT SUM(actual_cost_usd) FROM calls WHERE task_id=?", (task_id,)
+                ).fetchone()[0]
+                or 0
+            )
+            if outcome == "uncertain" or cost > params["max_cost_usd"]:
+                if row["state"] == RUNNING:
+                    self._transition(task_id, RECONCILIATION_REQUIRED)
+            self.db.execute("COMMIT")
+            if cost > params["max_cost_usd"]:
+                raise LifecycleError("provider_actual_cost_exceeded")
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            raise
 
     def record_evidence(self, task_id: str, *, evidence: dict[str, Any]) -> None:
         row = self._task(task_id)

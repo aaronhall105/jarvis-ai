@@ -47,6 +47,54 @@ public class AutonomyControlTest {
         assertEquals("bridge/tests/test_executive_agent.py", paths.getString(1));
     }
 
+    @Test public void signedScopeAcceptsOnlyExplicitBoundedRepairCallLimits() throws Exception {
+        for (int calls : new int[]{1, 2, 3, 4}) {
+            TreeMap<String, Object> fields = AutonomyControl.developmentFields(
+                developmentTask().put("max_calls", calls));
+            assertEquals(calls, fields.get("max_calls"));
+            assertTrue(AutonomyControl.canonical(fields).contains("\"max_calls\":" + calls));
+        }
+        for (Object calls : new Object[]{0, -1, 5, 1.5, "2", true}) {
+            try {
+                AutonomyControl.developmentFields(developmentTask().put("max_calls", calls));
+                fail("accepted invalid call limit " + calls);
+            } catch (IllegalArgumentException expected) { }
+        }
+    }
+
+    @Test public void configuredModelIsPreservedInExactSignedEnvelope() throws Exception {
+        String model = "configured-coding-model:2026-01-01";
+        TreeMap<String, Object> fields = AutonomyControl.developmentFields(
+            developmentTask().put("model", model));
+        assertEquals(model, fields.get("model"));
+        assertEquals("openai", fields.get("provider"));
+        assertTrue(AutonomyControl.canonical(fields).contains("\"model\":\"" + model + "\""));
+        // The phone validates and signs the protected controller's exact model;
+        // it does not select a model or assert availability/verified pricing.
+        for (String invalid : new String[]{"", "../model", "model name", "model\n", "-model", "m".repeat(129)}) {
+            try {
+                AutonomyControl.developmentFields(developmentTask().put("model", invalid));
+                fail("accepted malformed model");
+            } catch (IllegalArgumentException expected) { }
+        }
+    }
+
+    @Test public void approvalButtonRequiresCompleteCurrentSignerEnvelope() throws Exception {
+        assertTrue(AutonomyPresentation.developmentApprovalAvailable(developmentTask()));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(null));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(new JSONObject()));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(
+            new JSONObject().put("status", "unavailable")));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(
+            developmentTask().put("expires_at", 1)));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(
+            developmentTask().put("allowed_paths", new org.json.JSONArray().put("tools/autonomy_guardian.py"))));
+        JSONObject missing = developmentTask(); missing.remove("parameters_sha256");
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(missing));
+        assertFalse(AutonomyPresentation.developmentApprovalAvailable(
+            developmentTask().put("status", "approved")));
+    }
+
     @Test(expected=IllegalArgumentException.class) public void developmentTaskRejectsProtectedPolicyPath() throws Exception {
         JSONObject task = developmentTask().put("allowed_paths", new org.json.JSONArray()
             .put("tools/supervised_development_worker.py"));
@@ -114,6 +162,28 @@ public class AutonomyControlTest {
         TreeMap<String, Object> fields = new TreeMap<>();
         fields.put("allowed_paths", paths);
         assertEquals("{\"allowed_paths\":[\"bridge/app/ai_engine.py\"]}", AutonomyControl.canonical(fields));
+    }
+
+    @Test public void canonicalScopeMatchesSharedProtectedBoundaryVectors() throws Exception {
+        try (java.io.InputStream input = getClass().getResourceAsStream("/development_scope_vectors.json")) {
+            assertNotNull(input);
+            JSONObject vectors = new JSONObject(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+            for (String verdict : new String[] {"allowed", "denied"}) {
+                org.json.JSONArray paths = vectors.getJSONArray(verdict);
+                for (int i = 0; i < paths.length(); i++) {
+                    String path = paths.getString(i);
+                    assertEquals(path, verdict.equals("allowed"), AutonomyControl.isCanonicalEditablePath(path));
+                }
+            }
+        }
+    }
+
+    @Test public void signedScopeHasNoArbitraryGlobalFileCountLimit() throws Exception {
+        JSONObject task = developmentTask();
+        org.json.JSONArray paths = new org.json.JSONArray();
+        for (int i = 0; i < 80; i++) paths.put(String.format(java.util.Locale.ROOT, "bridge/app/module_%03d.py", i));
+        task.put("allowed_paths", paths);
+        assertEquals(80, ((org.json.JSONArray) AutonomyControl.developmentFields(task).get("allowed_paths")).length());
     }
 
     private JSONObject developmentTask() throws Exception {

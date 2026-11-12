@@ -26,7 +26,9 @@ ProtectKernelModules=true
 ProtectKernelLogs=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictNamespaces=true
+# Required only to construct the credential-free, network-isolated verifier.
+# No host namespace entry, CAP_SYS_ADMIN or Docker access is granted.
+RestrictNamespaces=user mnt pid net ipc uts
 LockPersonality=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

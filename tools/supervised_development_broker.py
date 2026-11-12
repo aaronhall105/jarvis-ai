@@ -16,6 +16,7 @@ import re
 import socket
 import struct
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from tools.autonomy_broker import Denied, Ledger, canonical, decode_request
+from tools.supervised_development_scope import editable_path
 
 
 DOMAIN = b"jarvis-development-admission-v1\n"
@@ -102,15 +104,19 @@ def _validate_limits(body: dict[str, Any]) -> None:
         )
         or body.get("provider") != "openai"
         or not isinstance(body.get("model"), str)
-        or body.get("max_calls") != 1
-        or not isinstance(body.get("max_cost_usd"), (int, float))
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", body["model"])
+        or type(body.get("max_calls")) is not int
+        or not 1 <= body["max_calls"] <= 4
+        or type(body.get("max_cost_usd")) not in {int, float}
         or not 0 < body["max_cost_usd"] <= 1
-        or not isinstance(body.get("deadline_seconds"), int)
+        or type(body.get("deadline_seconds")) is not int
         or not 0 < body["deadline_seconds"] <= 120
-        or not isinstance(body.get("expires_at"), int)
+        or type(body.get("expires_at")) is not int
         or body["expires_at"] <= int(time.time())
     ):
         raise Denied("development_approval_limits")
+    if not all(editable_path(path) for path in body["allowed_paths"]):
+        raise Denied("development_approval_scope")
 
 
 class DevelopmentAdmissionBroker:
@@ -172,6 +178,13 @@ class DevelopmentAdmissionBroker:
     def admit(self, request: dict[str, Any], actor_uid: int) -> dict[str, Any]:
         if actor_uid != self.worker_uid or actor_uid == 0:
             raise Denied("development_admission_peer")
+        # Serialize the read/verify/receipt write across socket handlers.
+        # A retry may retrieve the same receipt, never create a second admission.
+        with self.ledger.db:
+            self.ledger.db.execute("BEGIN IMMEDIATE")
+            return self._admit_locked(request, actor_uid)
+
+    def _admit_locked(self, request: dict[str, Any], actor_uid: int) -> dict[str, Any]:
         required = {
             "task_id",
             "approval_id",
@@ -197,13 +210,16 @@ class DevelopmentAdmissionBroker:
             approval_key = "request_id" if key == "approval_id" else key
             if approval.get(approval_key) != value:
                 raise Denied("development_admission_mismatch")
-        if row[1] == "admitted":
-            return json.loads(row[2])
         if approval["expires_at"] <= int(time.time()):
             raise Denied("development_approval_expired")
         active_generation = self._guardian_active(approval["guardian_generation"])
         if active_generation is None:
             raise Denied("guardian_not_active")
+        if row[1] == "admitted":
+            receipt = json.loads(row[2])
+            if receipt.get("guardian_generation") != active_generation:
+                raise Denied("development_admission_stale_cycle")
+            return receipt
         receipt = {
             **request,
             "status": "approved",
@@ -230,6 +246,13 @@ class DevelopmentAdmissionBroker:
     def _guardian_active(self, generation: str) -> str | None:
         try:
             status = self.guardian()
+            if not isinstance(status, dict):
+                return None
+            active = status.get("generation")
+            if not isinstance(active, str) or str(uuid.UUID(active)) != active:
+                return None
+            if not isinstance(generation, str) or str(uuid.UUID(generation)) != generation:
+                return None
         except Exception:
             # Observation failure is an authentication failure.  Never allow
             # an unavailable Guardian to authorize a development admission.

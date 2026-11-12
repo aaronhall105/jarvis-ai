@@ -39,10 +39,12 @@ MODULES = (
     "autonomy_guardian",
     "supervised_development_broker",
     "supervised_development_controller",
+    "supervised_development_edits",
     "supervised_development_pipeline",
     "supervised_development_publication",
     "supervised_development_review",
     "supervised_development_runtime",
+    "supervised_development_scope",
     "supervised_development_worker",
 )
 UNIT_NAMES = tuple(
@@ -70,11 +72,11 @@ SERVICES = (
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
-# Reviewed installed PR #129 bundle, verified against the canonical base payload.
+# Reviewed installed PR #132 bundle, verified against the canonical base payload.
 # Retain the exact-version migration and all existing integrity/rollback checks.
-CURRENT_BUNDLE = "2d0da2c88fabcfe81d2dad65954888fd5e9831830f792dc462c73a22e7e03701"
+CURRENT_BUNDLE = "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
 # Complete destination payload, including evidence-bound Governor selection.
-UPGRADE_BUNDLE = "890ded5e01f331470355e9044fc3558dffa02ebfb381fc7247ba41edf5290f2d"
+UPGRADE_BUNDLE = "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
 
 
 def payload() -> dict[Path, tuple[bytes, int]]:
@@ -82,6 +84,13 @@ def payload() -> dict[Path, tuple[bytes, int]]:
         LIB / "tools" / (name + ".py"): ((ROOT / "tools" / (name + ".py")).read_bytes(), 0o644)
         for name in MODULES
     }
+    # The installed policy is dependency-free reviewed code, not the repository
+    # wrapper which imports mutable Core source. The separate GitHub integration
+    # identity/credential is deliberately NOT part of the root broker bundle.
+    files[LIB / "tools/supervised_development_scope.py"] = (
+        (ROOT / "bridge/app/development_scope.py").read_bytes(),
+        0o644,
+    )
     files[LIB / "tools/__init__.py"] = (b"# Protected broker package.\n", 0o644)
     files[LIB / "entry.py"] = ((ROOT / "tools/autonomy_broker_entry.py").read_bytes(), 0o644)
     files[LIB / "deploy_unified_core.sh"] = (
@@ -293,10 +302,12 @@ def _verified_legacy_install(files: dict) -> dict:
             not in {
                 "supervised_development_broker",
                 "supervised_development_controller",
+                "supervised_development_edits",
                 "supervised_development_pipeline",
                 "supervised_development_publication",
                 "supervised_development_review",
                 "supervised_development_runtime",
+                "supervised_development_scope",
                 "supervised_development_worker",
             }
         ),
@@ -337,7 +348,13 @@ def _verified_current_install(files: dict) -> dict:
     if previous.get("bundle") != CURRENT_BUNDLE:
         raise Denied("upgrade_source_bundle_not_reviewed")
     recorded = previous.get("files")
-    expected_paths = {str(path) for path in files} | {
+    # This exact installed source has 33 files and predates these two modules.
+    # Do not infer its inventory from the new destination's inventory unchanged.
+    additions = {
+        LIB / "tools/supervised_development_edits.py",
+        LIB / "tools/supervised_development_scope.py",
+    }
+    expected_paths = {str(path) for path in files if path not in additions} | {
         str(POLICY),
         str(BASE / "docker-client/config.json"),
     }
@@ -367,7 +384,15 @@ def _stage(path: Path, data: bytes, mode: int, directory: Path) -> Path:
         raise
 
 
-def _prepare_development_workspace(policy: dict) -> None:
+def _workspace_identity(path: Path, original: os.stat_result) -> None:
+    current = path.lstat()
+    if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
+        raise Denied("upgrade_workspace_reconciliation_required")
+
+
+def _prepare_development_workspace(
+    policy: dict, metadata: dict[Path, tuple[int, os.stat_result]]
+) -> None:
     """Create only the worker's bounded writable directories.
 
     The root coordinator and autonomy account share the controller database;
@@ -375,17 +400,39 @@ def _prepare_development_workspace(policy: dict) -> None:
     root-owned and are never delegated to the worker.
     """
     work = BASE / "work"
-    worktrees = BASE / "worktrees"
-    for directory in (work, worktrees):
-        directory.mkdir(mode=0o770, parents=True, exist_ok=True)
-        directory.chmod(0o770)
+    for path, directory, mode in (
+        (work, True, 0o770),
+        (BASE / "worktrees", True, 0o770),
+        (work / "supervised-development.sqlite3", False, 0o660),
+    ):
+        if directory:
+            path.mkdir(mode=mode, parents=True, exist_ok=True)
+        elif not os.path.lexists(path):
+            continue  # Database initialisation is a separate explicit operation.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        if directory:
+            flags |= os.O_DIRECTORY
+        try:
+            descriptor = os.open(path, flags)
+        except OSError as error:
+            raise Denied("upgrade_workspace_metadata_untrusted") from error
+        info = os.fstat(descriptor)
+        metadata[path] = (descriptor, info)
+        if (directory and not stat.S_ISDIR(info.st_mode)) or (
+            not directory and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1)
+        ):
+            raise Denied("upgrade_workspace_metadata_untrusted")
+        _workspace_identity(path, info)
+        # The writable DB directory is owned by the unprivileged worker.
+        # Never chmod/chown through a pathname it can swap to a symlink.
+        # Correct existing metadata is left untouched.
+        if stat.S_IMODE(info.st_mode) != mode:
+            os.fchmod(descriptor, mode)
         if os.getuid() == 0:
-            os.chown(directory, int(policy["autonomy_uid"]), int(policy["autonomy_gid"]))
-    database = work / "supervised-development.sqlite3"
-    if database.exists():
-        database.chmod(0o660)
-        if os.getuid() == 0:
-            os.chown(database, int(policy["autonomy_uid"]), int(policy["autonomy_gid"]))
+            uid, gid = int(policy["autonomy_uid"]), int(policy["autonomy_gid"])
+            if (info.st_uid, info.st_gid) != (uid, gid):
+                os.fchown(descriptor, uid, gid)
+        _workspace_identity(path, info)
 
 
 def upgrade(files: dict, policy: dict) -> None:
@@ -403,6 +450,8 @@ def upgrade(files: dict, policy: dict) -> None:
     if marker.is_file() and not marker.is_symlink():
         g.trusted(marker)
         source_bundle = json.loads(marker.read_text()).get("bundle")
+    managed_sockets: tuple[str, ...]
+    managed_services: tuple[str, ...]
     if source_bundle == LEGACY_BUNDLE:
         previous = _verified_legacy_install(files)
         managed_sockets = SOCKETS[:3]
@@ -422,8 +471,10 @@ def upgrade(files: dict, policy: dict) -> None:
     staged: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     created_dirs: list[Path] = []
-    workspace_metadata: dict[Path, tuple[int, int, int]] = {}
+    workspace_metadata: dict[Path, tuple[int, os.stat_result]] = {}
     replaced: list[Path] = []
+    services_touched = False
+    guardian_manifest_touched = False
     marker = BASE / "installed.json"
     entries = dict(files)
     entries[POLICY] = (canonical(policy), 0o644)
@@ -452,16 +503,9 @@ def upgrade(files: dict, policy: dict) -> None:
                 created_dirs.append(directory)
             g.trusted(directory, directory=True)
         for workspace_dir in (BASE / "work", BASE / "worktrees"):
-            if not workspace_dir.exists():
+            if not os.path.lexists(workspace_dir):
                 created_dirs.append(workspace_dir)
-            else:
-                info = workspace_dir.stat()
-                workspace_metadata[workspace_dir] = (info.st_uid, info.st_gid, info.st_mode & 0o777)
-        database = BASE / "work" / "supervised-development.sqlite3"
-        if database.exists():
-            info = database.stat()
-            workspace_metadata[database] = (info.st_uid, info.st_gid, info.st_mode & 0o777)
-        _prepare_development_workspace(policy)
+        _prepare_development_workspace(policy, workspace_metadata)
         for path, (data, mode_bits) in entries.items():
             if path.is_symlink() or (path.exists() and not path.is_file()):
                 raise Denied("upgrade_destination_path_invalid")
@@ -472,8 +516,11 @@ def upgrade(files: dict, policy: dict) -> None:
         # mixed-version execution. No application data or ledgers are touched.
         # Stop every unit belonging to the source bundle before replacing any
         # executable, preventing mixed-version broker execution.
+        services_touched = True
         command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
         command(["/usr/bin/systemctl", "stop", *managed_services])
+        for path, (_descriptor, info) in workspace_metadata.items():
+            _workspace_identity(path, info)
         for path, staged_path in staged.items():
             if path.exists():
                 backups[path] = _stage(
@@ -485,6 +532,7 @@ def upgrade(files: dict, policy: dict) -> None:
         old_manifest["files"].update(new_digests)
         old_manifest["files"][str(marker)] = hashlib.sha256(new_marker).hexdigest()
         with controller.lock():
+            guardian_manifest_touched = True
             replace_manifest(guardian_marker, canonical(old_manifest))
         command(["/usr/bin/systemd-analyze", "verify", *[str(UNITS / name) for name in UNIT_NAMES]])
         command(["/usr/bin/systemctl", "daemon-reload"])
@@ -496,8 +544,9 @@ def upgrade(files: dict, policy: dict) -> None:
         # Restore only executable payloads and manifests; retain all broker data,
         # audit records and ledgers for reconciliation.
         try:
-            command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
-            command(["/usr/bin/systemctl", "stop", *managed_services])
+            if services_touched:
+                command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
+                command(["/usr/bin/systemctl", "stop", *managed_services])
         finally:
             for path in reversed(replaced):
                 backup = backups.get(path)
@@ -505,11 +554,21 @@ def upgrade(files: dict, policy: dict) -> None:
                     os.replace(backup, path)
                 else:
                     path.unlink(missing_ok=True)
-            for path, (uid, gid, mode_bits) in workspace_metadata.items():
-                path.chmod(mode_bits)
-                if os.getuid() == 0:
-                    os.chown(path, uid, gid)
-            if guardian_marker.exists():
+            workspace_reconciliation = False
+            for path, (descriptor, info) in workspace_metadata.items():
+                try:
+                    current = os.fstat(descriptor)
+                    if stat.S_IMODE(current.st_mode) != stat.S_IMODE(info.st_mode):
+                        os.fchmod(descriptor, stat.S_IMODE(info.st_mode))
+                    if os.getuid() == 0 and (current.st_uid, current.st_gid) != (
+                        info.st_uid,
+                        info.st_gid,
+                    ):
+                        os.fchown(descriptor, info.st_uid, info.st_gid)
+                    _workspace_identity(path, info)
+                except (OSError, Denied):
+                    workspace_reconciliation = True
+            if guardian_manifest_touched and guardian_marker.exists():
                 replace_manifest(guardian_marker, guardian_before)
             for path in staged.values():
                 path.unlink(missing_ok=True)
@@ -520,10 +579,16 @@ def upgrade(files: dict, policy: dict) -> None:
                     directory.rmdir()
                 except OSError:
                     pass
-            command(["/usr/bin/systemctl", "daemon-reload"])
-            command(["/usr/bin/systemctl", "enable", "--now", *managed_sockets])
+            if services_touched:
+                command(["/usr/bin/systemctl", "daemon-reload"])
+            if workspace_reconciliation:
+                raise Denied("upgrade_workspace_reconciliation_required")
+            if services_touched:
+                command(["/usr/bin/systemctl", "enable", "--now", *managed_sockets])
         raise
     finally:
+        for descriptor, _info in workspace_metadata.values():
+            os.close(descriptor)
         for path in staged.values():
             path.unlink(missing_ok=True)
         for path in backups.values():

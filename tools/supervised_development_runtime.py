@@ -40,6 +40,7 @@ from tools.supervised_development_pipeline import (
     SupervisedDevelopmentPipeline,
 )
 from tools.supervised_development_review import TrustedReviewRunner
+from tools.supervised_development_scope import editable_path
 
 
 # Core's authoritative /app/data is the protected host bind mount below.  The
@@ -57,6 +58,35 @@ PROTECTED_SCOPE_PREFIXES = (
 OWNER_ID = "enrolled-operator"
 POLL_SECONDS = 2
 WORKER_ENTRY = "/usr/local/libexec/jarvis-autonomy-broker/entry.py"
+
+
+def _configured_call_limit() -> int:
+    """Protected service configuration narrows the reviewed ceiling; task signs it.
+
+    Defaults to the original single-call trial. The gateway, candidate JSON and
+    model cannot choose this value or modify the service environment.
+    """
+    value = os.environ.get("JARVIS_SUPERVISED_MAX_CALLS", "1")
+    if value not in {"1", "2", "3", "4"}:
+        raise LifecycleError("governor_call_policy_invalid")
+    return int(value)
+
+
+_PROVIDER_CONFIGURATION_KEYS = (
+    "JARVIS_SUPERVISED_MODEL",
+    "JARVIS_SUPERVISED_PRICING_MODEL",
+    "JARVIS_SUPERVISED_INPUT_USD_PER_MILLION",
+    "JARVIS_SUPERVISED_OUTPUT_USD_PER_MILLION",
+    "JARVIS_GPT53_INPUT_USD_PER_MILLION",
+    "JARVIS_GPT53_OUTPUT_USD_PER_MILLION",
+    "JARVIS_SUPERVISED_MAX_INPUT_TOKENS",
+    "JARVIS_SUPERVISED_MAX_OUTPUT_TOKENS",
+)
+
+
+def _provider_configuration() -> dict[str, str]:
+    """Only protected service configuration chooses a model and verified rates."""
+    return {name: os.environ[name] for name in _PROVIDER_CONFIGURATION_KEYS if name in os.environ}
 
 
 def _trusted_source_git(source_root: Path, *arguments: str) -> str:
@@ -139,7 +169,9 @@ class GovernorCandidateSource:
         if not isinstance(evidence, dict) or evidence.get("scope") != "application":
             return False
         paths = evidence.get("affected_files")
-        if not isinstance(paths, list) or not paths or len(paths) > 32:
+        if not isinstance(paths, list) or not paths:
+            return False
+        if not all(editable_path(path) for path in paths):
             return False
         for path in paths:
             if (
@@ -287,7 +319,7 @@ class RuntimeReview:
 
 
 class _SubmitOnlyWorker:
-    def run(self, task: GovernorTask) -> dict[str, Any]:
+    def run(self, task: GovernorTask, *, call_ledger: Any) -> dict[str, Any]:
         raise LifecycleError("worker_not_initialized")
 
 
@@ -375,12 +407,12 @@ class SupervisedDevelopmentRuntime:
             os.setgid(worker_gid)
             os.setuid(worker_uid)
 
-        environment = os.environ.copy()
-        # The worker receives only its provider configuration.  Operator and
-        # private signing material is never inherited by the development child.
-        for name in tuple(environment):
-            if any(token in name.upper() for token in ("OPERATOR", "PRIVATE_KEY", "SIGNING_KEY")):
-                environment.pop(name, None)
+        # Explicit allow-list: never inherit GitHub, Docker, other provider,
+        # operator or signing credentials from the privileged coordinator.
+        environment = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8"}
+        for name in ("OPENAI_API_KEY", *_PROVIDER_CONFIGURATION_KEYS):
+            if name in os.environ:
+                environment[name] = os.environ[name]
         command = [
             "/usr/bin/python3",
             "-I",
@@ -398,15 +430,52 @@ class SupervisedDevelopmentRuntime:
             start_new_session=True,
             preexec_fn=drop_privileges,
         )
-        timeout = max(1, int(task.deadline_seconds) + 30)
+        # The execution budget is not extended by the service's cleanup grace.
+        # Kill a blocked SDK/validation child at the signed wall-clock ceiling;
+        # authoritative STOP and reap happen afterward, without another call.
+        timeout = max(1, int(task.deadline_seconds))
         try:
             stdout, _stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
+        except BaseException as exc:
+            # Cancellation/service shutdown must not leave the paid worker
+            # alive while the coordinator records STOP. Nested verification
+            # namespaces also use die-with-parent; never retry this execution.
             try:
                 os.killpg(process.pid, signal.SIGKILL)
-            finally:
-                process.communicate()
-            raise LifecycleError("development_worker_timeout") from exc
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # The coordinator deliberately lacks CAP_KILL. Signal only
+                # this unreaped child group from the already-authorised worker
+                # identity, not by broadening the root service capabilities.
+                try:
+                    subprocess.run(
+                        [
+                            "/usr/bin/python3",
+                            "-I",
+                            "-c",
+                            "import os,signal,sys\n"
+                            "try: os.killpg(int(sys.argv[1]),signal.SIGKILL)\n"
+                            "except ProcessLookupError: pass\n",
+                            str(process.pid),
+                        ],
+                        preexec_fn=drop_privileges,
+                        env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"},
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                        check=True,
+                    )
+                except (OSError, subprocess.SubprocessError) as signal_error:
+                    raise LifecycleError("development_worker_cleanup_unconfirmed") from signal_error
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as cleanup_error:
+                raise LifecycleError("development_worker_cleanup_unconfirmed") from cleanup_error
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise LifecycleError("development_worker_timeout") from exc
+            raise
         if process.returncode != 0:
             raise LifecycleError("development_worker_failed")
         try:
@@ -452,6 +521,8 @@ class SupervisedDevelopmentRuntime:
                     allowed_paths=tuple(candidate["allowed_paths"]),
                     guardian_generation=str(status["generation"]),
                     expires_at=int(time.time()) + 90,
+                    max_calls=_configured_call_limit(),
+                    model=os.environ.get("JARVIS_SUPERVISED_MODEL", "gpt-5.3-codex"),
                 )
                 task_id = SupervisedDevelopmentPipeline(
                     self.controller,
@@ -471,12 +542,7 @@ class SupervisedDevelopmentRuntime:
                     {
                         "JARVIS_AUTHORITATIVE_WORKSPACE": str(self.source_root),
                         "JARVIS_SUPERVISED_WORKTREE_ROOT": str(self.worktree_root),
-                        "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
-                            "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
-                        ),
-                        "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
-                            "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
-                        ),
+                        **_provider_configuration(),
                     },
                 ),
                 self.reviewer,
@@ -510,11 +576,24 @@ class SupervisedDevelopmentRuntime:
                 self.sleep(POLL_SECONDS)
             if self.guardian().get("state") == "ACTIVE":
                 self._confirm_stop()
+            self.controller.expire_stale_approval_requests()
             return self.controller.snapshot(task_id)
         except BaseException:
-            if execution_active and not stop_attempted:
-                stop_attempted = True
-                self._confirm_stop()
+            if not stop_attempted:
+                try:
+                    final_status = self.guardian()
+                except BaseException:
+                    final_status = {}
+                # Activation can occur while waiting, before execution_active
+                # is set. An observation/crash in that interval must not leave
+                # the host ACTIVE or silently claim a safe shutdown.
+                if (
+                    execution_active
+                    or final_status.get("state") != "STOPPED"
+                    or final_status.get("trusted") is not True
+                ):
+                    stop_attempted = True
+                    self._confirm_stop()
             raise
 
 
@@ -540,12 +619,7 @@ def worker_main(task_id: str) -> int:
             {
                 "JARVIS_AUTHORITATIVE_WORKSPACE": str(CANONICAL),
                 "JARVIS_SUPERVISED_WORKTREE_ROOT": str(WORKTREE_ROOT),
-                "JARVIS_GPT53_INPUT_USD_PER_MILLION": os.environ.get(
-                    "JARVIS_GPT53_INPUT_USD_PER_MILLION", ""
-                ),
-                "JARVIS_GPT53_OUTPUT_USD_PER_MILLION": os.environ.get(
-                    "JARVIS_GPT53_OUTPUT_USD_PER_MILLION", ""
-                ),
+                **_provider_configuration(),
             },
         )
         pipeline = SupervisedDevelopmentPipeline(controller, worker, RuntimeReview())

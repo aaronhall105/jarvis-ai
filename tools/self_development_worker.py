@@ -561,78 +561,14 @@ def _apply_incremental_edits(
     policy: dict[str, Any],
     config: base.WorkerConfig,
 ) -> tuple[str, list[str], str]:
-    edits = payload.get("edits")
-    if not isinstance(edits, list) or not edits:
-        raise base.WorkerError("Development step returned no structured edits.")
-    if len(edits) > config.max_patch_lines:
-        raise base.WorkerError("Development step contains too many structured edits.")
-
-    grouped: dict[str, list[tuple[str, str]]] = {}
-    for index, edit in enumerate(edits, start=1):
-        if not isinstance(edit, dict):
-            raise base.WorkerError(f"Development edit {index} is not an object.")
-        path_value = edit.get("path")
-        old_text = edit.get("old_text")
-        new_text = edit.get("new_text")
-        if not isinstance(path_value, str):
-            raise base.WorkerError(f"Development edit {index} has an invalid path.")
-        path = base._validate_structured_edit_path(path_value, policy)
-        if not isinstance(old_text, str) or not old_text:
-            raise base.WorkerError(f"Development edit {index} has invalid old_text.")
-        if not isinstance(new_text, str):
-            raise base.WorkerError(f"Development edit {index} has invalid new_text.")
-        if old_text == new_text:
-            raise base.WorkerError(f"Development edit {index} would make no change.")
-        grouped.setdefault(path, []).append((old_text, new_text))
-
-    workspace_root = workspace.resolve()
-    originals: dict[Path, str] = {}
-    updated_files: dict[Path, str] = {}
+    # Share the exact structured validator with the installed supervised worker,
+    # without importing this legacy provider/integration engine there.
+    from supervised_development_edits import StructuredEditError, apply_incremental_edits
 
     try:
-        for path, replacements in grouped.items():
-            target = workspace / path
-            if target.is_symlink() or not target.is_file():
-                raise base.WorkerError(f"Development target is not a safe regular file: {path}")
-            resolved = target.resolve()
-            if not resolved.is_relative_to(workspace_root):
-                raise base.WorkerError(f"Development edit escaped the worktree: {path}")
-            original = target.read_text(encoding="utf-8")
-            originals[target] = original
-            spans: list[tuple[int, int, str]] = []
-            for old_text, new_text in replacements:
-                occurrences = original.count(old_text)
-                if occurrences != 1:
-                    raise base.WorkerError(
-                        f"Development old_text for {path} occurs {occurrences} times; exactly one is required."
-                    )
-                start = original.index(old_text)
-                end = start + len(old_text)
-                if any(
-                    start < other_end and end > other_start for other_start, other_end, _ in spans
-                ):
-                    raise base.WorkerError(f"Development edits overlap in {path}.")
-                spans.append((start, end, new_text))
-            updated = original
-            for start, end, new_text in sorted(spans, key=lambda item: item[0], reverse=True):
-                updated = updated[:start] + new_text + updated[end:]
-            updated_files[target] = updated
-
-        for target, updated in updated_files.items():
-            target.write_text(updated, encoding="utf-8")
-
-        patch = base.run(
-            ["git", "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
-            cwd=workspace,
-        ).stdout
-        if not patch.strip():
-            raise base.WorkerError("Development edits produced no Git diff.")
-        paths, patch_hash = base.validate_patch_policy(patch, policy, config)
-        return patch, paths, patch_hash
-    except Exception:
-        for target, original in originals.items():
-            target.write_text(original, encoding="utf-8")
-        raise
+        return apply_incremental_edits(workspace, payload, policy, config)
+    except StructuredEditError as exc:
+        raise base.WorkerError(str(exc)) from exc
 
 
 def _write_patch(candidate_id: int, patch: str) -> Path:

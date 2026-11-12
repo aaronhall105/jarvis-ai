@@ -412,11 +412,28 @@ def path_matches(path: str, patterns: Iterable[str]) -> bool:
 
 def fetch_candidate(statuses: tuple[str, ...]) -> dict[str, Any] | None:
     placeholders = ",".join("?" for _ in statuses)
-    with connect() as connection:
+    # Selection must not create the database or change its journal mode.
+    with sqlite3.connect(
+        DB_PATH.resolve().as_uri() + "?mode=ro", uri=True, timeout=30
+    ) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(improvement_candidates)")
+        }
+        # Evidence-scoped queued work belongs solely to the supervised lifecycle.
+        # Legacy separately-authorised deploy/rollback states are not rewritten.
+        supervised = (
+            "AND NOT (status='queued' AND development_scope_json IS NOT NULL "
+            "AND development_scope_json != '')"
+            if "development_scope_json" in columns
+            else ""
+        )
         row = connection.execute(
             f"""
             SELECT * FROM improvement_candidates
             WHERE status IN ({placeholders})
+            {supervised}
             ORDER BY candidate_id ASC LIMIT 1
             """,
             statuses,

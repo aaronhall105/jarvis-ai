@@ -36,12 +36,11 @@ def _evidence(diff_sha):
     }
 
 
-def test_review_runner_verifies_real_diff(tmp_path):
+def test_review_runner_rejects_boolean_claims_without_execution_record(tmp_path):
     base, digest = _repo(tmp_path)
     review = TrustedReviewRunner(tmp_path, base_sha=base, allowed_paths=("diagnostic.py",))
-    result = review.review(object(), _evidence(digest))
-    assert result["verified"] is True
-    assert result["diff_sha256"] == digest
+    with pytest.raises(LifecycleError, match="review_execution_record_missing"):
+        review.review(object(), _evidence(digest))
 
 
 def test_review_runner_rejects_scope_and_claimed_results(tmp_path):
@@ -72,3 +71,66 @@ def test_review_runner_rejects_source_drift(tmp_path):
     review = TrustedReviewRunner(tmp_path, base_sha=base, allowed_paths=("diagnostic.py",))
     with pytest.raises(LifecycleError, match="review_source_drift"):
         review.review(object(), _evidence(digest))
+
+
+def test_review_runner_requires_actual_unmodified_private_execution_receipt(tmp_path):
+    from pathlib import Path
+    from tools.supervised_development_worker import verification_receipt
+    from tools.tests.test_supervised_development_worker import (
+        RecordingLedger,
+        _repo as source_repo,
+        _worker,
+        _task,
+        _reply,
+        _edit,
+    )
+
+    root, sha = source_repo(tmp_path)
+    worker = _worker(
+        tmp_path,
+        root,
+        lambda *args: _reply(
+            _edit("diagnostic.py", "VALUE = 1", "VALUE = 2"),
+            _edit("test_diagnostic.py", "assert VALUE == 1", "assert VALUE == 2"),
+        ),
+    )
+    task = _task(sha)
+    evidence = worker.run(task, call_ledger=RecordingLedger())
+    workspace = Path(evidence["worktree"])
+    reviewer = TrustedReviewRunner(workspace, base_sha=sha, allowed_paths=task.allowed_paths)
+    assert reviewer.review(task, evidence)["verified"]
+    receipt = verification_receipt(workspace)
+    original = receipt.read_bytes()
+    receipt.write_bytes(original + b" ")
+    with pytest.raises(LifecycleError, match="record_mismatch"):
+        reviewer.review(task, evidence)
+    receipt.write_bytes(original)
+    receipt.chmod(0o666)
+    with pytest.raises(LifecycleError, match="record_untrusted"):
+        reviewer.review(task, evidence)
+    receipt.chmod(0o600)
+    evidence["tests"]["checks"] = []
+    with pytest.raises(LifecycleError, match="checks_missing"):
+        reviewer.review(task, evidence)
+
+
+def test_review_runner_rejects_staged_changes_without_a_commit(tmp_path):
+    base, digest = _repo(tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "diagnostic.py"], check=True)
+    reviewer = TrustedReviewRunner(tmp_path, base_sha=base, allowed_paths=("diagnostic.py",))
+    with pytest.raises(LifecycleError, match="staged_git_changes"):
+        reviewer.review(object(), _evidence(digest))
+
+
+def test_review_git_cannot_inherit_external_diff_or_fsmonitor(tmp_path, monkeypatch):
+    base, digest = _repo(tmp_path)
+    marker = tmp_path.parent / "unexpected-git-command"
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", f"touch {marker}")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "core.fsmonitor", f"touch {marker}"], check=True
+    )
+    review = TrustedReviewRunner(tmp_path, base_sha=base, allowed_paths=("diagnostic.py",))
+    names, diff = review._scope()
+    assert names == ["diagnostic.py"]
+    assert hashlib.sha256(diff).hexdigest() == digest
+    assert not marker.exists()
