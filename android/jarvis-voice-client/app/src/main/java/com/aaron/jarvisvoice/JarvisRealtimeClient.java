@@ -1069,6 +1069,7 @@ public final class JarvisRealtimeClient {
                 }
             }
             case "session.context",
+                 "development.request",
                  "tool.started",
                  "tool.completed",
                  "memory.context",
@@ -2058,7 +2059,7 @@ public final class JarvisRealtimeClient {
     private static boolean isTurnScopedType(String type) {
         return switch (type == null ? "" : type) {
             case "brain.started", "brain.delta", "brain.response", "brain.discarded",
-                 "tool.started", "tool.completed", "memory.context", "turn.summary",
+                 "tool.started", "tool.completed", "development.request", "memory.context", "turn.summary",
                  "assistant.transcript.delta", "assistant.transcript.done",
                  "original.tts", "audio.done", "turn.done", "turn.accepted",
                  "turn.status", "turn.conflict", "turn.interrupted",

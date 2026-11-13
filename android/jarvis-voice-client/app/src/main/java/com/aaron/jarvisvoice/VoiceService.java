@@ -1347,6 +1347,16 @@ public final class VoiceService extends Service implements
         }
 
         switch (event.type) {
+            case "development.request" -> {
+                try {
+                    if (event.developmentRequest == null) return;
+                    new DevelopmentRequestStore(this).acknowledge(event.developmentRequest);
+                    broadcastEvent("development.request", "", event.developmentRequest.getString("request_id"),
+                        voiceActive, false);
+                } catch (Exception invalid) {
+                    status("Development request needs attention. Open Jarvis Development to refresh.");
+                }
+            }
             case "session.context" -> {
                 String name = event.userName == null
                     || event.userName.isBlank()

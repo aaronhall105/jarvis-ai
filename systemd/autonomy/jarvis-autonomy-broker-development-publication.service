@@ -18,6 +18,9 @@ CapabilityBoundingSet=CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=true
+# Only trusted read-only source and the authoritative SQLite directory are
+# exposed through ProtectHome. The directory is required for live WAL/shm.
+BindReadOnlyPaths=/home/aaron/jarvis-unified-production-worktree /home/aaron/jarvis/.git /home/aaron/.local/share/jarvis-runtime/data
 ReadOnlyPaths=/var/lib/jarvis-autonomy/work /var/lib/jarvis-autonomy-guardian /etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
 PrivateTmp=true
 PrivateDevices=true
@@ -32,7 +35,7 @@ LockPersonality=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX
 TasksMax=16
-MemoryMax=128M
+MemoryMax=256M
 CPUQuota=50%
 TimeoutStopSec=20
 KillMode=mixed

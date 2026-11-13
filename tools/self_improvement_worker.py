@@ -429,6 +429,16 @@ def fetch_candidate(statuses: tuple[str, ...]) -> dict[str, Any] | None:
             if "development_scope_json" in columns
             else ""
         )
+        # A newly recorded owner enhancement belongs to the same protected
+        # lifecycle even before a scope proposal exists. Never let a legacy
+        # worker race source preparation or take over this request later.
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='improvement_development_requests'"
+        ).fetchone():
+            supervised += (
+                " AND NOT EXISTS (SELECT 1 FROM improvement_development_requests r "
+                "WHERE r.candidate_id = improvement_candidates.candidate_id)"
+            )
         row = connection.execute(
             f"""
             SELECT * FROM improvement_candidates

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from .autonomy import Governor
 from .autonomy_host import collect_report, development_lifecycle, guardian_status, relay_operator
+from . import development_client
 
 
 def router(governor: Callable[[], Governor | None], authorised: Callable) -> APIRouter:
@@ -71,5 +72,66 @@ def router(governor: Callable[[], Governor | None], authorised: Callable) -> API
                 raise HTTPException(503, "Protected operator service unavailable")
             raise HTTPException(403, "Signed operator authorization was rejected")
         return result
+
+    async def product_preview(view: str, identifier: int | str, authorization: str | None):
+        require(authorization)
+        try:
+            result = await asyncio.to_thread(development_client.preview, view, identifier)
+        except ValueError:
+            raise HTTPException(400, "Invalid development identifier") from None
+        # Do not disguise an unavailable protected publisher as an empty form.
+        # A blocked, valid read is useful explanatory state, not an approval.
+        if result["status"] == "unavailable":
+            raise HTTPException(503, "Protected development publication unavailable")
+        return result
+
+    @routes.get("/development/prepare/{candidate_id}")
+    async def preparation(candidate_id: int, authorization: str | None = Header(default=None)):
+        return await product_preview("prepare", candidate_id, authorization)
+
+    @routes.get("/development/activation/{task_id}")
+    async def activation(task_id: str, authorization: str | None = Header(default=None)):
+        return await product_preview("activation", task_id, authorization)
+
+    @routes.get("/development/proposal/{task_id}")
+    async def proposal(task_id: str, authorization: str | None = Header(default=None)):
+        return await product_preview("proposal", task_id, authorization)
+
+    async def signed_product_action(action: str, request: Request, authorization: str | None):
+        require(authorization)
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > development_client.MAX_REQUEST:
+                raise HTTPException(413, "Request too large")
+        try:
+            body = development_client.decode(raw)
+        except (ValueError, RecursionError):
+            raise HTTPException(400, "Invalid signed request") from None
+        result = await asyncio.to_thread(development_client.relay, action, body)
+        if not result["ok"]:
+            category = result["category"]
+            if category in {"approval_expired", "request_expired"}:
+                raise HTTPException(410, "Approval expired; refresh before signing")
+            if category in {"outcome_unconfirmed", "integration_reconciliation_required"}:
+                raise HTTPException(503, "Outcome unconfirmed; refresh status, do not resend")
+            if category == "integration_authority_unprovisioned":
+                raise HTTPException(503, "Protected PR integration is not provisioned")
+            raise HTTPException(403, "Signed authorization rejected; no success confirmed")
+        return result
+
+    @routes.post("/development/start")
+    async def start(request: Request, authorization: str | None = Header(default=None)):
+        return await signed_product_action("prepare_development", request, authorization)
+
+    @routes.post("/development/activate")
+    async def activate(request: Request, authorization: str | None = Header(default=None)):
+        # This is a distinct, task-bound, signed capability, not HTTP RESUME.
+        # The broker checks the prior genuine task signature and generation.
+        return await signed_product_action("activate_development", request, authorization)
+
+    @routes.post("/development/publish")
+    async def publish(request: Request, authorization: str | None = Header(default=None)):
+        return await signed_product_action("create_development_pr", request, authorization)
 
     return routes

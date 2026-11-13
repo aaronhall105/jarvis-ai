@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import socket
 import sqlite3
 import struct
 import time
 from pathlib import Path
 from typing import Any
+
+from tools.autonomy_broker import Denied
 
 from tools.supervised_development_controller import (
     CONTROLLER_DATABASE,
@@ -18,7 +21,8 @@ from tools.supervised_development_controller import (
 )
 
 SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
-MAX_FRAME = 16_384
+MAX_FRAME = 262_144
+MAX_EXPORT_FRAME = 8 * 1024 * 1024
 
 
 def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
@@ -42,6 +46,9 @@ def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
             "lifecycle_state": None,
             "provider_calls": 0,
             "development_task": None,
+            "candidate_id": None,
+            "approval_accepted": False,
+            "proposal_available": False,
         }
         if len(live) > 1:
             return {**result, "status": "blocked", "reason": "multiple_active_tasks"}
@@ -59,6 +66,8 @@ def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
         if not isinstance(calls, int) or calls < 0:
             raise LifecycleError("controller_state_invalid")
         result.update(task_id=row["id"], lifecycle_state=state, provider_calls=calls)
+        parameters = json.loads(row["parameters"])
+        result["candidate_id"] = parameters.get("candidate_id")
         mapped = {
             "PROPOSED": "pending",
             "RUNNING": "running",
@@ -89,14 +98,16 @@ def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
         reader.db.execute("ROLLBACK")
 
 
-def _frame(value: dict[str, Any]) -> bytes:
+def _frame(value: dict[str, Any], *, maximum: int = MAX_FRAME) -> bytes:
     raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")
-    if len(raw) > MAX_FRAME:
+    if len(raw) > maximum:
         raise ValueError("publication_frame_too_large")
     return struct.pack("!I", len(raw)) + raw
 
 
 class PendingTaskPublisher:
+    integration_uid: int | None = None
+
     def __init__(self, controller: SupervisedDevelopmentController, *, gateway_uid: int):
         self.database = controller.database
         self.gateway_uid = gateway_uid
@@ -105,7 +116,8 @@ class PendingTaskPublisher:
         _, uid, _ = struct.unpack(
             "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
-        if uid != self.gateway_uid:
+        integration_uid = getattr(self, "integration_uid", None)
+        if uid != self.gateway_uid and uid != integration_uid:
             raise PermissionError("publication_peer_denied")
         header = connection.recv(4)
         if len(header) != 4:
@@ -117,18 +129,104 @@ class PendingTaskPublisher:
         if (
             not isinstance(body, dict)
             or type(body.get("version")) is not int
-            or body not in ({"version": 1}, {"version": 2})
+            or (body not in ({"version": 1}, {"version": 2}) and body.get("version") != 3)
         ):
             raise ValueError("publication_request_schema")
+        if body["version"] == 3 and (
+            body.get("view") not in {"prepare", "activation", "proposal", "integration_export"}
+            or set(body)
+            != {"version", "view", "candidate_id" if body.get("view") == "prepare" else "task_id"}
+        ):
+            raise ValueError("publication_request_schema")
+        exporting = (
+            uid == integration_uid
+            and body.get("version") == 3
+            and body.get("view") == "integration_export"
+        )
+        if uid != self.gateway_uid and not exporting:
+            raise PermissionError("publication_peer_denied")
+        if body.get("view") == "integration_export" and not exporting:
+            raise PermissionError("publication_peer_denied")
         try:
             reader = SupervisedDevelopmentController(self.database, read_only=True)
             try:
-                envelope = (
-                    lifecycle_view(reader) if body["version"] == 2 else reader.pending_owner_task()
-                )
+                envelope: dict[str, Any] | None
+                if body["version"] == 3:
+                    from tools.supervised_development_product import production_preview
+
+                    envelope = production_preview(body, reader, export=exporting)
+                else:
+                    envelope = (
+                        lifecycle_view(reader)
+                        if body["version"] == 2
+                        else reader.pending_owner_task()
+                    )
+                    if (
+                        body["version"] == 2
+                        and isinstance(envelope, dict)
+                        and envelope["status"] == "idle"
+                    ):
+                        from tools.supervised_development_product import read_readiness
+
+                        readiness = read_readiness()
+                        if (
+                            readiness is not None
+                            and readiness.get("status") == "blocked"
+                            and readiness["expires_at"] > time.time()
+                        ):
+                            envelope.update(
+                                status="blocked",
+                                reason="development_execution_preflight_failed",
+                                candidate_id=readiness.get("candidate_id"),
+                            )
+                    if (
+                        body["version"] == 2
+                        and isinstance(envelope, dict)
+                        and envelope.get("task_id")
+                    ):
+                        from tools.supervised_development_product import (
+                            ADMISSION_DATABASE,
+                            approved_task,
+                            readonly_ledger,
+                        )
+
+                        if envelope["status"] == "approval_requested":
+                            try:
+                                admission = readonly_ledger(ADMISSION_DATABASE)
+                                try:
+                                    approved_task(reader, envelope["task_id"], admission)
+                                    envelope["approval_accepted"] = True
+                                finally:
+                                    admission.close()
+                            except (Denied, OSError, sqlite3.DatabaseError, ValueError):
+                                # No positive authorization status without a verified receipt.
+                                pass
+                        if envelope["status"] == "review_required":
+                            from tools.supervised_development_product import production_preview
+
+                            try:
+                                production_preview(
+                                    {
+                                        "version": 3,
+                                        "view": "proposal",
+                                        "task_id": envelope["task_id"],
+                                    },
+                                    reader,
+                                )
+                                envelope["proposal_available"] = True
+                            except (Denied, LifecycleError, OSError, ValueError, KeyError):
+                                pass
             finally:
                 reader.close()
-        except (LifecycleError, sqlite3.DatabaseError, ValueError, TypeError, KeyError):
+        except (
+            Denied,
+            LifecycleError,
+            sqlite3.DatabaseError,
+            ValueError,
+            TypeError,
+            KeyError,
+            OSError,
+        ):
             # Unavailable or damaged state is never equivalent to no task.
             connection.sendall(
                 _frame(
@@ -140,7 +238,12 @@ class PendingTaskPublisher:
                 )
             )
             return
-        connection.sendall(_frame(envelope or {"version": 1, "status": "none"}))
+        connection.sendall(
+            _frame(
+                envelope or {"version": 1, "status": "none"},
+                maximum=MAX_EXPORT_FRAME if exporting else MAX_FRAME,
+            )
+        )
 
 
 def serve_listener(listener: socket.socket, *, database: Path, gateway_uid: int) -> None:
@@ -150,6 +253,10 @@ def serve_listener(listener: socket.socket, *, database: Path, gateway_uid: int)
     publisher = PendingTaskPublisher.__new__(PendingTaskPublisher)
     publisher.database = Path(database)
     publisher.gateway_uid = gateway_uid
+    try:
+        publisher.integration_uid = pwd.getpwnam("jarvis-integration").pw_uid
+    except KeyError:
+        publisher.integration_uid = None
 
     try:
         while True:

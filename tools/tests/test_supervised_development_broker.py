@@ -86,6 +86,30 @@ def test_receipt_retry_cannot_cross_stop_or_activation_cycle(tmp_path):
     ledger.close()
 
 
+def test_activation_guard_cannot_cross_a_changed_guardian_observation(tmp_path):
+    status = {
+        "state": "ACTIVE",
+        "trusted": True,
+        "generation": str(uuid.uuid4()),
+        "previous_generation": str(uuid.uuid4()),
+    }
+    broker, ledger, request = approved_request(tmp_path, status)
+    observations = iter([status, {**status, "generation": str(uuid.uuid4())}])
+    broker.guardian = lambda: next(observations)
+    broker.activation_guard = lambda *_: pytest.fail(
+        "changed generation cannot reach admission guard"
+    )
+    try:
+        with pytest.raises(Denied, match="stale_cycle"):
+            broker.admit(request, 1001)
+        assert ledger.db.execute(
+            "SELECT status,receipt FROM development_admissions"
+        ).fetchone() == ("approved", None)
+        assert ledger.verify_audit() == 1
+    finally:
+        ledger.close()
+
+
 @pytest.mark.parametrize(
     "observation",
     [

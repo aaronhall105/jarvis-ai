@@ -130,12 +130,14 @@ class DevelopmentAdmissionBroker:
         worker_uid: int,
         public_keys: dict[str, bytes],
         guardian,
+        activation_guard=None,
     ) -> None:
         self.ledger = ledger
         self.relay_uid = relay_uid
         self.worker_uid = worker_uid
         self.public_keys = dict(public_keys)
         self.guardian = guardian
+        self.activation_guard = activation_guard
         self.ledger.db.execute(
             """CREATE TABLE IF NOT EXISTS development_admissions (
                 approval_id TEXT PRIMARY KEY,
@@ -215,6 +217,11 @@ class DevelopmentAdmissionBroker:
         active_generation = self._guardian_active(approval["guardian_generation"])
         if active_generation is None:
             raise Denied("guardian_not_active")
+        if self.activation_guard is not None:
+            current = self.guardian()
+            if not isinstance(current, dict) or current.get("generation") != active_generation:
+                raise Denied("development_admission_stale_cycle")
+            self.activation_guard(request, current)
         if row[1] == "admitted":
             receipt = json.loads(row[2])
             if receipt.get("guardian_generation") != active_generation:

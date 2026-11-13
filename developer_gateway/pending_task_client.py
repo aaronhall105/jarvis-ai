@@ -100,13 +100,30 @@ def fetch_lifecycle() -> dict[str, Any]:
         "failed",
     }
     if (
-        set(body) not in (required, required | {"reason"})
+        not required <= set(body)
+        or set(body)
+        - required
+        - {"reason", "candidate_id", "approval_accepted", "proposal_available"}
         or body.get("version") != 2
         or body.get("status") not in statuses
         or type(body.get("provider_calls")) is not int
         or body["provider_calls"] < 0
     ):
         raise ValueError("publication_lifecycle_schema")
+    if (
+        "candidate_id" in body
+        and body["candidate_id"] is not None
+        and (type(body["candidate_id"]) is not int or body["candidate_id"] <= 0)
+    ):
+        raise ValueError("publication_candidate_invalid")
+    for proof, eligible_status in (
+        ("approval_accepted", "approval_requested"),
+        ("proposal_available", "review_required"),
+    ):
+        if proof in body and (
+            type(body[proof]) is not bool or (body[proof] and body["status"] != eligible_status)
+        ):
+            raise ValueError("publication_proof_invalid")
     task = body["development_task"]
     if body["status"] == "approval_requested":
         if (

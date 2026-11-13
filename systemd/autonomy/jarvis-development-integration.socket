@@ -1,0 +1,14 @@
+[Unit]
+Description=Separately owner-signed Jarvis draft PR handoff socket
+
+[Socket]
+ListenStream=/run/jarvis-development-integration/integration.sock
+SocketUser=root
+SocketGroup=aaron
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=true
+Backlog=4
+
+[Install]
+WantedBy=sockets.target

@@ -16,6 +16,11 @@ GENERATION = "10000000-0000-4000-8000-000000000001"
 
 @pytest.fixture(autouse=True)
 def pinned_test_environment(monkeypatch):
+    # These tests isolate the post-preflight process supervisor. Readiness
+    # denial and exact receipt binding have separate product regressions.
+    monkeypatch.setattr(
+        SupervisedDevelopmentRuntime, "_verify_execution_readiness", lambda *_: None
+    )
     monkeypatch.setattr(
         runtime_module, "verify_worker_environment", lambda: Path("/opt/fixture-runtime/bin/python")
     )

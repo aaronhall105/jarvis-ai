@@ -72,6 +72,24 @@ public final class ImprovementApiClient {
         post("/api/improvement/request", body, callback);
     }
 
+    /** Caller persists this exact UUID/body before submission; retry is idempotent at Core. */
+    public void requestDevelopment(JSONObject request, JsonCallback callback) {
+        try {
+            DevelopmentRequestStore.requireId(request.getString("request_id"));
+            String objective = request.getString("request");
+            if (request.length() != 2 || objective.length() < 3 || objective.length() > 2000)
+                throw new IllegalArgumentException("Invalid development request.");
+            post("/api/improvement/development", request, callback);
+        } catch (Exception invalid) { callback.onError("Development request is invalid; nothing was submitted."); }
+    }
+
+    public void loadDevelopment(String requestId, JsonCallback callback) {
+        try {
+            DevelopmentRequestStore.requireId(requestId);
+            get("/api/improvement/development/" + requestId, callback);
+        } catch (IllegalArgumentException invalid) { callback.onError("Saved development request identity is invalid."); }
+    }
+
     public void retry(int candidateId, JsonCallback callback) {
         post(
             "/api/improvement/candidates/"

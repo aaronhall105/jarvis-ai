@@ -99,6 +99,24 @@ def test_missing_and_damaged_publisher_are_not_idle(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("field", ["approval_accepted", "proposal_available"])
+@pytest.mark.parametrize("value", [True, 1, "true", None])
+def test_unverified_or_wrong_state_proof_is_not_shown(monkeypatch, field, value):
+    monkeypatch.setattr(pending_task_client, "_fetch", lambda _: {**view(), field: value})
+    assert autonomy_host.development_lifecycle()["status"] == "unavailable"
+
+
+def test_review_availability_requires_explicit_protected_receipt(monkeypatch):
+    value = {
+        **view("review_required"),
+        "candidate_id": 75,
+        "approval_accepted": False,
+        "proposal_available": True,
+    }
+    monkeypatch.setattr(pending_task_client, "_fetch", lambda _: value)
+    assert pending_task_client.fetch_lifecycle() == value
+
+
 def test_real_socket_rejects_nonroot_publisher_before_request(tmp_path, monkeypatch):
     if os.geteuid() == 0:
         pytest.skip("non-root peer fixture requires unprivileged test process")

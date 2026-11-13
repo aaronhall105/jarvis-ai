@@ -13,10 +13,13 @@ from tools import autonomy_broker_install as installer
 from tools import autonomy_guardian as g
 from tools.autonomy_broker import Denied, canonical
 
-INSTALLED_SOURCE = "8140346f5e5c05c34445b0c7ea3137f39c7f35ee"
+INSTALLED_SOURCE = "23a24a70cff9971778f966a0e45137c7fe60e2ca"
 ADDED_MODULES = {
-    "supervised_development_environment.py",
-    "supervised_development_environment.lock.json",
+    "supervised_development_product.py",
+    "supervised_development_integration.py",
+    "supervised_development_integration_service.py",
+    "jarvis-development-integration.service",
+    "jarvis-development-integration.socket",
 }
 
 
@@ -294,11 +297,16 @@ def _make_legacy_install(rehearsal, monkeypatch):
             "supervised_development_environment.py",
             "supervised_development_environment.lock.json",
             "supervised_development_pipeline.py",
+            "supervised_development_product.py",
+            "supervised_development_integration.py",
+            "supervised_development_integration_service.py",
             "supervised_development_publication.py",
             "supervised_development_review.py",
             "supervised_development_runtime.py",
             "supervised_development_scope.py",
             "supervised_development_worker.py",
+            "jarvis-development-integration.service",
+            "jarvis-development-integration.socket",
         }
     }
     for path in development:
@@ -335,7 +343,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
     )
     assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
     assert installer.CURRENT_BUNDLE == (
-        "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
+        "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
     )
     assert installer.UPGRADE_BUNDLE == installer.fingerprint(installer.payload())
     baseline_files = _reviewed_source_payload(installer.payload())
@@ -344,7 +352,7 @@ def test_reviewed_bundle_ids_match_current_payload_and_installed_source():
 
 def test_actual_installed_payload_identity_is_reconstructed_completely():
     baseline = _reviewed_source_payload(installer.payload())
-    assert len(baseline) == 33  # Plus retained private configuration and policy = 35.
+    assert len(baseline) == 35  # Plus retained private configuration and policy = 37.
     assert installer.fingerprint(baseline) == installer.CURRENT_BUNDLE
 
 
@@ -353,7 +361,14 @@ def test_installed_edit_scope_is_dependency_free_not_mutable_core_import(tmp_pat
     target = installer.LIB / "tools/supervised_development_scope.py"
     assert files[target][0] == (installer.ROOT / "bridge/app/development_scope.py").read_bytes()
     assert b"from bridge" not in files[target][0]
-    assert all(path.name != "supervised_development_integration.py" for path in files)
+    # Root publication reuses proposal verification, but GitHub execution is a
+    # separately provisioned, disabled, credential-isolated non-worker service.
+    integration = files[installer.UNITS / "jarvis-development-integration.service"][0]
+    assert b"User=jarvis-integration\n" in integration
+    assert b"CapabilityBoundingSet=\n" in integration
+    assert b"InaccessiblePaths=-/var/lib/jarvis-autonomy-broker" in integration
+    assert all(path.name not in {"github-token", "policy.json"} for path in files)
+    assert not any("integration" in name for name in installer.SOCKETS)
     standalone = tmp_path / "installed_scope.py"
     standalone.write_bytes(files[target][0])
     script = (
@@ -773,7 +788,7 @@ def test_upgrade_rejects_unknown_legacy_bundle_without_changes(rehearsal, monkey
 @pytest.mark.parametrize(
     "failure", [None, "activation", "modified", "unknown", "missing", "extra", "permission"]
 )
-def test_installed_pr135_payload_to_worker_runtime_preserves_history(
+def test_installed_pr137_payload_to_native_product_preserves_history(
     rehearsal, monkeypatch, failure
 ):
     files, policy, guardian, commands, _original, paths = rehearsal
@@ -783,7 +798,7 @@ def test_installed_pr135_payload_to_worker_runtime_preserves_history(
     installer.install(old_files, policy)
     marker = paths["BASE"] / "installed.json"
     previous = json.loads(marker.read_bytes())
-    assert len(previous["files"]) == 35
+    assert len(previous["files"]) == 37
     previous["bundle"] = installer.CURRENT_BUNDLE
     if failure == "unknown":
         previous["bundle"] = "unreviewed"
@@ -1076,6 +1091,21 @@ def test_interrupted_or_manifest_failed_upgrade_restores_exact_protected_bundle(
     assert guardian.status()["state"] == "STOPPED"
 
 
+def test_unreviewed_existing_destination_is_not_overwritten(rehearsal, monkeypatch):
+    files, policy, guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
+    target = paths["LIB"] / "tools/supervised_development_product.py"
+    assert not target.exists()
+    target.write_bytes(b"unreviewed existing source; must be preserved")
+    target.chmod(0o644)
+    before = target.read_bytes()
+    commands.reset_mock()
+    with pytest.raises(Denied, match="upgrade_destination_unexpected"):
+        installer.upgrade(files, policy)
+    assert target.read_bytes() == before
+    assert guardian.status()["state"] == "STOPPED"
+    commands.assert_not_called()
+
+
 def test_unknown_interrupted_transaction_prevents_all_automatic_retry(rehearsal, monkeypatch):
     files, policy, _guardian, commands, paths = _current_workspace_fixture(rehearsal, monkeypatch)
     record = paths["BASE"] / "upgrade-transaction.json"
@@ -1112,8 +1142,8 @@ def test_worker_environment_is_reviewed_payload_not_root_interpreter_or_auto_pro
         if path.suffix == ".service":
             assert b"ExecStart=/usr/bin/python3 -I " in contents
             assert b"ExecStart=/opt/" not in contents
-    assert len(installer.current_payload_paths()) == 33
-    assert len(files) == 35
+    assert len(installer.current_payload_paths()) == 35
+    assert len(files) == 40  # Existing sealed worker plus three adapters/two disabled PR units.
 
 
 def test_upgrade_rejects_missing_real_legacy_path(rehearsal, monkeypatch):

@@ -440,6 +440,8 @@ def serve(role: str, policy: dict) -> None:
     if listener.family != socket.AF_UNIX or listener.getsockname() != expected:
         raise Denied("wrong_socket")
     if role == "development-admission":
+        from tools.supervised_development_product import admission_activation_fence
+
         ledger = Ledger(BASE / role / "operations.sqlite3")
         admission_broker = DevelopmentAdmissionBroker(
             ledger,
@@ -450,6 +452,7 @@ def serve(role: str, policy: dict) -> None:
                 for key, value in policy["operator_public_keys"].items()
             },
             guardian=guardian_status,
+            activation_guard=admission_activation_fence,
         )
         try:
             while True:
@@ -466,6 +469,18 @@ def serve(role: str, policy: dict) -> None:
         broker = Broker(ledger, policy["autonomy_uid"], guardian_status)
 
         def dispatch(raw, actor):
+            from tools.supervised_development_product import (
+                OPERATOR_DATABASE,
+                readonly_ledger,
+                trial_fenced,
+            )
+
+            operator_audit = readonly_ledger(OPERATOR_DATABASE)
+            try:
+                if trial_fenced(operator_audit, guardian_status()):
+                    raise Denied("development_trial_excludes_legacy_work")
+            finally:
+                operator_audit.close()
             if actor == policy["autonomy_uid"]:
                 completed = ledger.completed(decode_request(raw), actor)
                 if completed is not None:
@@ -484,6 +499,16 @@ def serve(role: str, policy: dict) -> None:
                 raise
     else:
         controller = guardian_module.Guardian()
+        from tools.supervised_development_product import production_operator
+
+        product = production_operator(
+            ledger,
+            {
+                k: base64.b64decode(v, validate=True)
+                for k, v in policy["operator_public_keys"].items()
+            },
+            controller,
+        )
         operator = OperatorDispatcher(
             ledger,
             relay_uid=policy["operator_uid"],
@@ -502,6 +527,7 @@ def serve(role: str, policy: dict) -> None:
                 expected_generation=epoch,
             ),
             development_approve=forward_development_approval,
+            development_product=product.dispatch,
         )
 
         def dispatch(raw, actor):
@@ -522,6 +548,10 @@ def serve(role: str, policy: dict) -> None:
 
 
 def main(arguments: list[str]) -> int:
+    if arguments == ["development-integration"]:
+        from tools.supervised_development_integration_service import main as integration_main
+
+        return integration_main()
     if len(arguments) == 2 and arguments[0] == "development-worker":
         # The coordinator is root, but development execution is deliberately
         # delegated to the policy-pinned autonomy account.  This branch accepts

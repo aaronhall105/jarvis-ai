@@ -17,6 +17,22 @@ from tools.supervised_development_controller import SupervisedDevelopmentControl
 from tools.supervised_development_publication import PendingTaskPublisher
 
 
+@pytest.fixture(autouse=True)
+def disposable_product_paths(tmp_path, monkeypatch):
+    from tools import supervised_development_product as product
+    from tools import supervised_development_runtime as runtime
+    from tools import autonomy_broker_runtime, autonomy_broker_host
+
+    monkeypatch.setattr(product, "READINESS_RECEIPT", tmp_path / "readiness.json")
+    monkeypatch.setattr(product, "ADMISSION_DATABASE", tmp_path / "admission.sqlite3")
+    monkeypatch.setattr(product, "OPERATOR_DATABASE", tmp_path / "operator.sqlite3")
+    monkeypatch.setattr(runtime, "WORKTREE_ROOT", tmp_path / "worktrees")
+    monkeypatch.setattr(autonomy_broker_host, "CANONICAL", tmp_path / "source")
+    monkeypatch.setattr(
+        autonomy_broker_runtime, "installed_policy", lambda: {"autonomy_uid": os.getuid()}
+    )
+
+
 def exchange(controller, version=2):
     publisher = PendingTaskPublisher(controller, gateway_uid=os.getuid())
     left, right = socket.socketpair()
@@ -85,7 +101,13 @@ def test_pending_status_keeps_exact_signed_envelope_and_database_unchanged(tmp_p
         "lifecycle_state",
         "provider_calls",
         "development_task",
+        "candidate_id",
+        "approval_accepted",
+        "proposal_available",
     }
+    assert first["candidate_id"] is None
+    assert first["approval_accepted"] is False
+    assert first["proposal_available"] is False
     assert controller.snapshot(task_id) == before
     controller.close()
     # Reconnect and process restart do not alter task identity or authority.
@@ -132,8 +154,14 @@ def test_expired_and_retired_tasks_are_not_idle_or_authorizable(tmp_path):
 
 def test_idle_requires_successful_empty_database_read(tmp_path):
     controller = SupervisedDevelopmentController(tmp_path / "controller.sqlite3")
-    assert exchange(controller)["status"] == "idle"
+    before = list(controller.db.iterdump())
+    result = exchange(controller)
+    assert result["status"] == "idle"
+    assert result["candidate_id"] is None
+    assert result["approval_accepted"] is False
+    assert result["proposal_available"] is False
     assert exchange(controller, 1) == {"version": 1, "status": "none"}
+    assert list(controller.db.iterdump()) == before
     controller.close()
 
 

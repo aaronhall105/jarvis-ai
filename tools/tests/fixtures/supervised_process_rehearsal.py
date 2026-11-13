@@ -123,8 +123,13 @@ def create_fixture():
     assert os.getuid() == 0 and Path("/.dockerenv").is_file()
     with Path("/etc/passwd").open("a") as stream:
         stream.write("jarvis-autonomy:x:600:600::/var/lib/jarvis-autonomy:/usr/sbin/nologin\n")
+        stream.write(
+            "jarvis-integration:x:700:700::/var/lib/jarvis-development-integration:/usr/sbin/nologin\n"
+        )
+        stream.write("aaron:x:1000:1000::/nonexistent:/usr/sbin/nologin\n")
     with Path("/etc/group").open("a") as stream:
         stream.write("jarvis-autonomy:x:600:\n")
+        stream.write("jarvis-integration:x:700:\naaron:x:1000:\n")
     os.setgroups([WORKER_UID])
     for directory in [BASE, SOCKETS, BASE / "operator", BASE / "development-admission"]:
         directory.mkdir(parents=True, exist_ok=True)
@@ -199,6 +204,25 @@ def create_fixture():
             }
         },
     )
+    private_json(
+        Path("/etc/jarvis-development-integration/policy.json"),
+        {
+            "version": 1,
+            "repository": "aaronhall105/jarvis-ai",
+            "base_branch": "jarvis/unified-production",
+            "integration_uid": 700,
+            "github_actor_id": 123,
+            "owner_public_keys": {key_id: base64.b64encode(public).decode()},
+        },
+        0o644,
+    )
+    for directory in (
+        Path("/var/lib/jarvis-development-integration"),
+        Path("/run/jarvis-development-integration"),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o700 if directory.parts[1] == "var" else 0o711)
+        os.chown(directory, 700, 700)
     guardian_policy = Path("/etc/jarvis-autonomy/guardian.json")
     private_json(
         guardian_policy,
@@ -311,30 +335,73 @@ def operator_service():
     def stop(actor):
         guardian.stop(actor, terminate=lambda: None)  # No host/systemd in disposable fixture.
 
-    def resume(actor, generation):
-        with guardian.lock():
-            assert guardian.status()["generation"] == generation
-            guardian.write_state("ACTIVE")
-            guardian.audit("resumed", actor)
+    from tools import autonomy_guardian as guardian_module
+    from tools.supervised_development_product import production_operator, CONTROLLER_UNIT
+
+    # Disposable service-manager boundary. The orchestrator starts the actual
+    # installed root entrypoint only after this fixed unit notification. All
+    # signatures, durable queue, task binding and Guardian transitions are real.
+    def fixed_systemctl(*args):
+        if args == ("start", "--no-block", CONTROLLER_UNIT):
+            Path("/tmp/controller-start-request").write_text("requested")
+            return True
+        if args == ("is-active", "--quiet", CONTROLLER_UNIT):
+            return Path("/tmp/controller-process-active").exists()
+        raise AssertionError(("unexpected service operation", args))
+
+    guardian_module.fixed_systemctl = fixed_systemctl
+    original_run = subprocess.run
+
+    def service_read(command, *args, **kwargs):
+        if command == ["/usr/bin/systemctl", "is-active", guardian_module.UNIT]:
+            return subprocess.CompletedProcess(command, 3, b"inactive\n", b"")
+        if command == ["/usr/bin/systemctl", "is-enabled", guardian_module.UNIT]:
+            return subprocess.CompletedProcess(command, 1, b"disabled\n", b"")
+        return original_run(command, *args, **kwargs)
+
+    subprocess.run = service_read
+
+    class FixtureGuardian:
+        status = guardian.status
+
+        @staticmethod
+        def stop(actor):
+            return guardian.stop(actor, terminate=lambda: None)
+
+        @staticmethod
+        def resume(euid, actor, ready, start, **kwargs):
+            return guardian.resume(euid, actor, ready, start, terminate=lambda: None, **kwargs)
+
+    keys = {key: base64.b64decode(value) for key, value in policy["operator_public_keys"].items()}
+    product = production_operator(ledger, keys, FixtureGuardian())
 
     dispatcher = OperatorDispatcher(
         ledger,
         relay_uid=OWNER_UID,
         autonomy_uid=WORKER_UID,
-        public_keys={
-            key: base64.b64decode(value) for key, value in policy["operator_public_keys"].items()
-        },
+        public_keys=keys,
         guardian=guardian.status,
         stop=stop,
-        resume=resume,
+        resume=lambda *_: (_ for _ in ()).throw(AssertionError("legacy resume forbidden")),
         development_approve=forward_development_approval,
+        development_product=product.dispatch,
     )
 
     def dispatch(raw, actor):
         if actor == 0 and raw == canonical({"emergency_stop": True}):
             stop(0)
             return {"state": "STOPPED"}
-        return dispatcher.dispatch(raw, actor)
+        try:
+            return dispatcher.dispatch(raw, actor)
+        except Exception as exc:
+            print(
+                "fixture_operator_failure",
+                type(exc).__name__,
+                str(exc),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
 
     listener = socket.socket(fileno=3)
     while True:
@@ -366,6 +433,14 @@ def owner_flow():
     with TestClient(app) as client:
         assert client.get("/api/autonomy").status_code == 401
         headers = {"Authorization": "Bearer disposable-gateway-session"}
+        preview = client.get("/api/autonomy/development/prepare/1", headers=headers)
+        assert preview.status_code == 200 and preview.json()["status"] == "ready", preview.text
+        preparation = sign(
+            private, preview.json()["request"], b"jarvis-development-preparation-v1\n"
+        )
+        prepared = client.post("/api/autonomy/development/start", headers=headers, json=preparation)
+        assert prepared.status_code == 200, prepared.text
+        assert Guardian().status()["state"] == "STOPPED"
         deadline = time.monotonic() + 20
         envelope = None
         while time.monotonic() < deadline:
@@ -422,7 +497,7 @@ def owner_flow():
             exchange(SOCKETS / "development-admission.sock", admission)["error"]
             == "development_admission_peer"
         )
-        activation = sign(
+        legacy_activation = sign(
             private,
             {
                 "version": 1,
@@ -434,13 +509,21 @@ def owner_flow():
             b"jarvis-autonomy-control-v1\n",
         )
         assert (
-            client.post("/api/autonomy/control", headers=headers, json=activation).status_code
+            client.post(
+                "/api/autonomy/control", headers=headers, json=legacy_activation
+            ).status_code
             == 403
         )
-        # Separate protected operator ceremony, never HTTP RESUME.
-        transition = exchange(SOCKETS / "operator.sock", activation)
-        assert transition["ok"] is True, transition
-        assert transition["result"]["generation"] != envelope["guardian_generation"]
+        preview = client.get(
+            "/api/autonomy/development/activation/" + envelope["task_id"], headers=headers
+        )
+        assert preview.status_code == 200 and preview.json()["status"] == "ready", preview.text
+        activation = sign(private, preview.json()["request"], b"jarvis-development-activation-v1\n")
+        transition = client.post(
+            "/api/autonomy/development/activate", headers=headers, json=activation
+        )
+        assert transition.status_code == 200, transition.text
+        assert Guardian().status()["generation"] != envelope["guardian_generation"]
     print(
         json.dumps(
             {"task_id": envelope["task_id"], "admission": admission, "gateway_uid": os.getuid()}
@@ -519,12 +602,112 @@ def provider_server():
     return server, Provider
 
 
+def proposal_flow():
+    sys.path.insert(0, "/opt/jarvis-source")
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from types import SimpleNamespace
+    from developer_gateway import autonomy_api
+
+    autonomy_api.guardian_status = Guardian().status
+    app = FastAPI()
+    app.include_router(
+        autonomy_api.router(
+            lambda: SimpleNamespace(snapshot=lambda state: {"status": state["state"]}),
+            lambda value: value == "Bearer disposable-gateway-session",
+        )
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/autonomy/development/proposal/" + os.environ["JARVIS_FIXTURE_TASK_ID"],
+            headers={"Authorization": "Bearer disposable-gateway-session"},
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "ready", body
+        proposal = body["proposal"]
+        assert proposal["provider_calls"] == 2
+        assert proposal["cost_usd"] == 0.0004
+        assert hashlib.sha256(proposal["diff"].encode()).hexdigest() == proposal["diff_sha256"]
+        assert [item["name"] for item in proposal["checks"]] == [
+            "pytest",
+            "ruff",
+            "bandit",
+            "compile",
+        ]
+        assert proposal["checks"][0]["test_counts"]["executed"] > 0
+        assert body["handoff"] is None and body["request"] is not None, body
+        original = json.loads(json.dumps(body))
+        private = serialization.load_pem_private_key(
+            Path("/tmp/disposable-owner-key.pem").read_bytes(), password=None
+        )
+        approval = sign(private, body["request"], b"jarvis-development-integration-v1\n")
+        published = client.post(
+            "/api/autonomy/development/publish",
+            headers={"Authorization": "Bearer disposable-gateway-session"},
+            json=approval,
+        )
+        assert published.status_code == 200, published.text
+        refreshed = client.get(
+            "/api/autonomy/development/proposal/" + os.environ["JARVIS_FIXTURE_TASK_ID"],
+            headers={"Authorization": "Bearer disposable-gateway-session"},
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["request"] is None
+        assert refreshed.json()["handoff"]["status"] == "PR_REVIEW_REQUIRED"
+        assert refreshed.json()["handoff"]["number"] == published.json()["result"]["number"]
+        body = original
+        print(json.dumps(body))
+
+
+def integration_service():
+    assert os.getuid() == os.geteuid() == 700
+    for protected in (CONTROLLER_DATABASE, Path("/tmp/disposable-owner-key.pem")):
+        try:
+            protected.read_bytes()
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("integration identity obtained protected state")
+    sys.path.append("/opt/jarvis-source")
+    import importlib.util
+
+    specification = importlib.util.spec_from_file_location(
+        "fixture_github", "/opt/jarvis-source/tools/tests/test_supervised_development_handoff.py"
+    )
+    fixture_module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(fixture_module)
+    GitHubFixture = fixture_module.GitHubFixture
+    from tools import supervised_development_integration as integration
+    from tools import supervised_development_integration_service as service
+
+    original_fetch = service.fetch_proposal
+    latest = {}
+
+    def fetch(task_id):
+        result = original_fetch(task_id)
+        latest["proposal"] = result
+        return result
+
+    service.fetch_proposal = fetch
+    integration._GitHub = lambda: GitHubFixture(latest["proposal"])
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(service.SOCKET)
+    Path(service.SOCKET).chmod(0o666)
+    listener.listen(10)
+    os.dup2(listener.fileno(), 3)
+    os.environ["LISTEN_PID"], os.environ["LISTEN_FDS"] = str(os.getpid()), "1"
+    service.main()
+
+
 def orchestrate():
     sha, governor_digest = create_fixture()
+    os.environ["JARVIS_SUPERVISED_MAX_CALLS"] = "2"
     services = [
         activated("development-admission", SOCKETS / "development-admission.sock"),
         activated("development-publication", SOCKETS / "development-task.sock"),
         activated("fixture-operator", SOCKETS / "operator.sock"),
+        run_child("fixture-integration", uid=700, wait=False),
     ]
     server, provider = provider_server()
     environment = {
@@ -539,8 +722,21 @@ def orchestrate():
         for process in services:
             if process.poll() is not None:
                 raise AssertionError((process.args[-1], process.communicate()))
+        owner_process = run_child("fixture-owner", uid=OWNER_UID, wait=False)
+        deadline = time.monotonic() + 20
+        while not Path("/tmp/controller-start-request").exists() and time.monotonic() < deadline:
+            if owner_process.poll() is not None:
+                owner_output = owner_process.communicate()
+                services[2].terminate()
+                operator_output = services[2].communicate(timeout=10)
+                raise AssertionError((owner_output, operator_output))
+            time.sleep(0.05)
+        assert Path("/tmp/controller-start-request").exists()
+        Path("/tmp/controller-process-active").touch()
         controller = run_child("development-controller", env=environment, wait=False)
-        owner = run_child("fixture-owner", uid=OWNER_UID)
+        owner_out, owner_err = owner_process.communicate(timeout=30)
+        assert owner_process.returncode == 0, owner_err
+        owner = json.loads(owner_out)
         # Actual root client is denied even after genuine activation.
         root_denial = exchange(SOCKETS / "development-admission.sock", owner["admission"])
         assert root_denial["error"] == "development_admission_peer"
@@ -613,6 +809,7 @@ def orchestrate():
             restart = run_child("development-controller", env=environment)
             assert restart["status"] in {
                 "no_eligible_candidate",
+                "owner_preparation_required",
                 "RECONCILIATION_REQUIRED",
                 "reconciliation_required",
             }, restart
@@ -651,13 +848,33 @@ def orchestrate():
             if Path("/tmp/fixture-worker-stderr").exists()
             else None,
             "restart": restart,
+            "proposal_view": run_child(
+                "fixture-proposal",
+                uid=OWNER_UID,
+                env={**os.environ, "JARVIS_FIXTURE_TASK_ID": owner["task_id"]},
+            )
+            if result["state"] == "REVIEW_REQUIRED"
+            else None,
         }
         print(json.dumps(output))
     finally:
         provider.release.set()
         server.shutdown()
         for process in services:
-            process.terminate()
+            if process.args[-1] == "fixture-integration" and process.poll() is None:
+                subprocess.run(
+                    [
+                        "/usr/bin/python3",
+                        "-I",
+                        "-c",
+                        "import os,signal,sys;os.kill(int(sys.argv[1]),signal.SIGTERM)",
+                        str(process.pid),
+                    ],
+                    preexec_fn=child_identity(700),
+                    check=True,
+                )
+            else:
+                process.terminate()
             process.communicate(timeout=10)
 
 
@@ -668,6 +885,12 @@ def entry():
         return 0
     if role == "fixture-owner":
         owner_flow()
+        return 0
+    if role == "fixture-proposal":
+        proposal_flow()
+        return 0
+    if role == "fixture-integration":
+        integration_service()
         return 0
     listener = os.getenv("FIXTURE_LISTENER_FD")
     if listener:

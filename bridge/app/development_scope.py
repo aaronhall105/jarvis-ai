@@ -32,6 +32,7 @@ PROTECTED_PREFIXES = (
     "bridge/app/admin_engine.py",
     "bridge/app/self_improvement.py",
     "bridge/app/development_scope.py",
+    "bridge/app/development_requests.py",
     "docs/JARVIS_PRODUCT_BASELINE.json",
     "docs/releases/",
 )

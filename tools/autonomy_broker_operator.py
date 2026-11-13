@@ -88,17 +88,23 @@ class OperatorDispatcher:
         stop,
         resume,
         development_approve=None,
+        development_product=None,
     ):
         self.ledger = ledger
         self.relay_uid, self.autonomy_uid = relay_uid, autonomy_uid
         self.public_keys = public_keys
         self.guardian, self.stop, self.resume = guardian, stop, resume
         self.development_approve = development_approve
+        self.development_product = development_product
 
     def dispatch(self, raw: bytes, actor: int) -> dict[str, Any]:
         if actor != self.relay_uid or actor == self.autonomy_uid:
             raise Denied("operator_peer_denied")
         body = decode_request(raw)
+        if body.get("action") in {"prepare_development", "activate_development"}:
+            if self.development_product is None:
+                raise Denied("development_product_unavailable")
+            return self.development_product(body, actor)
         if body.get("action") == "approve_development":
             if self.development_approve is None:
                 raise Denied("development_approval_unavailable")
