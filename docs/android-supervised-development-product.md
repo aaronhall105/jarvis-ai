@@ -12,7 +12,7 @@ preparing this change.
 | --- | --- |
 | Canonical branch | `jarvis/unified-production`; deploy only the approved merge SHA after exact-head CI and CodeQL |
 | Installed broker source | `8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3` |
-| Replacement broker | `5663cf972a93fc0590a9b39e68cfb7ab219e6fe5375716ccd2ef2b0433edbc8b`; must match `UPGRADE_BUNDLE` and `fingerprint(payload())` |
+| Replacement broker | `973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41`; must match `UPGRADE_BUNDLE` and `fingerprint(payload())` |
 | Destination manifest | 42 records, including preserved policy/private configuration and the new integration payload/units |
 | Android candidate | `19.0.0-alpha49` / `190510`; Phone and Wear; not tagged, signed or published by this work |
 | Preserved contracts | `com.aaron.jarvisvoice`, Core API `3.7.0`, realtime protocol `2`, existing storage and Android Keystore identities |

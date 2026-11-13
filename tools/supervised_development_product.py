@@ -70,7 +70,9 @@ def read_readiness() -> dict[str, Any] | None:
     if any(path.is_symlink() for path in READINESS_RECEIPT.parents):
         raise Denied("development_readiness_untrusted")
     try:
-        fd = os.open(READINESS_RECEIPT, os.O_RDONLY | os.O_NOFOLLOW)
+        # The worker can replace directory entries but cannot create root-owned
+        # evidence. Never block on a forged FIFO before validating its type.
+        fd = os.open(READINESS_RECEIPT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "rb") as stream:

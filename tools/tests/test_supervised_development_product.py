@@ -4,9 +4,12 @@ import base64
 import hashlib
 import json
 import os
+from pathlib import Path
 import socket
 import sqlite3
 import struct
+import subprocess
+import sys
 import time
 import uuid
 
@@ -262,6 +265,34 @@ def test_readiness_receipt_rejects_untrusted_replacements(tmp_path, monkeypatch,
     monkeypatch.setattr(product.os, "fstat", metadata)
     with pytest.raises((Denied, OSError)):
         product.read_readiness()
+
+
+def test_fifo_readiness_replacement_is_denied_without_blocking(tmp_path):
+    receipt = tmp_path / "development-readiness.json"
+    os.mkfifo(receipt, 0o600)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\n"
+            "from pathlib import Path\n"
+            "from tools import supervised_development_product as product\n"
+            "from tools.autonomy_broker import Denied\n"
+            "product.READINESS_RECEIPT = Path(sys.argv[1])\n"
+            "try: product.read_readiness()\n"
+            "except Denied as error: print(str(error))\n"
+            "else: raise AssertionError('FIFO accepted')\n",
+            str(receipt),
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=True,
+    )
+    assert result.stdout.strip() == "development_readiness_untrusted"
+    assert result.stderr == ""
+    assert receipt.exists()
 
 
 def approved_fixture(fixture, tmp_path):
