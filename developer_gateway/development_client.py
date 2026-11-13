@@ -16,6 +16,8 @@ import time
 import uuid
 from typing import Any
 
+from .pending_task_client import _trusted_publication_peer
+
 PUBLICATION_SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
 OPERATOR_SOCKET = "/run/jarvis-autonomy-broker/operator.sock"
 INTEGRATION_SOCKET = "/run/jarvis-development-integration/integration.sock"
@@ -110,6 +112,19 @@ def _receive(connection: socket.socket, size: int) -> bytes:
     return bytes(output)
 
 
+def _trusted_peer(path: str, pid: int, uid: int, gid: int, *, integration: bool) -> bool:
+    """Accept only fixed trusted socket identities across restricted UID mappings."""
+    if integration:
+        expected_uid = pwd.getpwnam("jarvis-integration").pw_uid
+        return expected_uid != 0 and (
+            uid == expected_uid
+            or (path == INTEGRATION_SOCKET and _trusted_publication_peer(pid, uid, gid))
+        )
+    return uid == 0 or (
+        path in (PUBLICATION_SOCKET, OPERATOR_SOCKET) and _trusted_publication_peer(pid, uid, gid)
+    )
+
+
 def _exchange(path: str, body: dict[str, Any], *, integration: bool = False) -> dict[str, Any]:
     raw = json.dumps(body, separators=(",", ":"), allow_nan=False).encode()
     if not 0 < len(raw) <= MAX_REQUEST:
@@ -117,18 +132,10 @@ def _exchange(path: str, body: dict[str, Any], *, integration: bool = False) -> 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(10)
         connection.connect(path)
-        pid, uid, _ = struct.unpack(
+        pid, uid, gid = struct.unpack(
             "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
         )
-        if integration:
-            expected_uid = pwd.getpwnam("jarvis-integration").pw_uid
-            # systemd creates the listening socket before handing it to the
-            # separate unprivileged integration service. Direct test/standalone
-            # listeners must belong to that service identity, never the worker.
-            trusted = expected_uid != 0 and (uid == expected_uid or (pid == 1 and uid == 0))
-        else:
-            trusted = uid == 0
-        if not trusted:
+        if not _trusted_peer(path, pid, uid, gid, integration=integration):
             raise PermissionError("untrusted_service_peer")
         connection.sendall(struct.pack("!I", len(raw)) + raw)
         size = struct.unpack("!I", _receive(connection, 4))[0]
