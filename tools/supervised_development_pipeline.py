@@ -109,6 +109,18 @@ class GovernorAdapter:
         if candidate.get("status") not in {"queued", "recorded"}:
             raise LifecycleError("governor_candidate_not_queued")
         objective = str(candidate.get("summary") or "").strip()
+        evidence = candidate.get("evidence")
+        if isinstance(evidence, dict) and evidence.get("kind") == "owner_enhancement_proposal":
+            criteria = evidence.get("acceptance_criteria")
+            if (
+                not isinstance(criteria, list)
+                or not criteria
+                or not all(isinstance(item, str) and len(item.strip()) >= 10 for item in criteria)
+            ):
+                raise LifecycleError("governor_acceptance_criteria_invalid")
+            objective += "\nAcceptance criteria:\n" + "\n".join(
+                "- " + item.strip() for item in criteria
+            )
         if len(objective) < 3 or len(objective) > 2_000 or cls._UNSAFE.search(objective):
             raise LifecycleError("governor_objective_out_of_policy")
         if not allowed_paths or not all(editable_path(path) for path in allowed_paths):
@@ -155,6 +167,10 @@ class ExistingSelfDevelopmentWorker:
         self.env_values = dict(env_values)
 
     def run(self, task: GovernorTask, *, call_ledger: ControllerCallLedger) -> dict[str, Any]:
+        return self.configured_worker(task).run(task, call_ledger=call_ledger)
+
+    def configured_worker(self, task: GovernorTask) -> Any:
+        """Construct the reviewed worker without importing an SDK or transmitting."""
         from tools.supervised_development_worker import BoundedDevelopmentWorker
 
         source = self.env_values.get("JARVIS_AUTHORITATIVE_WORKSPACE", "")
@@ -193,7 +209,7 @@ class ExistingSelfDevelopmentWorker:
             raise LifecycleError("provider_token_policy_invalid") from exc
         if not 1 <= input_tokens <= 1_000_000 or not 1 <= output_tokens <= 65_536:
             raise LifecycleError("provider_token_policy_invalid")
-        worker = BoundedDevelopmentWorker(
+        return BoundedDevelopmentWorker(
             Path(source),
             worktree_root=Path(worktrees),
             input_price_per_million=input_price,
@@ -201,7 +217,6 @@ class ExistingSelfDevelopmentWorker:
             max_input_tokens=input_tokens,
             max_output_tokens=output_tokens,
         )
-        return worker.run(task, call_ledger=call_ledger)
 
 
 class SupervisedDevelopmentPipeline:

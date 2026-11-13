@@ -59,6 +59,7 @@ public final class MainActivity extends Activity {
     static final String EXTRA_SHOW_MODE_PICKER = "show_mode_picker";
     static final String EXTRA_CONFIRM_CLEAR_CHAT = "confirm_clear_chat";
     static final String EXTRA_NEW_CHAT = "new_chat";
+    static final String EXTRA_DEVELOPMENT_SCOPE_REQUEST = "development_scope_request";
     private static final int BLACK = JarvisUi.BLACK;
     private static final int MID = JarvisUi.MID;
     private static final int LINE = JarvisUi.LINE;
@@ -113,6 +114,18 @@ public final class MainActivity extends Activity {
             updateMicButton();
 
             switch (event) {
+                case "development.request" -> {
+                    try {
+                        DevelopmentRequestStore.requireId(text);
+                        statusText.setText("Development request recorded. Open Jarvis Development to review.");
+                        new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Review your development request")
+                            .setMessage("Jarvis recorded your request. Review its evidence, scope and limits before authorizing any development.")
+                            .setNegativeButton("Later", null)
+                            .setPositiveButton("Open development", (dialog, which) -> startActivity(
+                                new Intent(MainActivity.this, AutonomyActivity.class))).show();
+                    } catch (IllegalArgumentException invalid) { statusText.setText("Development request status unavailable"); }
+                }
                 case "status" -> statusText.setText(text);
                 case "message" -> {
                     finishStreaming();
@@ -556,6 +569,10 @@ public final class MainActivity extends Activity {
             sheet.addView(actionSheetRow("Improvements", "Review Jarvis improvement activity", () -> {
                 dialog.dismiss(); startActivity(new Intent(this, ImprovementsActivity.class));
             }), matchWrap());
+            sheet.addView(actionSheetRow("Jarvis Development", "Request an improvement or review a supervised task", () -> {
+                dialog.dismiss(); startActivity(new Intent(this, AutonomyActivity.class)
+                    .putExtra("development_objective", composer.getText().toString()));
+            }), matchWrap());
         }
         dialog.setContentView(sheet);
         dialog.show();
@@ -760,9 +777,21 @@ public final class MainActivity extends Activity {
         boolean showMode = intent.getBooleanExtra(EXTRA_SHOW_MODE_PICKER, false);
         boolean confirmClear = intent.getBooleanExtra(EXTRA_CONFIRM_CLEAR_CHAT, false);
         boolean newChat = intent.getBooleanExtra(EXTRA_NEW_CHAT, false);
+        String developmentId = intent.getStringExtra(EXTRA_DEVELOPMENT_SCOPE_REQUEST);
         intent.removeExtra(EXTRA_SHOW_MODE_PICKER);
         intent.removeExtra(EXTRA_CONFIRM_CLEAR_CHAT);
         intent.removeExtra(EXTRA_NEW_CHAT);
+        intent.removeExtra(EXTRA_DEVELOPMENT_SCOPE_REQUEST);
+        if (developmentId != null) {
+            try {
+                DevelopmentRequestStore.requireId(developmentId);
+                assistantMode = AssistantMode.JARVIS; store.setAssistantMode(assistantMode); applyAssistantMode(false);
+                composer.setText("Inspect the source for my existing supervised development request " + developmentId
+                    + " and propose an evidence-backed file scope and acceptance criteria. Preserve its existing request identity; do not start development.");
+                composer.setSelection(composer.length()); composer.requestFocus();
+                statusText.setText("Review this message, then send it to Jarvis.");
+            } catch (IllegalArgumentException invalid) { statusText.setText("Invalid development request identity"); }
+        }
         if (showMode) root.post(this::showModePicker);
         if (confirmClear) root.post(this::confirmDeleteChat);
         if (newChat) root.post(this::newChat);

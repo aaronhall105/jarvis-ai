@@ -1,0 +1,112 @@
+{
+  "handoff": null,
+  "proposal": {
+    "allowed_paths": [
+      "tools/diagnostic.py",
+      "tools/tests/test_diagnostic.py"
+    ],
+    "base_sha": "1cfe8d63b038a0d36b2502cd4b9678a63b6b624b",
+    "changed_files": [
+      "tools/diagnostic.py"
+    ],
+    "checks": [
+      {
+        "command": [
+          "/opt/jarvis-supervised-worker-473c353b00a7f96b3786/bin/python3.14",
+          "-I",
+          "-c",
+          "import importlib.metadata,json,sys,pytest\ncompletion_marker = sys.argv.pop(1)\n# Load verifier and installed plugins before application import paths.\nplugins = [entry.load() for entry in importlib.metadata.entry_points(group='pytest11')]\nclass Results:\n    executed = failed = skipped = collected = 0\n    def pytest_runtest_logreport(self, report):\n        if report.skipped:\n            self.skipped += 1\n        if report.when == 'call' and not report.skipped:\n            self.executed += 1\n            self.failed += int(report.failed)\n    def pytest_sessionfinish(self, session, exitstatus):\n        self.collected = session.testscollected\nrecord = Results()\nsys.path[:0] = ['/workspace', '/workspace/bridge']\ncode = pytest.main(sys.argv[1:], plugins=[*plugins, record])\nprint(completion_marker + json.dumps({name: getattr(record,name) for name in ('executed','failed','skipped','collected')}, sort_keys=True))\nraise SystemExit(code)\n",
+          "JARVIS_EXECUTED_TESTS=1fc786f8a75840d8ab27c45bada7531b:",
+          "-p",
+          "no:cacheprovider",
+          "tools/tests/test_diagnostic.py"
+        ],
+        "duration_ms": 1473,
+        "name": "pytest",
+        "output_sha256": "127f22923f88b5d775086316f4696a9c13281a742935312d33e38a06307d4957",
+        "returncode": 0,
+        "test_counts": {
+          "collected": 1,
+          "executed": 1,
+          "failed": 0,
+          "skipped": 0
+        }
+      },
+      {
+        "command": [
+          "/opt/jarvis-supervised-worker-473c353b00a7f96b3786/bin/python3.14",
+          "-I",
+          "-m",
+          "ruff",
+          "check",
+          "--no-cache",
+          "tools/diagnostic.py"
+        ],
+        "duration_ms": 171,
+        "name": "ruff",
+        "output_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+        "returncode": 0
+      },
+      {
+        "command": [
+          "/opt/jarvis-supervised-worker-473c353b00a7f96b3786/bin/python3.14",
+          "-I",
+          "-m",
+          "bandit",
+          "-q",
+          "-lll",
+          "--ignore-nosec",
+          "tools/diagnostic.py"
+        ],
+        "duration_ms": 879,
+        "name": "bandit",
+        "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "returncode": 0
+      },
+      {
+        "command": [
+          "/opt/jarvis-supervised-worker-473c353b00a7f96b3786/bin/python3.14",
+          "-I",
+          "-c",
+          "import ast,pathlib,sys; [ast.parse(pathlib.Path(p).read_text()) for p in sys.argv[1:]]",
+          "tools/diagnostic.py"
+        ],
+        "duration_ms": 173,
+        "name": "compile",
+        "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "returncode": 0
+      }
+    ],
+    "cost_usd": 0.0004,
+    "diff": "diff --git a/tools/diagnostic.py b/tools/diagnostic.py\nindex b15b1b0..95cd691 100644\n--- a/tools/diagnostic.py\n+++ b/tools/diagnostic.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 3\n",
+    "diff_sha256": "cb9f2c6a9606db3f5c4ff84a0150ab232efdc40d71175fc039ea21973f4b35dc",
+    "evidence_sha256": "7b97e707c8fc9b3db18297f1893d1b991c8cfe2349f86b19857ac5d24d5f6ce1",
+    "parameters_sha256": "e44cd2b15549df698c381df05e234f4671f3c9e8daaa87157493cdbad43e2af9",
+    "proposal_sha256": "954da8fa1edb30a4a130001fe026c9fb41bfe0dbe73cac4109d7c3b9b98a2639",
+    "provider_calls": 2,
+    "risk": "owner_review_required",
+    "task_id": "f6b72950-2b70-4019-99ba-b1995cb518ad"
+  },
+  "request": {
+    "action": "create_development_pr",
+    "allowed_paths": [
+      "tools/diagnostic.py",
+      "tools/tests/test_diagnostic.py"
+    ],
+    "base_branch": "jarvis/unified-production",
+    "base_sha": "1cfe8d63b038a0d36b2502cd4b9678a63b6b624b",
+    "base_tree_sha": "809250041126abc2909c1f2859831867257abfad",
+    "diff_sha256": "cb9f2c6a9606db3f5c4ff84a0150ab232efdc40d71175fc039ea21973f4b35dc",
+    "evidence_sha256": "7b97e707c8fc9b3db18297f1893d1b991c8cfe2349f86b19857ac5d24d5f6ce1",
+    "expires_at": 1794558487,
+    "head_tree_sha": "ec1cd577736e3f9c0d132102516fa5980dee60d0",
+    "parameters_sha256": "e44cd2b15549df698c381df05e234f4671f3c9e8daaa87157493cdbad43e2af9",
+    "proposal_sha256": "954da8fa1edb30a4a130001fe026c9fb41bfe0dbe73cac4109d7c3b9b98a2639",
+    "repository": "aaronhall105/jarvis-ai",
+    "request_id": "230a8b06-90db-402f-a5d5-3c29fa3eb1f3",
+    "task_id": "f6b72950-2b70-4019-99ba-b1995cb518ad",
+    "version": 1
+  },
+  "status": "ready",
+  "version": 3
+}

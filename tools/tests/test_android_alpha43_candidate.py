@@ -21,12 +21,12 @@ def _historical_bytes(commit: str, relative: str) -> bytes:
 
 def test_candidate_is_above_published_and_reserved_recovery_versions():
     release = load_manifest()["current_release"]
-    assert release["version_name"] == "19.0.0-alpha48"
+    assert release["version_name"] == "19.0.0-alpha49"
     # Published alpha40/43; PR98 alpha41; documented alpha42 return plan.
     assert (
         release["version_code"]
-        == 190500
-        > max(190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490)
+        == 190510
+        > max(190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490, 190500)
     )
     assert release["phone_package"] == "com.aaron.jarvisvoice"
     assert release["production_signer_sha256"] == (

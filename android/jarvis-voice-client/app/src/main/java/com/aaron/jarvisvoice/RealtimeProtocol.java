@@ -39,6 +39,7 @@ public final class RealtimeProtocol {
         public final boolean recoveryTurnHandled;
         public final String recoveryActionOutcome;
         public final String recoveryConversationId;
+        public final JSONObject developmentRequest;
 
         private Event(
             String type,
@@ -70,7 +71,8 @@ public final class RealtimeProtocol {
             boolean recoverySuccess,
             boolean recoveryTurnHandled,
             String recoveryActionOutcome,
-            String recoveryConversationId
+            String recoveryConversationId,
+            JSONObject developmentRequest
         ) {
             this.type = type;
             this.message = message;
@@ -103,6 +105,7 @@ public final class RealtimeProtocol {
             this.recoveryActionOutcome = recoveryActionOutcome;
             this.recoveryConversationId =
                 recoveryConversationId;
+            this.developmentRequest = developmentRequest;
         }
     }
 
@@ -284,7 +287,8 @@ public final class RealtimeProtocol {
             recoverySuccess,
             recovery != null && recovery.optBoolean("turn_handled", false),
             recovery == null ? "" : recovery.optString("action_outcome", ""),
-            recoveryConversationId
+            recoveryConversationId,
+            root.optJSONObject("development_request")
         );
     }
 }

@@ -1258,6 +1258,35 @@ def sanitise_tool_events(value: Any) -> list[dict[str, Any]]:
                 "message": message,
             }
         )
+        development_request = result.get("development_request")
+        if (
+            name in {"request_development", "get_development_request", "propose_development_scope"}
+            and success
+            and isinstance(development_request, dict)
+        ):
+            # Only the dedicated Core tool result may carry this owner UI
+            # handoff. Arbitrary tool output/assistant text cannot create it.
+            events[-1]["development_request"] = {
+                key: development_request[key]
+                for key in (
+                    "success",
+                    "goal",
+                    "request_id",
+                    "candidate_id",
+                    "failure_id",
+                    "status",
+                    "reason",
+                    "source_sha",
+                    "affected_files",
+                    "evidence_sha256",
+                    "scope_kind",
+                    "acceptance_criteria",
+                    "task_id",
+                    "approval_required",
+                    "review_screen",
+                )
+                if key in development_request
+            }
 
     return events
 
@@ -4755,6 +4784,17 @@ class RealtimeVoiceProxy:
         )
 
         for tool_event in result.get("tool_events", []):
+            if isinstance(tool_event.get("development_request"), dict):
+                await self._send_json(
+                    client,
+                    {
+                        "type": "development.request",
+                        "generation": generation,
+                        **({"client_turn_id": client_turn_id} if client_turn_id > 0 else {}),
+                        "conversation_id": result["conversation_id"],
+                        "development_request": tool_event["development_request"],
+                    },
+                )
             await self._send_json(
                 client,
                 {

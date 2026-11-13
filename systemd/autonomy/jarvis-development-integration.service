@@ -1,0 +1,44 @@
+[Unit]
+Description=Separately provisioned owner-signed Jarvis draft PR integration
+Requires=jarvis-autonomy-broker-development-publication.socket
+After=jarvis-autonomy-broker-development-publication.socket network-online.target
+ConditionPathExists=/etc/jarvis-development-integration/policy.json
+ConditionPathExists=/etc/jarvis-development-integration/github-token
+
+[Service]
+Type=simple
+User=jarvis-integration
+Group=jarvis-integration
+# Socket access only within this sandbox; no account-level group membership.
+SupplementaryGroups=aaron
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py development-integration
+LoadCredential=github-token:/etc/jarvis-development-integration/github-token
+StateDirectory=jarvis-development-integration
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/jarvis-development-integration
+InaccessiblePaths=-/var/lib/jarvis-autonomy-broker -/var/lib/jarvis-autonomy-guardian -/etc/jarvis-autonomy -/run/docker.sock -/var/run/docker.sock
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+TasksMax=16
+MemoryMax=256M
+CPUQuota=50%
+TimeoutStopSec=20
+KillMode=control-group
+Restart=no
+StandardOutput=null
+StandardError=journal

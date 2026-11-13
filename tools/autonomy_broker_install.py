@@ -42,6 +42,9 @@ MODULES = (
     "supervised_development_edits",
     "supervised_development_environment",
     "supervised_development_pipeline",
+    "supervised_development_product",
+    "supervised_development_integration",
+    "supervised_development_integration_service",
     "supervised_development_publication",
     "supervised_development_review",
     "supervised_development_runtime",
@@ -55,6 +58,13 @@ UNIT_NAMES = tuple(
 )
 CONTROLLER_UNIT = "jarvis-autonomy-broker-development-controller.service"
 UNIT_NAMES = UNIT_NAMES + (CONTROLLER_UNIT,)
+# Installed disabled. A separately provisioned non-worker identity and owner
+# integration policy/credential are required before this socket can be enabled.
+INTEGRATION_UNITS = (
+    "jarvis-development-integration.service",
+    "jarvis-development-integration.socket",
+)
+UNIT_NAMES += INTEGRATION_UNITS
 DROPIN = UNITS / "jarvis-autonomy.service.d/broker.conf"
 SOCKETS = (
     "jarvis-autonomy-broker-operator.socket",
@@ -73,11 +83,11 @@ SERVICES = (
 # The only legacy installation accepted by the narrowly-scoped upgrade path.
 # These values are reviewed bundle identities, not user-selectable versions.
 LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3eb"
-# Reviewed installed PR #135 bundle, verified against the canonical base payload.
+# Reviewed installed PR #136/#137 bundle, verified against canonical Git objects.
 # Retain the exact-version migration and all existing integrity/rollback checks.
-CURRENT_BUNDLE = "73e84548db287fb02daa86d9da8634ae62fec39f615322979e9e74dfd1f93489"
-# Complete destination payload, including evidence-bound Governor selection.
-UPGRADE_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
+CURRENT_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
+# Complete reviewed destination payload, including phone product boundaries.
+UPGRADE_BUNDLE = "5663cf972a93fc0590a9b39e68cfb7ab219e6fe5375716ccd2ef2b0433edbc8b"
 
 # Exact installed source inventory, independent of future destination additions.
 CURRENT_MODULES = (
@@ -95,6 +105,7 @@ CURRENT_MODULES = (
     "supervised_development_broker",
     "supervised_development_controller",
     "supervised_development_edits",
+    "supervised_development_environment",
     "supervised_development_pipeline",
     "supervised_development_publication",
     "supervised_development_review",
@@ -123,6 +134,8 @@ def current_payload_paths() -> dict[Path, Path]:
             for name in ("tools/__init__.py", "entry.py", "deploy_unified_core.sh")
         }
     )
+    lock_name = "tools/supervised_development_environment.lock.json"
+    result[LIB / lock_name] = fixed_lib / lock_name
     result.update({UNITS / name: fixed_units / name for name in CURRENT_UNIT_NAMES})
     result[DROPIN] = fixed_units / "jarvis-autonomy.service.d/broker.conf"
     return result
@@ -356,6 +369,7 @@ def _verified_legacy_install(files: dict) -> dict:
                 "supervised_development_broker",
                 "supervised_development_controller",
                 "supervised_development_edits",
+                "supervised_development_environment",
                 "supervised_development_pipeline",
                 "supervised_development_publication",
                 "supervised_development_review",
@@ -366,7 +380,7 @@ def _verified_legacy_install(files: dict) -> dict:
         ),
         *(
             str(UNITS / name)
-            for name in UNIT_NAMES
+            for name in CURRENT_UNIT_NAMES
             if all(
                 token not in name
                 for token in (
@@ -518,7 +532,7 @@ def _prepare_development_workspace(
 
 
 def upgrade(files: dict, policy: dict) -> None:
-    """Migrate only the reviewed legacy broker to the development-admission bundle."""
+    """Migrate only an exact reviewed source to the pinned destination bundle."""
     if (
         os.geteuid() != 0
         or os.getenv("SUDO_USER") != "aaron"
@@ -547,6 +561,12 @@ def upgrade(files: dict, policy: dict) -> None:
         managed_services = SERVICES
     else:
         raise Denied("upgrade_source_bundle_not_reviewed")
+    # New release payload paths must be genuinely absent. Never overwrite a
+    # partially installed or independently provisioned service/module merely
+    # because its path now appears in the reviewed destination inventory.
+    for destination in files:
+        if str(destination) not in previous["files"] and os.path.lexists(destination):
+            raise Denied("upgrade_destination_unexpected")
     controller = g.Guardian()
     controller.integrity()
     verify_guardian_audit(controller)

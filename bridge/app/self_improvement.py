@@ -19,6 +19,7 @@ from app.code_awareness import CodeAwarenessEngine
 from app.command_text import normalized_command
 from app.feedback_attribution import attribute_feedback
 from app.development_scope import editable_path
+from app.development_requests import DevelopmentRequestError, DevelopmentRequests
 from app.tool_outcomes import has_blocking_tool_failure
 from app.user_context import UserContext
 
@@ -445,6 +446,15 @@ class SelfImprovementEngine:
                     failure_id INTEGER,
                     candidate_id INTEGER,
                     details_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE TABLE IF NOT EXISTS improvement_development_requests (
+                    request_id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    request_sha256 TEXT NOT NULL,
+                    failure_id INTEGER NOT NULL REFERENCES improvement_failures(failure_id),
+                    candidate_id INTEGER NOT NULL UNIQUE REFERENCES improvement_candidates(candidate_id),
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -976,6 +986,36 @@ class SelfImprovementEngine:
                 (now, failure_id),
             )
             return True, candidate_id, "queued"
+
+    async def request_development(self, request_id: str, request: str, actor: str):
+        if not await self.enabled():
+            raise DevelopmentRequestError("self_improvement_disabled", 409)
+        return await asyncio.to_thread(DevelopmentRequests(self).create, request_id, request, actor)
+
+    async def development_request(self, request_id: str, actor: str):
+        return await asyncio.to_thread(DevelopmentRequests(self).get, request_id, actor)
+
+    async def inspect_development_source(self, query: str, path: str | None = None):
+        return await asyncio.to_thread(DevelopmentRequests(self).inspect, query, path)
+
+    async def propose_development_scope(
+        self,
+        request_id: str,
+        actor: str,
+        source_sha: str,
+        source_findings: dict[str, Any],
+        acceptance_criteria: list[str],
+    ):
+        if not await self.enabled():
+            raise DevelopmentRequestError("self_improvement_disabled", 409)
+        return await asyncio.to_thread(
+            DevelopmentRequests(self).propose,
+            request_id,
+            actor,
+            source_sha,
+            source_findings,
+            acceptance_criteria,
+        )
 
     async def request_improvement(self, text: str, actor: str):
         clean = self.redact_text(text).strip()

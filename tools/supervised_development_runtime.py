@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -44,6 +45,7 @@ from tools.supervised_development_pipeline import (
 from tools.supervised_development_review import TrustedReviewRunner
 from tools.supervised_development_scope import editable_path
 from tools.supervised_development_environment import (
+    MANIFEST as ENVIRONMENT_MANIFEST,
     verify_worker_environment,
     worker_python_arguments,
 )
@@ -96,7 +98,58 @@ def _provider_configuration() -> dict[str, str]:
     return {name: os.environ[name] for name in _PROVIDER_CONFIGURATION_KEYS if name in os.environ}
 
 
-def _trusted_source_git(source_root: Path, *arguments: str) -> str:
+def _execution_readiness(
+    task: GovernorTask, source_root: Path, worktree_root: Path
+) -> dict[str, str]:
+    """Offline root preflight. No SDK import, network, worktree or task mutation."""
+    if not os.environ.get("OPENAI_API_KEY", "").strip():
+        raise LifecycleError("provider_credential_unavailable")
+    configuration = _provider_configuration()
+    worker = ExistingSelfDevelopmentWorker(
+        object(),
+        {
+            "JARVIS_AUTHORITATIVE_WORKSPACE": str(source_root),
+            "JARVIS_SUPERVISED_WORKTREE_ROOT": str(worktree_root),
+            **configuration,
+        },
+    ).configured_worker(task)
+    prices = worker._pricing()
+    worst = (worker.max_input_tokens * prices[0] + worker.max_output_tokens * prices[1]) / 1_000_000
+    if worst > task.max_cost_usd:
+        raise LifecycleError("provider_budget_preflight_failed")
+    if _trusted_source_git(
+        source_root, "rev-parse", "HEAD"
+    ) != task.source_sha or _trusted_source_git(source_root, "status", "--porcelain"):
+        raise LifecycleError("trusted_source_snapshot_unavailable")
+    files = {}
+    for path in task.allowed_paths:
+        source = source_root / path
+        if (
+            not editable_path(path)
+            or source.is_symlink()
+            or not source.resolve().is_relative_to(source_root.resolve())
+        ):
+            raise LifecycleError("worker_source_path_invalid")
+        files[path] = (
+            _trusted_source_git_bytes(source_root, "show", task.source_sha + ":" + path).decode(
+                "utf-8"
+            )
+            if source.exists()
+            else ""
+        )
+    worker._prompt(task, files)
+    worker_python = verify_worker_environment()
+    return {
+        "configuration_sha256": hashlib.sha256(
+            json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "environment_sha256": hashlib.sha256(
+            (worker_python.parent.parent / ENVIRONMENT_MANIFEST).read_bytes()
+        ).hexdigest(),
+    }
+
+
+def _trusted_source_git_bytes(source_root: Path, *arguments: str) -> bytes:
     """Read the fixed source without trusting the process user's Git config.
 
     Production supplies the protected CANONICAL path. Root lacks the owner's
@@ -131,11 +184,15 @@ def _trusted_source_git(source_root: Path, *arguments: str) -> str:
             check=False,
             timeout=10,
         )
-        if result.returncode != 0 or len(result.stdout) > 65536:
+        if result.returncode != 0 or len(result.stdout) > 4 * 1024 * 1024:
             raise LifecycleError("trusted_source_snapshot_unavailable")
-        return result.stdout.decode("utf-8", "strict").strip()
+        return result.stdout
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         raise LifecycleError("trusted_source_snapshot_unavailable") from exc
+
+
+def _trusted_source_git(source_root: Path, *arguments: str) -> str:
+    return _trusted_source_git_bytes(source_root, *arguments).decode("utf-8", "strict").strip()
 
 
 class GovernorCandidateSource:
@@ -202,15 +259,22 @@ class GovernorCandidateSource:
         cannot disagree with execution eligibility. No database migrations.
         """
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(improvement_candidates)")}
-        scope_column = "c.development_scope_json" if "development_scope_json" in columns else "'{}'"
-        archived_column = "c.archived_at" if "archived_at" in columns else "NULL"
-        rows = self.db.execute(
-            f"SELECT c.candidate_id,c.failure_id,c.status,c.summary,{scope_column} AS scope_json,"
-            f"{archived_column} AS archived_at,f.summary AS failure_summary,f.evidence_json,"
+        records = self.db.execute(
+            "SELECT c.*,f.summary AS failure_summary,f.evidence_json,"
             "f.status AS failure_status FROM improvement_candidates c "
             "LEFT JOIN improvement_failures f ON f.failure_id=c.failure_id "
             "WHERE c.status='queued' ORDER BY c.candidate_id"
         ).fetchall()
+        rows = [
+            {
+                **dict(row),
+                "scope_json": row["development_scope_json"]
+                if "development_scope_json" in columns
+                else "{}",
+                "archived_at": row["archived_at"] if "archived_at" in columns else None,
+            }
+            for row in records
+        ]
         try:
             current_sha = self._current_source_sha()
         except LifecycleError:
@@ -287,6 +351,44 @@ class GovernorCandidateSource:
                 return "source_snapshot_unavailable"
         if any(inventory.get(path) not in {"100644", "100755"} for path in scope["affected_files"]):
             return "untracked_or_nonregular_scope"
+        if scope.get("kind") == "owner_enhancement_proposal":
+            source = evidence["source"]
+            findings = scope.get("source_findings")
+            criteria = scope.get("acceptance_criteria")
+            try:
+                request_id = str(uuid.UUID(scope["owner_request_id"]))
+                valid = (
+                    request_id == scope["owner_request_id"] == source.get("request_id")
+                    and source.get("kind") == "owner_enhancement"
+                    and source.get("actor") == scope.get("proposed_by") == "aaron"
+                    and isinstance(source.get("request"), str)
+                    and len(source["request"].strip()) >= 3
+                    and evidence.get("confirmed_defect") is False
+                    and scope.get("confirmed_defect") is False
+                    and isinstance(criteria, list)
+                    and bool(criteria)
+                    and all(isinstance(item, str) and len(item.strip()) >= 10 for item in criteria)
+                    and isinstance(findings, dict)
+                    and set(findings) == set(scope["affected_files"])
+                )
+                if not valid or not isinstance(findings, dict) or self.source_root is None:
+                    return "owner_enhancement_evidence_invalid"
+                for path, finding in findings.items():
+                    blob = _trusted_source_git_bytes(
+                        self.source_root, "show", f"{source_sha}:{path}"
+                    )
+                    if (
+                        not isinstance(finding, dict)
+                        or set(finding) != {"sha256", "anchor"}
+                        or hashlib.sha256(blob).hexdigest() != finding["sha256"]
+                        or not isinstance(finding["anchor"], str)
+                        or not 10 <= len(finding["anchor"]) <= 500
+                        or finding["anchor"].encode() not in blob
+                    ):
+                        return "owner_enhancement_source_invalid"
+            except (KeyError, TypeError, ValueError, subprocess.SubprocessError, LifecycleError):
+                return "owner_enhancement_evidence_invalid"
+            return "eligible"
         review = scope.get("review")
         if not isinstance(review, dict):
             return "scope_review_required"
@@ -404,6 +506,7 @@ class SupervisedDevelopmentRuntime:
         configured autonomy UID and rejects a root-originated admission.
         """
         generation = self._worker_generation(task)
+        self._verify_execution_readiness(task_id, task)
         policy = installed_policy()
         worker_uid = int(policy["autonomy_uid"])
         worker_gid = int(policy.get("autonomy_gid", worker_uid))
@@ -519,6 +622,18 @@ class SupervisedDevelopmentRuntime:
             raise LifecycleError("development_worker_result_invalid")
         return result
 
+    def _verify_execution_readiness(self, task_id: str, task: GovernorTask) -> None:
+        from tools.supervised_development_product import require_readiness
+
+        proof = require_readiness(self.controller, task_id)
+        if any(
+            proof.get(key) != value
+            for key, value in _execution_readiness(
+                task, self.source_root, self.worktree_root
+            ).items()
+        ):
+            raise LifecycleError("development_execution_preflight_changed")
+
     def _worker_generation(self, task: GovernorTask) -> str:
         """Observation can only deny; signed broker admission is still required."""
         try:
@@ -542,7 +657,9 @@ class SupervisedDevelopmentRuntime:
         if status.get("state") != "STOPPED" or status.get("trusted") is not True:
             raise LifecycleError("emergency_stop_unconfirmed")
 
-    def run_once(self) -> dict[str, Any]:
+    def run_once(
+        self, *, preparation: dict[str, Any] | None = None, require_preparation: bool = False
+    ) -> dict[str, Any]:
         execution_active = False
         stop_attempted = False
         try:
@@ -552,7 +669,36 @@ class SupervisedDevelopmentRuntime:
             self.controller.expire_stale_approval_requests()
             existing = self._existing_task()
             if existing is None:
-                candidate = self.source.next(self._claimed_candidates())
+                candidate: dict[str, Any] | None
+                if require_preparation and preparation is None:
+                    return {"status": "owner_preparation_required"}
+                if preparation is not None:
+                    from tools.supervised_development_product import candidate_request
+
+                    expected = candidate_request(
+                        self.source,
+                        preparation["candidate_id"],
+                        status,
+                        request_id=preparation["request_id"],
+                        expires_at=preparation["expires_at"],
+                    )
+                    if (
+                        expected
+                        != {
+                            k: v for k, v in preparation.items() if k not in {"key_id", "signature"}
+                        }
+                        or preparation["expires_at"] <= time.time()
+                    ):
+                        raise LifecycleError("development_preparation_changed")
+                    if preparation["candidate_id"] in self._claimed_candidates():
+                        raise LifecycleError("development_candidate_already_claimed")
+                    candidate = next(
+                        item
+                        for item in self.source.review_queue()
+                        if item["candidate_id"] == preparation["candidate_id"] and item["eligible"]
+                    )
+                else:
+                    candidate = self.source.next(self._claimed_candidates())
                 if candidate is None:
                     return {"status": "no_eligible_candidate"}
                 source_sha = self._source_sha()
@@ -562,7 +708,7 @@ class SupervisedDevelopmentRuntime:
                 task = GovernorAdapter.from_candidate(
                     candidate,
                     owner_id=OWNER_ID,
-                    request_ref=str(uuid.uuid4()),
+                    request_ref=preparation["request_id"] if preparation else str(uuid.uuid4()),
                     source_sha=source_sha,
                     allowed_paths=tuple(candidate["allowed_paths"]),
                     guardian_generation=str(status["generation"]),
@@ -570,11 +716,51 @@ class SupervisedDevelopmentRuntime:
                     max_calls=_configured_call_limit(),
                     model=os.environ.get("JARVIS_SUPERVISED_MODEL", "gpt-5.3-codex"),
                 )
+                readiness = None
+                if require_preparation:
+                    from tools.supervised_development_product import record_readiness
+
+                    try:
+                        readiness = _execution_readiness(task, self.source_root, self.worktree_root)
+                    except BaseException:
+                        record_readiness(
+                            {
+                                "version": 1,
+                                "status": "blocked",
+                                "reason": "development_execution_preflight_failed",
+                                "request_id": task.request_ref,
+                                "candidate_id": task.candidate_id,
+                                "source_sha": task.source_sha,
+                                "expires_at": int(time.time()) + 300,
+                            }
+                        )
+                        raise
+                    # Offline inventory validation consumes no part of the
+                    # separate, owner-visible 90-second signing window.
+                    task = replace(task, expires_at=int(time.time()) + 90)
+                    if preparation is None or preparation["expires_at"] <= time.time():
+                        raise LifecycleError("development_preparation_expired")
                 task_id = SupervisedDevelopmentPipeline(
                     self.controller,
                     self.worker or _SubmitOnlyWorker(),
                     self.reviewer or RuntimeReview(),
                 ).submit(task)
+                if readiness is not None:
+                    record_readiness(
+                        {
+                            "version": 1,
+                            "status": "ready",
+                            "task_id": task_id,
+                            "request_id": task.request_ref,
+                            "candidate_id": task.candidate_id,
+                            "source_sha": task.source_sha,
+                            "expires_at": task.expires_at,
+                            "parameters_sha256": SupervisedDevelopmentPipeline._parameters_hash(
+                                task
+                            ),
+                            **readiness,
+                        }
+                    )
             else:
                 task_id, task = existing
                 if self.controller.snapshot(task_id)["state"] in {RUNNING, REVIEW_PENDING}:
@@ -725,7 +911,7 @@ def initialize_controller_database(policy: dict[str, Any]) -> None:
     CONTROLLER_DATABASE.chmod(0o660)
 
 
-def main() -> int:
+def _main() -> int:
     source = GovernorCandidateSource(source_root=CANONICAL)
     controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
 
@@ -735,12 +921,63 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
     try:
-        result = SupervisedDevelopmentRuntime(source, controller).run_once()
+        from tools.supervised_development_product import (
+            OPERATOR_DATABASE,
+            queued_preparation,
+            readonly_ledger,
+            verify_request,
+        )
+
+        operator = readonly_ledger(OPERATOR_DATABASE)
+        try:
+            preparation = queued_preparation(controller, operator)
+            # systemctl --no-block can schedule this process before the operator
+            # commits its completed dispatch receipt. This wait creates no task.
+            for _ in range(10):
+                if preparation is not None:
+                    break
+                time.sleep(0.1)
+                preparation = queued_preparation(controller, operator)
+        finally:
+            operator.close()
+        if preparation is not None:
+            import base64
+
+            policy = installed_policy()
+            verify_request(
+                preparation,
+                {
+                    key: base64.b64decode(value, validate=True)
+                    for key, value in policy["operator_public_keys"].items()
+                },
+                guardian_status()["generation"],
+            )
+        result = SupervisedDevelopmentRuntime(source, controller).run_once(
+            preparation=preparation, require_preparation=True
+        )
         print(json.dumps({"status": result.get("status", result.get("state", "unknown"))}))
         return 0
     finally:
         controller.close()
         source.close()
+
+
+def main() -> int:
+    try:
+        return _main()
+    except BaseException:
+        # Initialization and signed preparation checks precede run_once. They
+        # require the same authoritative STOP guarantee as execution failures.
+        try:
+            state = guardian_status()
+        except BaseException:
+            state = {}
+        if state.get("trusted") is not True or state.get("state") != "STOPPED":
+            emergency_stop()
+            state = guardian_status()
+            if state.get("trusted") is not True or state.get("state") != "STOPPED":
+                raise LifecycleError("critical_guardian_stop_unconfirmed") from None
+        raise
 
 
 if __name__ == "__main__":

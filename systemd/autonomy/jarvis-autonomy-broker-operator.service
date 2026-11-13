@@ -14,6 +14,7 @@ CapabilityBoundingSet=CAP_KILL CAP_DAC_READ_SEARCH
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=true
+BindReadOnlyPaths=/home/aaron/jarvis-unified-production-worktree /home/aaron/jarvis/.git /home/aaron/.local/share/jarvis-runtime/data
 ReadWritePaths=/var/lib/jarvis-autonomy-broker/operator /var/lib/jarvis-autonomy-guardian
 ReadOnlyPaths=/etc/jarvis-autonomy /usr/local/libexec/jarvis-autonomy /usr/local/libexec/jarvis-autonomy-broker
 PrivateTmp=true

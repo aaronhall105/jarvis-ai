@@ -69,6 +69,7 @@ from app.person_room_context import (
 )
 from app.pending_interactions import PendingInteractionKind, PendingInteractionService
 from app.self_improvement import SelfImprovementEngine
+from app.development_requests import DevelopmentRequestError
 from app.memory_models import (
     SaveMemoryRequest,
     SearchMemoryRequest,
@@ -283,6 +284,7 @@ ai = AIEngine(
     dialogue=dialogue,
     awareness=awareness,
     code_awareness=code_awareness,
+    improvement=improvement,
     speech_corrections=speech_corrections,
     # The runtime is always present for durable Home Assistant write receipts.
     # Its own enabled flag independently controls optional external-agent tools.
@@ -708,6 +710,16 @@ class ImprovementActionRequest(BaseModel):
 
 class ImprovementCreateRequest(BaseModel):
     request: str = Field(min_length=3, max_length=2000)
+
+
+class DevelopmentCreateRequest(ImprovementCreateRequest):
+    request_id: str = Field(min_length=36, max_length=36)
+
+
+class DevelopmentScopeRequest(BaseModel):
+    source_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    source_findings: dict[str, dict[str, str]]
+    acceptance_criteria: list[str] = Field(min_length=1)
 
 
 class EvidencedImprovementRequest(BaseModel):
@@ -7148,6 +7160,49 @@ async def improvement_request(
     if not ok:
         raise HTTPException(status_code=400, detail=status)
     return {"success": True, "candidate_id": candidate_id, "status": status}
+
+
+@app.post("/api/improvement/development")
+async def development_request_create(
+    request: DevelopmentCreateRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_improvement_token(x_jarvis_admin_token)
+    try:
+        return await improvement.request_development(request.request_id, request.request, "aaron")
+    except DevelopmentRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.get("/api/improvement/development/{request_id}")
+async def development_request_status(
+    request_id: str,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_improvement_token(x_jarvis_admin_token)
+    try:
+        return await improvement.development_request(request_id, "aaron")
+    except DevelopmentRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@app.post("/api/improvement/development/{request_id}/scope")
+async def development_request_scope(
+    request_id: str,
+    request: DevelopmentScopeRequest,
+    x_jarvis_admin_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    _require_improvement_token(x_jarvis_admin_token)
+    try:
+        return await improvement.propose_development_scope(
+            request_id,
+            "aaron",
+            request.source_sha,
+            request.source_findings,
+            request.acceptance_criteria,
+        )
+    except DevelopmentRequestError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/improvement/request/evidenced")

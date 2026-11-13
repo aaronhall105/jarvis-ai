@@ -1,0 +1,75 @@
+[
+  {
+    "domain": "jarvis-development-preparation-v1\n",
+    "fields": {
+      "version": 1,
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "key_id": "5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111",
+      "expires_at": 2000000000,
+      "action": "prepare_development",
+      "candidate_id": 78,
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "candidate_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "goal": "Reduce response latency safely",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "provider": "openai",
+      "model": "approved-model",
+      "max_calls": 1,
+      "max_cost_usd": 1,
+      "deadline_seconds": 120,
+      "guardian_generation": "00000000-0000-4000-8000-000000000001"
+    },
+    "canonical": "{\"action\":\"prepare_development\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"candidate_id\":78,\"candidate_sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"deadline_seconds\":120,\"evidence_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"expires_at\":2000000000,\"goal\":\"Reduce response latency safely\",\"guardian_generation\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111\",\"max_calls\":1,\"max_cost_usd\":1,\"model\":\"approved-model\",\"provider\":\"openai\",\"request_id\":\"00000000-0000-4000-8000-000000000001\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"version\":1}",
+    "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHcfmx7RTn6CFByVv9o/9itVocx9EkzRVD0oApfZEpY9IDE3VnraW8NvwPiEdSc9T+ctr0IPoTWtQmo4nLR2Gxw==",
+    "signature": "MEQCIBKDBAHMMB20x/LSyhFfke/yQEvtobFPXdI8Hr94RPTRAiBdSwUJ9w3o57IMJWMm1IZz0D+BpegiIEriyJNNE4DMIg=="
+  },
+  {
+    "domain": "jarvis-development-activation-v1\n",
+    "fields": {
+      "version": 1,
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "key_id": "5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111",
+      "expires_at": 2000000000,
+      "action": "activate_development",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "approval_id": "approval-78",
+      "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "parameters_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "guardian_generation": "00000000-0000-4000-8000-000000000001"
+    },
+    "canonical": "{\"action\":\"activate_development\",\"approval_id\":\"approval-78\",\"expires_at\":2000000000,\"guardian_generation\":\"00000000-0000-4000-8000-000000000001\",\"key_id\":\"5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111\",\"parameters_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"request_id\":\"00000000-0000-4000-8000-000000000001\",\"source_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}",
+    "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHcfmx7RTn6CFByVv9o/9itVocx9EkzRVD0oApfZEpY9IDE3VnraW8NvwPiEdSc9T+ctr0IPoTWtQmo4nLR2Gxw==",
+    "signature": "MEQCIFxUwvpBTnT20w6okvHmDPnxn1eYB7o31/woHm8iJ6WyAiBXz7m0Fmclxt5vGMuAXP4cfecwNldhhjVIwEkef8sy3Q=="
+  },
+  {
+    "domain": "jarvis-development-integration-v1\n",
+    "fields": {
+      "version": 1,
+      "request_id": "00000000-0000-4000-8000-000000000001",
+      "key_id": "5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111",
+      "expires_at": 2000000000,
+      "action": "create_development_pr",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "repository": "aaronhall105/jarvis-ai",
+      "base_branch": "jarvis/unified-production",
+      "base_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "base_tree_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+      "allowed_paths": [
+        "bridge/app/ai_engine.py",
+        "bridge/tests/test_executive_agent.py"
+      ],
+      "parameters_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "evidence_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "diff_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "proposal_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "canonical": "{\"action\":\"create_development_pr\",\"allowed_paths\":[\"bridge/app/ai_engine.py\",\"bridge/tests/test_executive_agent.py\"],\"base_branch\":\"jarvis/unified-production\",\"base_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"base_tree_sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"diff_sha256\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\",\"evidence_sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"expires_at\":2000000000,\"head_tree_sha\":\"cccccccccccccccccccccccccccccccccccccccc\",\"key_id\":\"5d653b6bdf9965878ffbf05bada8982c2f90b32082edf55e2e9c86bb8a5b4111\",\"parameters_sha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"proposal_sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"repository\":\"aaronhall105/jarvis-ai\",\"request_id\":\"00000000-0000-4000-8000-000000000001\",\"task_id\":\"00000000-0000-4000-8000-000000000001\",\"version\":1}",
+    "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEHcfmx7RTn6CFByVv9o/9itVocx9EkzRVD0oApfZEpY9IDE3VnraW8NvwPiEdSc9T+ctr0IPoTWtQmo4nLR2Gxw==",
+    "signature": "MEUCIHUhIDIvnlwWSNFea0Xy8kM58q1hTolntYfRtBSMcZt9AiEAoEJsajH5bC1d673JCbVuVzqYQFqL5t7HxU6ZkLGWyyk="
+  }
+]

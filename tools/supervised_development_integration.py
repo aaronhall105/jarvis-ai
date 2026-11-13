@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -458,6 +458,7 @@ def _publish(
     policy: dict[str, Any],
     github: Any,
     records: Records,
+    validate_proposal: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """Internal transaction engine; production authority is fixed by publish()."""
     _verify_approval(approval, proposal, policy)
@@ -478,19 +479,22 @@ def _publish(
     db.execute("""CREATE TABLE IF NOT EXISTS integration_handoffs (
         task_id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL,
         proposal_sha256 TEXT NOT NULL, status TEXT NOT NULL, phase TEXT NOT NULL,
-        receipt TEXT, FOREIGN KEY(task_id) REFERENCES tasks(id))""")
+        receipt TEXT)""")
     db.execute("BEGIN IMMEDIATE")
     try:
-        row = db.execute(
-            "SELECT state,parameters,evidence FROM tasks WHERE id=?", (proposal["task_id"],)
-        ).fetchone()
-        _require(
-            row is not None
-            and row[0] == REVIEW_REQUIRED
-            and _digest(json.loads(row[1])) == proposal["parameters_sha256"]
-            and _digest(json.loads(row[2])) == proposal["evidence_sha256"],
-            "integration_task_changed",
-        )
+        if validate_proposal is not None:
+            validate_proposal()
+        else:
+            row = db.execute(
+                "SELECT state,parameters,evidence FROM tasks WHERE id=?", (proposal["task_id"],)
+            ).fetchone()
+            _require(
+                row is not None
+                and row[0] == REVIEW_REQUIRED
+                and _digest(json.loads(row[1])) == proposal["parameters_sha256"]
+                and _digest(json.loads(row[2])) == proposal["evidence_sha256"],
+                "integration_task_changed",
+            )
         prior = db.execute(
             "SELECT status FROM integration_handoffs WHERE task_id=? OR request_id=?",
             (proposal["task_id"], approval["request_id"]),
@@ -534,16 +538,19 @@ def _publish(
         # long sequence of uploads. The approved capsule is held in memory;
         # expiry or a changed task record makes the remaining steps forbidden.
         _verify_approval(approval, proposal, policy)
-        current = db.execute(
-            "SELECT state,parameters,evidence FROM tasks WHERE id=?", (proposal["task_id"],)
-        ).fetchone()
-        _require(
-            current is not None
-            and current[0] == REVIEW_REQUIRED
-            and _digest(json.loads(current[1])) == proposal["parameters_sha256"]
-            and _digest(json.loads(current[2])) == proposal["evidence_sha256"],
-            "integration_task_changed",
-        )
+        if validate_proposal is not None:
+            validate_proposal()
+        else:
+            current = db.execute(
+                "SELECT state,parameters,evidence FROM tasks WHERE id=?", (proposal["task_id"],)
+            ).fetchone()
+            _require(
+                current is not None
+                and current[0] == REVIEW_REQUIRED
+                and _digest(json.loads(current[1])) == proposal["parameters_sha256"]
+                and _digest(json.loads(current[2])) == proposal["evidence_sha256"],
+                "integration_task_changed",
+            )
         records.write(
             "handoff",
             proposal["task_id"],
@@ -683,12 +690,9 @@ def _publish(
 def publish(task_id: str, approval: dict[str, Any]) -> dict[str, Any]:
     """The only production publishing entry point; no authority/transport overrides."""
     policy = _policy()
-    proposal = prepare_proposal(
-        CONTROLLER_DATABASE,
-        task_id,
-        WORKSPACES,
-        expected_receipt_uid=pwd.getpwnam("jarvis-autonomy").pw_uid,
-    )
+    from tools.supervised_development_integration_service import fetch_proposal
+
+    proposal = fetch_proposal(task_id)
     _verify_approval(approval, proposal, policy)
     github = _GitHub()
     for parent in JOURNAL.parents:
@@ -707,14 +711,31 @@ def publish(task_id: str, approval: dict[str, Any]) -> dict[str, Any]:
         and stat.S_IMODE(info.st_mode) == 0o600,
         "integration_lock_untrusted",
     )
-    # Opening an existing DB must not initialise, chmod or replace it.
-    db = sqlite3.connect(f"file:{CONTROLLER_DATABASE}?mode=rw", uri=True, isolation_level=None)
+    # This journal has no task authority and lives only under the separate
+    # integration identity. It never grants that identity controller DB access.
+    journal = JOURNAL / "handoffs.sqlite3"
+    fd = os.open(journal, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    info = os.fstat(fd)
+    os.close(fd)
+    _require(
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.getuid()
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) == 0o600,
+        "integration_journal_untrusted",
+    )
+    db = sqlite3.connect(f"file:{journal}?mode=rw", uri=True, isolation_level=None)
     try:
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA foreign_keys=ON")
         with os.fdopen(lock_fd, "rb") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            return _publish(db, proposal, approval, policy, github, records)
+
+            def validate() -> None:
+                current = fetch_proposal(task_id)
+                _require(current == proposal, "integration_task_changed")
+
+            return _publish(db, proposal, approval, policy, github, records, validate)
     finally:
         db.close()
 

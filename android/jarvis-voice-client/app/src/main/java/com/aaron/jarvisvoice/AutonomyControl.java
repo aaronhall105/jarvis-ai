@@ -26,6 +26,20 @@ import org.json.JSONObject;
 final class AutonomyControl {
     private static final String ALIAS = "jarvis.autonomy.operator.v1";
     private static final String DEVELOPMENT_DOMAIN = "jarvis-development-admission-v1\n";
+    static final String INTEGRATION_DOMAIN = "jarvis-development-integration-v1\n";
+    static final String PREPARATION_DOMAIN = "jarvis-development-preparation-v1\n";
+    static final String ACTIVATION_DOMAIN = "jarvis-development-activation-v1\n";
+    private static final Set<String> INTEGRATION_FIELDS = Set.of(
+        "version", "action", "request_id", "task_id", "repository", "base_branch",
+        "base_sha", "base_tree_sha", "head_tree_sha", "allowed_paths", "parameters_sha256",
+        "evidence_sha256", "diff_sha256", "proposal_sha256", "expires_at");
+    private static final Set<String> PREPARATION_FIELDS = Set.of(
+        "version", "action", "request_id", "candidate_id", "source_sha", "evidence_sha256",
+        "candidate_sha256", "goal", "allowed_paths", "provider", "model", "max_calls",
+        "max_cost_usd", "deadline_seconds", "guardian_generation", "expires_at");
+    private static final Set<String> ACTIVATION_FIELDS = Set.of(
+        "version", "action", "request_id", "task_id", "approval_id", "source_sha",
+        "parameters_sha256", "guardian_generation", "expires_at");
     private static final Set<String> DEVELOPMENT_FIELDS = new HashSet<>(java.util.Arrays.asList(
         "version", "action", "task_id", "source_sha", "parameters_sha256", "allowed_paths",
         "provider", "model", "max_calls", "max_cost_usd", "deadline_seconds",
@@ -41,7 +55,8 @@ final class AutonomyControl {
             "tools/artifact_signing", "tools/publish_", "tools/generate_ota",
             "tools/verify_", "tools/check_", "tools/prepare_",
             "bridge/app/main.py", "bridge/app/config.py", "bridge/app/admin_engine.py",
-            "bridge/app/self_improvement.py", "bridge/app/development_scope.py")));
+            "bridge/app/self_improvement.py", "bridge/app/development_scope.py",
+            "bridge/app/development_requests.py")));
     private static final Pattern PROTECTED_WORDS = Pattern.compile(
         "(?:^|[/_.-])(?:auth(?:entication|orization)?|security|secrets?|credentials?|passwords?|"
         + "tokens?|signing|keystore|guardian|broker|policy|policies|deploy(?:ment)?|sudoers|"
@@ -70,6 +85,114 @@ final class AutonomyControl {
         return sign(store, DEVELOPMENT_DOMAIN, canonical(fields));
     }
 
+    /** Separate consent for publishing the reviewed proposal. Never authorizes a merge or deployment. */
+    static JSONObject signedIntegration(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = integrationFields(request);
+        KeyStore store = operatorStore();
+        fields.put("key_id", keyId(store));
+        return sign(store, INTEGRATION_DOMAIN, canonical(fields));
+    }
+
+    static JSONObject signedPreparation(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = preparationFields(request);
+        KeyStore store = operatorStore();
+        fields.put("key_id", keyId(store));
+        return sign(store, PREPARATION_DOMAIN, canonical(fields));
+    }
+
+    static JSONObject signedActivation(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = activationFields(request);
+        KeyStore store = operatorStore();
+        fields.put("key_id", keyId(store));
+        return sign(store, ACTIVATION_DOMAIN, canonical(fields));
+    }
+
+    static TreeMap<String, Object> preparationFields(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = productFields(request, PREPARATION_FIELDS,
+            "prepare_development", 300);
+        Object candidate = request.get("candidate_id");
+        if (!(candidate instanceof Number) || ((Number) candidate).doubleValue() != ((Number) candidate).longValue()
+            || ((Number) candidate).longValue() < 1)
+            throw new IllegalArgumentException("invalid candidate");
+        requireSha(request, "source_sha", SHA40);
+        requireSha(request, "evidence_sha256", SHA64);
+        requireSha(request, "candidate_sha256", SHA64);
+        requireUuid(request, "guardian_generation");
+        validateDevelopmentPolicy(request);
+        return fields;
+    }
+
+    static TreeMap<String, Object> activationFields(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = productFields(request, ACTIVATION_FIELDS,
+            "activate_development", 300);
+        requireUuid(request, "task_id");
+        requireUuid(request, "guardian_generation");
+        String approval = request.getString("approval_id");
+        if (!approval.matches("[A-Za-z0-9._:-]{1,200}")) throw new IllegalArgumentException("invalid approval");
+        requireSha(request, "source_sha", SHA40);
+        requireSha(request, "parameters_sha256", SHA64);
+        return fields;
+    }
+
+    private static void requireUuid(JSONObject request, String field) throws Exception {
+        String value = request.getString(field);
+        if (!UUID.fromString(value).toString().equals(value)) throw new IllegalArgumentException("invalid identity");
+    }
+
+    private static void requireSha(JSONObject request, String field, Pattern pattern) throws Exception {
+        if (!pattern.matcher(request.getString(field)).matches()) throw new IllegalArgumentException("invalid binding");
+    }
+
+    private static TreeMap<String, Object> productFields(JSONObject request, Set<String> expected,
+            String action, int lifetime) throws Exception {
+        if (request == null) throw new IllegalArgumentException("missing approval preview");
+        Set<String> names = new HashSet<>();
+        request.keys().forEachRemaining(names::add);
+        Object version = request.get("version");
+        Object expiry = request.get("expires_at");
+        long now = System.currentTimeMillis() / 1000;
+        if (!names.equals(expected) || !(version instanceof Integer) || ((Integer) version) != 1
+            || !action.equals(request.getString("action")) || !(expiry instanceof Number)
+            || ((Number) expiry).doubleValue() != ((Number) expiry).longValue()
+            || request.getLong("expires_at") <= now || request.getLong("expires_at") > now + lifetime)
+            throw new IllegalArgumentException("invalid or expired approval preview");
+        requireUuid(request, "request_id");
+        TreeMap<String, Object> fields = new TreeMap<>();
+        for (String field : expected) fields.put(field, request.get(field));
+        return fields;
+    }
+
+    static TreeMap<String, Object> integrationFields(JSONObject request) throws Exception {
+        TreeMap<String, Object> fields = productFields(request, INTEGRATION_FIELDS,
+            "create_development_pr", 900);
+        if (!"aaronhall105/jarvis-ai".equals(request.getString("repository"))
+            || !"jarvis/unified-production".equals(request.getString("base_branch")))
+            throw new IllegalArgumentException("invalid proposal approval");
+        for (String field : new String[]{"request_id", "task_id"}) {
+            String id = request.getString(field);
+            if (!UUID.fromString(id).toString().equals(id)) throw new IllegalArgumentException("invalid identity");
+        }
+        for (String field : new String[]{"base_sha", "base_tree_sha", "head_tree_sha"})
+            if (!SHA40.matcher(request.getString(field)).matches()) throw new IllegalArgumentException("invalid source");
+        for (String field : new String[]{"parameters_sha256", "evidence_sha256", "diff_sha256", "proposal_sha256"})
+            if (!SHA64.matcher(request.getString(field)).matches()) throw new IllegalArgumentException("invalid evidence");
+        long now = System.currentTimeMillis() / 1000;
+        Object expires = request.get("expires_at");
+        if (!(expires instanceof Number) || ((Number) expires).doubleValue() != ((Number) expires).longValue()
+            || request.getLong("expires_at") <= now || request.getLong("expires_at") > now + 900)
+            throw new IllegalArgumentException("expired proposal approval");
+        JSONArray paths = request.getJSONArray("allowed_paths");
+        String previous = null;
+        if (paths.length() == 0) throw new IllegalArgumentException("empty proposal scope");
+        for (int i = 0; i < paths.length(); i++) {
+            String path = paths.getString(i);
+            if (!isCanonicalEditablePath(path) || (previous != null && previous.compareTo(path) >= 0))
+                throw new IllegalArgumentException("invalid proposal scope");
+            previous = path;
+        }
+        return fields;
+    }
+
     static TreeMap<String, Object> developmentFields(JSONObject task) throws Exception {
         if (task == null) throw new IllegalArgumentException("missing task");
         Set<String> names = new HashSet<>();
@@ -93,10 +216,22 @@ final class AutonomyControl {
         if (!SHA40.matcher(task.getString("source_sha")).matches()
             || !SHA64.matcher(task.getString("parameters_sha256")).matches())
             throw new IllegalArgumentException("invalid source binding");
+        validateDevelopmentPolicy(task);
+        TreeMap<String, Object> fields = new TreeMap<>();
+        for (String field : DEVELOPMENT_FIELDS) fields.put(field, task.get(field));
+        return fields;
+    }
+
+    private static void validateDevelopmentPolicy(JSONObject task) throws Exception {
         Object rawCalls = task.get("max_calls");
+        Object rawCost = task.get("max_cost_usd");
+        Object rawDeadline = task.get("deadline_seconds");
         if (!(rawCalls instanceof Number) || !Double.isFinite(((Number) rawCalls).doubleValue())
-            || ((Number) rawCalls).doubleValue() != ((Number) rawCalls).intValue())
-            throw new IllegalArgumentException("invalid call limit");
+            || ((Number) rawCalls).doubleValue() != ((Number) rawCalls).intValue()
+            || !(rawCost instanceof Number) || !Double.isFinite(((Number) rawCost).doubleValue())
+            || !(rawDeadline instanceof Number) || !Double.isFinite(((Number) rawDeadline).doubleValue())
+            || ((Number) rawDeadline).doubleValue() != ((Number) rawDeadline).intValue())
+            throw new IllegalArgumentException("invalid execution limit");
         if (!"openai".equals(task.getString("provider"))
             || !task.getString("model").matches("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
             || task.getInt("max_calls") < 1 || task.getInt("max_calls") > 4
@@ -115,9 +250,6 @@ final class AutonomyControl {
                 throw new IllegalArgumentException("invalid scope");
             previous = path;
         }
-        TreeMap<String, Object> fields = new TreeMap<>();
-        for (String field : DEVELOPMENT_FIELDS) fields.put(field, task.get(field));
-        return fields;
     }
 
     static boolean isCanonicalEditablePath(String path) {

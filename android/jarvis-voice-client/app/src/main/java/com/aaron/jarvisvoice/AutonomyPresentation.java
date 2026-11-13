@@ -38,7 +38,31 @@ final class AutonomyPresentation {
     }
 
     static boolean retryHttpFailure(String path) {
-        return !path.equals("/control");
+        return path.equals("/observe") || path.startsWith("/development/prepare/")
+            || path.startsWith("/development/activation/") || path.startsWith("/development/proposal/");
+    }
+
+    static boolean productAcknowledged(String path, JSONObject request, JSONObject result) {
+        if (request == null || result == null || !result.optBoolean("ok")
+            || !"accepted".equals(result.optString("category"))) return false;
+        if (path.equals("/development/start"))
+            return "preparation_requested".equals(result.optString("status"))
+                && request.optString("request_id").equals(result.optString("request_id"));
+        if (path.equals("/development/activate"))
+            return "active".equals(result.optString("status"))
+                && request.optString("request_id").equals(result.optString("request_id"))
+                && request.optString("task_id").equals(result.optString("task_id"));
+        if (path.equals("/development/publish")) {
+            JSONObject receipt = result.optJSONObject("result");
+            if (receipt == null || !"PR_REVIEW_REQUIRED".equals(receipt.optString("status"))
+                || receipt.optInt("number") < 1
+                || !receipt.optString("head_sha").matches("[a-f0-9]{40}")
+                || !request.optString("base_sha").equals(receipt.optString("base_sha"))
+                || !request.optString("proposal_sha256").equals(receipt.optString("proposal_sha256"))) return false;
+            return ("https://github.com/aaronhall105/jarvis-ai/pull/" + receipt.optInt("number"))
+                .equals(result.optString("url"));
+        }
+        return false;
     }
 
     static String status(JSONObject state) {

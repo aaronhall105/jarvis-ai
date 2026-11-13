@@ -88,7 +88,7 @@ def test_actual_controller_process_signed_admission_iterative_worker_review_stop
             assert evidence["provider_requests"] == 2
             assert len(evidence["calls"]) == 2
             assert all(call["outcome"] == "completed" for call in evidence["calls"])
-            assert evidence["restart"]["status"] == "no_eligible_candidate"
+            assert evidence["restart"]["status"] == "owner_preparation_required"
         else:
             assert evidence["state"] == "RECONCILIATION_REQUIRED", evidence
             assert evidence["restart"]["status"].upper() == "RECONCILIATION_REQUIRED"
@@ -122,6 +122,10 @@ def test_actual_controller_process_signed_admission_iterative_worker_review_stop
         receipt_path = tmp_path / "rehearsal-evidence.json"
         receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
         receipt_path.chmod(0o600)
+        if outcome == "success":
+            (tmp_path / "proposal-view.json").write_text(
+                json.dumps(evidence["proposal_view"], indent=2, sort_keys=True) + "\n"
+            )
     finally:
         subprocess.run(
             ["docker", "stop", "--time=1", name], capture_output=True, timeout=10, check=False

@@ -16,6 +16,7 @@
     "bridge/app/tokens.py",
     "bridge/app/approvals.py",
     "bridge/app/development_scope.py",
+    "bridge/app/development_requests.py",
     "bridge/app/main.py",
     "bridge/app/self_improvement.py",
     "bridge/app/patch_validation.py",
