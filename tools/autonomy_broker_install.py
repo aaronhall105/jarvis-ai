@@ -561,6 +561,7 @@ def upgrade(files: dict, policy: dict) -> None:
     workspace_metadata: dict[Path, tuple[int, os.stat_result]] = {}
     replaced: list[Path] = []
     services_touched = False
+    destination_activation_attempted = False
     guardian_manifest_touched = False
     retain_reconciliation = False
     transaction_owned = False
@@ -654,13 +655,18 @@ def upgrade(files: dict, policy: dict) -> None:
             os.replace(staged_path, path)
             replaced.append(path)
         old_manifest = json.loads(guardian_before)
-        old_manifest["files"].update(new_digests)
+        # Root verifies private configuration through the broker manifest;
+        # public Guardian readers must never need to open that private file.
+        # Also remove the exact verified entry if an older upgrade exposed it.
+        old_manifest["files"] = _public_guardian_files(old_manifest["files"], private_digest)
+        old_manifest["files"].update(_public_guardian_files(new_digests, private_digest))
         old_manifest["files"][str(marker)] = hashlib.sha256(new_marker).hexdigest()
         with controller.lock():
             guardian_manifest_touched = True
             replace_manifest(guardian_marker, canonical(old_manifest))
         command(["/usr/bin/systemd-analyze", "verify", *[str(UNITS / name) for name in UNIT_NAMES]])
         command(["/usr/bin/systemctl", "daemon-reload"])
+        destination_activation_attempted = True
         command(["/usr/bin/systemctl", "enable", "--now", *SOCKETS])
         controller.integrity()
         if controller.status().get("state") != "STOPPED":
@@ -671,8 +677,15 @@ def upgrade(files: dict, policy: dict) -> None:
         # audit records and ledgers for reconciliation.
         if services_touched:
             try:
-                command(["/usr/bin/systemctl", "disable", "--now", *managed_sockets])
-                command(["/usr/bin/systemctl", "stop", *managed_services])
+                # Activation can partially succeed before systemctl fails.
+                # The legacy source lacks publication/controller units, but
+                # destination roles may now be running the replacement code.
+                rollback_sockets = SOCKETS if destination_activation_attempted else managed_sockets
+                rollback_services = (
+                    SERVICES if destination_activation_attempted else managed_services
+                )
+                command(["/usr/bin/systemctl", "disable", "--now", *rollback_sockets])
+                command(["/usr/bin/systemctl", "stop", *rollback_services])
             except BaseException as error:
                 # Never restore executable bytes underneath a possibly live
                 # process, and never destroy the only rollback evidence.
@@ -786,6 +799,17 @@ def replace_manifest(path: Path, raw: bytes) -> None:
         Path(name).unlink(missing_ok=True)
 
 
+def _public_guardian_files(files: dict, private_digest: str) -> dict:
+    """Exclude only verified private Docker configuration, not other integrity pins."""
+    private = str(BASE / "docker-client/config.json")
+    public = dict(files)
+    if private in public:
+        if public[private] != private_digest:
+            raise Denied("unexpected_private_configuration")
+        del public[private]
+    return public
+
+
 def repair_public_manifest(files: dict) -> None:
     """One known metadata repair, not a reinstall or permission change.
 
@@ -822,9 +846,7 @@ def repair_public_manifest(files: dict) -> None:
         if str(private) not in manifest["files"]:
             print("Public Guardian manifest already repaired; autonomy STOPPED.")
             return
-        if manifest["files"][str(private)] != expected:
-            raise Denied("unexpected_private_configuration")
-        del manifest["files"][str(private)]
+        manifest["files"] = _public_guardian_files(manifest["files"], expected)
         revised = canonical(manifest)
         digest = hashlib.sha256(revised).hexdigest()
         records = Records(BASE / "records")
@@ -898,13 +920,9 @@ def install(files: dict, policy: dict) -> None:
         # Public status must remain readable by the isolated autonomy UID.
         # The private file remains pinned in the root-verified broker manifest;
         # that complete manifest is itself pinned by the Guardian below.
-        old_manifest["files"].update(
-            {
-                name: digest
-                for name, digest in digests.items()
-                if name != str(BASE / "docker-client/config.json")
-            }
-        )
+        private_digest = digests[str(BASE / "docker-client/config.json")]
+        old_manifest["files"] = _public_guardian_files(old_manifest["files"], private_digest)
+        old_manifest["files"].update(_public_guardian_files(digests, private_digest))
         old_manifest["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
         with controller.lock():
             replace_manifest(guardian_marker, canonical(old_manifest))
