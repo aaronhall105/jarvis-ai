@@ -299,3 +299,61 @@ def test_actual_integration_peer_credentials_and_framing(tmp_path, monkeypatch):
     thread.join(2)
     listener.close()
     assert received == [body]
+
+
+@pytest.mark.parametrize(
+    ("path", "integration"),
+    [
+        (ipc.PUBLICATION_SOCKET, False),
+        (ipc.OPERATOR_SOCKET, False),
+        (ipc.INTEGRATION_SOCKET, True),
+    ],
+)
+@pytest.mark.parametrize(
+    ("pid", "uid", "gid", "expected"),
+    [
+        (1, 65534, 65534, True),
+        (1, 0, 0, True),
+        (99, 65534, 65534, False),
+        (1, 1000, 1000, False),
+        (1, 65534, 1000, False),
+    ],
+)
+def test_mapped_systemd_socket_peer(monkeypatch, path, integration, pid, uid, gid, expected):
+    monkeypatch.setattr(
+        ipc.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=994),
+    )
+    assert ipc._trusted_peer(path, pid, uid, gid, integration=integration) is expected
+
+
+def test_overflow_identity_cannot_use_arbitrary_socket(monkeypatch):
+    monkeypatch.setattr(
+        ipc.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=994),
+    )
+    for integration in (False, True):
+        assert not ipc._trusted_peer(
+            "/tmp/untrusted.sock",
+            1,
+            65534,
+            65534,
+            integration=integration,
+        )
+
+
+def test_dedicated_integration_identity_remains_valid(monkeypatch):
+    monkeypatch.setattr(
+        ipc.pwd,
+        "getpwnam",
+        lambda _name: SimpleNamespace(pw_uid=994),
+    )
+    assert ipc._trusted_peer(
+        ipc.INTEGRATION_SOCKET,
+        88,
+        994,
+        994,
+        integration=True,
+    )
