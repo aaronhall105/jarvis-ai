@@ -10,6 +10,13 @@ from typing import Any
 
 SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
 MAX_FRAME = 16_384
+
+
+def _trusted_publication_peer(pid: int, uid: int, gid: int) -> bool:
+    """Authenticate the PID 1 systemd socket across restricted UID mappings."""
+    return pid == 1 and uid in (0, 65534) and gid in (0, 65534)
+
+
 REQUIRED = {
     "version",
     "action",
@@ -45,10 +52,10 @@ def _fetch(version: int) -> dict[str, Any]:
         connection.settimeout(3)
         connection.connect(SOCKET)
         if version == 2:
-            _, peer_uid, _ = struct.unpack(
+            peer_pid, peer_uid, peer_gid = struct.unpack(
                 "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             )
-            if peer_uid != 0:
+            if not _trusted_publication_peer(peer_pid, peer_uid, peer_gid):
                 raise PermissionError("untrusted_publication_peer")
         connection.sendall(struct.pack("!I", len(raw)) + raw)
         header = _receive(connection, 4)

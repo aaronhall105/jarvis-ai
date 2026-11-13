@@ -139,3 +139,21 @@ def test_real_socket_rejects_nonroot_publisher_before_request(tmp_path, monkeypa
     thread.join(3)
     listener.close()
     assert received == [b""]
+
+
+@pytest.mark.parametrize(
+    "pid,uid,gid,expected",
+    [
+        (1, 0, 0, True),
+        (1, 65534, 65534, True),
+        (1, 65534, 0, True),
+        (1, 0, 65534, True),
+        (2, 0, 0, False),
+        (99, 65534, 65534, False),
+        (1, 1000, 1000, False),
+        (1, 0, 1000, False),
+        (1, 1000, 0, False),
+    ],
+)
+def test_publication_peer_identity_validation(pid, uid, gid, expected):
+    assert pending_task_client._trusted_publication_peer(pid, uid, gid) is expected
