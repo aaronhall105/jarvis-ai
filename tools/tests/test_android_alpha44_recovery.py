@@ -42,15 +42,15 @@ def test_recovery_retains_entire_published_alpha43_android_tree():
 
 def test_recovery_has_new_monotonic_identity_and_matching_release_notes():
     release = load_manifest()["current_release"]
-    assert release["version_name"] == "19.0.0-alpha49"
-    assert release["version_code"] == 190510
+    assert release["version_name"] == "19.0.0-alpha50"
+    assert release["version_code"] == 190520
     assert release["version_code"] > max(
-        190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490, 190500
+        190420, 190430, 190440, 190450, 190460, 190470, 190480, 190490, 190500, 190510
     )
     assert release["phone_package"] == "com.aaron.jarvisvoice"
     for component in ("app", "wear"):
         gradle = (ROOT / ANDROID / component / "build.gradle.kts").read_text()
         assert 'applicationId = "com.aaron.jarvisvoice"' in gradle
-    notes = (ROOT / "docs/releases/CHANGES_V19_0_0_ALPHA49.md").read_text()
-    assert "190510" in notes
+    notes = (ROOT / "docs/releases/CHANGES_V19_0_0_ALPHA50.md").read_text()
+    assert "190520" in notes
     assert "No storage migration" in notes
