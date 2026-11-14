@@ -3,8 +3,6 @@ package com.aaron.jarvisvoice;
 import android.os.Handler;
 import android.os.Looper;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -19,10 +17,16 @@ final class AutonomyClient implements AutoCloseable {
     private final OkHttpClient http = new OkHttpClient.Builder()
         .followRedirects(false).followSslRedirects(false).retryOnConnectionFailure(false)
         .callTimeout(20, TimeUnit.SECONDS).build();
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final AutonomyWorkQueue work = new AutonomyWorkQueue(() -> {
+        // TLS cancellation/close may perform I/O: never execute it on the UI thread.
+        try { http.dispatcher().cancelAll(); }
+        finally {
+            try { http.connectionPool().evictAll(); }
+            finally { http.dispatcher().executorService().shutdown(); }
+        }
+    });
     private final Handler main = new Handler(Looper.getMainLooper());
     private final SecureStore store;
-    private volatile boolean closed;
     AutonomyClient(SecureStore store) { this.store = store; }
 
     void observe(Callback callback) { request("/observe", new JSONObject(), callback); }
@@ -45,7 +49,7 @@ final class AutonomyClient implements AutoCloseable {
     void publish(JSONObject request, Callback callback) { signedProduct("/development/publish", request, callback); }
 
     private void signedProduct(String path, JSONObject request, Callback callback) {
-        executor.execute(() -> {
+        work.execute(() -> {
             try {
                 JSONObject signed = switch (path) {
                     case "/development/start" -> AutonomyControl.signedPreparation(request);
@@ -61,14 +65,14 @@ final class AutonomyClient implements AutoCloseable {
     }
 
     void control(String action, String generation, Callback callback) {
-        executor.execute(() -> {
+        work.execute(() -> {
             try { execute("/control", AutonomyControl.signed(action, generation), callback); }
             catch (Exception ignored) { deliver(callback, null, "Operator authorization is not available."); }
         });
     }
 
     void approveDevelopment(JSONObject task, Callback callback) {
-        executor.execute(() -> {
+        work.execute(() -> {
             try { execute("/control", AutonomyControl.signedDevelopment(task), callback); }
             catch (Exception ignored) {
                 deliver(callback, null, "The development approval could not be created. Nothing was authorized.");
@@ -77,7 +81,7 @@ final class AutonomyClient implements AutoCloseable {
     }
 
     private void request(String path, JSONObject body, Callback callback) {
-        executor.execute(() -> execute(path, body, callback));
+        work.execute(() -> execute(path, body, callback));
     }
 
     private void execute(String path, JSONObject body, Callback callback) {
@@ -86,7 +90,7 @@ final class AutonomyClient implements AutoCloseable {
             deliver(callback, null, "Connect Developer Mode in Settings first."); return;
         }
         for (String endpoint : endpoints) {
-            if (closed) return;
+            if (work.isClosed()) return;
             try {
                 Request.Builder builder = new Request.Builder().url(endpoint + "/api/autonomy" + path)
                     .header("Authorization", "Bearer " + store.developerToken());
@@ -131,14 +135,17 @@ final class AutonomyClient implements AutoCloseable {
                 }
             }
         }
-        deliver(callback, null, "Development observation is not available yet. Jarvis is still running normally.");
+        deliver(callback, null, path.startsWith("/development/") && body == null
+            ? "The protected review is unavailable. This read-only request did not submit an approval."
+            : "Development observation is not available yet. Jarvis is still running normally.");
     }
 
     private void deliver(Callback callback, JSONObject body, String error) {
-        main.post(() -> { if (!closed) callback.done(body, error); });
+        if (work.isClosed()) return;
+        main.post(() -> { if (!work.isClosed()) callback.done(body, error); });
     }
     @Override public void close() {
-        closed = true; http.dispatcher().cancelAll(); executor.shutdownNow();
-        http.connectionPool().evictAll();
+        work.close();
+        main.removeCallbacksAndMessages(null);
     }
 }

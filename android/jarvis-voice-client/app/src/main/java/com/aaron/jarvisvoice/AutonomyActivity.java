@@ -9,11 +9,13 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
+import android.view.ViewTreeObserver;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -23,6 +25,12 @@ public final class AutonomyActivity extends Activity {
     private AutonomyClient client;
     private JSONObject state;
     private boolean busy;
+    private boolean observing;
+    private boolean productLoading;
+    private boolean focusPreview;
+    private int renderRevision;
+    private ScrollView scroll;
+    private View previewAnchor;
     private ImprovementApiClient improvements;
     private DevelopmentRequestStore requests;
     private JSONObject developmentRequest;
@@ -34,7 +42,12 @@ public final class AutonomyActivity extends Activity {
     private String productError;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshLoop = new Runnable() {
-        @Override public void run() { refresh(); handler.postDelayed(this, 5000); }
+        @Override public void run() {
+            if (isFinishing() || isDestroyed()) return;
+            // Do not rebuild a review while the owner is reading or confirming it.
+            if (!productLoading && productPreview == null && productError == null) refresh();
+            handler.postDelayed(this, 5000);
+        }
     };
 
     @Override protected void onCreate(Bundle saved) {
@@ -42,7 +55,7 @@ public final class AutonomyActivity extends Activity {
         client = new AutonomyClient(new SecureStore(this));
         improvements = new ImprovementApiClient(this);
         requests = new DevelopmentRequestStore(this);
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         scroll.setBackgroundColor(JarvisUi.WHITE);
         content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -52,27 +65,48 @@ public final class AutonomyActivity extends Activity {
         setContentView(scroll);
     }
     @Override protected void onResume() {
-        super.onResume(); refresh(); handler.postDelayed(refreshLoop, 5000);
+        super.onResume(); handler.removeCallbacks(refreshLoop); refresh(); handler.postDelayed(refreshLoop, 5000);
     }
     @Override protected void onPause() { handler.removeCallbacks(refreshLoop); super.onPause(); }
-    @Override protected void onDestroy() { handler.removeCallbacks(refreshLoop); client.close(); super.onDestroy(); }
+    @Override protected void onDestroy() { handler.removeCallbacksAndMessages(null); client.close(); super.onDestroy(); }
 
     private void refresh() {
-        if (busy) return;
+        if (busy || observing || isFinishing() || isDestroyed()) return;
         refreshRequest();
-        busy = true;
+        observing = true;
         client.observe((value, error) -> {
-            busy = false;
-            if (error != null) { state = null; render(error); }
-            else { state = value; render(null); }
+            observing = false;
+            if (isFinishing() || isDestroyed()) return;
+            state = error == null ? value : null;
+            // A review click may be queued behind this read. Do not replace its loading UI.
+            if (!busy) render(error);
         });
     }
 
     private void render(String error) {
+        if (isFinishing() || isDestroyed()) return;
+        int position = scroll.getScrollY();
+        int revision = ++renderRevision;
+        previewAnchor = null;
+        renderContent(error);
+        View destination = focusPreview ? previewAnchor : null;
+        focusPreview = false;
+        scroll.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override public void onGlobalLayout() {
+                if (scroll.getViewTreeObserver().isAlive())
+                    scroll.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                if (revision != renderRevision || isFinishing() || isDestroyed()) return;
+                scroll.scrollTo(0, destination == null ? position : destination.getTop());
+            }
+        });
+    }
+
+    private void renderContent(String error) {
         content.removeAllViews();
         button("Back", this::finish);
         heading("JARVIS DEVELOPMENT");
         renderRequest();
+        if ("prepare".equals(productKind)) renderProductPreview();
         button("Set up operator controls", this::enrollment);
         if (state == null) {
             heading("NEEDS ATTENTION"); text(error == null ? "Loading observations…" : error);
@@ -104,9 +138,9 @@ public final class AutonomyActivity extends Activity {
             if (lifecycle.optBoolean("proposal_available") && "review_required".equals(lifecycle.optString("status")))
                 button("Review verified code proposal", () -> loadProduct("proposal", taskId));
         }
+        if (!"prepare".equals(productKind)) renderProductPreview();
         if (developmentTask != null) renderDevelopmentTask(developmentTask,
             lifecycle != null && lifecycle.optBoolean("approval_accepted"));
-        renderProductPreview();
         heading("WHAT I'M PLANNING");
         JSONArray plans = state.optJSONArray("plans");
         if (plans == null || plans.length() == 0) text("No evidence-backed plans yet.");
@@ -229,21 +263,44 @@ public final class AutonomyActivity extends Activity {
     }
 
     private void loadProduct(String kind, String identity) {
-        if (busy) return;
-        busy = true; productPreview = null; productError = null;
-        productKind = kind; productIdentity = identity;
+        if (isFinishing() || isDestroyed()) return;
+        if (busy) {
+            Toast.makeText(this, "A protected request is already in progress.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        // Observation uses its own flag. This read queues behind it rather than dropping the tap.
+        busy = true; productLoading = true; productPreview = null; productError = null;
+        productKind = kind; productIdentity = identity; focusPreview = true;
+        render(null);
         AutonomyClient.Callback callback = (value, error) -> {
-            busy = false; productPreview = value; productError = error; render(null);
+            busy = false; productLoading = false;
+            if (isFinishing() || isDestroyed()) return;
+            productPreview = value; productError = error; focusPreview = true; render(null);
         };
-        if (kind.equals("prepare")) client.preparation(Integer.parseInt(identity), callback);
-        else if (kind.equals("activation")) client.activation(identity, callback);
-        else client.proposal(identity, callback);
+        try {
+            if (kind.equals("prepare")) client.preparation(Integer.parseInt(identity), callback);
+            else if (kind.equals("activation")) client.activation(identity, callback);
+            else if (kind.equals("proposal")) client.proposal(identity, callback);
+            else callback.done(null, "Invalid protected review type.");
+        } catch (IllegalArgumentException invalid) {
+            callback.done(null, "Invalid protected request identity. No approval was submitted.");
+        }
     }
 
     private void renderProductPreview() {
-        if (productError != null) { heading("PROTECTED REQUEST NEEDS ATTENTION"); text(productError); return; }
+        if (productLoading) {
+            previewAnchor = heading("LOADING PROTECTED REVIEW");
+            text("Loading " + productKind + " review. No approval is being submitted.");
+            return;
+        }
+        if (productError != null) {
+            previewAnchor = heading("PROTECTED REQUEST NEEDS ATTENTION");
+            text(productError);
+            button("Retry read-only review", () -> loadProduct(productKind, productIdentity));
+            return;
+        }
         if (productPreview == null) return;
-        heading("PROTECTED " + productKind.toUpperCase(java.util.Locale.ROOT) + " REVIEW");
+        previewAnchor = heading("PROTECTED " + productKind.toUpperCase(java.util.Locale.ROOT) + " REVIEW");
         if (productPreview.optInt("version") != 3 || !"ready".equals(productPreview.optString("status"))) {
             text("No authorization is available: " + productPreview.optString("reason", "protected service unavailable"));
             return;
@@ -320,7 +377,8 @@ public final class AutonomyActivity extends Activity {
             .setNegativeButton("Cancel", null).setPositiveButton("Confirm", (dialog, which) -> {
                 busy = true;
                 AutonomyClient.Callback callback = (result, error) -> {
-                    busy = false; productPreview = null;
+                    busy = false; productPreview = null; productError = null;
+                    if (isFinishing() || isDestroyed()) return;
                     new AlertDialog.Builder(this).setMessage(error == null
                         ? "Protected request acknowledged. Refreshing the recorded result." : error)
                         .setPositiveButton("OK", null).show();
@@ -369,6 +427,7 @@ public final class AutonomyActivity extends Activity {
                 busy = true;
                 client.control(action, state.optString("guardian_generation"), (result, error) -> {
                     busy = false;
+                    if (isFinishing() || isDestroyed()) return;
                     if (error != null) new AlertDialog.Builder(this).setMessage(error).setPositiveButton("OK", null).show();
                     refresh(); // Never optimistically flip ACTIVE/STOPPED.
                 });
@@ -414,6 +473,7 @@ public final class AutonomyActivity extends Activity {
                 busy = true;
                 client.approveDevelopment(task, (result, error) -> {
                     busy = false;
+                    if (isFinishing() || isDestroyed()) return;
                     new AlertDialog.Builder(this)
                         .setMessage(error == null ? "Approval submitted. Guardian activation remains separate." : error)
                         .setPositiveButton("OK", null).show();
@@ -426,7 +486,7 @@ public final class AutonomyActivity extends Activity {
         TextView view = new TextView(this); view.setText(value); view.setTextSize(16);
         view.setTextColor(JarvisUi.BLACK); view.setPadding(0, 12, 0, 12); content.addView(view); return view;
     }
-    private void heading(String value) { TextView view = text(value); view.setTypeface(null, Typeface.BOLD); }
+    private TextView heading(String value) { TextView view = text(value); view.setTypeface(null, Typeface.BOLD); return view; }
     private void button(String value, Runnable action) {
         Button view = new Button(this); view.setText(value); view.setTextColor(JarvisUi.BLACK);
         view.setAllCaps(false);
