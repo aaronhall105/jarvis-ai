@@ -1515,7 +1515,13 @@ def test_timed_product_upgrades_without_changing_history_or_dropins(rehearsal, m
     drop.parent.mkdir()
     drop.write_text("[Service]\nProtectHome=tmpfs\n")
     private = paths["BASE"] / "docker-client/config.json"
-    protected = (history, drop, private, guardian.base / "state.json", guardian.base / "audit/events.jsonl")
+    protected = (
+        history,
+        drop,
+        private,
+        guardian.base / "state.json",
+        guardian.base / "audit/events.jsonl",
+    )
     before = {path: (path.read_bytes(), path.stat().st_ino) for path in protected}
     assert len(installer._verified_current_install(files)["files"]) == 42
     installer.upgrade(files, policy)
@@ -1530,11 +1536,17 @@ def test_timed_product_upgrades_without_changing_history_or_dropins(rehearsal, m
     )
 
 
-@pytest.mark.parametrize("active", [
-    "jarvis-development-integration.socket", "jarvis-development-integration.service",
-])
+@pytest.mark.parametrize(
+    "active",
+    [
+        "jarvis-development-integration.socket",
+        "jarvis-development-integration.service",
+    ],
+)
 def test_timed_product_refuses_live_integration_before_mutation(rehearsal, monkeypatch, active):
-    files, policy, guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch, active)
+    files, policy, guardian, commands, paths = _timed_product_fixture(
+        rehearsal, monkeypatch, active
+    )
     marker = paths["BASE"] / "installed.json"
     before = marker.read_bytes()
     with pytest.raises(Denied, match="upgrade_integration_must_be_inactive"):
@@ -1545,7 +1557,9 @@ def test_timed_product_refuses_live_integration_before_mutation(rehearsal, monke
     assert guardian.status()["trusted"] is True
 
 
-@pytest.mark.parametrize("change", ["bytes", "self_consistent", "mode", "missing", "extra", "unknown"])
+@pytest.mark.parametrize(
+    "change", ["bytes", "self_consistent", "mode", "missing", "extra", "unknown"]
+)
 def test_timed_product_refuses_modified_source(rehearsal, monkeypatch, change):
     files, _policy, _guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch)
     marker = paths["BASE"] / "installed.json"

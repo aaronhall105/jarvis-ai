@@ -474,11 +474,17 @@ def _require_timed_integration_quiescent() -> None:
     for unit in INTEGRATION_UNITS:
         result = subprocess.run(
             [
-                "/usr/bin/systemctl", "show",
-                "--property=LoadState,ActiveState", unit,
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState,ActiveState",
+                unit,
             ],
-            env=SAFE_ENV, stdin=subprocess.DEVNULL,
-            capture_output=True, text=True, timeout=15, check=True,
+            env=SAFE_ENV,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
         )
         state = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         if state.get("LoadState") != "loaded" or state.get("ActiveState") != "inactive":
