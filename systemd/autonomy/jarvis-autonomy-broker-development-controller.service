@@ -11,6 +11,9 @@ User=root
 Group=root
 SupplementaryGroups=jarvis-autonomy
 ExecStart=/usr/bin/python3 -I /usr/local/libexec/jarvis-autonomy-broker/entry.py development-controller
+# New tasks use v2 owner review without a wall-clock approval deadline.
+# Signed preparation/activation freshness and execution bounds are unchanged.
+Environment=JARVIS_SUPERVISED_REVIEW_MODE=manual
 UMask=0077
 NoNewPrivileges=true
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID

@@ -26,6 +26,7 @@ import org.json.JSONObject;
 final class AutonomyControl {
     private static final String ALIAS = "jarvis.autonomy.operator.v1";
     private static final String DEVELOPMENT_DOMAIN = "jarvis-development-admission-v1\n";
+    private static final String MANUAL_DEVELOPMENT_DOMAIN = "jarvis-development-admission-v2\n";
     static final String INTEGRATION_DOMAIN = "jarvis-development-integration-v1\n";
     static final String PREPARATION_DOMAIN = "jarvis-development-preparation-v1\n";
     static final String ACTIVATION_DOMAIN = "jarvis-development-activation-v1\n";
@@ -82,7 +83,7 @@ final class AutonomyControl {
         fields.put("key_id", keyId(store));
         fields.put("request_id", task.getString("request_ref"));
         fields.put("expires_at", task.getLong("expires_at"));
-        return sign(store, DEVELOPMENT_DOMAIN, canonical(fields));
+        return sign(store, developmentDomain(task.getInt("version")), canonical(fields));
     }
 
     /** Separate consent for publishing the reviewed proposal. Never authorizes a merge or deployment. */
@@ -193,6 +194,27 @@ final class AutonomyControl {
         return fields;
     }
 
+    static String developmentDomain(int version) {
+        if (version == 1) return DEVELOPMENT_DOMAIN;
+        if (version == 2) return MANUAL_DEVELOPMENT_DOMAIN;
+        throw new IllegalArgumentException("invalid development version");
+    }
+
+    static boolean manualReview(JSONObject task) {
+        if (task == null) return false;
+        Object version = task.opt("version");
+        Object expiry = task.opt("expires_at");
+        return version instanceof Integer && ((Integer) version) == 2
+            && (expiry instanceof Integer || expiry instanceof Long)
+            && ((Number) expiry).longValue() == 0;
+    }
+
+    static String reviewDeadlineLabel(JSONObject task) {
+        return manualReview(task)
+            ? "Review deadline: none. Explicit approval and separate activation are still required."
+            : "Approval expires: " + task.optLong("expires_at", 0);
+    }
+
     static TreeMap<String, Object> developmentFields(JSONObject task) throws Exception {
         if (task == null) throw new IllegalArgumentException("missing task");
         Set<String> names = new HashSet<>();
@@ -203,7 +225,10 @@ final class AutonomyControl {
         Set<String> withGoal = new HashSet<>(taskFields); withGoal.add("goal");
         if (!names.equals(taskFields) && !names.equals(withGoal))
             throw new IllegalArgumentException("unexpected task fields");
-        if (task.optInt("version", -1) != 1 || !"approve_development".equals(task.optString("action")))
+        Object rawVersion = task.get("version");
+        if (!(rawVersion instanceof Integer)
+            || (((Integer) rawVersion) != 1 && ((Integer) rawVersion) != 2)
+            || !"approve_development".equals(task.optString("action")))
             throw new IllegalArgumentException("invalid development action");
         UUID.fromString(task.getString("task_id"));
         UUID.fromString(task.getString("guardian_generation"));
@@ -212,7 +237,14 @@ final class AutonomyControl {
             || !requestRef.matches("[A-Za-z0-9._:-]+")) throw new IllegalArgumentException("invalid request");
         long expires = task.getLong("expires_at");
         long now = System.currentTimeMillis() / 1000;
-        if (expires <= now || expires > now + 120) throw new IllegalArgumentException("invalid expiry");
+        Object rawExpiry = task.get("expires_at");
+        if (!(rawExpiry instanceof Integer || rawExpiry instanceof Long))
+            throw new IllegalArgumentException("invalid expiry type");
+        if (((Integer) rawVersion) == 2) {
+            if (!manualReview(task)) throw new IllegalArgumentException("invalid manual review");
+        } else if (expires <= now || expires > now + 120) {
+            throw new IllegalArgumentException("invalid expiry");
+        }
         if (!SHA40.matcher(task.getString("source_sha")).matches()
             || !SHA64.matcher(task.getString("parameters_sha256")).matches())
             throw new IllegalArgumentException("invalid source binding");

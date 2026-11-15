@@ -441,7 +441,7 @@ public final class AutonomyActivity extends Activity {
             text("The protected task publisher is unavailable. Refresh later; no approval is possible.");
             return;
         }
-        if (expires <= System.currentTimeMillis() / 1000) {
+        if (!AutonomyControl.manualReview(task) && expires <= System.currentTimeMillis() / 1000) {
             heading("OWNER REVIEW EXPIRED");
             text("This development approval expired. Refresh for a new task; no approval is possible.");
             return;
@@ -459,7 +459,8 @@ public final class AutonomyActivity extends Activity {
             + "\nProvider/model: " + task.optString("provider") + "/" + task.optString("model")
             + "\nMaximum provider requests: " + task.optInt("max_calls")
             + "\nMaximum cost: $" + task.optString("max_cost_usd") + "\nDeadline: "
-            + task.optString("deadline_seconds") + " seconds\nExpires: " + expires);
+            + task.optString("deadline_seconds") + " seconds (execution only)\n"
+            + AutonomyControl.reviewDeadlineLabel(task));
         if (approvalAccepted) text("The protected broker has verified this development approval. Activation remains separate.");
         else button("Authorize this development task", () -> confirmDevelopment(task));
     }

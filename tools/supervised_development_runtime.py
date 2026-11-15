@@ -8,8 +8,8 @@ Guardian approvals, and then invokes the bounded worker exactly once.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import signal
@@ -23,18 +23,26 @@ from pathlib import Path
 from typing import Any, Callable
 
 from tools.autonomy_broker_host import CANONICAL, SAFE_ENV
-from tools.autonomy_guardian import identity as worker_identity
 from tools.autonomy_broker_runtime import emergency_stop, guardian_status, installed_policy
+from tools.autonomy_guardian import identity as worker_identity
 from tools.supervised_development_controller import (
     APPROVAL_REQUESTED,
+    CONTROLLER_DATABASE,
     FAILED,
-    LifecycleError,
+    RECONCILIATION_REQUIRED,
     REVIEW_PENDING,
     REVIEW_REQUIRED,
-    RECONCILIATION_REQUIRED,
     RUNNING,
+    LifecycleError,
     SupervisedDevelopmentController,
-    CONTROLLER_DATABASE,
+    approval_current,
+)
+from tools.supervised_development_environment import (
+    MANIFEST as ENVIRONMENT_MANIFEST,
+)
+from tools.supervised_development_environment import (
+    verify_worker_environment,
+    worker_python_arguments,
 )
 from tools.supervised_development_pipeline import (
     ExistingSelfDevelopmentWorker,
@@ -44,12 +52,6 @@ from tools.supervised_development_pipeline import (
 )
 from tools.supervised_development_review import TrustedReviewRunner
 from tools.supervised_development_scope import editable_path
-from tools.supervised_development_environment import (
-    MANIFEST as ENVIRONMENT_MANIFEST,
-    verify_worker_environment,
-    worker_python_arguments,
-)
-
 
 # Core's authoritative /app/data is the protected host bind mount below.  The
 # repository has no trusted Governor database and must never be used as a
@@ -432,6 +434,13 @@ class _SubmitOnlyWorker:
         raise LifecycleError("worker_not_initialized")
 
 
+def _manual_review_enabled() -> bool:
+    mode = os.environ.get("JARVIS_SUPERVISED_REVIEW_MODE", "timed")
+    if mode not in {"timed", "manual"}:
+        raise LifecycleError("invalid_owner_review_mode")
+    return mode == "manual"
+
+
 class SupervisedDevelopmentRuntime:
     """Coordinate exactly one durable task, then stop at REVIEW_REQUIRED."""
 
@@ -496,6 +505,7 @@ class SupervisedDevelopmentRuntime:
             candidate_id=params.get("candidate_id"),
             guardian_generation=approval.get("guardian_generation", ""),
             expires_at=approval.get("expires_at", 0),
+            approval_version=approval.get("approval_version", 1),
         )
 
     def _run_worker_subprocess(self, task_id: str, task: GovernorTask) -> dict[str, Any]:
@@ -712,7 +722,8 @@ class SupervisedDevelopmentRuntime:
                     source_sha=source_sha,
                     allowed_paths=tuple(candidate["allowed_paths"]),
                     guardian_generation=str(status["generation"]),
-                    expires_at=int(time.time()) + 90,
+                    expires_at=0 if _manual_review_enabled() else int(time.time()) + 90,
+                    approval_version=2 if _manual_review_enabled() else 1,
                     max_calls=_configured_call_limit(),
                     model=os.environ.get("JARVIS_SUPERVISED_MODEL", "gpt-5.3-codex"),
                 )
@@ -735,9 +746,10 @@ class SupervisedDevelopmentRuntime:
                             }
                         )
                         raise
-                    # Offline inventory validation consumes no part of the
-                    # separate, owner-visible 90-second signing window.
-                    task = replace(task, expires_at=int(time.time()) + 90)
+                    # V2 has no human-review countdown. V1 remains unchanged
+                    # for historical tasks and explicitly timed configurations.
+                    if task.approval_version == 1:
+                        task = replace(task, expires_at=int(time.time()) + 90)
                     if preparation is None or preparation["expires_at"] <= time.time():
                         raise LifecycleError("development_preparation_expired")
                 task_id = SupervisedDevelopmentPipeline(
@@ -755,6 +767,7 @@ class SupervisedDevelopmentRuntime:
                             "candidate_id": task.candidate_id,
                             "source_sha": task.source_sha,
                             "expires_at": task.expires_at,
+                            **({"approval_version": 2} if task.approval_version == 2 else {}),
                             "parameters_sha256": SupervisedDevelopmentPipeline._parameters_hash(
                                 task
                             ),
@@ -779,7 +792,7 @@ class SupervisedDevelopmentRuntime:
                 ),
                 self.reviewer,
             )
-            while int(time.time()) < task.expires_at:
+            while approval_current(task.approval_version, task.expires_at):
                 current = self.controller.snapshot(task_id)
                 if current["state"] in {REVIEW_REQUIRED, FAILED, RECONCILIATION_REQUIRED}:
                     return current

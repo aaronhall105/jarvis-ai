@@ -9,11 +9,11 @@ tests and separate from production state.
 from __future__ import annotations
 
 import hashlib
-import math
 import json
+import math
 import re
-import sqlite3
 import socket
+import sqlite3
 import stat
 import struct
 import time
@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from tools.supervised_development_scope import editable_path
-
 
 PROPOSED = "PROPOSED"
 APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
@@ -76,6 +75,19 @@ def _is_uuid(value: Any) -> bool:
         return isinstance(value, str) and str(uuid.UUID(value)) == value
     except (ValueError, AttributeError):
         return False
+
+
+def manual_review_deadline(version: Any, expires_at: Any) -> bool:
+    """Only an explicit v2 + integer zero has no human-review countdown."""
+    return type(version) is int and version == 2 and type(expires_at) is int and expires_at == 0
+
+
+def approval_current(version: Any, expires_at: Any, *, now: int | None = None) -> bool:
+    """Validate review lifetime without changing any signed task parameters."""
+    if manual_review_deadline(version, expires_at):
+        return True
+    cutoff = _now() if now is None else now
+    return type(version) is int and version == 1 and type(expires_at) is int and expires_at > cutoff
 
 
 class SupervisedDevelopmentController:
@@ -240,8 +252,13 @@ class SupervisedDevelopmentController:
         request_ref: str,
         guardian_generation: str = "",
         expires_at: int | None = None,
+        approval_version: int = 1,
     ) -> None:
         """Persist an untrusted request; this never grants execution authority."""
+        if type(approval_version) is not int or approval_version not in {1, 2}:
+            raise LifecycleError("invalid_approval_version")
+        if approval_version == 2 and not manual_review_deadline(approval_version, expires_at):
+            raise LifecycleError("invalid_manual_review_deadline")
         if not owner_id or len(owner_id) > 200 or not request_ref or len(request_ref) > 200:
             raise LifecycleError("invalid_approval_request")
         if not re.fullmatch(r"[0-9a-f]{64}", parameters_sha256):
@@ -261,7 +278,8 @@ class SupervisedDevelopmentController:
                 "parameters_sha256": expected_hash,
                 "request_ref": request_ref,
                 "guardian_generation": guardian_generation,
-                "expires_at": expires_at or _now() + 90,
+                "expires_at": 0 if approval_version == 2 else (expires_at or _now() + 90),
+                **({"approval_version": 2} if approval_version == 2 else {}),
             }
             encoded = _json(request)
             self._transition(task_id, APPROVAL_REQUESTED)
@@ -276,7 +294,7 @@ class SupervisedDevelopmentController:
             raise
 
     def pending_owner_task(self) -> dict[str, Any] | None:
-        """Return only the one current, unexpired approval envelope.
+        """Return the one valid timed-v1 or manual-v2 owner approval envelope.
 
         This is the sole publication source for the owner UI; observer plans
         and caller-provided JSON never enter this method.
@@ -293,8 +311,7 @@ class SupervisedDevelopmentController:
         if (
             approval.get("task_id") != row["id"]
             or not isinstance(approval.get("request_ref"), str)
-            or not isinstance(expires, int)
-            or expires <= _now()
+            or not approval_current(approval.get("approval_version", 1), expires)
             or not isinstance(approval.get("guardian_generation"), str)
             or not _is_uuid(approval["guardian_generation"])
         ):
@@ -303,7 +320,7 @@ class SupervisedDevelopmentController:
         if approval.get("parameters_sha256") != expected:
             return None
         return {
-            "version": 1,
+            "version": approval.get("approval_version", 1),
             "action": "approve_development",
             "goal": task["goal"],
             "task_id": row["id"],
@@ -334,6 +351,8 @@ class SupervisedDevelopmentController:
                 try:
                     approval = json.loads(row["approval"] or "")
                     expires_at = approval.get("expires_at")
+                    if manual_review_deadline(approval.get("approval_version", 1), expires_at):
+                        continue
                 except (TypeError, json.JSONDecodeError):
                     expires_at = cutoff
                 if not isinstance(expires_at, int) or expires_at > cutoff:
@@ -405,7 +424,9 @@ class SupervisedDevelopmentController:
             raise
         except Exception as exc:
             raise LifecycleError("trusted_execution_admission_unavailable") from exc
-        _validate_admission_response(response, request)
+        _validate_admission_response(
+            response, request, approval_version=approval.get("approval_version", 1)
+        )
         try:
             self.db.execute("BEGIN IMMEDIATE")
             current = self._task(task_id)
@@ -613,7 +634,9 @@ def _request_protected_admission(request: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def _validate_admission_response(response: dict[str, Any], request: dict[str, Any]) -> None:
+def _validate_admission_response(
+    response: dict[str, Any], request: dict[str, Any], *, approval_version: int = 1
+) -> None:
     required = {
         "status",
         "authority",
@@ -630,6 +653,12 @@ def _validate_admission_response(response: dict[str, Any], request: dict[str, An
         "expires_at",
         "guardian_generation",
     }
+    if type(approval_version) is not int or approval_version not in {1, 2}:
+        raise LifecycleError("invalid_admission_version")
+    if approval_version == 2:
+        required.add("approval_version")
+        if type(response.get("approval_version")) is not int or response["approval_version"] != 2:
+            raise LifecycleError("admission_approval_version_mismatch")
     if set(response) != required or response.get("status") != "approved":
         raise LifecycleError("invalid_admission_attestation")
     if response.get("authority") != "jarvis-autonomy-broker":
@@ -637,7 +666,7 @@ def _validate_admission_response(response: dict[str, Any], request: dict[str, An
     for key, value in request.items():
         if response.get(key) != value:
             raise LifecycleError("admission_parameters_mismatch")
-    if type(response["expires_at"]) is not int or response["expires_at"] <= _now():
+    if not approval_current(approval_version, response["expires_at"]):
         raise LifecycleError("expired_admission_attestation")
     try:
         uuid.UUID(str(response["guardian_generation"]))

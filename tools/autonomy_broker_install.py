@@ -87,7 +87,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # Retain the exact-version migration and all existing integrity/rollback checks.
 CURRENT_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
 # Complete reviewed destination payload, including phone product boundaries.
-UPGRADE_BUNDLE = "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
+UPGRADE_BUNDLE = "88a1375a9a0f73dc6fe9c8b83151326501c314f5ed15730febb7412c8a561cbb"
 
 # Exact installed source inventory, independent of future destination additions.
 CURRENT_MODULES = (
