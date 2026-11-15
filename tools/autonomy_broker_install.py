@@ -87,7 +87,9 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # Retain the exact-version migration and all existing integrity/rollback checks.
 CURRENT_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
 # Complete reviewed destination payload, including phone product boundaries.
-UPGRADE_BUNDLE = "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
+UPGRADE_BUNDLE = "88a1375a9a0f73dc6fe9c8b83151326501c314f5ed15730febb7412c8a561cbb"
+# Exact previously deployed timed-review product; preserve earlier source pins.
+TIMED_REVIEW_BUNDLE = "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
 
 # Exact installed source inventory, independent of future destination additions.
 CURRENT_MODULES = (
@@ -138,6 +140,25 @@ def current_payload_paths() -> dict[Path, Path]:
     result[LIB / lock_name] = fixed_lib / lock_name
     result.update({UNITS / name: fixed_units / name for name in CURRENT_UNIT_NAMES})
     result[DROPIN] = fixed_units / "jarvis-autonomy.service.d/broker.conf"
+    return result
+
+
+def timed_review_payload_paths() -> dict[Path, Path]:
+    """Frozen 40-file source inventory for the previously installed v1 product."""
+    result = current_payload_paths()
+    fixed_lib = Path("/usr/local/libexec/jarvis-autonomy-broker")
+    fixed_units = Path("/etc/systemd/system")
+    for name in (
+        "supervised_development_product.py",
+        "supervised_development_integration.py",
+        "supervised_development_integration_service.py",
+    ):
+        result[LIB / "tools" / name] = fixed_lib / "tools" / name
+    for name in (
+        "jarvis-development-integration.service",
+        "jarvis-development-integration.socket",
+    ):
+        result[UNITS / name] = fixed_units / name
     return result
 
 
@@ -412,10 +433,15 @@ def _verified_current_install(files: dict) -> dict:
         raise Denied("upgrade_source_manifest_missing")
     g.trusted(marker)
     previous = json.loads(marker.read_text())
-    if previous.get("version") != 1 or previous.get("bundle") != CURRENT_BUNDLE:
+    source_bundle = previous.get("bundle")
+    if previous.get("version") != 1 or source_bundle not in (CURRENT_BUNDLE, TIMED_REVIEW_BUNDLE):
         raise Denied("upgrade_source_bundle_not_reviewed")
     recorded = previous.get("files")
-    source_paths = current_payload_paths()
+    source_paths = (
+        timed_review_payload_paths()
+        if source_bundle == TIMED_REVIEW_BUNDLE
+        else current_payload_paths()
+    )
     expected_paths = {str(path) for path in source_paths} | {
         str(POLICY),
         str(BASE / "docker-client/config.json"),
@@ -434,9 +460,35 @@ def _verified_current_install(files: dict) -> dict:
         if path in source_paths:
             verified_payload[source_paths[path]] = (data, stat.S_IMODE(path.stat().st_mode))
     # A self-consistent modified marker is not the reviewed source bundle.
-    if fingerprint(verified_payload) != CURRENT_BUNDLE:
+    if fingerprint(verified_payload) != source_bundle:
         raise Denied("upgrade_source_bundle_not_reviewed")
     return previous
+
+
+def _require_timed_integration_quiescent() -> None:
+    """Never replace code underneath the separate credentialled integration.
+
+    The rollout must stop its socket and service first and restore their former
+    state afterwards. This installer does not grant or enable GitHub access.
+    """
+    for unit in INTEGRATION_UNITS:
+        result = subprocess.run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                "--property=LoadState,ActiveState",
+                unit,
+            ],
+            env=SAFE_ENV,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        state = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if state.get("LoadState") != "loaded" or state.get("ActiveState") != "inactive":
+            raise Denied("upgrade_integration_must_be_inactive")
 
 
 def _upgrade_service_preconditions(sockets: tuple[str, ...], services: tuple[str, ...]) -> None:
@@ -555,8 +607,10 @@ def upgrade(files: dict, policy: dict) -> None:
         previous = _verified_legacy_install(files)
         managed_sockets = SOCKETS[:3]
         managed_services = SERVICES[:3]
-    elif source_bundle == CURRENT_BUNDLE:
+    elif source_bundle in (CURRENT_BUNDLE, TIMED_REVIEW_BUNDLE):
         previous = _verified_current_install(files)
+        if source_bundle == TIMED_REVIEW_BUNDLE:
+            _require_timed_integration_quiescent()
         managed_sockets = SOCKETS
         managed_services = SERVICES
     else:

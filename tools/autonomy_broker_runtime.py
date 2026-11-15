@@ -7,10 +7,9 @@ import hashlib
 import json
 import os
 import socket
-import subprocess
 import struct
+import subprocess
 import sys
-import time
 from pathlib import Path
 
 from tools import autonomy_guardian as guardian_module
@@ -21,8 +20,8 @@ from tools.autonomy_broker import (
     Request,
     active_generation,
     canonical,
-    sandbox_argv,
     decode_request,
+    sandbox_argv,
 )
 from tools.autonomy_broker_data import compatible_code
 from tools.autonomy_broker_evidence import merged_release
@@ -44,6 +43,7 @@ from tools.supervised_development_broker import (
     DevelopmentAdmissionBroker,
     serve_admission_connection,
 )
+from tools.supervised_development_controller import approval_current
 from tools.supervised_development_publication import serve_activation as serve_publication
 
 LIB = Path("/usr/local/libexec/jarvis-autonomy-broker")
@@ -101,7 +101,7 @@ def forward_development_approval(raw: bytes) -> dict:
         or not isinstance(body.get("expires_at"), int)
     ):
         raise Denied("development_approval_denied")
-    if body["expires_at"] <= int(time.time()):
+    if not approval_current(body.get("version"), body.get("expires_at")):
         raise Denied("development_approval_expired")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(5)
@@ -115,6 +115,7 @@ def forward_development_approval(raw: bytes) -> dict:
 
 def health(sha: str, *, quiet: bool = False) -> bool:
     import urllib.request
+
     from tools.autonomy_broker_host import NoRedirect
 
     try:

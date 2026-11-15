@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any, Protocol
 
 from tools.supervised_development_controller import (
@@ -83,6 +83,7 @@ class GovernorTask:
     candidate_id: int | None = None
     guardian_generation: str = ""
     expires_at: int = 0
+    approval_version: int = 1
 
 
 class GovernorAdapter:
@@ -105,7 +106,12 @@ class GovernorAdapter:
         guardian_generation: str = "",
         expires_at: int = 0,
         max_calls: int = 1,
+        approval_version: int = 1,
     ) -> GovernorTask:
+        if type(approval_version) is not int or approval_version not in {1, 2}:
+            raise LifecycleError("invalid_approval_version")
+        if approval_version == 2 and (type(expires_at) is not int or expires_at != 0):
+            raise LifecycleError("invalid_manual_review_deadline")
         if candidate.get("status") not in {"queued", "recorded"}:
             raise LifecycleError("governor_candidate_not_queued")
         objective = str(candidate.get("summary") or "").strip()
@@ -150,6 +156,7 @@ class GovernorAdapter:
             candidate_id=candidate_id,
             guardian_generation=guardian_generation,
             expires_at=expires_at,
+            approval_version=approval_version,
         )
 
 
@@ -267,7 +274,8 @@ class SupervisedDevelopmentPipeline:
             parameters_sha256=self._parameters_hash(task),
             request_ref=task.request_ref,
             guardian_generation=task.guardian_generation,
-            expires_at=task.expires_at or None,
+            expires_at=task.expires_at if task.approval_version == 2 else (task.expires_at or None),
+            approval_version=task.approval_version,
         )
         return task_id
 

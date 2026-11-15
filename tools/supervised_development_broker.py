@@ -15,7 +15,6 @@ import json
 import re
 import socket
 import struct
-import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -25,10 +24,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from tools.autonomy_broker import Denied, Ledger, canonical, decode_request
+from tools.supervised_development_controller import approval_current
 from tools.supervised_development_scope import editable_path
 
-
 DOMAIN = b"jarvis-development-admission-v1\n"
+MANUAL_DOMAIN = b"jarvis-development-admission-v2\n"
 APPROVAL_FIELDS = frozenset(
     {
         "version",
@@ -57,7 +57,11 @@ def _fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _verify_signature(body: dict[str, Any], public_keys: dict[str, bytes]) -> dict[str, Any]:
-    if set(body) != APPROVAL_FIELDS or body.get("version") != 1:
+    if (
+        set(body) != APPROVAL_FIELDS
+        or type(body.get("version")) is not int
+        or body["version"] not in {1, 2}
+    ):
         raise Denied("development_approval_schema")
     if body.get("action") != "approve_development":
         raise Denied("development_approval_action")
@@ -77,7 +81,7 @@ def _verify_signature(body: dict[str, Any], public_keys: dict[str, bytes]) -> di
             raise Denied("development_approval_key_type")
         verifier.verify(
             base64.b64decode(signature, validate=True),
-            DOMAIN + canonical(signed),
+            (MANUAL_DOMAIN if body["version"] == 2 else DOMAIN) + canonical(signed),
             ec.ECDSA(hashes.SHA256()),
         )
     except (ValueError, TypeError, InvalidSignature):
@@ -111,8 +115,7 @@ def _validate_limits(body: dict[str, Any]) -> None:
         or not 0 < body["max_cost_usd"] <= 1
         or type(body.get("deadline_seconds")) is not int
         or not 0 < body["deadline_seconds"] <= 120
-        or type(body.get("expires_at")) is not int
-        or body["expires_at"] <= int(time.time())
+        or not approval_current(body.get("version"), body.get("expires_at"))
     ):
         raise Denied("development_approval_limits")
     if not all(editable_path(path) for path in body["allowed_paths"]):
@@ -212,7 +215,7 @@ class DevelopmentAdmissionBroker:
             approval_key = "request_id" if key == "approval_id" else key
             if approval.get(approval_key) != value:
                 raise Denied("development_admission_mismatch")
-        if approval["expires_at"] <= int(time.time()):
+        if not approval_current(approval.get("version"), approval.get("expires_at")):
             raise Denied("development_approval_expired")
         active_generation = self._guardian_active(approval["guardian_generation"])
         if active_generation is None:
@@ -232,6 +235,7 @@ class DevelopmentAdmissionBroker:
             "status": "approved",
             "authority": "jarvis-autonomy-broker",
             "expires_at": approval["expires_at"],
+            **({"approval_version": 2} if approval["version"] == 2 else {}),
             "guardian_generation": active_generation,
         }
         with self.ledger.db:

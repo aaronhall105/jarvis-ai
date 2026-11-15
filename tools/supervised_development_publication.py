@@ -13,11 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from tools.autonomy_broker import Denied
-
 from tools.supervised_development_controller import (
     CONTROLLER_DATABASE,
     LifecycleError,
     SupervisedDevelopmentController,
+    approval_current,
 )
 
 SOCKET = "/run/jarvis-autonomy-broker/development-task.sock"
@@ -28,8 +28,8 @@ MAX_EXPORT_FRAME = 8 * 1024 * 1024
 def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
     """Observe one durable lifecycle without mutating, expiring or approving it.
 
-    Version 2 is presentation-only. The signed approval envelope remains version
-    1 and is returned only when the controller validates it in this same SQLite
+    Lifecycle version 2 is presentation-only. Timed-v1 and manual-v2 signed
+    envelopes are returned only when validated in this same SQLite
     read transaction. No goals, raw evidence, approval signatures or error text
     are exposed outside that envelope.
     """
@@ -80,7 +80,7 @@ def lifecycle_view(reader: SupervisedDevelopmentController) -> dict[str, Any]:
             approval = json.loads(row["approval"] or "null")
             if not isinstance(approval, dict) or type(approval.get("expires_at")) is not int:
                 raise LifecycleError("controller_approval_invalid")
-            if approval["expires_at"] <= int(time.time()):
+            if not approval_current(approval.get("approval_version", 1), approval["expires_at"]):
                 return {**result, "status": "expired"}
             envelope = reader.pending_owner_task()
             if envelope is None or envelope.get("task_id") != row["id"]:

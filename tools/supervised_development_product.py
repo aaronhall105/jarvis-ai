@@ -29,6 +29,7 @@ from tools.autonomy_broker import Denied, Ledger, Request, canonical, identifier
 from tools.supervised_development_controller import (
     CONTROLLER_DATABASE,
     SupervisedDevelopmentController,
+    approval_current,
 )
 
 OPERATOR_DATABASE = Path("/var/lib/jarvis-autonomy-broker/operator/operations.sqlite3")
@@ -105,7 +106,8 @@ def require_readiness(reader: SupervisedDevelopmentController, task_id: str) -> 
         or proof.get("source_sha") != snapshot["parameters"].get("base_sha")
         or proof.get("parameters_sha256")
         != hashlib.sha256(canonical(snapshot["parameters"])).hexdigest()
-        or proof.get("expires_at", 0) <= time.time()
+        or proof.get("approval_version", 1) != snapshot["approval"].get("approval_version", 1)
+        or not approval_current(proof.get("approval_version", 1), proof.get("expires_at"))
     ):
         raise Denied("development_execution_preflight_required")
     return proof
@@ -365,7 +367,11 @@ def activation_request(
         "source_sha": pending["source_sha"],
         "parameters_sha256": pending["parameters_sha256"],
         "guardian_generation": state["generation"],
-        "expires_at": min(pending["expires_at"], int(time.time()) + 300)
+        "expires_at": (
+            int(time.time()) + 300
+            if pending["version"] == 2
+            else min(pending["expires_at"], int(time.time()) + 300)
+        )
         if expires_at is None
         else expires_at,
     }
@@ -512,10 +518,10 @@ def trial_fenced(operator: sqlite3.Connection, state: dict[str, Any]) -> bool:
 def production_preview(
     body: dict[str, Any], reader: SupervisedDevelopmentController, *, export: bool = False
 ) -> dict[str, Any]:
-    from tools.autonomy_broker_runtime import guardian_status, installed_policy
     from tools.autonomy_broker_host import CANONICAL
-    from tools.supervised_development_runtime import GovernorCandidateSource, WORKTREE_ROOT
-    from tools.supervised_development_integration import prepare_proposal, approval_request, _git
+    from tools.autonomy_broker_runtime import guardian_status, installed_policy
+    from tools.supervised_development_integration import _git, approval_request, prepare_proposal
+    from tools.supervised_development_runtime import WORKTREE_ROOT, GovernorCandidateSource
 
     view = body.get("view")
     wanted = {"version", "view", "candidate_id" if view == "prepare" else "task_id"}
@@ -619,10 +625,11 @@ def production_preview(
 
 
 def production_operator(ledger: Ledger, keys: dict[str, bytes], guardian: Any) -> ProductOperator:
-    from tools.autonomy_broker_host import CANONICAL, SAFE_ENV
-    from tools.autonomy_guardian import fixed_systemctl, UNIT
-    from tools.supervised_development_runtime import GovernorCandidateSource, _trusted_source_git
     import subprocess
+
+    from tools.autonomy_broker_host import CANONICAL, SAFE_ENV
+    from tools.autonomy_guardian import UNIT, fixed_systemctl
+    from tools.supervised_development_runtime import GovernorCandidateSource, _trusted_source_git
 
     def prepare(body: dict[str, Any]) -> dict[str, Any]:
         source = GovernorCandidateSource(source_root=CANONICAL)

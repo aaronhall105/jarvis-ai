@@ -169,7 +169,17 @@ def relay_operator(body: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "category": "request_denied"}
     if action == "approve_development":
         expires_at = body.get("expires_at")
-        if not isinstance(expires_at, int) or expires_at <= int(time.time()):
+        version = body.get("version")
+        manual = (
+            type(version) is int and version == 2 and type(expires_at) is int and expires_at == 0
+        )
+        timed = (
+            type(version) is int
+            and version == 1
+            and type(expires_at) is int
+            and expires_at > int(time.time())
+        )
+        if not (manual or timed):
             return {"ok": False, "category": "approval_expired"}
     raw = json.dumps(body, separators=(",", ":")).encode()
     if len(raw) > 8192:
