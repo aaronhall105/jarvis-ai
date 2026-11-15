@@ -1438,3 +1438,154 @@ def test_activation_failure_stops_only_broker_services(rehearsal, monkeypatch):
     assert all(
         "jarvis-developer.service" not in call and "docker.service" not in call for call in calls
     )
+
+
+# Exact previously deployed payload; never substitute destination bytes.
+TIMED_REVIEW_SOURCE = "296e24a112ac3753bdf5cb9a43db5cd65ce61b37"
+
+
+def _reviewed_timed_product_payload():
+    previous = {}
+    for path in installer.timed_review_payload_paths():
+        if path == installer.LIB / "tools/__init__.py":
+            data = b"# Protected broker package.\n"
+        else:
+            if path == installer.DROPIN:
+                source = "systemd/autonomy/broker-worker-access.conf"
+            elif path.parent == installer.UNITS:
+                source = "systemd/autonomy/" + path.name
+            elif path == installer.LIB / "entry.py":
+                source = "tools/autonomy_broker_entry.py"
+            elif path.name == "supervised_development_scope.py":
+                source = "bridge/app/development_scope.py"
+            else:
+                source = "tools/" + path.name
+            data = subprocess.check_output(
+                ["git", "-C", str(installer.ROOT), "show", TIMED_REVIEW_SOURCE + ":" + source]
+            )
+        previous[path] = (data, 0o644)
+    return previous
+
+
+def _timed_product_fixture(rehearsal, monkeypatch, active_integration=None):
+    files, policy, guardian, commands, _original, paths = rehearsal
+    installer.install(_reviewed_timed_product_payload(), policy)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    value["bundle"] = installer.TIMED_REVIEW_BUNDLE
+    marker.write_bytes(canonical(value))
+    guardian_marker = guardian.base / "installed.json"
+    manifest = json.loads(guardian_marker.read_bytes())
+    manifest["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(manifest))
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+    run = subprocess.run
+
+    def integration_state(argv, **kwargs):
+        if argv[:2] == ["/usr/bin/systemctl", "show"] and argv[-1] in installer.INTEGRATION_UNITS:
+            active = "active" if argv[-1] == active_integration else "inactive"
+            return subprocess.CompletedProcess(
+                argv, 0, f"LoadState=loaded\nUnitFileState=enabled\nActiveState={active}\n", ""
+            )
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", integration_state)
+    commands.reset_mock()
+    return files, policy, guardian, commands, paths
+
+
+def test_timed_product_migration_source_is_exact_reviewed_inventory():
+    previous = _reviewed_timed_product_payload()
+    assert len(previous) == 40  # Plus existing policy and private config = 42.
+    assert installer.TIMED_REVIEW_BUNDLE == (
+        "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
+    )
+    assert installer.fingerprint(previous) == installer.TIMED_REVIEW_BUNDLE
+    assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
+
+
+def test_timed_product_upgrades_without_changing_history_or_dropins(rehearsal, monkeypatch):
+    files, policy, guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch)
+    history = paths["BASE"] / "operator/preserved-history.sqlite3"
+    with sqlite3.connect(history) as db:
+        db.execute("CREATE TABLE evidence (value TEXT)")
+        db.execute("INSERT INTO evidence VALUES ('retain')")
+    db.close()
+    drop = paths["UNITS"] / "jarvis-autonomy-broker-operator.service.d/99-home.conf"
+    drop.parent.mkdir()
+    drop.write_text("[Service]\nProtectHome=tmpfs\n")
+    private = paths["BASE"] / "docker-client/config.json"
+    protected = (history, drop, private, guardian.base / "state.json", guardian.base / "audit/events.jsonl")
+    before = {path: (path.read_bytes(), path.stat().st_ino) for path in protected}
+    assert len(installer._verified_current_install(files)["files"]) == 42
+    installer.upgrade(files, policy)
+    assert {path: (path.read_bytes(), path.stat().st_ino) for path in protected} == before
+    assert installer.checked_existing(files, policy)[0] == "REPEAT"
+    assert guardian.status()["state"] == "STOPPED"
+    assert guardian.status()["trusted"] is True
+    assert not any(
+        name in call.args[0]
+        for call in commands.call_args_list
+        for name in installer.INTEGRATION_UNITS
+    )
+
+
+@pytest.mark.parametrize("active", [
+    "jarvis-development-integration.socket", "jarvis-development-integration.service",
+])
+def test_timed_product_refuses_live_integration_before_mutation(rehearsal, monkeypatch, active):
+    files, policy, guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch, active)
+    marker = paths["BASE"] / "installed.json"
+    before = marker.read_bytes()
+    with pytest.raises(Denied, match="upgrade_integration_must_be_inactive"):
+        installer.upgrade(files, policy)
+    commands.assert_not_called()
+    assert marker.read_bytes() == before
+    assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+    assert guardian.status()["trusted"] is True
+
+
+@pytest.mark.parametrize("change", ["bytes", "self_consistent", "mode", "missing", "extra", "unknown"])
+def test_timed_product_refuses_modified_source(rehearsal, monkeypatch, change):
+    files, _policy, _guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    value = json.loads(marker.read_bytes())
+    target = paths["LIB"] / "tools/supervised_development_product.py"
+    if change in {"bytes", "self_consistent"}:
+        target.write_bytes(target.read_bytes() + b"\n# unreviewed\n")
+        if change == "self_consistent":
+            value["files"][str(target)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    elif change == "mode":
+        target.chmod(0o640)
+    elif change == "missing":
+        target.unlink()
+    elif change == "extra":
+        value["files"][str(paths["BASE"] / "unexpected")] = "0" * 64
+    else:
+        value["bundle"] = "0" * 64
+    marker.write_bytes(canonical(value))
+    with pytest.raises(Denied, match="upgrade_source_"):
+        installer._verified_current_install(files)
+    commands.assert_not_called()
+
+
+def test_timed_product_failed_upgrade_restores_exact_source(rehearsal, monkeypatch):
+    files, policy, guardian, commands, paths = _timed_product_fixture(rehearsal, monkeypatch)
+    marker = paths["BASE"] / "installed.json"
+    guardian_marker = guardian.base / "installed.json"
+    all_paths = [Path(path) for path in json.loads(marker.read_bytes())["files"]]
+    all_paths.extend([marker, guardian_marker, guardian.base / "state.json"])
+    before = {path: (path.read_bytes(), path.stat().st_mode) for path in all_paths}
+
+    def fail_verify(argv):
+        if argv[0] == "/usr/bin/systemd-analyze":
+            raise OSError("synthetic unit validation failure")
+
+    commands.side_effect = fail_verify
+    with pytest.raises(OSError, match="synthetic unit validation failure"):
+        installer.upgrade(files, policy)
+    assert {path: (path.read_bytes(), path.stat().st_mode) for path in all_paths} == before
+    assert not (paths["BASE"] / "upgrade-transaction.json").exists()
+    assert guardian.status()["state"] == "STOPPED"
+    assert guardian.status()["trusted"] is True
+    assert installer._verified_current_install(files)["bundle"] == installer.TIMED_REVIEW_BUNDLE

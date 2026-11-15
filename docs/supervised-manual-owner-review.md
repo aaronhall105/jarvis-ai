@@ -71,3 +71,22 @@ The configuration applies to newly created tasks, not to old task records.
 Preserve the existing operator/publication home-isolation overrides, persistent
 SQLite WAL helpers, database records, credentials and enrolled phone key during
 rollout. No new signing workflow or deployment is triggered by the patch builder.
+
+
+### Exact installed-bundle migration
+
+The installer additionally accepts the complete 42-file installed timed-review
+product whose payload identity is
+`973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41`.
+It reconstructs the fixed 40-file executable/unit inventory and verifies its
+bytes and modes independently of the recorded policy/private-configuration hashes.
+The original legacy/current source identities remain accepted and unchanged.
+
+Before invoking the reviewed upgrade, the rollout must record the existing
+GitHub integration socket/service state and stop **both**
+`jarvis-development-integration.socket` and
+`jarvis-development-integration.service`. The installer refuses this source
+migration while either is active; it never enables the separately credentialled
+integration itself. Restore the recorded state only after upgrade/reconciliation
+has verified the installed bundle. Keep the persistent SQLite helpers, home
+isolation drop-ins, operator enrolment, credentials and task history unchanged.
