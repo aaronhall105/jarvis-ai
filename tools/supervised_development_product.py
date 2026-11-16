@@ -675,7 +675,7 @@ def production_operator(ledger: Ledger, keys: dict[str, bytes], guardian: Any) -
             if (
                 expected != {k: v for k, v in body.items() if k not in {"key_id", "signature"}}
                 or pending is None
-                or body["expires_at"] > pending["expires_at"]
+                or (pending["version"] == 1 and body["expires_at"] > pending["expires_at"])
             ):
                 raise Denied("development_activation_changed")
             if _trusted_source_git(CANONICAL, "rev-parse", "HEAD") != body[
