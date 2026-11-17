@@ -698,7 +698,7 @@ def production_operator(ledger: Ledger, keys: dict[str, bytes], guardian: Any) -
                 )
                 return (
                     active.stdout.strip() == b"inactive"
-                    and enabled.stdout.strip() in {b"disabled", b"masked"}
+                    and enabled.stdout.strip() in {b"disabled", b"masked", b"static"}
                     and fixed_systemctl("is-active", "--quiet", CONTROLLER_UNIT)
                 )
 
