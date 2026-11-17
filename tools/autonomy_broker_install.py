@@ -87,7 +87,7 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # Retain the exact-version migration and all existing integrity/rollback checks.
 CURRENT_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
 # Complete reviewed destination payload, including phone product boundaries.
-UPGRADE_BUNDLE = "078c66f86bec56cae59c7a9c8c45be83fcda38e9703337237dc00770a29ed961"
+UPGRADE_BUNDLE = "1fabeac071f6bba20ea6a389e8f0662c949cd69edab51e33eb2e7e89cf44bf46"
 # Exact previously deployed timed-review product; preserve earlier source pins.
 TIMED_REVIEW_BUNDLE = "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
 

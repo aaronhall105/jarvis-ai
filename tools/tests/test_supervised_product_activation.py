@@ -44,7 +44,7 @@ class FakeGuardian:
     def resume(self, root_uid, actor_uid, ready, started, *, expected_generation):
         self.resumes.append((root_uid, actor_uid, expected_generation))
         if expected_generation != self.state["generation"] or not ready() or not started():
-            raise AssertionError("production activation readiness was not satisfied")
+            raise autonomy_guardian.UnsafeState("Autonomy runtime is not ready")
         self.state.update(
             state="ACTIVE",
             previous_generation=expected_generation,
@@ -58,7 +58,15 @@ class FakeGuardian:
 
 class ProductionActivationTests(unittest.TestCase):
     @contextmanager
-    def fixture(self, *, version=2, approved=True):
+    def fixture(
+        self,
+        *,
+        version=2,
+        approved=True,
+        legacy_active="inactive",
+        legacy_enabled="static",
+        controller_active=True,
+    ):
         """Keep real signatures and databases; replace only privileged boundaries."""
         with ExitStack() as stack:
             directory = Path(stack.enter_context(tempfile.TemporaryDirectory()))
@@ -168,15 +176,26 @@ class ProductionActivationTests(unittest.TestCase):
                     ],
                 )
                 self.assertEqual(kwargs["env"], host.SAFE_ENV)
+                state = legacy_active if args[1] == "is-active" else legacy_enabled
+                if args[1] == "is-active":
+                    returncode = 0 if state in {"active", "reloading"} else 3
+                else:
+                    # systemctl reports static with exit 0 even though the unit
+                    # has no [Install] provisions and is not enabled.
+                    returncode = (
+                        0 if state in {"static", "enabled", "enabled-runtime", "indirect"} else 1
+                    )
+                    if state == "not-found":
+                        returncode = 4
                 return subprocess.CompletedProcess(
                     args,
-                    3 if args[1] == "is-active" else 1,
-                    stdout=b"inactive\n" if args[1] == "is-active" else b"disabled\n",
+                    returncode,
+                    stdout=(state + "\n").encode(),
                 )
 
             def fixed_systemctl(*args):
                 self.assertEqual(args, ("is-active", "--quiet", product.CONTROLLER_UNIT))
-                return True
+                return controller_active
 
             stack.enter_context(patch.object(product, "CONTROLLER_DATABASE", controller.database))
             stack.enter_context(patch.object(product, "ADMISSION_DATABASE", admission_path))
@@ -273,6 +292,73 @@ class ProductionActivationTests(unittest.TestCase):
             accepted = fixture.operator.dispatch(fixture.activation(expires_at=NOW + 60), OWNER_UID)
             self.assertEqual(accepted["status"], "active")
             self.assertEqual(len(fixture.guardian.resumes), 1)
+
+    def test_inactive_legacy_unit_states_allow_signed_activation_once(self):
+        for enabled in ("static", "disabled", "masked"):
+            with self.subTest(enabled=enabled), self.fixture(legacy_enabled=enabled) as fixture:
+                body = fixture.activation()
+                result = fixture.operator.dispatch(body, OWNER_UID)
+                self.assertEqual(result["status"], "active")
+                self.assertEqual(fixture.guardian.state["state"], "ACTIVE")
+                self.assertEqual(
+                    fixture.guardian.resumes,
+                    [(0, OWNER_UID, fixture.pending["guardian_generation"])],
+                )
+                self.assertEqual(fixture.guardian.stops, [])
+                self.assertEqual(fixture.system_calls.call_count, 2)
+                self.assertEqual(fixture.fixed_calls.call_count, 2)
+                self.assertEqual(fixture.controller.snapshot(fixture.task_id)["provider_calls"], 0)
+
+                self.assertEqual(fixture.operator.dispatch(body, OWNER_UID), result)
+                self.assertEqual(len(fixture.guardian.resumes), 1)
+                self.assertEqual(fixture.system_calls.call_count, 2)
+                self.assertEqual(fixture.fixed_calls.call_count, 2)
+
+    def test_unsafe_or_unknown_unit_states_reject_signed_activation_without_retry(self):
+        states = (
+            ("inactive", "enabled", True),
+            ("inactive", "enabled-runtime", True),
+            ("inactive", "indirect", True),
+            ("inactive", "linked", True),
+            ("inactive", "not-found", True),
+            ("inactive", "unexpected", True),
+            ("inactive", "", True),
+            ("active", "static", True),
+            ("activating", "static", True),
+            ("reloading", "static", True),
+            ("deactivating", "static", True),
+            ("failed", "static", True),
+            ("unknown", "static", True),
+            ("", "static", True),
+            ("inactive", "static", False),
+        )
+        for active, enabled, controller_active in states:
+            with (
+                self.subTest(active=active, enabled=enabled, controller_active=controller_active),
+                self.fixture(
+                    legacy_active=active,
+                    legacy_enabled=enabled,
+                    controller_active=controller_active,
+                ) as fixture,
+            ):
+                body = fixture.activation()
+                with self.assertRaisesRegex(autonomy_guardian.UnsafeState, "runtime is not ready"):
+                    fixture.operator.dispatch(body, OWNER_UID)
+                self.assertEqual(fixture.guardian.state["state"], "STOPPED")
+                self.assertEqual(len(fixture.guardian.resumes), 1)
+                self.assertEqual(fixture.guardian.stops, [OWNER_UID])
+                self.assertEqual(fixture.system_calls.call_count, 2)
+                self.assertEqual(
+                    fixture.fixed_calls.call_count,
+                    1 if active == "inactive" and enabled == "static" else 0,
+                )
+                self.assertEqual(fixture.controller.snapshot(fixture.task_id)["provider_calls"], 0)
+
+                with self.assertRaisesRegex(Denied, "reconciliation_required"):
+                    fixture.operator.dispatch(body, OWNER_UID)
+                self.assertEqual(len(fixture.guardian.resumes), 1)
+                self.assertEqual(fixture.guardian.stops, [OWNER_UID])
+                self.assertEqual(fixture.system_calls.call_count, 2)
 
     def test_manual_approval_still_requires_fresh_activation(self):
         with self.fixture() as fixture:
