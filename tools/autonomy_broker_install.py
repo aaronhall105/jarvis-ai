@@ -87,7 +87,8 @@ LEGACY_BUNDLE = "b7c72340c0d19b320928fc50fc07513389374f22584dfd3801d22e655cdde3e
 # Retain the exact-version migration and all existing integrity/rollback checks.
 CURRENT_BUNDLE = "8902197c9a7f1c44c6251fe765c6cafcec31952721009158984fd593bcea87f3"
 # Complete reviewed destination payload, including phone product boundaries.
-UPGRADE_BUNDLE = "1fabeac071f6bba20ea6a389e8f0662c949cd69edab51e33eb2e7e89cf44bf46"
+PR145_BUNDLE = "1fabeac071f6bba20ea6a389e8f0662c949cd69edab51e33eb2e7e89cf44bf46"
+UPGRADE_BUNDLE = "394f584283f6fd6d8ccb49036da994d09b8edf6bdeb461c2e4b100fdbdfd16be"
 # Exact previously deployed timed-review product; preserve earlier source pins.
 TIMED_REVIEW_BUNDLE = "973dd051e3cc9aab4ac4ec9293b397e33a5180abaf535578454299d51299af41"
 
@@ -434,12 +435,16 @@ def _verified_current_install(files: dict) -> dict:
     g.trusted(marker)
     previous = json.loads(marker.read_text())
     source_bundle = previous.get("bundle")
-    if previous.get("version") != 1 or source_bundle not in (CURRENT_BUNDLE, TIMED_REVIEW_BUNDLE):
+    if previous.get("version") != 1 or source_bundle not in (
+        CURRENT_BUNDLE,
+        TIMED_REVIEW_BUNDLE,
+        PR145_BUNDLE,
+    ):
         raise Denied("upgrade_source_bundle_not_reviewed")
     recorded = previous.get("files")
     source_paths = (
         timed_review_payload_paths()
-        if source_bundle == TIMED_REVIEW_BUNDLE
+        if source_bundle in (TIMED_REVIEW_BUNDLE, PR145_BUNDLE)
         else current_payload_paths()
     )
     expected_paths = {str(path) for path in source_paths} | {
@@ -607,9 +612,9 @@ def upgrade(files: dict, policy: dict) -> None:
         previous = _verified_legacy_install(files)
         managed_sockets = SOCKETS[:3]
         managed_services = SERVICES[:3]
-    elif source_bundle in (CURRENT_BUNDLE, TIMED_REVIEW_BUNDLE):
+    elif source_bundle in (CURRENT_BUNDLE, TIMED_REVIEW_BUNDLE, PR145_BUNDLE):
         previous = _verified_current_install(files)
-        if source_bundle == TIMED_REVIEW_BUNDLE:
+        if source_bundle in (TIMED_REVIEW_BUNDLE, PR145_BUNDLE):
             _require_timed_integration_quiescent()
         managed_sockets = SOCKETS
         managed_services = SERVICES
