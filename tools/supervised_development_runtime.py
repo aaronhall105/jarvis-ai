@@ -515,9 +515,13 @@ class SupervisedDevelopmentRuntime:
         child may perform development execution, so SO_PEERCRED observes the
         configured autonomy UID and rejects a root-originated admission.
         """
+        print("JARVIS_DEV_STAGE=guardian_check", file=sys.stderr, flush=True)
         generation = self._worker_generation(task)
+        print("JARVIS_DEV_STAGE=readiness_check", file=sys.stderr, flush=True)
         self._verify_execution_readiness(task_id, task)
+        print("JARVIS_DEV_STAGE=readiness_pass", file=sys.stderr, flush=True)
         policy = installed_policy()
+        print("JARVIS_DEV_STAGE=policy_pass", file=sys.stderr, flush=True)
         worker_uid = int(policy["autonomy_uid"])
         worker_gid = int(policy.get("autonomy_gid", worker_uid))
         if worker_uid <= 0 or worker_uid == 0:
@@ -525,6 +529,7 @@ class SupervisedDevelopmentRuntime:
         # Read/hash the fixed root-owned environment before dropping identity;
         # never import SDK/package code into the privileged broker interpreter.
         worker_python = verify_worker_environment()
+        print("JARVIS_DEV_STAGE=worker_environment_pass", file=sys.stderr, flush=True)
 
         def drop_privileges() -> None:
             os.setgroups([])
@@ -546,6 +551,7 @@ class SupervisedDevelopmentRuntime:
         ]
         if self._worker_generation(task) != generation:
             raise LifecycleError("development_worker_generation_changed")
+        print("JARVIS_DEV_STAGE=worker_spawn_start", file=sys.stderr, flush=True)
         process = subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
@@ -556,6 +562,7 @@ class SupervisedDevelopmentRuntime:
             start_new_session=True,
             preexec_fn=drop_privileges,
         )
+        print("JARVIS_DEV_STAGE=worker_spawn_pass", file=sys.stderr, flush=True)
         # The execution budget is not extended by the service's cleanup grace.
         # Kill a blocked SDK/validation child at the signed wall-clock ceiling;
         # authoritative STOP and reap happen afterward, without another call.
@@ -572,7 +579,7 @@ class SupervisedDevelopmentRuntime:
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, timeout)
                 try:
-                    stdout, _stderr = process.communicate(
+                    stdout, worker_stderr = process.communicate(
                         timeout=min(WORKER_FENCE_SECONDS, remaining)
                     )
                     break
@@ -619,6 +626,16 @@ class SupervisedDevelopmentRuntime:
                 raise LifecycleError("development_worker_timeout") from exc
             raise
         if process.returncode != 0:
+            stages = re.findall(
+                r"(?m)^JARVIS_DEV_WORKER_STAGE=([a-z_]{1,48})$",
+                worker_stderr or "",
+            )
+            last = stages[-1] if stages else "not_reported"
+            print(
+                "JARVIS_DEV_STAGE=worker_failed WORKER_LAST=" + last,
+                file=sys.stderr,
+                flush=True,
+            )
             raise LifecycleError("development_worker_failed")
         try:
             result = json.loads(stdout)
@@ -844,6 +861,7 @@ class SupervisedDevelopmentRuntime:
 
 def worker_main(task_id: str) -> int:
     """Run one persisted task as the policy-pinned unprivileged worker."""
+    print("JARVIS_DEV_WORKER_STAGE=entry", file=sys.stderr, flush=True)
     # A direct invocation cannot select a different Python/package environment
     # or start development while the independent Guardian is stopped/untrusted.
     try:
@@ -863,8 +881,11 @@ def worker_main(task_id: str) -> int:
             return 1
     except Exception:
         return 1
+    print("JARVIS_DEV_WORKER_STAGE=startup_verified", file=sys.stderr, flush=True)
     controller = SupervisedDevelopmentController(CONTROLLER_DATABASE, database_mode=0o660)
+    print("JARVIS_DEV_WORKER_STAGE=controller_open", file=sys.stderr, flush=True)
     source = GovernorCandidateSource(GOVERNOR_DATABASE, source_root=CANONICAL)
+    print("JARVIS_DEV_WORKER_STAGE=source_open", file=sys.stderr, flush=True)
     try:
         runtime = SupervisedDevelopmentRuntime(
             source,
@@ -885,6 +906,7 @@ def worker_main(task_id: str) -> int:
             },
         )
         pipeline = SupervisedDevelopmentPipeline(controller, worker, RuntimeReview())
+        print("JARVIS_DEV_WORKER_STAGE=admission_start", file=sys.stderr, flush=True)
         result = pipeline.execute(task_id, task, current_base_sha=runtime._source_sha())
         print(json.dumps(result, sort_keys=True))
         return 0
