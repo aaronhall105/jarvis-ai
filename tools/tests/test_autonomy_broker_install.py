@@ -1603,3 +1603,225 @@ def test_timed_product_failed_upgrade_restores_exact_source(rehearsal, monkeypat
     assert guardian.status()["state"] == "STOPPED"
     assert guardian.status()["trusted"] is True
     assert installer._verified_current_install(files)["bundle"] == installer.TIMED_REVIEW_BUNDLE
+
+
+# PR145 -> exact-pinned diagnostic successor.
+PR145_SOURCE_COMMIT = "7d73ada986995764ac8274e6e2b0539723a254b5"
+
+
+def _pr145_frozen_payload():
+    result = {}
+    for path in installer.timed_review_payload_paths():
+        if path == installer.LIB / "tools/__init__.py":
+            data = b"# Protected broker package.\n"
+        else:
+            if path == installer.LIB / "tools/supervised_development_scope.py":
+                src = "bridge/app/development_scope.py"
+            elif path == installer.LIB / "entry.py":
+                src = "tools/autonomy_broker_entry.py"
+            elif path == installer.LIB / "deploy_unified_core.sh":
+                src = "tools/deploy_unified_core.sh"
+            elif path == installer.DROPIN:
+                src = "systemd/autonomy/broker-worker-access.conf"
+            elif path.is_relative_to(installer.UNITS):
+                src = "systemd/autonomy/" + path.name
+            elif path.is_relative_to(installer.LIB / "tools"):
+                src = "tools/" + path.name
+            else:
+                raise AssertionError("Unexpected protected PR145 source path")
+            data = subprocess.check_output(
+                ["git", "-C", str(installer.ROOT), "show", f"{PR145_SOURCE_COMMIT}:{src}"]
+            )
+        result[path] = (data, 0o644)
+    assert len(result) == 40
+    assert set(result) == set(installer.payload())
+    return result
+
+
+def test_pr145_predecessor_and_successor_have_independent_exact_pins():
+    previous = _pr145_frozen_payload()
+    assert installer.fingerprint(previous) == installer.PR145_BUNDLE
+    assert installer.PR145_BUNDLE == (
+        "1fabeac071f6bba20ea6a389e8f0662c949cd69edab51e33eb2e7e89cf44bf46"
+    )
+    assert installer.fingerprint(installer.payload()) == installer.UPGRADE_BUNDLE
+    assert installer.UPGRADE_BUNDLE != installer.PR145_BUNDLE
+
+
+def test_pr145_upgrade_refuses_active_integration_without_modifying_source(rehearsal, monkeypatch):
+    files, policy, guardian, commands, _original, paths = rehearsal
+    previous = _pr145_frozen_payload()
+
+    # Disposable paths differ from actual /usr/local and /etc paths.
+    # Rebind pins only within this fixture, never in production.
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+
+    installer.install(previous, policy)
+    _bind_pr145_fixture_to_production_identity(paths, guardian)
+
+    marker = paths["BASE"] / "installed.json"
+    before = marker.read_bytes()
+    guardian_before = (guardian.base / "installed.json").read_bytes()
+
+    original_run = subprocess.run
+
+    def integration_active(arguments, **kwargs):
+        if (
+            arguments[:2] == ["/usr/bin/systemctl", "show"]
+            and arguments[-1] in installer.INTEGRATION_UNITS
+        ):
+            return subprocess.CompletedProcess(
+                arguments, 0, "LoadState=loaded\nActiveState=active\n", ""
+            )
+        return original_run(arguments, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", integration_active)
+    commands.reset_mock()
+
+    with pytest.raises(Denied, match="upgrade_integration_must_be_inactive"):
+        installer.upgrade(files, policy)
+
+    assert marker.read_bytes() == before
+    assert (guardian.base / "installed.json").read_bytes() == guardian_before
+    commands.assert_not_called()
+
+
+def test_pr145_upgrade_quiescent_integration_preserves_task_history(rehearsal, monkeypatch):
+    files, policy, guardian, commands, _original, paths = rehearsal
+    previous = _pr145_frozen_payload()
+
+    monkeypatch.setattr(installer, "UPGRADE_BUNDLE", installer.fingerprint(files))
+
+    installer.install(previous, policy)
+    _bind_pr145_fixture_to_production_identity(paths, guardian)
+
+    marker = paths["BASE"] / "installed.json"
+    before_guardian_state = (guardian.base / "state.json").read_bytes()
+    before_guardian_audit = (guardian.base / "audit/events.jsonl").read_bytes()
+
+    task_db = paths["BASE"] / "work/supervised-development.sqlite3"
+    task_db.parent.mkdir(parents=True, exist_ok=True)
+    task_db.write_bytes(b"preserve exact task and admission history fixture")
+    task_db.chmod(0o660)
+    original_task_bytes = task_db.read_bytes()
+
+    original_run = subprocess.run
+
+    def integration_stopped(arguments, **kwargs):
+        if (
+            arguments[:2] == ["/usr/bin/systemctl", "show"]
+            and arguments[-1] in installer.INTEGRATION_UNITS
+        ):
+            return subprocess.CompletedProcess(
+                arguments, 0, "LoadState=loaded\nActiveState=inactive\n", ""
+            )
+        return original_run(arguments, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", integration_stopped)
+    commands.reset_mock()
+
+    installer.upgrade(files, policy)
+
+    assert json.loads(marker.read_bytes())["bundle"] == (installer.UPGRADE_BUNDLE)
+    assert installer.checked_existing(files, policy)[0] == "REPEAT"
+    assert task_db.read_bytes() == original_task_bytes
+    assert (guardian.base / "state.json").read_bytes() == (before_guardian_state)
+    assert (guardian.base / "audit/events.jsonl").read_bytes() == (before_guardian_audit)
+    assert guardian.status() == {
+        "state": "STOPPED",
+        "generation": json.loads(before_guardian_state)["generation"],
+        "trusted": True,
+    }
+    # Verifying unit files is allowed. Activating or altering the
+    # separate GitHub integration service/socket is not.
+    verification = [
+        call.args[0]
+        for call in commands.call_args_list
+        if call.args and call.args[0][:2] == ["/usr/bin/systemd-analyze", "verify"]
+    ]
+
+    assert len(verification) == 1
+    assert all(
+        any(argument.endswith("/" + unit) for argument in verification[0][2:])
+        for unit in installer.INTEGRATION_UNITS
+    )
+
+    for call in commands.call_args_list:
+        arguments = call.args[0]
+        if arguments[:1] == ["/usr/bin/systemctl"]:
+            assert all(unit not in arguments for unit in installer.INTEGRATION_UNITS)
+
+
+def test_pr145_rejects_modified_old_payload_even_with_rewritten_file_digest(rehearsal, monkeypatch):
+    files, policy, guardian, _commands, _original, paths = rehearsal
+    previous = _pr145_frozen_payload()
+
+    installer.install(previous, policy)
+    _bind_pr145_fixture_to_production_identity(paths, guardian)
+
+    target = paths["LIB"] / "tools/supervised_development_runtime.py"
+    target.write_bytes(target.read_bytes() + b"# unreviewed modification\n")
+
+    marker = paths["BASE"] / "installed.json"
+    forged = json.loads(marker.read_bytes())
+    forged["files"][str(target)] = hashlib.sha256(target.read_bytes()).hexdigest()
+    marker.write_bytes(canonical(forged))
+
+    # The marker now has a matching file digest, but the complete
+    # reviewed predecessor fingerprint must still reject the change.
+    with pytest.raises(Denied, match="upgrade_source_bundle_not_reviewed"):
+        installer._verified_current_install(files)
+
+
+def _bind_pr145_fixture_to_production_identity(paths, guardian):
+    """Represent reviewed PR145 bytes in a disposable installation.
+
+    The production fingerprint is never monkeypatched. Installed fixture
+    files are mapped to their original fixed production paths for verification.
+    Only the temporary fixture's two linked manifests are rewritten.
+    """
+    marker = paths["BASE"] / "installed.json"
+    record = json.loads(marker.read_bytes())
+
+    installed = {}
+    production = {}
+
+    for destination, fixed_source in installer.timed_review_payload_paths().items():
+        assert destination.is_file()
+        assert not destination.is_symlink()
+        value = (
+            destination.read_bytes(),
+            destination.stat().st_mode & 0o777,
+        )
+        installed[destination] = value
+        production[fixed_source] = value
+
+    assert len(installed) == 40
+    assert installer.fingerprint(installed) == record["bundle"]
+    assert installer.fingerprint(production) == installer.PR145_BUNDLE
+
+    expected_files = {str(path) for path in installed}
+    expected_files.add(str(paths["POLICY"]))
+    expected_files.add(str(paths["BASE"] / "docker-client/config.json"))
+
+    assert record["version"] == 1
+    assert set(record["files"]) == expected_files
+
+    for destination, (content, _mode) in installed.items():
+        assert record["files"][str(destination)] == (hashlib.sha256(content).hexdigest())
+
+    # The marker must describe the original reviewed PR145 bundle.
+    record["bundle"] = installer.PR145_BUNDLE
+    marker.write_bytes(canonical(record))
+
+    # The test Guardian must pin the updated test marker.
+    guardian_marker = guardian.base / "installed.json"
+    guardian_record = json.loads(guardian_marker.read_bytes())
+
+    assert str(marker) in guardian_record["files"]
+
+    guardian_record["files"][str(marker)] = hashlib.sha256(marker.read_bytes()).hexdigest()
+    guardian_marker.write_bytes(canonical(guardian_record))
+
+    assert guardian.status()["trusted"] is True
+    assert guardian.status()["state"] == "STOPPED"

@@ -446,3 +446,44 @@ def test_controller_git_rejects_failed_or_untrusted_checkout(tmp_path, monkeypat
         runtime._trusted_source_git(root, "rev-parse", "HEAD")
     with pytest.raises(LifecycleError, match="trusted_source_snapshot_unavailable"):
         runtime._trusted_source_git(tmp_path / "missing", "rev-parse", "HEAD")
+
+
+def test_controller_diagnostic_guardian_denial(monkeypatch, capsys):
+    import pytest
+    from tools.supervised_development_controller import LifecycleError
+
+    instance = object.__new__(SupervisedDevelopmentRuntime)
+
+    def deny_guardian(_task):
+        raise LifecycleError("development_worker_guardian_denied")
+
+    monkeypatch.setattr(instance, "_worker_generation", deny_guardian)
+
+    with pytest.raises(LifecycleError, match="development_worker_guardian_denied"):
+        instance._run_worker_subprocess("test-only", object())
+
+    output = capsys.readouterr().err
+    assert "JARVIS_DEV_STAGE=guardian_check" in output
+    assert "JARVIS_DEV_STAGE=readiness_check" not in output
+
+
+def test_controller_diagnostic_readiness_denial(monkeypatch, capsys):
+    import pytest
+    from tools.supervised_development_controller import LifecycleError
+
+    instance = object.__new__(SupervisedDevelopmentRuntime)
+
+    monkeypatch.setattr(instance, "_worker_generation", lambda _task: "test-generation")
+
+    def deny_readiness(*_args):
+        raise LifecycleError("development_execution_preflight_changed")
+
+    monkeypatch.setattr(instance, "_verify_execution_readiness", deny_readiness)
+
+    with pytest.raises(LifecycleError, match="development_execution_preflight_changed"):
+        instance._run_worker_subprocess("test-only", object())
+
+    output = capsys.readouterr().err
+    assert "JARVIS_DEV_STAGE=guardian_check" in output
+    assert "JARVIS_DEV_STAGE=readiness_check" in output
+    assert "JARVIS_DEV_STAGE=readiness_pass" not in output
